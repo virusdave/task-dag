@@ -30,6 +30,30 @@
 #   - breakdown: decompose an epic/task into child tasks from a JSON spec
 #     (was a stub until 2026-06-16). Creates child commits (DAG edges =
 #     git parents), atomically publishes their frontier refs, create-only.
+#
+# ═══════════════════════════════════════════════════════════════════════
+# ⛔ DO NOT change the commit/ref FORMAT this tool mints until you FULLY
+#    understand docs/INVARIANTS.md. task-dag's entire state is git refs +
+#    commit messages with load-bearing invariants (every task/gh ref is an
+#    empty-tree commit; namespaces are exact; claims are an atomic CAS;
+#    completion is a specific merge shape; closure rides on trailers). A
+#    well-meaning tweak to a message body, a new ref namespace, or a
+#    "quick" manual `git commit-tree`/`update-ref` fix WILL silently break
+#    dispatch dedup, claim safety, or issue closure across the whole fleet.
+#
+#    Enforcement (see docs/INVARIANTS.md):
+#      • `task-dag validate --strict` audits every task/gh ref against the
+#        grandfather-safe invariant floor (empty-tree + known namespace).
+#        Any NEW ref namespace must be added to TASKDAG_KNOWN_*_NS below AND
+#        get a golden fixture in tests/task-dag/ FIRST, or the audit (and CI)
+#        will correctly reject it.
+#      • Format changes are versioned by a `Task-Dag-Format:` trailer so a
+#        tighter rule binds only to commits that declare the new version —
+#        that is how "permanently backwards-compatible" is kept mechanical.
+#    Changing any of this is a critical-infra change: operator approval +
+#    an Oracle design/architecture review are REQUIRED. If the tool can't
+#    express what you need, `block` the task + `page-dave`; do NOT improvise.
+# ═══════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
@@ -67,7 +91,11 @@ parse_commit_metadata() {
 extract_field() {
     local message="$1"
     local field="$2"
-    echo "$message" | grep "^${field}:" | sed "s/^${field}: *//" | head -1
+    # Missing field -> empty output + SUCCESS. grep exits non-zero when the
+    # field is absent, and under `set -euo pipefail` that non-zero would
+    # otherwise abort any caller that runs this in the main shell (not a
+    # subshell). A missing field is a normal, expected case, so swallow it.
+    echo "$message" | grep "^${field}:" | sed "s/^${field}: *//" | head -1 || true
 }
 
 # Helper: get task title (first line minus "Task: " prefix)
@@ -195,6 +223,60 @@ blocked_structural_ancestor() {
 # Helper: list all task refs
 list_task_refs() {
     git for-each-ref refs/heads/tasks/ --format='%(objectname) %(refname:short)'
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# Task-ref invariants (see docs/INVARIANTS.md)
+#
+# Every ref the task-dag system creates points at an EMPTY-TREE commit and
+# lives under a KNOWN namespace. These two facts have held for every
+# task/gh ref since the tool existed, so asserting them never false-flags
+# legacy history — they are the "grandfather-safe" invariant floor. Deeper,
+# kind-specific rules (required trailers per commit kind, the #34 naming/
+# format migration, etc.) are versioned via a `Task-Dag-Format:` trailer so
+# tightening them later binds only to commits that declare the new version;
+# see docs/INVARIANTS.md § "Format versioning".
+#
+# The PRIMARY value of the namespace check is catching a hand-crafted ref
+# at a path the tool would never mint — i.e. exactly the "I'll just do the
+# ref surgery by hand" mistake this whole subsystem exists to prevent.
+# ─────────────────────────────────────────────────────────────────────
+TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated completions ci-chains"
+TASKDAG_KNOWN_GH_NS="issues comments child-epics"
+
+# taskdag_ref_violations <objectname> <full-refname>
+# Echoes one human-readable line per invariant violation (nothing when the
+# ref is well-formed). Never mutates anything. Returns 0 always; the caller
+# counts the emitted lines. A ref whose object has vanished mid-walk
+# (concurrent claim/complete/drop) yields NO lines — a race is a skip, not
+# a failure, so the audit never flaps.
+taskdag_ref_violations() {
+    local sha="$1" ref="$2"
+    local objtype tree rest ns
+    objtype=$(git cat-file -t "$sha" 2>/dev/null) || return 0   # vanished → skip
+    if [ "$objtype" != commit ]; then
+        echo "✗ ${ref} → ${sha} is a ${objtype}, expected an (empty-tree) commit"
+        return 0
+    fi
+    tree=$(git rev-parse "${sha}^{tree}" 2>/dev/null) || return 0   # vanished → skip
+    if [ "$tree" != "$EMPTY_TREE" ]; then
+        echo "✗ ${ref} → ${sha} has a non-empty tree (${tree}); every task/gh ref MUST point at an empty-tree commit"
+    fi
+    case "$ref" in
+        refs/heads/tasks/*)
+            rest="${ref#refs/heads/tasks/}"; ns="${rest%%/*}"
+            case " $TASKDAG_KNOWN_TASK_NS " in
+                *" $ns "*) ;;
+                *) echo "✗ ${ref} is under UNKNOWN tasks namespace '${ns}' (hand-crafted ref? do NOT do ref surgery by hand — see docs/INVARIANTS.md). Known: ${TASKDAG_KNOWN_TASK_NS}" ;;
+            esac ;;
+        refs/heads/gh/*)
+            rest="${ref#refs/heads/gh/}"; ns="${rest%%/*}"
+            case " $TASKDAG_KNOWN_GH_NS " in
+                *" $ns "*) ;;
+                *) echo "✗ ${ref} is under UNKNOWN gh namespace '${ns}' (hand-crafted ref? do NOT do ref surgery by hand — see docs/INVARIANTS.md). Known: ${TASKDAG_KNOWN_GH_NS}" ;;
+            esac ;;
+    esac
+    return 0
 }
 
 # Helper: fetch task refs from origin so local view reflects remote.
@@ -1063,6 +1145,26 @@ cmd_help() {
     cat <<EOF
 task-dag - Git-DAG Task Management CLI v${VERSION}
 
+╔══════════════════════════════════════════════════════════════════════╗
+║  ⛔  STOP — DO NOT HAND-CRAFT TASK COMMITS OR DO REF SURGERY BY HAND   ║
+║                                                                        ║
+║  task-dag state lives in git refs/commits with SUBTLE, LOAD-BEARING    ║
+║  invariants (empty-tree commits; exact namespaces; claim-CAS;          ║
+║  completion-merge shape; closure trailers). A hand-rolled              ║
+║  'git commit-tree' / 'git update-ref' / 'git push' — or "just fixing"  ║
+║  a prior mistake by editing refs manually — WILL silently corrupt the  ║
+║  DAG, break dispatch dedup, or wedge issue closure.                    ║
+║                                                                        ║
+║  • Use the SUBCOMMANDS below for every mutation.                       ║
+║  • If the tool cannot express what you need: 'task-dag block' the      ║
+║    task, 'page-dave', and STOP. Do not improvise git surgery.          ║
+║  • Do NOT change this tool's commit/ref format until you FULLY         ║
+║    understand docs/INVARIANTS.md (esp. Format versioning + why every   ║
+║    ref is empty-tree). Changing it needs operator approval + an        ║
+║    Oracle critical-infra review.                                       ║
+║  • Audit any repo's DAG with:  task-dag validate --strict              ║
+╚══════════════════════════════════════════════════════════════════════╝
+
 USAGE:
     task-dag <command> [options]
 
@@ -1105,7 +1207,9 @@ COMMANDS:
     drop <sha>             Housecleaning: remove an orphaned/irrelevant task
                            from the pickable/blocked sets
     issue-update <sha>     Update GitHub issue with task progress
-    validate               Validate DAG structure
+    validate               Validate DAG structure; --strict audits EVERY
+                           task/gh ref (empty-tree + known namespace) and
+                           FAILS on violations — the hand-crafted-ref catcher
     check-workflow         Validate recent commits follow task-dag convention
 
 CROSS-REPO COORDINATION:
@@ -4081,13 +4185,37 @@ Related: $issue_url"
 # Command: validate - validate DAG structure
 cmd_validate() {
     local json=false
+    local strict=false
     local scope=""
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
+            # --strict promotes the invariant floor (empty tree + known
+            # namespace) over the ENTIRE task/gh ref namespace into hard
+            # ERRORS, so it can gate CI / a scheduled fleet audit. --all-refs
+            # is an accepted alias (the strict walk is always all-refs).
+            --strict|--all-refs) strict=true; shift ;;
             --help|-h)
-                echo "Usage: task-dag validate [scope] [--json]"
+                cat <<'EOF'
+Usage: task-dag validate [scope] [--strict|--all-refs] [--json]
+
+Validate task-DAG structure.
+
+Default: light structural checks (empty-tree task commits; frontier refs
+are leaf/task-typed).
+
+--strict (alias --all-refs): audit EVERY ref under refs/heads/tasks/** and
+refs/heads/gh/** against the grandfather-safe invariant floor and FAIL
+(exit 3) on any violation:
+  • the ref must point at an empty-tree commit, and
+  • it must live under a KNOWN namespace.
+An unknown namespace is the classic "I did the ref surgery by hand"
+mistake — do NOT hand-craft task refs. See docs/INVARIANTS.md.
+
+Strict mode is race-tolerant (a ref whose object vanishes mid-walk is
+skipped, not failed) and read-only.
+EOF
                 return 0
                 ;;
             *) scope="$1"; shift ;;
@@ -4102,30 +4230,69 @@ cmd_validate() {
     fi
     
     # Check 1: All task commits have empty tree
-    while read sha ref; do
-        local tree=$(git rev-parse "$sha^{tree}")
+    while read -r sha ref; do
+        local tree
+        tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
         if [ "$tree" != "$EMPTY_TREE" ]; then
             errors=$((errors + 1))
             [ "$json" = false ] && printf "${RED}✗${RESET} Task $sha ($ref) has non-empty tree\n"
         fi
     done < <(list_task_refs)
     
-    # Check 2: Frontier refs point only to leaf-type tasks
-    git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:short)' | while read sha ref; do
+    # Check 2: Frontier refs point only to leaf-type tasks.
+    # NOTE: read from a process substitution (NOT a pipe) so the warnings
+    # counter mutated here lives in THIS shell, not a subshell that is
+    # discarded when the pipeline ends (the historical counter-loss bug).
+    while read -r sha ref; do
         # Blocked tasks are intentionally parked; don't flag their type.
         if is_task_blocked "$sha"; then
             continue
         fi
-        local msg=$(parse_commit_metadata "$sha")
-        local type=$(extract_field "$msg" "Type")
+        local msg type
+        # Guard the object read: a frontier ref pointing at a non-commit
+        # (blob/tag) or a pruned object must NOT crash validate under
+        # `set -e` — skip it here so the strict audit (Check 3) can report
+        # it properly instead of the whole command dying with rc=1.
+        msg=$(parse_commit_metadata "$sha" 2>/dev/null) || continue
+        # Ingested human comments are valid frontier leaves but use the
+        # message dialect (`kind: message`) with no `Type:` field — don't
+        # flag them as mistyped.
+        if extract_field "$msg" "kind" | grep -q '^message$'; then
+            continue
+        fi
+        type=$(extract_field "$msg" "Type")
         if [ "$type" != "leaf" ] && [ "$type" != "task" ]; then
             warnings=$((warnings + 1))
             [ "$json" = false ] && printf "${YELLOW}⚠${RESET} Frontier task $sha is type '$type', expected 'leaf' or 'task'\n"
         fi
-    done
+    done < <(git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:short)')
+
+    # Check 3 (--strict only): full-namespace invariant-floor audit.
+    # Snapshot the refs in a SINGLE for-each-ref so concurrent claim/
+    # complete/drop can't make the walk inconsistent, then check each. A
+    # ref whose object vanished after the snapshot is skipped (see
+    # taskdag_ref_violations), so the gate never flaps under fleet churn.
+    if [ "$strict" = true ]; then
+        # Walk the WHOLE tasks/ and gh/ namespaces (not just the known
+        # sub-namespaces) so a hand-crafted ref at an UNKNOWN path is
+        # actually seen and flagged — restricting the snapshot to known
+        # namespaces would make the unknown-namespace check dead code.
+        local snapshot line vsha vref out
+        snapshot=$(git for-each-ref --format='%(objectname) %(refname)' \
+            refs/heads/tasks/ refs/heads/gh/)
+        while read -r vsha vref; do
+            [ -n "$vsha" ] || continue
+            out=$(taskdag_ref_violations "$vsha" "$vref")
+            [ -n "$out" ] || continue
+            while IFS= read -r line; do
+                errors=$((errors + 1))
+                [ "$json" = false ] && printf "${RED}%s${RESET}\n" "$line"
+            done <<< "$out"
+        done <<< "$snapshot"
+    fi
     
     if [ "$json" = true ]; then
-        echo "{\"errors\": $errors, \"warnings\": $warnings, \"valid\": $([ $errors -eq 0 ] && echo "true" || echo "false")}"
+        echo "{\"errors\": $errors, \"warnings\": $warnings, \"strict\": $strict, \"valid\": $([ $errors -eq 0 ] && echo "true" || echo "false")}"
     else
         echo ""
         if [ $errors -eq 0 ]; then
