@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   familyBrandKey,
+  groupBrandSubdividedFamilies,
   groupFamilies,
   type FamilyExplorerVariant,
 } from './familyExplorer.js'
@@ -161,6 +162,74 @@ describe('groupFamilies — unparseable size families surface first', () => {
     expect(groups[0]?.categoryName).toBe('Accessories')
     const parsed = groups.find((g) => g.categoryName === 'Flower')
     expect(parsed?.sizeUnparsed).toBe(false)
+  })
+})
+
+describe('groupBrandSubdividedFamilies — non-brand family subdivided by brand', () => {
+  it('nests one non-brand family into per-brand sub-families', () => {
+    const families = groupBrandSubdividedFamilies([
+      variant({ brandName: 'Acme', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+      variant({ brandName: 'acme', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+      variant({ brandName: 'Zenith', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+    ])
+    // All three share one non-brand family (Flower · Indica · 3.5 g · pack 1)…
+    expect(families).toHaveLength(1)
+    const family = families[0]
+    expect(family?.memberCount).toBe(3)
+    // …which subdivides into two brand sub-families (Acme+acme collapse).
+    expect(family?.brandCount).toBe(2)
+    const acme = family?.subFamilies.find((s) => s.brandKey === 'acme')
+    const zenith = family?.subFamilies.find((s) => s.brandKey === 'zenith')
+    expect(acme?.memberCount).toBe(2)
+    expect(zenith?.memberCount).toBe(1)
+  })
+
+  it('splits distinct non-brand families and preserves size-group folding', () => {
+    const families = groupBrandSubdividedFamilies([
+      variant({ brandName: 'Acme', categoryName: 'Pre-Rolls', subcategoryName: null, sizeLabel: '0.5g' }),
+      variant({ brandName: 'Acme', categoryName: 'Pre-Rolls', subcategoryName: null, sizeLabel: '0.6g' }),
+      variant({ brandName: 'Acme', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '7g' }),
+    ])
+    // 0.5g + 0.6g prerolls fold into one non-brand family; flower is separate.
+    expect(families).toHaveLength(2)
+    const prerolls = families.find((f) => f.categoryName === 'Pre-Rolls')
+    expect(prerolls?.sizeGroupKey).toBe('g:0.5')
+    expect(prerolls?.memberCount).toBe(2)
+    expect(prerolls?.brandCount).toBe(1)
+  })
+
+  it('orders the no-brand sub-family last', () => {
+    const families = groupBrandSubdividedFamilies([
+      variant({ brandName: null, categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+      variant({ brandName: 'Zenith', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+      variant({ brandName: 'Acme', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+    ])
+    expect(families).toHaveLength(1)
+    const keys = families[0]?.subFamilies.map((s) => s.brandKey)
+    expect(keys).toEqual(['acme', 'zenith', null])
+  })
+
+  it('picks a deterministic representative raw brand spelling', () => {
+    const families = groupBrandSubdividedFamilies([
+      variant({ brandName: 'acme', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+      variant({ brandName: 'Acme', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+    ])
+    // Both fold to key 'acme'; representative is the deterministic
+    // localeCompare-smallest raw spelling regardless of input order.
+    expect(families[0]?.subFamilies[0]?.brandName).toBe('acme')
+  })
+
+  it('is deterministic regardless of input order', () => {
+    const input: FamilyExplorerVariant[] = [
+      variant({ brandName: 'Zenith', categoryName: 'Vapes', subcategoryName: 'Cart', sizeLabel: '1g' }),
+      variant({ brandName: 'Acme', categoryName: 'Flower', subcategoryName: 'Indica', sizeLabel: '3.5g' }),
+      variant({ brandName: 'Acme', categoryName: 'Vapes', subcategoryName: 'Cart', sizeLabel: '1g' }),
+    ]
+    const shape = (fs: ReturnType<typeof groupBrandSubdividedFamilies>) =>
+      fs.map((f) => [f.familyKey, f.subFamilies.map((s) => s.brandKey)])
+    expect(shape(groupBrandSubdividedFamilies([...input].reverse()))).toEqual(
+      shape(groupBrandSubdividedFamilies(input)),
+    )
   })
 })
 

@@ -179,6 +179,121 @@ export function groupFamilies(
   return groups
 }
 
+// ---------------------------------------------------------------------------
+// Brand-subdivided hierarchy (issue #58, task T1).
+//
+// The operator repriced by BRAND-categorical-family, so the audit page nests
+// the flat grouping one level deeper: a NON-brand categorical family (category ×
+// subcategory × size-group × pack) that fans out into per-brand sub-families.
+// This deliberately reuses `groupFamilies(…, 'nonbrand')` so the non-brand
+// family dimensions, size-group folding, `sizeUnparsed` flag, member ordering,
+// and top-level ordering stay byte-for-byte identical to the existing flat
+// nonbrand view — the hierarchy is a pure regrouping of the SAME members, never
+// a second, drifting grouping implementation.
+// ---------------------------------------------------------------------------
+
+/** One per-brand sub-family within a non-brand categorical family. */
+export interface BrandSubFamily {
+  /** Normalized brand key (`familyBrandKey`); null = genuinely no brand. */
+  readonly brandKey: string | null
+  /** Representative raw brand name for display (null = no brand). */
+  readonly brandName: string | null
+  readonly members: readonly FamilyMember[]
+  readonly memberCount: number
+}
+
+/** A non-brand categorical family subdivided into per-brand sub-families. */
+export interface BrandSubdividedFamily {
+  /** Stable key of the underlying non-brand family (JSON dimension tuple). */
+  readonly familyKey: string
+  readonly categoryName: string | null
+  readonly subcategoryName: string | null
+  readonly sizeGroupKey: string
+  readonly sizeGroupLabel: string
+  readonly packCount: number | null
+  /** True when the size dimension did not parse (surfaced first in the UI). */
+  readonly sizeUnparsed: boolean
+  readonly subFamilies: readonly BrandSubFamily[]
+  /** Number of distinct brand sub-families (case-insensitive). */
+  readonly brandCount: number
+  /** Total variants across all sub-families. */
+  readonly memberCount: number
+}
+
+/**
+ * Group the whole variant catalog into non-brand categorical families, each
+ * subdivided into per-brand sub-families. Pure and deterministic: identical
+ * input (in any order) yields an identically-ordered result.
+ */
+export function groupBrandSubdividedFamilies(
+  variants: readonly FamilyExplorerVariant[],
+): BrandSubdividedFamily[] {
+  // Reuse the nonbrand grouping verbatim so the outer family dimensions,
+  // size-group folding, unparseable-size flag, and ordering never drift.
+  const nonBrandGroups = groupFamilies(variants, 'nonbrand')
+  return nonBrandGroups.map((group) => {
+    const byBrand = new Map<string, FamilyMember[]>()
+    for (const member of group.members) {
+      const brandKey = familyBrandKey(member.brandName)
+      // `\u0000` prefix keeps the null-brand bucket distinct from a real brand
+      // literally equal to the sentinel string.
+      const mapKey = brandKey ?? '\u0000(no brand)'
+      let members = byBrand.get(mapKey)
+      if (!members) {
+        members = []
+        byBrand.set(mapKey, members)
+      }
+      members.push(member)
+    }
+
+    const subFamilies: BrandSubFamily[] = []
+    for (const members of byBrand.values()) {
+      subFamilies.push({
+        brandKey: familyBrandKey(members[0]?.brandName ?? null),
+        brandName: pickRepresentativeBrand(members),
+        members,
+        memberCount: members.length,
+      })
+    }
+    subFamilies.sort(compareSubFamilies)
+
+    return {
+      familyKey: group.familyKey,
+      categoryName: group.categoryName,
+      subcategoryName: group.subcategoryName,
+      sizeGroupKey: group.sizeGroupKey,
+      sizeGroupLabel: group.sizeGroupLabel,
+      packCount: group.packCount,
+      sizeUnparsed: group.sizeUnparsed,
+      subFamilies,
+      brandCount: subFamilies.length,
+      memberCount: group.memberCount,
+    }
+  })
+}
+
+/**
+ * Deterministic representative raw brand spelling for a sub-family whose
+ * members may carry case/whitespace variants of one brand key: the
+ * lexicographically-smallest non-null raw name, or null when truly brandless.
+ */
+function pickRepresentativeBrand(members: readonly FamilyMember[]): string | null {
+  let best: string | null = null
+  for (const m of members) {
+    if (m.brandName == null) continue
+    if (best == null || m.brandName.localeCompare(best) < 0) best = m.brandName
+  }
+  return best
+}
+
+/** Sub-family ordering: real brands first (by key), the no-brand bucket last. */
+function compareSubFamilies(a: BrandSubFamily, b: BrandSubFamily): number {
+  if (a.brandKey == null && b.brandKey == null) return 0
+  if (a.brandKey == null) return 1
+  if (b.brandKey == null) return -1
+  return a.brandKey.localeCompare(b.brandKey)
+}
+
 /** Deterministic member ordering: name, then SKU, then productId. */
 function compareMembers(a: FamilyMember, b: FamilyMember): number {
   const byName = (a.name ?? '').localeCompare(b.name ?? '')
