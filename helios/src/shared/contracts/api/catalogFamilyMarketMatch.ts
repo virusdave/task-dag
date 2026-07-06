@@ -26,6 +26,59 @@ export type BrandFamilyMatchFactors = z.infer<typeof BrandFamilyMatchFactorsSche
 export const BrandFamilyDistanceBandSchema = z.enum(['near', 'mid', 'far', 'very_far', 'unknown'])
 export type BrandFamilyDistanceBand = z.infer<typeof BrandFamilyDistanceBandSchema>
 
+// ---------------------------------------------------------------------------
+// Price-outlier review signal (issue #59, task T1).
+//
+// A REVIEW SIGNAL ONLY: outliers are never removed, down-ranked, or reordered.
+// Stats are computed with Tukey IQR fences (widened by a conservative
+// tight-cluster guard) over ONLY the above-threshold, same-hard-gated-family,
+// finite-priced candidates, over the FULL scored set BEFORE the display cap so
+// an outlier can never fall out of view. See shared/marketMatch/priceOutliers.
+// ---------------------------------------------------------------------------
+
+export const PriceOutlierKindSchema = z.enum(['low', 'high'])
+export type PriceOutlierKind = z.infer<typeof PriceOutlierKindSchema>
+
+export const BrandFamilyPriceOutlierSchema = z.object({
+  kind: PriceOutlierKindSchema,
+  /** Signed preTax price − basis median (USD); negative below, positive above. */
+  delta: z.number(),
+  /** The crossed fence value (USD): effective low fence for `low`, high for `high`. */
+  fence: z.number(),
+  /** Basis median preTax price (USD). */
+  median: z.number(),
+  /** Count of eligible (above-threshold, finite-priced) candidates in the basis. */
+  basis: z.number().int(),
+})
+export type BrandFamilyPriceOutlier = z.infer<typeof BrandFamilyPriceOutlierSchema>
+
+export const PriceOutlierMethodSchema = z.enum([
+  'iqr',
+  'tight-cluster',
+  'insufficient-basis',
+  'no-variation',
+])
+export type PriceOutlierMethod = z.infer<typeof PriceOutlierMethodSchema>
+
+/** Family-level roll-up for the summary pill / tooltip. Numeric stats null when no basis. */
+export const BrandFamilyPriceOutlierSummarySchema = z.object({
+  /** Which rule produced the fences (or why none were computed). */
+  method: PriceOutlierMethodSchema,
+  /** Eligible candidate count (above-threshold, finite priced) the stats used. */
+  basis: z.number().int(),
+  /** Basis median (USD); null when basis < minimum. */
+  median: z.number().nullable(),
+  /** Effective low fence (USD); null when not computed. */
+  lowFence: z.number().nullable(),
+  /** Effective high fence (USD); null when not computed. */
+  highFence: z.number().nullable(),
+  lowCount: z.number().int(),
+  highCount: z.number().int(),
+  /** Total flagged outliers = lowCount + highCount (over the full scored set). */
+  flaggedCount: z.number().int(),
+})
+export type BrandFamilyPriceOutlierSummary = z.infer<typeof BrandFamilyPriceOutlierSummarySchema>
+
 export const BrandFamilyMatchCandidateSchema = z.object({
   fuzzySkuId: z.number().int(),
   sourceListingId: z.string(),
@@ -59,8 +112,24 @@ export const BrandFamilyMatchCandidateSchema = z.object({
   factors: BrandFamilyMatchFactorsSchema,
   aboveThreshold: z.boolean(),
   matchedCatalogProductId: z.number().int().nullable(),
+  /**
+   * Price-outlier review flag, or null when this candidate's price is within
+   * the family's fences / not eligible / basis too small. Review signal only —
+   * it never affects score, ordering, or above/below-threshold gating.
+   */
+  priceOutlier: BrandFamilyPriceOutlierSchema.nullable(),
 })
 export type BrandFamilyMatchCandidate = z.infer<typeof BrandFamilyMatchCandidateSchema>
+
+/**
+ * A flagged price outlier surfaced in the bounded `reviewCandidates` list. Same
+ * shape as a candidate but with a guaranteed non-null `priceOutlier`, so the UI
+ * needn't null-check a list that by construction only holds outliers.
+ */
+export const BrandFamilyPriceReviewCandidateSchema = BrandFamilyMatchCandidateSchema.extend({
+  priceOutlier: BrandFamilyPriceOutlierSchema,
+})
+export type BrandFamilyPriceReviewCandidate = z.infer<typeof BrandFamilyPriceReviewCandidateSchema>
 
 export const BrandFamilyBrandMappingStateSchema = z.enum(['mapped', 'operator-says-none', 'unmapped'])
 export type BrandFamilyBrandMappingState = z.infer<typeof BrandFamilyBrandMappingStateSchema>
@@ -125,5 +194,18 @@ export const BrandFamilyMarketMatchResponseSchema = z.object({
   snapshotCapturedAtMin: z.string().nullable(),
   snapshotCapturedAtMax: z.string().nullable(),
   candidates: z.array(BrandFamilyMatchCandidateSchema),
+  /** Family-level price-outlier stats roll-up (over the full scored set). */
+  priceOutlierSummary: BrandFamilyPriceOutlierSummarySchema,
+  /**
+   * Flagged price outliers over the FULL scored set (before the display cap),
+   * so an outlier is never invisible for falling outside the top-N table slice.
+   * Bounded to `reviewCandidatesLimit`, severity-sorted (distance past fence,
+   * then |delta|, then score, then fuzzySkuId).
+   */
+  reviewCandidates: z.array(BrandFamilyPriceReviewCandidateSchema),
+  /** Max entries returned in `reviewCandidates`. */
+  reviewCandidatesLimit: z.number().int(),
+  /** True when more outliers exist than `reviewCandidatesLimit` (hidden = flaggedCount − reviewCandidates.length). */
+  reviewCandidatesOverflow: z.boolean(),
 })
 export type BrandFamilyMarketMatchResponse = z.infer<typeof BrandFamilyMarketMatchResponseSchema>

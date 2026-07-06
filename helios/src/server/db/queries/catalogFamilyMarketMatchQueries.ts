@@ -31,7 +31,10 @@ import type {
   BrandFamilyMappingSummary,
   BrandFamilyMarketMatchResponse,
   BrandFamilyMatchCandidate,
+  BrandFamilyPriceOutlierSummary,
+  BrandFamilyPriceReviewCandidate,
 } from '../../../shared/contracts/index.js'
+import { computePriceOutliers, priceOutlierSeverity } from '../../../shared/marketMatch/priceOutliers.js'
 import {
   groupBrandSubdividedFamilies,
   type BrandSubdividedFamily,
@@ -66,6 +69,33 @@ import {
 const MAX_FAMILY_CANDIDATES = 200
 /** Cap the deduped partner rows fetched before scoring (bounded payload). */
 const FAMILY_FETCH_LIMIT = 500
+/** Max flagged outliers surfaced in `reviewCandidates` (rest reported via overflow). */
+const REVIEW_CANDIDATES_LIMIT = 25
+
+/** Empty outlier fields for the honest short-circuit paths (no scored family). */
+const EMPTY_PRICE_OUTLIER_SUMMARY: BrandFamilyPriceOutlierSummary = {
+  method: 'insufficient-basis',
+  basis: 0,
+  median: null,
+  lowFence: null,
+  highFence: null,
+  lowCount: 0,
+  highCount: 0,
+  flaggedCount: 0,
+}
+
+/**
+ * Derived preTax price for a scored candidate = round(salePrice ?? normalPrice)
+ * when positive, else null. Single source so the outlier basis and the
+ * materialized candidate rows never disagree on a price.
+ */
+function preTaxPriceOf(c: MarketMatchCandidate): number | null {
+  const raw = c.fuzzy.rawInputJsonb as
+    | { normalPrice?: number | string | null; salePrice?: number | string | null }
+    | null
+  const preTaxRaw = parseLooseNumber(raw?.salePrice) ?? parseLooseNumber(raw?.normalPrice)
+  return preTaxRaw !== null && preTaxRaw > 0 ? Math.round(preTaxRaw * 100) / 100 : null
+}
 
 /**
  * Short-TTL process cache of the whole-catalog brand-subdivided grouping. An
@@ -271,6 +301,10 @@ export async function loadBrandFamilyMarketMatch(
     | 'snapshotCapturedAtMin'
     | 'snapshotCapturedAtMax'
     | 'candidates'
+    | 'priceOutlierSummary'
+    | 'reviewCandidates'
+    | 'reviewCandidatesLimit'
+    | 'reviewCandidatesOverflow'
   > = {
     familyKey,
     brandKey,
@@ -303,6 +337,10 @@ export async function loadBrandFamilyMarketMatch(
       snapshotCapturedAtMin: null,
       snapshotCapturedAtMax: null,
       candidates: [],
+      priceOutlierSummary: EMPTY_PRICE_OUTLIER_SUMMARY,
+      reviewCandidates: [],
+      reviewCandidatesLimit: REVIEW_CANDIDATES_LIMIT,
+      reviewCandidatesOverflow: false,
     }
   }
 
@@ -330,6 +368,10 @@ export async function loadBrandFamilyMarketMatch(
     snapshotCapturedAtMin: null,
     snapshotCapturedAtMax: null,
     candidates: [],
+    priceOutlierSummary: EMPTY_PRICE_OUTLIER_SUMMARY,
+    reviewCandidates: [],
+    reviewCandidatesLimit: REVIEW_CANDIDATES_LIMIT,
+    reviewCandidatesOverflow: false,
   })
 
   // Every spelling explicit-null / no usable brand → no structured pull (same
@@ -496,13 +538,46 @@ export async function loadBrandFamilyMarketMatch(
     if (candidate) scored.push(candidate)
   }
   scored.sort((a, b) => b.finalScore - a.finalScore)
+
+  const threshold = EFFECTIVE_AUTO_PROMOTE_THRESHOLD
+
+  // Price-outlier review signal over the FULL scored set, restricted to
+  // above-threshold, same-hard-gated-family, finite-priced candidates — computed
+  // BEFORE the display cap so an outlier can never be invisible for falling
+  // outside the top-N table slice. Review signal only: it never reorders or
+  // gates candidates (canon: outlier stats must not pollute / be polluted).
+  const outlier = computePriceOutliers(
+    scored,
+    (c) => c.fuzzy.id,
+    (c) => preTaxPriceOf(c),
+    (c) => c.finalScore >= threshold,
+  )
+
+  // Rank all flagged outliers for the bounded review list: most anomalous first
+  // (distance past the crossed fence), then |delta|, then score, then a stable id.
+  const flaggedScored = scored.filter((c) => outlier.flagByKey.has(c.fuzzy.id))
+  flaggedScored.sort((a, b) => {
+    const fa = outlier.flagByKey.get(a.fuzzy.id)!
+    const fb = outlier.flagByKey.get(b.fuzzy.id)!
+    const sa = priceOutlierSeverity(preTaxPriceOf(a) ?? 0, fa)
+    const sb = priceOutlierSeverity(preTaxPriceOf(b) ?? 0, fb)
+    if (sb !== sa) return sb - sa
+    const da = Math.abs(fa.delta)
+    const dbv = Math.abs(fb.delta)
+    if (dbv !== da) return dbv - da
+    if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore
+    return a.fuzzy.id - b.fuzzy.id
+  })
+  const reviewScored = flaggedScored.slice(0, REVIEW_CANDIDATES_LIMIT)
+
   const capped = scored.slice(0, MAX_FAMILY_CANDIDATES)
 
-  // Distance band (optional context): join the candidate retailerIds to the
-  // geocoded retailer directory once.
+  // Distance band (optional context): join retailerIds to the geocoded retailer
+  // directory once, over BOTH the displayed rows and the review rows (which may
+  // fall outside the display cap) so review cards still show a distance band.
   const retailerIds = Array.from(
     new Set(
-      capped
+      [...capped, ...reviewScored]
         .map((c) => {
           const raw = c.fuzzy.rawInputJsonb as { retailerId?: string | null } | null
           const id = raw?.retailerId != null ? Number(raw.retailerId) : NaN
@@ -513,15 +588,12 @@ export async function loadBrandFamilyMarketMatch(
   )
   const retailerMiles = await loadRetailerDistanceMiles(db, retailerIds)
 
-  const threshold = EFFECTIVE_AUTO_PROMOTE_THRESHOLD
   // Above/below counts are over the WHOLE scored family (not the 200-row display
   // slice) so the header pills stay honest even when the table is capped — a
   // matcher-quality audit must never silently skew its own counts.
   const aboveThresholdCount = scored.filter((c) => c.finalScore >= threshold).length
-  let capturedMin: string | null = null
-  let capturedMax: string | null = null
 
-  const candidates: BrandFamilyMatchCandidate[] = capped.map((c) => {
+  const buildCandidate = (c: MarketMatchCandidate): BrandFamilyMatchCandidate => {
     const raw = c.fuzzy.rawInputJsonb as
       | {
           listingName?: string | null
@@ -534,19 +606,13 @@ export async function loadBrandFamilyMarketMatch(
           retailerId?: string | null
         }
       | null
-    const preTaxRaw = parseLooseNumber(raw?.salePrice) ?? parseLooseNumber(raw?.normalPrice)
-    const preTaxPrice = preTaxRaw !== null && preTaxRaw > 0 ? Math.round(preTaxRaw * 100) / 100 : null
+    const preTaxPrice = preTaxPriceOf(c)
     const postTaxPrice =
       preTaxPrice !== null ? Math.round(preTaxPrice * PRICING_POST_TAX_MULTIPLIER * 100) / 100 : null
     const currentStock = parseLooseNumber(raw?.currentStock)
     const retailerId = raw?.retailerId != null ? Number(raw.retailerId) : NaN
     const miles = Number.isFinite(retailerId) ? retailerMiles.get(retailerId) ?? null : null
-    const aboveThreshold = c.finalScore >= threshold
     const capturedAt = capturedAtByFuzzyId.get(c.fuzzy.id) ?? null
-    if (capturedAt != null) {
-      if (capturedMin === null || capturedAt < capturedMin) capturedMin = capturedAt
-      if (capturedMax === null || capturedAt > capturedMax) capturedMax = capturedAt
-    }
     return {
       fuzzySkuId: c.fuzzy.id,
       sourceListingId: c.fuzzy.sourceListingId,
@@ -567,10 +633,30 @@ export async function loadBrandFamilyMarketMatch(
       distanceMiles: miles,
       score: c.finalScore,
       factors: c.factors,
-      aboveThreshold,
+      aboveThreshold: c.finalScore >= threshold,
       matchedCatalogProductId: c.matchedCatalogProductId,
+      priceOutlier: outlier.flagByKey.get(c.fuzzy.id) ?? null,
     }
-  })
+  }
+
+  const candidates = capped.map(buildCandidate)
+
+  // Snapshot capture range over the displayed candidates (the returned table).
+  let capturedMin: string | null = null
+  let capturedMax: string | null = null
+  for (const c of capped) {
+    const capturedAt = capturedAtByFuzzyId.get(c.fuzzy.id) ?? null
+    if (capturedAt != null) {
+      if (capturedMin === null || capturedAt < capturedMin) capturedMin = capturedAt
+      if (capturedMax === null || capturedAt > capturedMax) capturedMax = capturedAt
+    }
+  }
+
+  const reviewCandidates: BrandFamilyPriceReviewCandidate[] = reviewScored.map((c) => ({
+    ...buildCandidate(c),
+    // Non-null by construction: reviewScored only holds flagged rows.
+    priceOutlier: outlier.flagByKey.get(c.fuzzy.id)!,
+  }))
 
   return {
     ...baseResponse,
@@ -587,5 +673,9 @@ export async function loadBrandFamilyMarketMatch(
     snapshotCapturedAtMin: capturedMin,
     snapshotCapturedAtMax: capturedMax,
     candidates,
+    priceOutlierSummary: outlier.stats,
+    reviewCandidates,
+    reviewCandidatesLimit: REVIEW_CANDIDATES_LIMIT,
+    reviewCandidatesOverflow: outlier.stats.flaggedCount > reviewScored.length,
   }
 }
