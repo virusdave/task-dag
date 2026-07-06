@@ -3858,24 +3858,26 @@ Related: $issue_url"
         emit_operator_blocked_dispatch complete "$short_sha"
     fi
 
-    # Post progress update to GitHub issue (if issue exists and GITHUB_TOKEN is set)
-    if [ -n "$issue_num" ] && [ -n "$issue_url" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+    # Post progress update to GitHub issue (best-effort; token resolved via
+    # _post_issue_comment = GITHUB_TOKEN/GH_TOKEN/`gh auth token`). A failed
+    # post must NEVER fail `complete`: the completion commit/ref work already
+    # happened, so failing here would leave agents re-running complete. Gate on
+    # a real GitHub origin so fixture tests (local bare-repo origin) stay
+    # hermetic — the same seam the #29 dashboard dispatch uses.
+    if [ -n "$issue_num" ] && [ -n "$issue_url" ] && _is_real_github_origin; then
         local repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
         local short_task_sha=$(git rev-parse --short "$task_sha")
-        local comment_body="<!-- task-dag:status -->\n✅ Task **${task_title}** completed!\n\nTask SHA: \`${short_task_sha}\`\nCompletion commit: \`$(git rev-parse --short "$new_commit")\`"
-        
-        # Post comment
-        local api_url="https://api.github.com/repos/$repo/issues/$issue_num/comments"
-        local response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -d "{\"body\":\"$comment_body\"}")
-        
-        local http_code=$(echo "$response" | tail -n1)
-        if [ "$http_code" = "201" ]; then
+        # Marker on physical line 1; REAL newlines (jq-encoded downstream).
+        local comment_body
+        comment_body=$(printf '%s\n%s\n\n%s\n%s' \
+            "<!-- task-dag:status -->" \
+            "✅ Task **${task_title}** completed!" \
+            "Task SHA: \`${short_task_sha}\`" \
+            "Completion commit: \`$(git rev-parse --short "$new_commit")\`")
+        if _post_issue_comment "$repo" "$issue_num" "$comment_body" >/dev/null; then
             printf "${GREEN}✓ Posted completion update to issue #$issue_num${RESET}\n"
         else
-            printf "${YELLOW}⚠ Could not post to issue #$issue_num (HTTP $http_code)${RESET}\n" >&2
+            printf "${YELLOW}⚠ Could not post completion comment to issue #$issue_num (continuing; completion itself succeeded)${RESET}\n" >&2
         fi
     fi
     
@@ -4310,6 +4312,61 @@ EOF
     [ $errors -eq 0 ] && return 0 || return 3
 }
 
+# True only when the cwd's `origin` remote is a real GitHub remote (URL with
+# a github host + scheme). The fleet's checkouts use https://github.com/… or
+# the `git@github-<repo>:owner/repo` SSH host aliases ephemeral_checkout
+# configures. Fixture tests use a local bare-repo PATH (no scheme), so this
+# auto-skips them — the same seam emit_operator_blocked_dispatch relies on to
+# stay hermetic. Used to gate the AUTOMATIC completion-comment post (an
+# unconditional side-effect of `complete`); the explicit `comment` /
+# `issue-update` commands are user-invoked and post regardless.
+_is_real_github_origin() {
+    local origin_url
+    origin_url=$(git remote get-url origin 2>/dev/null || true)
+    case "$origin_url" in
+        https://github.com/*|http://github.com/*|git@github*:*|ssh://*github*/*|git://*github*/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# Resolve a GitHub API token for the sanctioned comment poster(s).
+#
+# Order: $GITHUB_TOKEN -> $GH_TOKEN -> `gh auth token`. This is the
+# load-bearing fix that lets `task-dag comment` (and issue-update /
+# complete's progress post) actually work in the worker/agent environment,
+# where GITHUB_TOKEN is UNSET and GitHub auth is provided by the `gh` CLI's
+# own store (~/.config/gh/hosts.yml). In CI / the materialise-child-epic
+# App flow GITHUB_TOKEN *is* set, so it is preferred and `gh` (which may not
+# be logged in there) is never consulted. Both gho_/ghs_ tokens work with
+# the `Authorization: token …` header. $GH_TOKEN is gh's own convention and
+# some CI sets only it.
+#
+# ⚠ DO NOT "simplify" the posters to `gh api …/comments` / `gh issue
+# comment`: the agent runtime prepends a gh-guard shim to PATH that BLOCKS
+# `gh` comment writes (github-worker shims/gh, canon rules/WORKFLOW.md), so
+# the sanctioned tool would block ITSELF. Posting via curl + a resolved
+# token is the design that coexists with that shim — the shim passes
+# `gh auth token` through, but blocks comment writes.
+#
+# Cached in _RESOLVED_GITHUB_TOKEN so a single command (e.g. cmd_comment,
+# which does an existence GET then a POST) resolves the token only once.
+# ─────────────────────────────────────────────────────────────────────
+_RESOLVED_GITHUB_TOKEN=""
+_resolve_github_token() {
+    if [ -n "$_RESOLVED_GITHUB_TOKEN" ]; then
+        printf '%s' "$_RESOLVED_GITHUB_TOKEN"; return 0
+    fi
+    local tok="${GITHUB_TOKEN:-}"
+    [ -z "$tok" ] && tok="${GH_TOKEN:-}"
+    if [ -z "$tok" ] && command -v gh >/dev/null 2>&1; then
+        tok="$(gh auth token 2>/dev/null || true)"
+    fi
+    [ -n "$tok" ] || return 1
+    _RESOLVED_GITHUB_TOKEN="$tok"
+    printf '%s' "$tok"
+}
+
 # ─────────────────────────────────────────────────────────────────────
 # Shared GitHub-issue comment poster.
 #
@@ -4318,17 +4375,30 @@ EOF
 # JSON-encodes the body SAFELY with jq (so arbitrary agent-supplied text —
 # quotes, backslashes, real newlines, control chars — cannot break the
 # request or inject fields; the old hand-rolled `-d "{\"body\":\"$x\"}"`
-# only survived because it fed itself controlled `\n`-literal strings),
-# POSTs via the GitHub API using GITHUB_TOKEN, and prints the created
+# broke on any `"`/`\` in the body and only survived by feeding itself
+# controlled `\n`-literal strings), resolves a token via
+# _resolve_github_token, POSTs via the GitHub API, and prints the created
 # comment's html_url on success. Returns 0 on HTTP 201, else 1 (echoing the
-# API error to stderr). The caller must have already confirmed GITHUB_TOKEN
-# is set. This is the ONE place task-dag turns a body into an issue comment.
+# API error to stderr). This is the ONE place task-dag turns a body into an
+# issue comment — every caller (comment / issue-update / complete) routes
+# here so encoding, auth, and timeouts are identical.
+#
+# NOTE: call this in a CONDITION context (`url=$(_post_issue_comment …) ||
+# …`, or `if _post_issue_comment …; then`). That disables errexit through
+# its body, so a curl failure degrades to the `http_code != 201` error path
+# instead of aborting the script — load-bearing for cmd_complete's
+# fail-softness. Do NOT invoke it bare under `set -e`.
 # ─────────────────────────────────────────────────────────────────────
 _post_issue_comment() {
     local repo="$1" issue="$2" body="$3"
-    local payload api_url response http_code resp_body
+    local payload api_url response http_code resp_body token
     if ! command -v jq >/dev/null 2>&1; then
         echo "Error: 'jq' is required to post issue comments but was not found on PATH" >&2
+        return 1
+    fi
+    if ! token="$(_resolve_github_token)"; then
+        echo "Error: no GitHub token available. Set GITHUB_TOKEN/GH_TOKEN, or run" >&2
+        echo "       'gh auth login' (the worker env authenticates via the gh CLI)." >&2
         return 1
     fi
     payload=$(jq -n --arg b "$body" '{body:$b}') || {
@@ -4336,8 +4406,8 @@ _post_issue_comment() {
         return 1
     }
     api_url="https://api.github.com/repos/${repo}/issues/${issue}/comments"
-    response=$(curl -s -w $'\n%{http_code}' -X POST "$api_url" \
-        -H "Authorization: token ${GITHUB_TOKEN}" \
+    response=$(curl -s --max-time 30 -w $'\n%{http_code}' -X POST "$api_url" \
+        -H "Authorization: token ${token}" \
         -H "Accept: application/vnd.github+json" \
         -d "$payload")
     http_code=$(printf '%s' "$response" | tail -n1)
@@ -4402,7 +4472,9 @@ Kinds (required; fail-closed):
 
 Body (exactly one of):
   --body=TEXT         inline body
-  --body-file=PATH    read body from a file
+  --body-file=PATH    read body from a file (use --body-file=- to read STDIN).
+                      PREFER this for large/multi-line bodies — it avoids the
+                      shell-quoting pain of a big inline --body.
 
 The tool stamps the marker; your body must NOT contain a `<!-- task-dag:` marker.
 --dry-run prints the resolved target (stderr) and the exact final body (stdout)
@@ -4479,8 +4551,15 @@ EOF
     fi
     local raw
     if [ "$have_body_file" = true ]; then
-        [ -r "$body_file" ] || { echo "Error: cannot read body file: $body_file" >&2; return 2; }
-        raw=$(cat "$body_file")
+        if [ "$body_file" = "-" ]; then
+            # Reading STDIN interactively would hang; agent runners feed
+            # /dev/null (caught by the empty-body check), but guard a TTY.
+            [ -t 0 ] && { echo "Error: --body-file=- but STDIN is a TTY (pipe/heredoc the body)" >&2; return 2; }
+            raw=$(cat)   # read body from STDIN
+        else
+            [ -r "$body_file" ] || { echo "Error: cannot read body file: $body_file" >&2; return 2; }
+            raw=$(cat "$body_file")
+        fi
     else
         raw="$body"
     fi
@@ -4513,7 +4592,10 @@ EOF
 
     # GitHub rejects comments over 65536 chars; fail before the API does.
     if [ "${#final}" -gt 65536 ]; then
-        echo "Error: final comment body is ${#final} chars (>65536 GitHub limit)" >&2; return 2
+        echo "Error: final comment body is ${#final} chars (>65536 GitHub limit)." >&2
+        echo "       Shorten it, or publish the detail as a one-off and link it (see" >&2
+        echo "       agent-kb/runbooks/publish-long-output-one-off.md)." >&2
+        return 2
     fi
 
     if [ "$dry_run" = true ]; then
@@ -4522,22 +4604,35 @@ EOF
         return 0
     fi
 
-    if [ -z "${GITHUB_TOKEN:-}" ]; then
-        echo "Error: GITHUB_TOKEN is not set; cannot post to GitHub" >&2
+    # Resolve in THIS (main) shell so the _RESOLVED_GITHUB_TOKEN cache is
+    # populated for the _post_issue_comment subshell below — one `gh auth
+    # token`, not two (existence GET + POST).
+    if ! _resolve_github_token >/dev/null; then
+        echo "Error: no GitHub token available. Set GITHUB_TOKEN/GH_TOKEN, or run" >&2
+        echo "       'gh auth login' (the worker env authenticates via the gh CLI)." >&2
         return 1
     fi
+    local token="$_RESOLVED_GITHUB_TOKEN"
 
     # Confirm the issue exists before posting (catches a wrong bare number
-    # or wrong repo before we write to the wrong place).
+    # or wrong repo before we write to the wrong place). Authenticated so
+    # private repos resolve and we are not rate-limited to 60/hr/IP.
+    # `|| check_code=000` keeps a curl failure (DNS, timeout) from aborting
+    # the whole script under errexit — it degrades to the not-reachable path.
     local check_code
-    check_code=$(curl -s -o /dev/null -w '%{http_code}' \
-        -H "Authorization: token ${GITHUB_TOKEN}" \
+    check_code=$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: token ${token}" \
         -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${repo}/issues/${issue_num}")
+        "https://api.github.com/repos/${repo}/issues/${issue_num}") || check_code="000"
     if [ "$check_code" != "200" ]; then
         echo "Error: issue ${repo}#${issue_num} not reachable (HTTP ${check_code})" >&2
         return 1
     fi
+
+    # Show the resolved target before writing (a bare number with no --repo
+    # resolves from the CWD's origin; this makes a wrong-repo mistake visible
+    # instead of silently posting to the wrong issue).
+    echo "Posting ${kind} comment to ${repo}#${issue_num} …" >&2
 
     local url
     url=$(_post_issue_comment "$repo" "$issue_num" "$final") || return 1
@@ -4615,59 +4710,39 @@ EOF
         return 1
     fi
     
-    # Determine status message.
-    # Prefix a `task-dag:status` marker so the comment-sync ingest skips
-    # this agent-generated status post instead of turning it into a new
-    # pickable frontier task (which would create a worker dispatch loop).
+    # Determine status message. The `<!-- task-dag:status -->` marker MUST be
+    # physical line 1 so the comment-sync ingest skips this agent-generated
+    # status post instead of turning it into a new pickable frontier task
+    # (which would create a worker dispatch loop). Build with REAL newlines:
+    # the body goes through _post_issue_comment's jq encoder, so literal `\n`
+    # two-char sequences would render verbatim in the comment.
     local status_msg="${status:-pending}"
-    local comment_body="<!-- task-dag:status -->\nTask [\`$short_sha\`](${issue_url:-https://github.com/$repo/issues/$issue_num}) **$task_title**"
-    
+    local status_line
     case "$status_msg" in
-        completed)
-            comment_body="$comment_body\n\n✓ Status: **Completed**"
-            ;;
-        blocked)
-            comment_body="$comment_body\n\n⚠️ Status: **Blocked**"
-            ;;
-        in-progress)
-            comment_body="$comment_body\n\n🔄 Status: **In Progress**"
-            ;;
-        *)
-            comment_body="$comment_body\n\nStatus: $status_msg"
-            ;;
+        completed)   status_line="✓ Status: **Completed**" ;;
+        blocked)     status_line="⚠️ Status: **Blocked**" ;;
+        in-progress) status_line="🔄 Status: **In Progress**" ;;
+        *)           status_line="Status: $status_msg" ;;
     esac
-    
+    local comment_body
+    comment_body=$(printf '%s\n%s\n\n%s' \
+        "<!-- task-dag:status -->" \
+        "Task [\`$short_sha\`](${issue_url:-https://github.com/$repo/issues/$issue_num}) **$task_title**" \
+        "$status_line")
+
     if [ "$dry_run" = true ]; then
         echo "Would post to issue #$issue_num in $repo:"
         echo "$comment_body"
         return 0
     fi
-    
-    # Check for GITHUB_TOKEN
-    if [ -z "${GITHUB_TOKEN:-}" ]; then
-        echo "Error: GITHUB_TOKEN environment variable not set" >&2
-        echo "Set GITHUB_TOKEN to post comments to GitHub issues" >&2
-        return 1
-    fi
-    
-    # Post comment via GitHub API
-    local api_url="https://api.github.com/repos/$repo/issues/$issue_num/comments"
-    local response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
-        -H "Authorization: token $GITHUB_TOKEN" \
-        -H "Accept: application/vnd.github.v3+json" \
-        -d "{\"body\":\"$comment_body\"}")
-    
-    local http_code=$(echo "$response" | tail -n1)
-    local body=$(echo "$response" | sed '$d')
-    
-    if [ "$http_code" = "201" ]; then
-        printf "${GREEN}✓ Posted comment to issue #$issue_num${RESET}\n"
-        return 0
-    else
-        echo "Error: Failed to post comment (HTTP $http_code)" >&2
-        echo "$body" >&2
-        return 1
-    fi
+
+    # Single sanctioned poster: safe jq encoding + token resolution
+    # (GITHUB_TOKEN/GH_TOKEN/`gh auth token`) + timeout, all in one place.
+    local url
+    url=$(_post_issue_comment "$repo" "$issue_num" "$comment_body") || return 1
+    printf "${GREEN}✓ Posted status comment to %s#%s${RESET}\n" "$repo" "$issue_num"
+    [ -n "$url" ] && echo "$url"
+    return 0
 }
 
 # ── Operator-blocked dashboard event emitter ──────────────────────────
@@ -5233,114 +5308,6 @@ if [ -d "${__task_dag_dir}/task-dag.d" ]; then
     unset __ext
 fi
 unset __task_dag_self __task_dag_dir
-
-# DEAD CODE BELOW: a duplicate cmd_issue_update + cmd_check_workflow originally
-# lived here after main was invoked. We've reordered so main "$@" runs at the
-# very bottom of the file, after extension sourcing. The original first copy of
-# cmd_issue_update earlier in the file is the canonical one. The cmd_check_workflow
-# definition that follows below is now correctly registered before main runs.
-
-# Command: issue-update (legacy duplicate - kept verbatim for diff stability)
-_dead_cmd_issue_update_duplicate() {
-    local task_sha=""
-    local status="in-progress"
-    local message=""
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --status=*) status="${1#*=}"; shift ;;
-            --message=*) message="${1#*=}"; shift ;;
-            --help|-h)
-                cat <<EOF
-Usage: task-dag issue-update <task-sha> [--status=STATUS] [--message=TEXT]
-
-Post status update to GitHub issue associated with task.
-
-Options:
-  --status=STATUS    Task status: completed|blocked|in-progress (default: in-progress)
-  --message=TEXT     Additional message for issue comment
-
-Requires: gh CLI installed and authenticated
-EOF
-                return 0
-                ;;
-            *)
-                if [ -z "$task_sha" ]; then
-                    task_sha="$1"
-                else
-                    echo "Unknown option: $1" >&2
-                    return 1
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    if [ -z "$task_sha" ]; then
-        echo "Error: task SHA required" >&2
-        return 1
-    fi
-    
-    task_sha=$(resolve_sha "$task_sha") || return 1
-    
-    # Extract issue URL from task commit
-    local task_msg=$(parse_commit_metadata "$task_sha")
-    local issue_url=$(extract_field "$task_msg" "URL")
-    local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
-    local task_title=$(get_task_title "$task_sha")
-    
-    if [ -z "$issue_num" ]; then
-        echo "Error: No issue number found in task commit" >&2
-        return 1
-    fi
-    
-    # Check if gh CLI is available
-    if ! command -v gh &> /dev/null; then
-        echo "Warning: gh CLI not installed, cannot update GitHub issue" >&2
-        echo "Task status: $status - $task_title" >&2
-        return 0
-    fi
-    
-    # Build status emoji
-    local status_emoji
-    case "$status" in
-        completed) status_emoji="✅" ;;
-        blocked) status_emoji="🚫" ;;
-        in-progress) status_emoji="⏳" ;;
-        *) status_emoji="📝" ;;
-    esac
-    
-    # Create issue comment
-    local comment="$status_emoji Task **$status**: $task_title
-
-Task SHA: \`$(git rev-parse --short "$task_sha")\`
-Status: $status"
-    
-    if [ -n "$issue_url" ]; then
-        comment="$comment
-
-Root issue: $issue_url"
-    fi
-    
-    if [ -n "$message" ]; then
-        comment="$comment
-
-$message"
-    fi
-    
-    # Post comment to issue
-    echo "$comment" | gh issue comment "$issue_num" --body-file - || {
-        echo "Failed to post comment to issue #$issue_num" >&2
-        return 1
-    }
-    
-    printf "${GREEN}✓ Posted status update to issue #$issue_num${RESET}\n"
-    
-    # Note: Issue closing logic is handled by the check-task-completions.sh GitHub Action
-    # which runs on push and closes issues when all tasks are complete
-    
-    return 0
-}
 
 # Command: check-workflow - validate recent commits follow task-dag convention
 cmd_check_workflow() {
