@@ -114,7 +114,7 @@ const STATIC_MODULE_SUBTREES: Partial<Record<HeliosModuleCode, TreeNavNode[]>> =
  * /dashboard, /crm) are handled as router redirects (see router.tsx),
  * never duplicate nav pointers.
  */
-function buildPrimarySidebarNodes(
+export function buildPrimarySidebarNodes(
   subtreesByModule: Partial<Record<HeliosModuleCode, TreeNavNode[]>>,
   session: SessionEnvelope | null | undefined,
 ): TreeNavNode[] {
@@ -366,6 +366,30 @@ function buildPrimarySidebarNodes(
   }
 
   // ---- 6. Admin & Config ----
+  // Admin-only surfaces are appended to the canonical config subtree here
+  // (where the session is available) rather than inside the pure config
+  // builder, mirroring how the Metrics branch is grant-filtered above.
+  // Nav-hiding is discoverability, not access control: the agent-waste
+  // review page and its server API are independently admin-gated (#57).
+  const adminConfigChildren: TreeNavNode[] = [...subtreeFor('config')]
+  if (session?.permissions.canManageUsers) {
+    adminConfigChildren.push({
+      // Agents — operator surfaces for the AMP agent fleet. Today just the
+      // agent-waste review queue (issue #57); grouped so future agent-config
+      // surfaces have a discoverable home.
+      kind: 'branch',
+      navKey: 'config.agents',
+      label: 'Agents',
+      children: [
+        {
+          kind: 'leaf',
+          navKey: 'config.agents.waste-review',
+          label: 'Waste review queue',
+          to: buildHeliosModulePath('config', 'agent-waste'),
+        },
+      ],
+    })
+  }
   const adminConfig: TreeNavNode = {
     kind: 'branch',
     navKey: 'admin-config',
@@ -373,7 +397,7 @@ function buildPrimarySidebarNodes(
     to: buildHeliosModulePath('config'),
     end: false,
     defaultOpen: false,
-    children: subtreeFor('config'),
+    children: adminConfigChildren,
   }
 
   // ---- 7. Trash ----

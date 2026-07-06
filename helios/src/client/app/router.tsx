@@ -571,7 +571,8 @@ export const router = createBrowserRouter([
       {
         // Admin-gated agent-waste review queue (issue #57). Route-level
         // admin guard lives in the page; the server API is independently
-        // admin-gated. The navbar entry is a separate follow-up task.
+        // admin-gated. Reached via Admin & Config → Agents → Waste review
+        // queue in the primary sidebar (admin-gated, see AppShell.tsx).
         element: <AgentWasteReviewPage />,
         path: 'config/agent-waste',
       },
