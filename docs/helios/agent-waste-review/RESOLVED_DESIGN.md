@@ -1,7 +1,10 @@
 # Helios agent-waste review queue — resolved design
 
 **Issue:** [FreshlyBakedNYC/automation#57](https://github.com/FreshlyBakedNYC/automation/issues/57)
-**Status:** design resolved by operator; implementation pending (see "Remaining work" — needs operator infra approval before the write path lands).
+**Status:** design **fully** resolved by operator (incl. the §Security
+write-key decision — see "Security decision (RESOLVED)"); implementation
+pending. No operator *decision* remains open; what is left is routine
+cross-repo implementation + agenix key provisioning (see "Remaining work").
 
 This doc records the design **after** the operator resolved the two open
 questions that had blocked the epic. It supersedes the earlier
@@ -148,8 +151,7 @@ unavailable on the current plan (same limitation documented in this repo's
 `AGENTS.md`), so a "protected `master`" cannot be relied on to stop a
 stray/compromised push. That materially changes each option:
 
-Options (operator decision needed —
-[posted on #57](https://github.com/FreshlyBakedNYC/automation/issues/57)):
+Options as posted for the operator decision:
 
 - **(a) Dedicated advisories repo.** Move `advisories.yaml` + the pending
   backlog into a small standalone repo; the write key's blast radius is
@@ -165,23 +167,67 @@ Options (operator decision needed —
   server-side advisory-catalog validation (the applyConfig shape). Most
   convenient; largest standing credential; same repo-wide key as (b).
 
+### Security decision (RESOLVED)
+
+**Operator adopted (c)** — direct, admin-gated, server-validated push to
+`top-level master`. (a) and (b) are declined. Resolved in operator comment
+[#4889206463](https://github.com/FreshlyBakedNYC/automation/issues/57#issuecomment-4889206463):
+
+> "At the moment, the helios machine can push to any repo if the group,
+> including top level. All workers can; it's necessary for them to be and
+> to update canon instructions. These pushes should be strictly less
+> risky, I'd imagine."
+
+Rationale the operator accepted: the fleet already grants push access to
+every group repo (including `top-level`, needed so agents can update
+canon), so a **scoped, contract-validated, admin-gated** promote push is a
+*narrower* action than access already in the trust model — not a new trust
+grant. The residual repo-wide-deploy-key risk called out above is
+therefore **explicitly accepted**, not mitigated by (a)/(b).
+
+**Consequence for D2/D3 key provisioning — reclassified, not eliminated.**
+The operator's comment is about the *host/machine* credentials (owned by
+OS user `amp-local`); Helios's mirror + promote paths run as the **`helios`
+service user**, which authenticates via its own per-repo agenix deploy key
+(the automation mirror already does this —
+[`taskDagMirror.ts`](../../../helios/src/server/taskDagMirror.ts) reads
+`/run/agenix/helios-github-automation-deploy-key`). So a `top-level`
+**read** key (D2) and, under (c), a `top-level` **write** key (D3) still
+have to be provisioned for the `helios` user — but this is now **routine
+agenix infra** (same shape as the existing automation read key and the
+`helios-parser-configs` write key), **not a pending operator decision**.
+It belongs in the follow-up `top-level` task (see "Remaining work" #1).
+
 ## Remaining work (proposed follow-up tasks — NOT created by this leaf)
 
 This comment was handled by a single frontier-leaf worker, which may not
 `breakdown` the epic (canon: `rules/WORKFLOW.md`). The decomposition below
 is for the operator / an epic-root dispatch to create, and lives in the
-owning repos:
+owning repos. **All operator decisions are now closed** (D1/D2/D3 + the
+§Security write-key choice); every item below is implementation +
+routine infra provisioning, needing **no further operator input**:
 
-1. **`top-level`** (infra, operator-approval-gated): define the
-   `agent-waste-backlog` file format next to `advisories.yaml`; provision
-   a **read-only deploy key** for Helios (D2); and — pending the §Security
-   decision — a scoped **write** path for promotions (D3).
+1. **`top-level`** (infra): define the `agent-waste-backlog` file format
+   next to `advisories.yaml`; provision a **read-only** agenix deploy key
+   for the `helios` user (D2); and provision a scoped **write** deploy key
+   for promotions (D3) — per the resolved §Security decision (option (c),
+   direct validated push). Both keys are routine agenix provisioning, not
+   an operator decision.
 2. **`github-worker`**: exporter that writes the pending-review backlog to
    the top-level file (pull-rebase-retry on push).
 3. **`automation`/Helios (re-scope of leaf `0d07aed`)**: add a second
    read-only mirror of `top-level` and wire `setBacklogReader()` to read
-   the backlog file. Blocked on #1 (file format + read key).
+   the backlog file. Depends on #1 (file format + read key) — downstream,
+   not operator-blocked.
 4. **`automation`/Helios**: the promote-to-advisory button — server-side
    git commit to `top-level` `advisories.yaml`, admin-gated, contract-
-   validated, applyConfig-pattern. Blocked on the §Security decision + #1
-   write key.
+   validated, applyConfig-pattern. Depends on #1 (write key) — downstream,
+   not operator-blocked.
+
+> **Task-creation gap (flagged for the operator):** a frontier-leaf worker
+> cannot `breakdown` the epic, and `#57`'s root is already decomposed, so
+> these four follow-up tasks have **no automated creation trigger** from
+> this repo. They must be minted by a future epic-root/orchestration
+> dispatch or by an unmarked operator instruction on `#57`. Until then,
+> leaf `0d07aed` is parked `--downstream` (not operator-blocked) awaiting
+> #1/#2 above.
