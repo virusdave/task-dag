@@ -454,11 +454,21 @@ PY
 }
 
 # ─────────────────────────────────────────────────────────────────────
+# Helper: return 0 if a delegation ref exists (locally OR on origin) for
+# the given epic + peer repo + candidate peer issue. Used to validate a
+# comment-supplied --peer-issue before trusting it (Strategy 0).
+_xrepo_delegation_exists() {
+    local top_issue="$1" owner="$2" repo="$3" peer_issue="$4"
+    local ref="refs/heads/tasks/delegated/${top_issue}/${owner}/${repo}/${peer_issue}"
+    git rev-parse --verify "$ref" >/dev/null 2>&1 && return 0
+    git ls-remote origin "$ref" 2>/dev/null | grep -q .
+}
+
 # cmd_ingest_completion — record a peer-repo Satisfies: as completion
 # ─────────────────────────────────────────────────────────────────────
 
 cmd_ingest_completion() {
-    local top_issue="" comment_id="" comment_url="" from="" comment_phase=""
+    local top_issue="" comment_id="" comment_url="" from="" comment_phase="" comment_peer_issue=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --issue)        top_issue="$2";   shift 2 ;;
@@ -470,6 +480,13 @@ cmd_ingest_completion() {
             # work without a cross-repo API call — see the resolution
             # block below.
             --phase)        comment_phase="$2"; shift 2 ;;
+            # Optional peer-repo issue number carried by the completion
+            # comment itself (emitted by the peer-side aggregator, which
+            # CAN read its own commit). Authoritative when it names a real
+            # delegated child — this is how multiple same-repo delegations
+            # are disambiguated for a private cross-org peer whose commit
+            # the top-level token cannot read. See Strategy 0 below.
+            --peer-issue)   comment_peer_issue="$2"; shift 2 ;;
             *) _xrepo_die "ingest-completion: unknown arg: $1"; return 2 ;;
         esac
     done
@@ -531,11 +548,31 @@ cmd_ingest_completion() {
     # Determine the delegated child key.
     local peer_issue=""
 
+    # Strategy 0: comment-supplied peer issue (authoritative when present
+    # AND it names a real delegated child). The peer-side aggregator
+    # resolves this from ITS OWN commit — which the top-level token often
+    # cannot read for a private cross-org peer — and carries it in the
+    # completion comment. This is the only reliable disambiguator when a
+    # single peer repo has MULTIPLE delegated children under one epic
+    # (Strategies 1–2 need the unreadable commit; Strategy 3 needs exactly
+    # one delegation). A bogus/typo'd value that matches no delegation is
+    # ignored (not fatal) so it can never wedge a completion — we fall
+    # through to Strategies 1–3.
+    if [ -n "$comment_peer_issue" ]; then
+        if _xrepo_delegation_exists "$top_issue" "$XREPO_OWNER" "$XREPO_REPO" "$comment_peer_issue"; then
+            peer_issue="$comment_peer_issue"
+        else
+            _xrepo_log "ingest-completion: comment-supplied peer-issue ${comment_peer_issue} has no delegation under #${top_issue} for ${XREPO_OWNER}/${XREPO_REPO}; ignoring it and falling back to commit/single-delegation resolution"
+        fi
+    fi
+
     # Strategy 1: parse URL: https://github.com/<owner>/<repo>/issues/<peer_issue>
-    peer_issue="$(printf '%s\n' "$peer_message" \
-        | grep -Eo "https://github\.com/${XREPO_OWNER}/${XREPO_REPO}/issues/[0-9]+" \
-        | head -n1 \
-        | grep -Eo '[0-9]+$' || true)"
+    if [ -z "$peer_issue" ]; then
+        peer_issue="$(printf '%s\n' "$peer_message" \
+            | grep -Eo "https://github\.com/${XREPO_OWNER}/${XREPO_REPO}/issues/[0-9]+" \
+            | head -n1 \
+            | grep -Eo '[0-9]+$' || true)"
+    fi
 
     # Strategy 2: parse Issue: #<peer_issue>
     if [ -z "$peer_issue" ]; then
@@ -577,7 +614,7 @@ cmd_ingest_completion() {
     fi
 
     [ -n "$peer_issue" ] || {
-        _xrepo_die "ingest-completion: cannot resolve delegated peer issue for ${XREPO_OWNER}/${XREPO_REPO}@${peer_full_sha} (no URL: trailer, no Issue: trailer, and not exactly one delegated child)"
+        _xrepo_die "ingest-completion: cannot resolve delegated peer issue for ${XREPO_OWNER}/${XREPO_REPO}@${peer_full_sha} (no comment peer-issue matching a delegation, no URL: trailer, no Issue: trailer, and not exactly one delegated child)"
         return 2
     }
 
@@ -789,11 +826,14 @@ cmd_ingest_comment() {
 
     # Completion comment path:
     #   <!-- task-dag:completion --> Satisfies <owner>/<repo>#<N> via <peer>@<short>
-    # Optionally followed by ` phase <P...>` — the peer-side aggregator
-    # appends the commit's `Phase:` trailer so phase-gating works without
-    # the top-level workflow having to read the (often cross-org private)
-    # peer repo. The phase suffix is optional for backward compatibility.
-    if [[ "$first_line" =~ ^[[:space:]]*\<\!--[[:space:]]*task-dag:completion[[:space:]]*--\>[[:space:]]+Satisfies[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)[[:space:]]+via[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]+)([[:space:]]+phase[[:space:]]+([A-Za-z0-9]+))?[[:space:]]*$ ]]; then
+    # Optionally followed by ` phase <P>` and/or ` peer-issue <M>` (in that
+    # order) — the peer-side aggregator appends the commit's `Phase:`
+    # trailer (so phase-gating works) and the peer repo's OWN issue number
+    # (so a completion is attributed to the right delegated child), both
+    # without the top-level workflow having to read the (often cross-org
+    # private) peer repo. Both suffixes are optional for backward
+    # compatibility with older completion comments.
+    if [[ "$first_line" =~ ^[[:space:]]*\<\!--[[:space:]]*task-dag:completion[[:space:]]*--\>[[:space:]]+Satisfies[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)[[:space:]]+via[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]+)([[:space:]]+phase[[:space:]]+([A-Za-z0-9]+))?([[:space:]]+peer-issue[[:space:]]+([0-9]+))?[[:space:]]*$ ]]; then
         local target_owner="${BASH_REMATCH[1]}"
         local target_repo="${BASH_REMATCH[2]}"
         local target_issue="${BASH_REMATCH[3]}"
@@ -801,6 +841,7 @@ cmd_ingest_comment() {
         local peer_repo="${BASH_REMATCH[5]}"
         local peer_sha="${BASH_REMATCH[6]}"
         local peer_phase="${BASH_REMATCH[8]}"
+        local peer_issue="${BASH_REMATCH[10]}"
 
         local top_repo
         top_repo="$(_xrepo_current_repo)"
@@ -818,7 +859,8 @@ cmd_ingest_comment() {
             --comment-id "$comment_id" \
             --comment-url "$comment_url" \
             --from "${peer_owner}/${peer_repo}@${peer_sha}" \
-            ${peer_phase:+--phase "$peer_phase"}
+            ${peer_phase:+--phase "$peer_phase"} \
+            ${peer_issue:+--peer-issue "$peer_issue"}
 
         # If now fully satisfied, emit the close commit so close-completed-issues.yml fires.
         local status_line

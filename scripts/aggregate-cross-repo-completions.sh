@@ -106,9 +106,43 @@ for commit in "${COMMITS[@]}"; do
       | head -n1 \
       | tr -d '[:space:]'
   )"
+  # Guard the ingest-side regex: a phase containing any char outside
+  # [A-Za-z0-9] would make the top-level completion-comment regex fail to
+  # match, the comment would be treated as machine noise and skipped, and
+  # `comment_exists` dedup would prevent any retry — a permanent silent
+  # completion drop. Drop a malformed phase rather than risk that.
+  [[ "$phase" =~ ^[A-Za-z0-9]+$ ]] || phase=""
 
   if [[ ${#trailers[@]} -eq 0 ]]; then
     continue
+  fi
+
+  # Resolve THIS commit's own peer-repo issue number so the top-level
+  # coordinator can attribute the completion to the right delegated child
+  # WITHOUT having to read this (often cross-org, private) peer repo over
+  # the API — a token it usually does not have. We are the only side that
+  # can read this commit, so we resolve it here, exactly like `phase`.
+  #
+  # A commit belongs to a single peer issue (independent of how many
+  # top-level issues it Satisfies), so resolve once per commit. Prefer the
+  # explicit `Issue: #<N>` trailer; fall back to an own-repo issue URL in
+  # the message. Empty when neither is present (older/hand commits) — the
+  # top-level side then falls back to its existing resolution strategies.
+  peer_issue="$(
+    printf '%s\n' "${message}" \
+      | git interpret-trailers --parse \
+      | awk -F': ' '$1 == "Issue" { print $2 }' \
+      | head -n1 \
+      | tr -d '[:space:]' \
+      | sed -n 's/^#\{0,1\}\([0-9][0-9]*\)$/\1/p'
+  )"
+  if [[ -z "${peer_issue}" ]]; then
+    peer_issue="$(
+      printf '%s\n' "${message}" \
+        | grep -Eo "https://github\.com/${PEER_REPO}/issues/[0-9]+" \
+        | head -n1 \
+        | grep -Eo '[0-9]+$' || true
+    )"
   fi
 
   for trailer in "${trailers[@]}"; do
@@ -129,6 +163,11 @@ for commit in "${COMMITS[@]}"; do
     body="<!-- task-dag:completion --> Satisfies ${owner}/${repo}#${issue} via ${PEER_REPO}@${short_sha}"
     if [[ -n "${phase}" ]]; then
       body+=" phase ${phase}"
+    fi
+    # Order matters: the top-level ingest regex expects an optional
+    # ` phase <P>` BEFORE an optional ` peer-issue <M>`.
+    if [[ -n "${peer_issue}" ]]; then
+      body+=" peer-issue ${peer_issue}"
     fi
     post_completion_comment "${issue}" "${body}"
   done
