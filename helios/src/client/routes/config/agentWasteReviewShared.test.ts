@@ -6,11 +6,16 @@ import type {
 } from '../../../shared/contracts/index.js'
 import {
   AgentWasteBacklogUnavailableError,
+  buildPromoteRequest,
   compareObservations,
+  defaultPromoteFormState,
   deriveViewState,
   observationKey,
+  parseTriggerIds,
   severityRank,
   severityTone,
+  toAdvisorySeverity,
+  type PromoteFormState,
 } from './agentWasteReviewShared.js'
 
 function obs(overrides: Partial<AgentWasteObservation>): AgentWasteObservation {
@@ -136,5 +141,67 @@ describe('deriveViewState', () => {
       visibleCount: 2,
     })
     expect(state).toEqual({ kind: 'ready', source: AVAILABLE, visibleCount: 2 })
+  })
+})
+
+describe('promote form helpers', () => {
+  it('seeds the form with an EMPTY text (never from the observation note)', () => {
+    const state = defaultPromoteFormState(obs({ id: 'rg-short-r-rejected', note: 'agent free text', severity: 'high' }))
+    expect(state.text).toBe('')
+    // provenance defaults: observation id seeds trigger ids + severity default.
+    expect(state.triggerIdsCsv).toBe('rg-short-r-rejected')
+    expect(state.severity).toBe('high')
+    expect(state.status).toBe('active')
+  })
+
+  it('coerces an unknown severity to a valid default', () => {
+    expect(toAdvisorySeverity('bogus')).toBe('medium')
+    expect(toAdvisorySeverity(undefined)).toBe('medium')
+    expect(toAdvisorySeverity('safety')).toBe('safety')
+  })
+
+  it('parses trigger ids from comma/space separated input', () => {
+    expect(parseTriggerIds('a, b  c,,d')).toEqual(['a', 'b', 'c', 'd'])
+    expect(parseTriggerIds('   ')).toEqual([])
+  })
+
+  function form(overrides: Partial<PromoteFormState> = {}): PromoteFormState {
+    return {
+      id: 'rg-short-r',
+      status: 'active',
+      scope: 'global',
+      severity: 'low',
+      maxTokens: '35',
+      text: 'Use rg -n / rg -l; never rg -r.',
+      triggerIdsCsv: 'rg-short-r-rejected',
+      expiresAfterDays: '',
+      notes: '',
+      ...overrides,
+    }
+  }
+
+  it('builds a valid request against the shared contract schema', () => {
+    const res = buildPromoteRequest(form(), 'rg-short-r-rejected')
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.request.id).toBe('rg-short-r')
+    expect(res.request.trigger_ids).toEqual(['rg-short-r-rejected'])
+    expect(res.request.sourceObservationId).toBe('rg-short-r-rejected')
+    // note is not a field; nothing agent-authored leaks in beyond approved text.
+    expect((res.request as Record<string, unknown>).note).toBeUndefined()
+  })
+
+  it('surfaces field errors for an invalid form (non-kebab id, over-budget text)', () => {
+    const res = buildPromoteRequest(form({ id: 'Not Kebab', maxTokens: '1' }), 'obs-1')
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.errors.join(' ')).toMatch(/id|kebab/i)
+  })
+
+  it('rejects an active promotion with no trigger ids', () => {
+    const res = buildPromoteRequest(form({ triggerIdsCsv: '' }), 'obs-1')
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.errors.join(' ')).toMatch(/trigger/i)
   })
 })

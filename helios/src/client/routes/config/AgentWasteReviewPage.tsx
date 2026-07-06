@@ -15,7 +15,7 @@
 // ADMIN-GATED at the route level (client guard below); the server route is
 // independently admin-gated -- nav-hiding is not access control.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Navigate, useRouteLoaderData } from 'react-router-dom'
 
 import type {
@@ -29,12 +29,22 @@ import { useRegisterConfigSidebarSubtree } from './configSidebarSubtree.js'
 import {
   ADVISORY_CATALOG_DOC_URL,
   ADVISORY_CATALOG_URL,
+  buildPromoteRequest,
   compareObservations,
+  defaultPromoteFormState,
   deriveViewState,
   fetchAgentWasteBacklog,
   observationKey,
+  promoteTextTokens,
   severityTone,
+  submitPromoteAdvisory,
+  type PromoteFormState,
+  type PromoteSubmitResult,
 } from './agentWasteReviewShared.js'
+import type {
+  AdvisorySeverity,
+  PromotableAdvisoryStatus,
+} from '../../../shared/contracts/index.js'
 
 const REFRESH_INTERVAL_MS = 60_000
 
@@ -283,6 +293,8 @@ function ObservationCard({
 }) {
   const tokens = formatTokens(obs.estimated_wasted_tokens)
   const seconds = formatSeconds(obs.estimated_wasted_seconds)
+  const [promoting, setPromoting] = useState(false)
+  const promoteFormId = useId()
   return (
     <article className="history-card">
       <div className="history-card-topline">
@@ -295,9 +307,15 @@ function ObservationCard({
         </div>
         <div className="inline-row wrap-row">
           <Pill tone={severityTone(obs.severity)}>{obs.severity ?? 'unrated'}</Pill>
-          <a href={ADVISORY_CATALOG_URL} target="_blank" rel="noopener noreferrer">
-            Promote…
-          </a>
+          <button
+            type="button"
+            className="ghost-button"
+            aria-expanded={promoting}
+            aria-controls={promoteFormId}
+            onClick={() => setPromoting((v) => !v)}
+          >
+            {promoting ? 'Cancel promotion' : 'Promote…'}
+          </button>
           <button type="button" className="ghost-button" onClick={onDismiss}>
             Dismiss
           </button>
@@ -320,6 +338,226 @@ function ObservationCard({
             .join(' · ')}
         </p>
       )}
+
+      {promoting ? (
+        <PromoteForm
+          obs={obs}
+          formId={promoteFormId}
+          onDone={() => setPromoting(false)}
+          onDismiss={onDismiss}
+        />
+      ) : null}
     </article>
+  )
+}
+
+const STATUS_OPTIONS: PromotableAdvisoryStatus[] = ['active', 'permanent-safety']
+const SEVERITY_OPTIONS: AdvisorySeverity[] = ['low', 'medium', 'high', 'safety']
+
+function PromoteForm({
+  obs,
+  formId,
+  onDone,
+  onDismiss,
+}: {
+  obs: AgentWasteObservation
+  formId: string
+  onDone: () => void
+  onDismiss: () => void
+}) {
+  const [state, setState] = useState<PromoteFormState>(() => defaultPromoteFormState(obs))
+  const [errors, setErrors] = useState<string[]>([])
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState<PromoteSubmitResult | null>(null)
+
+  const set = <K extends keyof PromoteFormState>(key: K, value: PromoteFormState[K]) =>
+    setState((prev) => ({ ...prev, [key]: value }))
+
+  const maxTokens = Number(state.maxTokens)
+  const textTokens = promoteTextTokens(state.text)
+  const overBudget = Number.isFinite(maxTokens) && textTokens > maxTokens
+
+  const submit = async () => {
+    setErrors([])
+    setResult(null)
+    const built = buildPromoteRequest(state, obs.id)
+    if (!built.ok) {
+      setErrors(built.errors)
+      return
+    }
+    setSubmitting(true)
+    const r = await submitPromoteAdvisory(built.request)
+    setSubmitting(false)
+    setResult(r)
+  }
+
+  // On success, show the outcome + a link to the commit. The row is handled
+  // now, so the primary next action is to hide it from the queue; keep the
+  // commit link visible and offer a way to leave the row in place.
+  if (result && result.ok) {
+    return (
+      <div className="promote-form promote-form--done" id={formId} role="status" aria-live="polite">
+        <p>
+          <strong>Promoted.</strong> Added <code>{result.response.id}</code> to the advisory
+          catalog. Future agents pick it up within ~1 minute.
+        </p>
+        <p className="inline-row wrap-row">
+          <a href={result.response.commitUrl} target="_blank" rel="noopener noreferrer">
+            View commit ↗
+          </a>
+          <button type="button" className="primary-button" onClick={onDismiss}>
+            Hide handled row
+          </button>
+          <button type="button" className="ghost-button" onClick={onDone}>
+            Keep row visible
+          </button>
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <form
+      className="promote-form"
+      id={formId}
+      onSubmit={(e) => {
+        e.preventDefault()
+        void submit()
+      }}
+    >
+      <p className="subtle-copy">
+        Approve a <strong>reviewed</strong> advisory. Only <code>text</code> is ever injected into
+        future agents — type it, or paste an LLM draft and edit it; whatever you commit here is what
+        ships. The observation&rsquo;s note is never auto-used. The catalog contract caps size &amp;
+        count (see{' '}
+        <a href={ADVISORY_CATALOG_DOC_URL} target="_blank" rel="noopener noreferrer">
+          contract
+        </a>
+        ).
+      </p>
+
+      <div className="promote-grid">
+        <label>
+          <span>Advisory id (kebab-case)</span>
+          <input
+            type="text"
+            value={state.id}
+            placeholder="e.g. rg-short-r"
+            onChange={(e) => set('id', e.target.value)}
+          />
+        </label>
+        <label>
+          <span>Status</span>
+          <select
+            value={state.status}
+            onChange={(e) => set('status', e.target.value as PromotableAdvisoryStatus)}
+          >
+            {STATUS_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Severity</span>
+          <select
+            value={state.severity}
+            onChange={(e) => set('severity', e.target.value as AdvisorySeverity)}
+          >
+            {SEVERITY_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Scope</span>
+          <input
+            type="text"
+            value={state.scope}
+            placeholder="global or repo:owner/repo"
+            onChange={(e) => set('scope', e.target.value)}
+          />
+        </label>
+        <label>
+          <span>Max tokens</span>
+          <input
+            type="number"
+            min={1}
+            value={state.maxTokens}
+            onChange={(e) => set('maxTokens', e.target.value)}
+          />
+        </label>
+        {state.status === 'active' ? (
+          <label>
+            <span>Expires after days (optional)</span>
+            <input
+              type="number"
+              min={1}
+              value={state.expiresAfterDays}
+              placeholder="default 14"
+              onChange={(e) => set('expiresAfterDays', e.target.value)}
+            />
+          </label>
+        ) : null}
+      </div>
+
+      <label className="promote-block">
+        <span>
+          Advisory text (injected) —{' '}
+          <span className={overBudget ? 'promote-tokens promote-tokens--over' : 'promote-tokens'}>
+            ~{textTokens}/{Number.isFinite(maxTokens) ? maxTokens : '?'} tokens
+          </span>
+        </span>
+        <textarea
+          rows={2}
+          value={state.text}
+          placeholder="One self-contained line an agent can act on cold."
+          onChange={(e) => set('text', e.target.value)}
+        />
+      </label>
+
+      <label className="promote-block">
+        <span>Trigger observation ids (comma/space separated)</span>
+        <input
+          type="text"
+          value={state.triggerIdsCsv}
+          onChange={(e) => set('triggerIdsCsv', e.target.value)}
+        />
+      </label>
+
+      <label className="promote-block">
+        <span>Review notes (human-only, never injected)</span>
+        <input type="text" value={state.notes} onChange={(e) => set('notes', e.target.value)} />
+      </label>
+
+      {errors.length > 0 ? (
+        <ul className="promote-errors" role="alert">
+          {errors.map((e) => (
+            <li key={e}>{e}</li>
+          ))}
+        </ul>
+      ) : null}
+
+      {result && !result.ok ? (
+        <p className="promote-errors" role="alert">
+          {result.code === 'top_level_unavailable'
+            ? 'The advisory write path is not wired up yet on this server, so the promotion could not be committed. ' +
+              result.message
+            : `Promotion failed (${result.code}): ${result.message}`}
+        </p>
+      ) : null}
+
+      <div className="inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
+        <button type="submit" className="primary-button" disabled={submitting}>
+          {submitting ? 'Promoting…' : 'Commit + push advisory'}
+        </button>
+        <button type="button" className="ghost-button" disabled={submitting} onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
   )
 }

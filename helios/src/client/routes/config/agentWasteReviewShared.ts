@@ -8,20 +8,28 @@ import {
   AGENT_WASTE_SEVERITIES,
   AgentWasteBacklogResponseSchema,
   AgentWasteUnavailableResponseSchema,
+  PromoteAdvisoryErrorResponseSchema,
+  PromoteAdvisoryRequestSchema,
+  PromoteAdvisoryResponseSchema,
+  estimateAdvisoryTokens,
   type AgentWasteBacklogResponse,
   type AgentWasteObservation,
   type AgentWasteSourceStatus,
+  type AdvisorySeverity,
+  type PromoteAdvisoryRequest,
+  type PromoteAdvisoryResponse,
+  type PromotableAdvisoryStatus,
 } from '../../../shared/contracts/index.js'
 import type { PillProps } from '../../components/Pill.js'
 import { buildAppPath } from '../../app/paths.js'
 
 /**
- * Where a human goes to actually PROMOTE an observation into the reviewed
- * advisory catalog. Promotion edits `advisories.yaml` in virusdave/top-level
- * and IS a behavior-changing mutation (it adds allowlisted text the
- * dispatcher may inject into future agents), so it is deliberately NOT a
- * Helios button in v1 -- the page only links toward it (operator decision on
- * issue #57). The catalog contract governing that file lives alongside it.
+ * The reviewed advisory catalog an observation is promoted INTO. Promotion
+ * edits `advisories.yaml` in virusdave/top-level and IS a behavior-changing
+ * mutation (it adds allowlisted text the dispatcher may inject into future
+ * agents). As of issue #61 this is done via an in-Helios admin button
+ * (server-side commit+push; operator decision D3), so these links are just
+ * for reference. The catalog contract governing that file lives alongside it.
  */
 export const ADVISORY_CATALOG_URL =
   'https://github.com/virusdave/top-level/blob/master/docs/agent-runtime/advisories.yaml'
@@ -176,4 +184,155 @@ export function deriveViewState(input: {
     return { kind: 'error', message: error.message }
   }
   return { kind: 'loading' }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Promote-to-advisory (issue #61). The admin approves the allowlisted `text`
+// (the only field ever injected into an agent) — typed, pasted from an LLM
+// draft, or produced by the in-Helios draft-assist and then reviewed. The
+// safety gate is operator APPROVAL, not provenance. `text` starts blank (it is
+// never auto-filled from the observation's display-only `note`); the
+// observation contributes only provenance: its id (as a trigger id + audit
+// source) and, as a convenience default, its severity.
+
+/** Editable form state for a single promotion. All strings for input binding. */
+export interface PromoteFormState {
+  id: string
+  status: PromotableAdvisoryStatus
+  scope: string
+  severity: AdvisorySeverity
+  maxTokens: string
+  text: string
+  triggerIdsCsv: string
+  expiresAfterDays: string
+  notes: string
+}
+
+const VALID_SEVERITIES = new Set<AdvisorySeverity>(['low', 'medium', 'high', 'safety'])
+
+/** Coerce an observation's free-form severity to a valid advisory severity. */
+export function toAdvisorySeverity(severity: string | undefined): AdvisorySeverity {
+  return severity && VALID_SEVERITIES.has(severity as AdvisorySeverity)
+    ? (severity as AdvisorySeverity)
+    : 'medium'
+}
+
+/**
+ * Seed the promote form from an observation. `text` is intentionally EMPTY —
+ * the admin writes the reviewed, allowlisted advisory text. The observation
+ * id seeds `trigger_ids` (recurrence linkage) and the audit source; severity
+ * is a starting default only.
+ */
+export function defaultPromoteFormState(obs: AgentWasteObservation): PromoteFormState {
+  return {
+    id: '',
+    status: 'active',
+    scope: 'global',
+    severity: toAdvisorySeverity(obs.severity),
+    maxTokens: '35',
+    text: '',
+    triggerIdsCsv: obs.id,
+    expiresAfterDays: '',
+    notes: '',
+  }
+}
+
+/** Split a comma/whitespace-separated trigger-id list into a clean array. */
+export function parseTriggerIds(csv: string): string[] {
+  return csv
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+/**
+ * Build a PromoteAdvisoryRequest from form state and validate it with the
+ * SHARED contract schema (the same schema the server enforces). Returns the
+ * parsed request or a list of `field: message` errors for inline display.
+ * `sourceObservationId` is fixed from the observation and never editable.
+ */
+export function buildPromoteRequest(
+  state: PromoteFormState,
+  sourceObservationId: string,
+):
+  | { ok: true; request: PromoteAdvisoryRequest }
+  | { ok: false; errors: string[] } {
+  const candidate: Record<string, unknown> = {
+    id: state.id.trim(),
+    status: state.status,
+    scope: state.scope.trim(),
+    severity: state.severity,
+    max_tokens: Number(state.maxTokens),
+    text: state.text,
+    trigger_ids: parseTriggerIds(state.triggerIdsCsv),
+    sourceObservationId,
+  }
+  if (state.expiresAfterDays.trim() !== '') {
+    candidate.expires_after_days = Number(state.expiresAfterDays)
+  }
+  if (state.notes.trim() !== '') {
+    candidate.notes = state.notes
+  }
+  const parsed = PromoteAdvisoryRequestSchema.safeParse(candidate)
+  if (!parsed.success) {
+    return {
+      ok: false,
+      errors: parsed.error.issues.map(
+        (i) => `${i.path.join('.') || '(form)'}: ${i.message}`,
+      ),
+    }
+  }
+  return { ok: true, request: parsed.data }
+}
+
+/** Live token estimate of the advisory text (matches the server proxy). */
+export function promoteTextTokens(text: string): number {
+  return estimateAdvisoryTokens(text)
+}
+
+export type PromoteSubmitResult =
+  | { ok: true; response: PromoteAdvisoryResponse }
+  | { ok: false; code: string; message: string }
+
+/**
+ * POST a validated promotion to the admin endpoint. Never throws for an
+ * expected server rejection — returns a structured `{ok:false, code, message}`
+ * so the UI can render it inline (including the 503 `top_level_unavailable`
+ * degrade when the write path is not yet wired).
+ */
+export async function submitPromoteAdvisory(
+  request: PromoteAdvisoryRequest,
+): Promise<PromoteSubmitResult> {
+  let res: Response
+  try {
+    res = await fetch(buildAppPath('/api/agent-waste/promote'), {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(request),
+    })
+  } catch (cause) {
+    return { ok: false, code: 'network_error', message: cause instanceof Error ? cause.message : 'Network error' }
+  }
+
+  let json: unknown
+  try {
+    json = await res.json()
+  } catch {
+    return { ok: false, code: 'bad_response', message: `Request failed (${res.status})` }
+  }
+
+  if (res.ok) {
+    const parsed = PromoteAdvisoryResponseSchema.safeParse(json)
+    if (parsed.success) {
+      return { ok: true, response: parsed.data }
+    }
+    return { ok: false, code: 'bad_response', message: 'The server returned an unexpected success shape.' }
+  }
+
+  const err = PromoteAdvisoryErrorResponseSchema.safeParse(json)
+  if (err.success) {
+    return { ok: false, code: err.data.code, message: err.data.message }
+  }
+  return { ok: false, code: 'error', message: `Request failed (${res.status})` }
 }

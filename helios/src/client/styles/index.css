@@ -378,6 +378,69 @@ pre {
   text-decoration: underline;
 }
 
+/* Inline promote-to-advisory form on each review-queue row (issue #61). */
+.promote-form {
+  margin-top: 0.85rem;
+  padding: 0.85rem;
+  border: 1px solid var(--control-border);
+  border-radius: 14px;
+  background: rgba(255, 250, 241, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.promote-form--done {
+  gap: 0.4rem;
+}
+.promote-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.6rem;
+}
+.promote-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.promote-form label > span {
+  color: var(--muted, #6b5b4a);
+}
+.promote-form input,
+.promote-form select,
+.promote-form textarea {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--control-border);
+  background: #fffaf1;
+  font-weight: 400;
+}
+.promote-form textarea {
+  resize: vertical;
+}
+.promote-block {
+  width: 100%;
+}
+.promote-tokens {
+  font-weight: 400;
+  color: var(--muted, #6b5b4a);
+}
+.promote-tokens--over {
+  color: #7a2719;
+  font-weight: 700;
+}
+.promote-errors {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 12px;
+  background: rgba(192, 99, 84, 0.16);
+  border: 1px solid rgba(192, 99, 84, 0.45);
+  color: #7a2719;
+  font-size: 0.85rem;
+  list-style-position: inside;
+}
+
 .runtime-status-item {
   display: flex;
   align-items: center;
