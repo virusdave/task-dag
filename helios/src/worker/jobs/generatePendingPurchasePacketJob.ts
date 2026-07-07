@@ -31,7 +31,10 @@ import {
   type PendingPurchaseParseRuleRecord,
 } from '../../server/db/queries/pendingPurchaseParserQueries.js'
 import { withTransaction } from '../../server/db/tx.js'
-import { loadExtractedPendingPurchaseHintFactsForBundle } from '../../server/db/queries/pendingPurchaseHintQueries.js'
+import {
+  getPendingPurchaseHintExtractionProgress,
+  loadExtractedPendingPurchaseHintFactsForBundle,
+} from '../../server/db/queries/pendingPurchaseHintQueries.js'
 import {
   persistPendingPurchasePacket,
   type PendingPurchasePacket,
@@ -52,7 +55,7 @@ import {
 } from '../pendingPurchases/reconcilePendingPurchaseDrafts.js'
 import { getWorkerEnv } from '../config/env.js'
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
-import { isRetryableWorkerError } from '../runtime/errors.js'
+import { isRetryableWorkerError, RetryableWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { readSweedDealerContext } from '../sweed/client.js'
 import {
@@ -754,6 +757,15 @@ const CANDIDATE_BRAND_HITS_PER_ROW = 40
 const MAX_CLASSIFIER_CANDIDATES_PER_CALL = 2000
 const MAX_RECONCILER_CANDIDATES = 4000
 const MAX_CLASSIFIER_HINT_FACTS = 5000
+
+// The generate job is frequently enqueued by the same operator action that just
+// added a hint document, moments before the async C3 hint-extraction job has
+// finished. When documents are still mid-extraction, defer generation by this
+// long rather than failing the packet. Bounded by the worker loop's max-attempts
+// budget (RetryableWorkerError), so a genuinely stuck extraction dead-letters
+// instead of deferring forever. Observed extraction latency is a few-to-~20s, so
+// this resolves within the first retry or two.
+const HINT_EXTRACTION_RETRY_DELAY_MS = 10_000
 const GROUP_CONTEXT_CONCURRENCY = 20
 
 interface PendingPurchaseClassifierProvenance {
@@ -1350,20 +1362,38 @@ function describeClassifierEvent(chunk: readonly PendingPurchaseGroupContext[]):
   return `${site} — ${distributorLabel} delivery, ${chunk.length} unresolved line${chunk.length === 1 ? '' : 's'}.`
 }
 
-async function buildClassifierHintFacts(
+export async function buildClassifierHintFacts(
   db: Queryable,
   hintBundleId: string | null,
 ): Promise<ClassifierHintFact[]> {
   if (hintBundleId === null) {
     return []
   }
+
+  // Close the enqueue race: the generate job is frequently queued by the same
+  // operator action that just added a hint document, before the async C3
+  // extraction job has written its facts. If any document is still awaiting
+  // extraction, defer this job (retry shortly) instead of failing the whole
+  // packet. RetryableWorkerError bounds the deferral to the worker loop's
+  // max-attempts budget, so a genuinely stuck extraction dead-letters rather
+  // than looping forever.
+  const progress = await getPendingPurchaseHintExtractionProgress(db, hintBundleId)
+  if (progress.pending > 0) {
+    throw new RetryableWorkerError(
+      `Hint bundle "${hintBundleId}" still has ${progress.pending} of ${progress.total} document(s) awaiting extraction; deferring generation until extraction completes.`,
+      { delayMs: HINT_EXTRACTION_RETRY_DELAY_MS },
+    )
+  }
+
   const bundleFacts = await loadExtractedPendingPurchaseHintFactsForBundle(db, hintBundleId)
   if (bundleFacts.length === 0) {
-    // The operator attached a hint bundle but nothing extracted from it. Fail
-    // loud (re-extract or drop the bundle) rather than silently ignoring the
-    // context they deliberately supplied.
+    // Every document reached a terminal state but none produced usable facts
+    // (extraction failed/skipped, or the stored payload no longer matches the
+    // contract). This is NOT the enqueue race — fail loud so the operator
+    // re-extracts or drops the bundle rather than silently losing the context
+    // they deliberately supplied.
     throw new Error(
-      `Hint bundle "${hintBundleId}" has no extracted facts. Re-run extraction or remove the bundle before generating.`,
+      `Hint bundle "${hintBundleId}" has no extracted facts (documents: ${progress.total}, failed: ${progress.failed}, skipped: ${progress.skipped}). Re-run extraction or remove the bundle before generating.`,
     )
   }
   if (bundleFacts.length > MAX_CLASSIFIER_HINT_FACTS) {

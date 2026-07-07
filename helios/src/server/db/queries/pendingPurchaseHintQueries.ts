@@ -518,6 +518,63 @@ interface HintFactDocumentRow {
   extracted_facts: unknown
 }
 
+export interface PendingPurchaseHintExtractionProgress {
+  /** Total documents in the bundle. */
+  readonly total: number
+  /** Documents still awaiting extraction (extraction_status = 'pending'). */
+  readonly pending: number
+  /** Documents that produced usable facts. */
+  readonly extracted: number
+  /** Documents whose extraction failed. */
+  readonly failed: number
+  /** Documents deliberately skipped (e.g. unsupported content). */
+  readonly skipped: number
+}
+
+/**
+ * Cheap status roll-up for a bundle's documents (no facts pulled). Lets the
+ * generate job distinguish "extraction still in flight" (defer + retry) from
+ * "extraction finished but produced nothing" (fail loud). This closes the
+ * enqueue race where a packet-generation job is queued by the same operator
+ * action that just added a hint document — before the async C3 extraction job
+ * has run.
+ */
+export async function getPendingPurchaseHintExtractionProgress(
+  db: Queryable,
+  hintBundleId: string,
+): Promise<PendingPurchaseHintExtractionProgress> {
+  const result = await db.query<{
+    total: string | number
+    pending: string | number
+    extracted: string | number
+    failed: string | number
+    skipped: string | number
+  }>(
+    `
+      select
+        count(*) as total,
+        count(*) filter (where d.extraction_status = 'pending') as pending,
+        count(*) filter (where d.extraction_status = 'extracted') as extracted,
+        count(*) filter (where d.extraction_status = 'failed') as failed,
+        count(*) filter (where d.extraction_status = 'skipped') as skipped
+      from pending_purchase_hint_documents d
+      join pending_purchase_hint_bundles b on b.id = d.bundle_id
+      where b.hint_bundle_id = $1
+    `,
+    [hintBundleId],
+  )
+  const row = result.rows[0]
+  const toInt = (value: string | number | null | undefined): number =>
+    typeof value === 'number' ? value : Number.parseInt(value ?? '0', 10)
+  return {
+    total: toInt(row?.total),
+    pending: toInt(row?.pending),
+    extracted: toInt(row?.extracted),
+    failed: toInt(row?.failed),
+    skipped: toInt(row?.skipped),
+  }
+}
+
 /**
  * Flatten every successfully-extracted fact across an active bundle's
  * documents, attaching the owning-document context each citation needs. This
