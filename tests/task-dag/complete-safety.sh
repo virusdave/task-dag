@@ -152,14 +152,29 @@ if [ -n "$T5" ]; then
   fi
 fi
 
+# find the completion merge whose 2nd+ parent is <leaf task sha>, reachable from HEAD
+_merge_for_leaf() {
+  git rev-list HEAD --parents \
+    | awk -v t="$1" '{for(i=3;i<=NF;i++) if($i==t){print $1; exit}}'
+}
+# true iff <commit>'s tree differs from its first parent's tree (a REAL impl)
+_is_real_impl() {
+  local c="$1" t pt
+  t=$(git rev-parse "$c^{tree}")
+  if git rev-parse -q --verify "$c^1" >/dev/null 2>&1; then pt=$(git rev-parse "$c^1^{tree}"); else pt=4b825dc642cb6eb9a060e54bf8d69288fbee4904; fi
+  [ "$t" != "$pt" ]
+}
+
 # ---------------------------------------------------------------------------
-# TEST 6 (issue #7): two stacked sibling-leaf impls in ONE worktree complete
-# cleanly. The worker makes two stacked impl commits (S then C) and completes
-# each against its own (now-ancestor) impl via --commit=<sha>; HEAD only ever
-# moves FORWARD (no ref surgery, no empty-HEAD dead-end).
+# TEST 6 (issue #7): DAG-native BATCH completion of stacked sibling leaves.
+# Two stacked impls (S then C) in ONE worktree, completed via
+# `complete --leaves=SERVER:S,CLIENT:C`; each completion merge's FIRST parent
+# is its own impl (honest linear graph), semantics stay in the DAG (no
+# Impl-Commit trailer). Single ancestor-complete is refused (points to
+# --leaves). Idempotent rerun cleans up only.
 # ---------------------------------------------------------------------------
 git checkout -q master 2>/dev/null || true
-git push -q origin HEAD:master 2>/dev/null
+git push -q origin HEAD:master 2>/dev/null      # origin/master == HEAD
 S_LEAF=$(mk_task "issue7 server leaf")
 C_LEAF=$(mk_task "issue7 client leaf")
 if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
@@ -167,24 +182,25 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
   CLEAF_SHA=$(git rev-parse "refs/heads/tasks/frontier/$C_LEAF")
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$S_LEAF" >/dev/null 2>&1
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$C_LEAF" >/dev/null 2>&1
-  # Two stacked implementation commits on master: S (server) then C (client).
+  # Two stacked impls, deliberately NOT pushed (graft requires unpushed).
   echo "server work" > server.txt; git add server.txt; git commit -qm "impl server"
   S=$(git rev-parse HEAD)
   echo "client work" > client.txt; git add client.txt; git commit -qm "impl client"
   C=$(git rev-parse HEAD)
 
-  # Complete SERVER against its impl S — now an ANCESTOR of HEAD (=C). Old
-  # behaviour refused this ("not a fast-forward descendant of HEAD").
-  out1=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$S_LEAF" --commit="$S" 2>&1); rc1=$?
-  # Complete CLIENT against its impl C — an ANCESTOR of the new HEAD.
-  out2=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$C_LEAF" --commit="$C" 2>&1); rc2=$?
-  if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ]; then
-    ok "7: both stacked leaves complete via --commit=<ancestor> (rc1=$rc1 rc2=$rc2)"
+  # (a) single complete against an impl BEHIND HEAD is refused → use --leaves
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$S_LEAF" --commit="$S" 2>&1); rc=$?
+  if [ $rc -ne 0 ] && echo "$out" | grep -q -- '--leaves'; then
+    ok "7: single complete of an impl behind HEAD refuses and points to --leaves"
   else
-    bad "7: stacked completion failed rc1=$rc1 rc2=$rc2 :: $out1 :: $out2"
+    bad "7: single ancestor-complete was not refused (rc=$rc): $out"
   fi
 
-  # Both task commits are recorded as completion parents reachable from HEAD.
+  # (b) batch --leaves completes BOTH stacked siblings in one shot
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$S_LEAF:$S,$C_LEAF:$C" 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then ok "7: complete --leaves completes both stacked siblings (rc=0)"; else bad "7: complete --leaves failed (rc=$rc): $out"; fi
+
+  # both task commits reachable as completion parents
   if git log HEAD --format='%P' | tr ' ' '\n' | grep -qx "$SLEAF_SHA" \
      && git log HEAD --format='%P' | tr ' ' '\n' | grep -qx "$CLEAF_SHA"; then
     ok "7: both leaves recorded as completion parents reachable from HEAD"
@@ -192,41 +208,125 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
     bad "7: a stacked leaf is not reachable as a completion parent"
   fi
 
-  # HEAD only moved forward: the client impl C is still an ancestor of HEAD.
-  if git merge-base --is-ancestor "$C" HEAD; then
-    ok "7: HEAD advanced forward only (client impl C is an ancestor of HEAD)"
+  # DAG-native: each completion merge's FIRST parent is a REAL impl commit
+  MS=$(_merge_for_leaf "$SLEAF_SHA"); MC=$(_merge_for_leaf "$CLEAF_SHA")
+  if [ -n "$MS" ] && _is_real_impl "$(git rev-parse "$MS^1")"; then
+    ok "7: server completion merge's first parent is a real impl (DAG-native)"
   else
-    bad "7: HEAD did not move forward past the client impl C"
+    bad "7: server completion merge first parent is not a real impl (MS=$MS)"
+  fi
+  if [ -n "$MC" ] && _is_real_impl "$(git rev-parse "$MC^1")"; then
+    ok "7: client completion merge's first parent is a real impl (DAG-native)"
+  else
+    bad "7: client completion merge first parent is not a real impl (MC=$MC)"
   fi
 
-  # The server completion merge (2nd parent == SLEAF_SHA) sits on the tip,
-  # is an EMPTY merge (tree == first parent's tree), and records provenance.
-  MS=$(git rev-list HEAD --parents \
-        | awk -v t="$SLEAF_SHA" '{for(i=3;i<=NF;i++) if($i==t){print $1; exit}}')
-  if [ -n "$MS" ]; then
-    p1=$(git rev-parse "$MS^1")
-    if [ "$(git rev-parse "$MS^{tree}")" = "$(git rev-parse "$p1^{tree}")" ]; then
-      ok "7: server completion merge is an empty merge (tree == first parent)"
-    else
-      bad "7: server completion merge has a non-empty tree diff vs first parent"
-    fi
-    if git log -1 --format=%B "$MS" | grep -qx "Impl-Commit: $S"; then
-      ok "7: server completion merge records Impl-Commit provenance trailer"
-    else
-      bad "7: server completion merge missing 'Impl-Commit: $S' trailer"
-    fi
+  # DAG-native shape: the ONLY merges in the range are the two completion
+  # merges, and every merge's 2nd parent is a leaf TASK commit (semantics
+  # live in parentage). The first-parent spine is otherwise linear.
+  BASE=$(git rev-parse origin/master)
+  merges=$(git rev-list --min-parents=2 "$BASE..HEAD")
+  nmerges=$(printf '%s\n' "$merges" | grep -c .)
+  bad2parent=0
+  for m in $merges; do
+    p2=$(git rev-parse "$m^2")
+    [ "$p2" = "$SLEAF_SHA" ] || [ "$p2" = "$CLEAF_SHA" ] || bad2parent=1
+  done
+  if [ "$nmerges" = "2" ] && [ "$bad2parent" = "0" ]; then
+    ok "7: only the 2 completion merges exist and each 2nd parent is a leaf task commit"
   else
-    bad "7: could not locate the server completion merge"
+    bad "7: unexpected DAG shape (merges=$nmerges bad2parent=$bad2parent)"
   fi
 
-  # Refuse completing against an empty completion merge (e.g. HEAD itself).
-  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$S_LEAF" --commit="$(git rev-parse HEAD)" --force 2>&1); rc=$?
-  if [ $rc -ne 0 ] && echo "$out" | grep -qiE "empty|task/control commit"; then
-    ok "7: refuses --commit at an empty completion/control commit (rc=$rc)"
+  # NO message-encoded provenance: Impl-Commit trailer must not appear
+  if git log "$BASE..HEAD" --format='%B' | grep -q '^Impl-Commit:'; then
+    bad "7: an Impl-Commit message trailer leaked into history"
   else
-    bad "7: did NOT refuse completing against an empty commit (rc=$rc): $out"
+    ok "7: no Impl-Commit trailer — impl↔task link stays in the DAG"
+  fi
+
+  # worktree preserved through the graft (files intact)
+  if [ -f server.txt ] && grep -q "server work" server.txt && [ -f client.txt ] && grep -q "client work" client.txt; then
+    ok "7: worktree files preserved through the graft"
+  else
+    bad "7: worktree files lost after graft"
+  fi
+
+  # a local backup ref of the old tip exists (recovery)
+  if [ -n "$(git for-each-ref 'refs/task-dag-backup/complete-batch/*' 2>/dev/null)" ]; then
+    ok "7: old tip preserved under refs/task-dag-backup/ for recovery"
+  else
+    bad "7: no batch backup ref created"
+  fi
+
+  # idempotent rerun (all already completed) → cleanup-only, rc 0
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$S_LEAF:$S,$C_LEAF:$C" 2>&1); rc=$?
+  if [ $rc -eq 0 ] && echo "$out" | grep -qi 'already completed'; then
+    ok "7: idempotent rerun of a fully-completed batch (cleanup-only, rc=0)"
+  else
+    bad "7: idempotent rerun not handled (rc=$rc): $out"
   fi
   git push -q origin HEAD:master 2>/dev/null
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 7 (issue #7): batch respects dependencies (option b) and refuses
+# duplicate impls.
+# ---------------------------------------------------------------------------
+git checkout -q master 2>/dev/null || true
+git push -q origin HEAD:master 2>/dev/null
+# two leaves in one breakdown: CLIENT (@2) depends on SERVER (@1)
+printf '[{"title":"dep server","type":"leaf"},{"title":"dep client","type":"leaf","dependencies":["@1"]}]' > "$ROOT/spec_dep.json"
+"$TD" claim-root 999 --force >/dev/null 2>&1
+mapfile -t DEP_SHORTS < <("$TD" breakdown "$EPIC" --spec-file="$ROOT/spec_dep.json" --force --json 2>/dev/null | grep -oE '"shortSha":"[0-9a-f]+"' | cut -d'"' -f4)
+DSRV="${DEP_SHORTS[0]:-}"; DCLI="${DEP_SHORTS[1]:-}"
+if [ -n "$DSRV" ] && [ -n "$DCLI" ]; then
+  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$DSRV" >/dev/null 2>&1
+  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$DCLI" >/dev/null 2>&1
+  # dependency's impl (server) stacked BELOW the dependent's impl (client)
+  echo "dep server work" > dsrv.txt; git add dsrv.txt; git commit -qm "impl dep server"; DS=$(git rev-parse HEAD)
+  echo "dep client work" > dcli.txt; git add dcli.txt; git commit -qm "impl dep client"; DC=$(git rev-parse HEAD)
+
+  # WRONG order (dependent's impl stacked below its dependency) → refused.
+  # Here we lie about the pairing so the dependent (DCLI) maps to the lower
+  # impl DS and the dependency (DSRV) to the higher impl DC — graft order
+  # would then complete DCLI before its dependency DSRV.
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$DCLI:$DS,$DSRV:$DC" 2>&1); rc=$?
+  if [ $rc -ne 0 ] && echo "$out" | grep -qi 'depends on'; then
+    ok "8: batch refuses when a dependency's impl is stacked ABOVE the dependent (wrong graft order)"
+  else
+    bad "8: batch did not refuse reversed dependency order (rc=$rc): $out"
+  fi
+
+  # correct order (server impl below) → succeeds
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$DSRV:$DS,$DCLI:$DC" 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then ok "8: batch with intra-batch dependency (dep impl stacked below) succeeds"; else bad "8: dependency batch failed (rc=$rc): $out"; fi
+  git push -q origin HEAD:master 2>/dev/null
+fi
+
+# duplicate impl in one --leaves is refused
+git checkout -q master 2>/dev/null || true; git push -q origin HEAD:master 2>/dev/null
+D1=$(mk_task "dup impl A"); D2=$(mk_task "dup impl B")
+if [ -n "$D1" ] && [ -n "$D2" ]; then
+  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$D1" >/dev/null 2>&1
+  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$D2" >/dev/null 2>&1
+  echo dup > dup.txt; git add dup.txt; git commit -qm "impl dup"; DUP=$(git rev-parse HEAD)
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$D1:$DUP,$D2:$DUP" 2>&1); rc=$?
+  if [ $rc -ne 0 ] && echo "$out" | grep -qi 'same impl commit'; then
+    ok "8: batch refuses two leaves sharing one impl commit"
+  else
+    bad "8: batch did not refuse duplicate impls (rc=$rc): $out"
+  fi
+
+  # duplicate LEAF in one --leaves is refused (needs a 2nd real impl so the
+  # dedupe fails on the leaf, not the impl)
+  echo dup2 > dup2.txt; git add dup2.txt; git commit -qm "impl dup2"; DUP2=$(git rev-parse HEAD)
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$D1:$DUP,$D1:$DUP2" 2>&1); rc=$?
+  if [ $rc -ne 0 ] && echo "$out" | grep -qi 'listed twice'; then
+    ok "8: batch refuses the same leaf listed twice"
+  else
+    bad "8: batch did not refuse a duplicate leaf (rc=$rc): $out"
+  fi
 fi
 
 echo "-----"

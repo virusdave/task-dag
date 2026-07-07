@@ -122,30 +122,79 @@ born-claimed decomposition happens under the single cross-host root CAS.
 
 When a root worker implements two+ born-claimed siblings in the **same
 worktree**, it naturally stacks their implementation commits on `master`
-(`… → S → C`, `HEAD=C`) and then completes each. `complete` supports this
-directly — **HEAD only ever moves forward**:
+(`… → S → C`, `HEAD=C`) and then completes each. The design law is that a
+completion is a **git parent-edge**, not a message tag: every completion
+merge's **first parent is that leaf's implementation commit** and its
+second parent is the leaf's task commit (see
+[`DESIGN_PRINCIPLES.md`](DESIGN_PRINCIPLES.md) — semantics live in the git
+DAG). Keeping that invariant true for a *stack* of impls is what the batch
+form does.
 
-- `complete <leaf> --commit=<sha>` where `<sha> == HEAD`: the completion
-  merge is built on `HEAD` (the normal path).
-- `--commit=<sha>` where `<sha>` is **ahead of** `HEAD`: the merge is
-  built on `<sha>` and `HEAD` fast-forwards up to it (may touch tracked
-  files).
-- `--commit=<sha>` where `<sha>` is **behind** `HEAD` (an already-stacked
-  earlier sibling's impl): the impl already lives in history, so the
-  completion merge is built on the **current tip**, the merge records the
-  real impl via an `Impl-Commit: <sha>` trailer, and `HEAD` advances
-  forward. No `reset`/`cherry-pick` ref surgery, no dangling half-state.
+#### Single `complete <leaf> --commit=<sha>`
 
-So the worker can commit all sibling impls first and then
-`complete <leaf> --commit=<that leaf's impl>` for each, in any order.
-Each completion merge stays an *empty* merge (tree == its first parent's
-tree); completion is detected purely by the task commit appearing as a
-non-primary parent reachable from `HEAD` (`is_task_completed` /
-`close-completed-issues.sh`), which the forward-only tip merge preserves.
+Handles only the two cases where first-parent-==-impl needs no local
+rewrite:
+
+- `<sha> == HEAD`: the completion merge is built on `HEAD` (normal path).
+- `<sha>` is **ahead of** `HEAD`: the merge is built on `<sha>` and `HEAD`
+  fast-forwards up to it (may touch tracked files).
+- `<sha>` is **behind** `HEAD` (an already-stacked earlier sibling's
+  impl): **refused**, with a pointer to the batch form. Completing it in
+  place would either break first-parent-==-impl or silently rewrite local
+  history, so it must be explicit.
+
 `complete` still refuses a `--commit` that is an empty task/control/
 completion commit, or one that is neither an ancestor nor a descendant of
-`HEAD`. (Retroactively linking work already on `master` remains
-`complete-historical`.)
+`HEAD`.
+
+#### Batch `complete --leaves=<leaf>:<impl>[,<leaf>:<impl>…]`
+
+Completes a whole stack in one shot. The impls must all be **unpushed**
+commits on the *linear* range `origin/master..HEAD` (proven against a
+freshly fetched `origin/master`). task-dag walks the chain oldest→newest,
+**replaying** each commit onto the running tip and inserting a completion
+merge immediately above each impl, yielding an honest linear graph:
+
+```
+origin/master → S → M_S → C' → M_C   (HEAD)
+```
+
+where `M_S`/`M_C` are the completion merges (first parent = the impl,
+second parent = the task commit). Note that any commit replayed **above**
+an inserted merge is a new commit (`C'`), so a later merge's first parent
+is the *replayed* impl, not the original SHA you passed in `--leaves`
+(`M_C^1 == C'`, not the input `C`); the input SHA only has to identify the
+impl in the pre-graft `origin/master..HEAD` range. This is a **local,
+non-fast-forward rewrite of unpushed commits only** — the final tree equals the old
+`HEAD`'s, so the worktree/index are untouched, the old tip is saved under
+`refs/task-dag-backup/complete-batch/*` (and the reflog), and the later
+`git push origin HEAD:master` is still a fast-forward.
+
+Safety gates (all enforced before any ref moves):
+
+- Freshly fetches `origin/master`; refuses unless `HEAD` is ahead of it
+  and the range is linear (no merges), i.e. the rewritten window is
+  provably local/unpushed.
+- Refuses duplicate leaves or two leaves naming the same impl commit.
+- Each impl must be a real work commit in-range (not a task/control commit,
+  and its tree must differ from its first parent).
+- Refuses to reparent a **GPG-signed** commit (would drop the signature).
+- Verifies claim ownership of every leaf up front (`--force` to override a
+  known-dead claim); refuses an epic root.
+- Intra-batch **dependencies** must be satisfied by an already-completed
+  task or an earlier leaf **in graft order** (the dependency's impl must
+  be stacked below the dependent's).
+- **Idempotent**: if all named leaves are already completed on `HEAD`, it
+  runs ref cleanup only (rc 0); a partial state (some completed) is
+  refused so the caller re-runs with only the not-yet-completed leaves.
+- A single CAS `update-ref HEAD` advance (never `git reset --hard`) after a
+  backup ref is written; ref cleanup uses `--force-with-lease` so it can
+  never clobber a concurrent worker's claim.
+
+Completion is still detected purely by the task commit appearing as a
+non-primary parent reachable from `HEAD` (`is_task_completed` /
+`close-completed-issues.sh`). (Retroactively linking work already on
+`master` remains `complete-historical`.)
 
 ## Born-blocked epics (block at birth via label)
 

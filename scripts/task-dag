@@ -3653,45 +3653,90 @@ cleanup_completed_task_refs() {
     return 0
 }
 
+# Helper: build a completion merge's commit message from the task commit's
+# metadata and the implementation commit's message. Shared by single
+# `complete` and the batch (--leaves) path so both produce identical
+# trailers. Encodes NOTHING that the DAG already carries: the impl↔task
+# link is the merge's parentage (first parent = impl, second = task), not a
+# message tag (docs/DESIGN_PRINCIPLES.md).
+#   $1 = task_sha (full)   $2 = base implementation commit message (%B)
+build_completion_message() {
+    local task_sha="$1" base_message="$2"
+    local task_msg issue_num issue_url m
+    task_msg=$(parse_commit_metadata "$task_sha")
+    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    issue_url=$(extract_field "$task_msg" "URL")
+    m="${base_message}
+
+Task-Commit: $task_sha"
+    [ -n "$issue_num" ] && m="${m}
+Issue: #$issue_num"
+    [ -n "$issue_url" ] && m="${m}
+URL: $issue_url"
+    m="${m}
+Status: completed"
+    # Related: footer for GitHub auto-linking.
+    [ -n "$issue_url" ] && m="${m}
+
+Related: $issue_url"
+    printf '%s' "$m"
+}
+
 # Command: complete - mark task as complete
 cmd_complete() {
     local task_sha=""
     local commit_sha=""
+    local leaves_spec=""
     local no_cleanup=false
     local do_force=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --commit=*) commit_sha="${1#*=}"; shift ;;
+            --leaves=*) leaves_spec="${1#*=}"; shift ;;
             --no-cleanup) no_cleanup=true; shift ;;
             --force) do_force=true; shift ;;
             --help|-h)
                 cat <<EOF
 Usage: task-dag complete <task-sha> [--commit=SHA] [--no-cleanup] [--force]
+       task-dag complete --leaves=<leaf>:<impl>[,<leaf>:<impl>...] [--no-cleanup] [--force]
 
-Mark a task as complete by creating a completion commit.
+Mark a task (or several stacked sibling leaves) complete by creating a
+completion merge whose FIRST parent is the leaf's implementation commit and
+whose second parent is the task commit. Completion is thus a git parent-edge
+(see docs/DESIGN_PRINCIPLES.md), never a message tag.
+
+Single-leaf form (default):
+  --commit=SHA     Implementation commit to complete against (default:
+                   HEAD). SHA must be HEAD, or a DESCENDANT of HEAD (HEAD
+                   fast-forwards up to it). SHA must be real work (not an
+                   empty task/control/completion commit). If your impl is
+                   BEHIND HEAD (you stacked more commits on top of it), use
+                   the --leaves form instead — completing it in place would
+                   rewrite local history and must be explicit. To link work
+                   already on master, use 'complete-historical'.
+
+Batch form (--leaves): complete several sibling leaves implemented as a
+  stack of commits in ONE worktree. Each pair is <leaf>:<impl>, where <impl>
+  is that leaf's implementation commit (all must be UNPUSHED commits in
+  origin/master..HEAD, on a linear chain). task-dag grafts a completion
+  merge directly above each impl and replays the commits stacked above, so
+  the result is an honest linear graph (base -> S -> M_S -> C' -> M_C) with
+  no history left dangling and no message-encoded provenance. This is a
+  LOCAL rewrite of your unpushed commits (old tip stays in the reflog);
+  the subsequent 'git push origin HEAD:master' is still a fast-forward.
 
 Options:
-  --commit=SHA     Implementation commit to complete against (default:
-                   HEAD). SHA may be HEAD, a descendant of HEAD (HEAD
-                   fast-forwards up to it), or an ANCESTOR of HEAD — the
-                   latter lets you stack several sibling-leaf impls in one
-                   worktree and complete each against its own commit; the
-                   completion merge is then built on the current tip and
-                   records the impl via an 'Impl-Commit:' trailer. HEAD
-                   only ever moves forward (no history rewrite). SHA must
-                   be real work (not an empty task/control/completion
-                   commit). To link work already on master, use
-                   'complete-historical'.
   --no-cleanup     Don't delete frontier/active refs
-  --force          Complete even if the task's active claim is held by
+  --force          Complete even if a task's active claim is held by
                    another worker (use only if that claim is known dead).
 
-Safety: 'complete' advances HEAD with 'git update-ref' (never
-'git reset --hard'), so uncommitted work is preserved; it refuses to
-complete a task another live worker has claimed; and it removes remote
-task refs with --force-with-lease so it can never clobber a concurrent
-worker's claim.
+Safety: 'complete' advances HEAD with 'git update-ref' CAS (never
+'git reset --hard'), so uncommitted work is preserved; the batch form only
+rewrites commits proven unpushed against a freshly-fetched origin/master;
+it refuses to complete a task another live worker has claimed; and it
+removes remote task refs with --force-with-lease so it can never clobber a
+concurrent worker's claim.
 EOF
                 return 0
                 ;;
@@ -3706,6 +3751,17 @@ EOF
                 ;;
         esac
     done
+
+    # ── Batch form: --leaves routes to the graft-based multi-leaf path ──
+    if [ -n "$leaves_spec" ]; then
+        if [ -n "$task_sha" ] || [ -n "$commit_sha" ]; then
+            echo "Error: --leaves cannot be combined with a positional task SHA or --commit." >&2
+            echo "       Use EITHER 'complete <sha> [--commit=..]' OR 'complete --leaves=l:i,l:i'." >&2
+            return 1
+        fi
+        cmd_complete_batch "$leaves_spec" "$no_cleanup" "$do_force"
+        return $?
+    fi
     
     if [ -z "$task_sha" ]; then
         echo "Error: task SHA required" >&2
@@ -3841,81 +3897,48 @@ EOF
         read -r
     fi
     
-    # ── Choose the completion base (HEAD moves FORWARD only) ─────────
-    # The completion merge only needs the task commit as a reachable 2nd
-    # parent to be recorded as done; it never needs to snapshot the impl's
-    # tree (an empty completion merge always inherits its first parent's
-    # tree). So we keep HEAD moving forward only, which lets one worker
-    # stack several sibling-leaf impl commits and complete each without
-    # ref surgery (issue #7):
-    #   * impl == HEAD          → merge on HEAD              (normal path)
-    #   * HEAD ancestor of impl → merge on impl, ff HEAD up  (the existing
-    #                             --commit=<ahead> path; may touch tracked
-    #                             files via `git merge --ff-only`)
-    #   * impl ancestor of HEAD → the impl already lives in history behind
-    #                             HEAD; build the completion merge on the
-    #                             current HEAD tip, record the impl with an
-    #                             Impl-Commit: trailer, and advance HEAD
-    #                             forward (never backward, no history rewrite)
-    local completion_base impl_trailer="" current
+    # ── Choose the completion base (single-leaf: first parent == impl) ──
+    # The completion merge's FIRST parent is always the implementation
+    # commit (DAG-native provenance — see docs/DESIGN_PRINCIPLES.md), so
+    # single `complete` only handles the two cases where that is possible
+    # without rewriting local history:
+    #   * impl == HEAD          → merge on HEAD, update-ref HEAD forward
+    #   * HEAD ancestor of impl → merge on impl, fast-forward HEAD up to it
+    # If the impl is BEHIND HEAD (you stacked more commits on top of it),
+    # completing it in place would rewrite local history to keep first
+    # parent == impl; that is the batch form's job and must be explicit:
+    # use 'complete --leaves=<leaf>:<impl>[,...]'.
+    local completion_base current
     current=$(git rev-parse --verify HEAD^{commit}) || return 1
     if [ "$commit_sha" = "$current" ]; then
         completion_base="$current"
     elif git merge-base --is-ancestor "$current" "$commit_sha"; then
         completion_base="$commit_sha"
     elif git merge-base --is-ancestor "$commit_sha" "$current"; then
-        completion_base="$current"
-        impl_trailer="$commit_sha"
+        echo "Error: --commit=$commit_sha is BEHIND HEAD ($current) — you have commits stacked on top of it." >&2
+        echo "Completing it in place would rewrite local history to keep the completion merge's first" >&2
+        echo "parent = the impl. Do that explicitly with the batch form, e.g.:" >&2
+        echo "    task-dag complete --leaves=${short_sha}:${commit_sha}[,<leaf>:<impl>...]" >&2
+        return 1
     else
         echo "Error: --commit=$commit_sha is neither an ancestor nor a descendant of HEAD ($current)." >&2
         echo "Point --commit at a commit in this checkout's history, or check it out in a fresh ephemeral worktree and rerun." >&2
         return 1
     fi
 
-    # Extract metadata from task commit
-    local task_msg=$(parse_commit_metadata "$task_sha")
-    local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
-    local issue_url=$(extract_field "$task_msg" "URL")
-    local task_title=$(get_task_title "$task_sha")
-    
-    # Create new commit with task as second parent and full issue metadata
-    local new_message="${old_message}
+    # Task metadata (issue_num/issue_url are reused by the completion-comment
+    # post below; task_title by both the comment and the success line).
+    local task_msg issue_num issue_url task_title
+    task_msg=$(parse_commit_metadata "$task_sha")
+    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    issue_url=$(extract_field "$task_msg" "URL")
+    task_title=$(get_task_title "$task_sha")
 
-Task-Commit: $task_sha"
-
-    # Record the real implementation commit when it is not the completion
-    # merge's first parent (the impl-behind-HEAD case), so provenance is
-    # not lost even though the merge sits on the current tip.
-    if [ -n "$impl_trailer" ]; then
-        new_message="${new_message}
-Impl-Commit: $impl_trailer"
-    fi
-    
-    if [ -n "$issue_num" ]; then
-        new_message="${new_message}
-Issue: #$issue_num"
-    fi
-    
-    if [ -n "$issue_url" ]; then
-        new_message="${new_message}
-URL: $issue_url"
-    fi
-    
-    new_message="${new_message}
-Status: completed"
-    
-    # Add Related: footer for GitHub auto-linking
-    if [ -n "$issue_url" ]; then
-        new_message="${new_message}
-
-Related: $issue_url"
-    fi
-    
-    # The completion merge inherits the completion base's tree (an empty
-    # merge: no file changes, only a 2nd parent + metadata). Its first
-    # parent is the completion base (HEAD, or the ahead --commit target),
-    # never necessarily the impl commit itself.
-    local tree new_commit
+    # Build the completion merge message (Task-Commit/Issue/URL/Status/
+    # Related trailers), then create the merge: first parent == impl base,
+    # second parent == task commit. Tree == base tree (an empty merge).
+    local new_message tree new_commit
+    new_message=$(build_completion_message "$task_sha" "$old_message")
     tree=$(git rev-parse "$completion_base^{tree}") || return 1
     new_commit=$(git commit-tree "$tree" -p "$completion_base" -p "$task_sha" -m "$new_message") || return 1
     
@@ -3978,6 +4001,323 @@ Related: $issue_url"
     # with cross-repo delegated children still close via `close-epic`.
     maybe_emit_local_epic_close "$task_sha"
 
+    return 0
+}
+
+# Helper: recreate commit <c> with a NEW first parent <parent>, preserving
+# its tree, author/committer identity + dates, and message. Prints the new
+# sha. Refuses if <c> is GPG-signed (reparenting invalidates the signature,
+# and silently dropping it is bad provenance — design review). Used by the
+# batch graft to replay commits stacked above an implementation commit.
+#   $1 = commit to replay   $2 = new first parent
+recommit_onto() {
+    local c="$1" parent="$2"
+    # gpgsig check via pure-bash matching (NOT `git cat-file | grep -q`,
+    # which under `set -o pipefail` can return git's SIGPIPE 141 when grep
+    # exits early on a match — inverting the result). The commit object has
+    # a `gpgsig ` header line iff it is signed.
+    local hdr
+    hdr=$(git cat-file commit "$c" 2>/dev/null || true)
+    # A signed commit has a `gpgsig ` (SHA-1 repos) or `gpgsig-sha256 `
+    # (SHA-256 repos) header line; reparenting would silently drop it.
+    if [[ $'\n'"$hdr" == *$'\n'"gpgsig "* ]] || [[ $'\n'"$hdr" == *$'\n'"gpgsig-sha256 "* ]]; then
+        echo "Error: commit ${c:0:12} is GPG-signed; refusing to reparent it (would drop the signature)." >&2
+        return 1
+    fi
+    local an ae ai cn ce ci
+    an=$(git show -s --format=%an "$c"); ae=$(git show -s --format=%ae "$c"); ai=$(git show -s --format=%aI "$c")
+    cn=$(git show -s --format=%cn "$c"); ce=$(git show -s --format=%ce "$c"); ci=$(git show -s --format=%cI "$c")
+    GIT_AUTHOR_NAME="$an" GIT_AUTHOR_EMAIL="$ae" GIT_AUTHOR_DATE="$ai" \
+    GIT_COMMITTER_NAME="$cn" GIT_COMMITTER_EMAIL="$ce" GIT_COMMITTER_DATE="$ci" \
+        git commit-tree "$c^{tree}" -p "$parent" -F <(git show -s --format=%B "$c")
+}
+
+# Helper: post the best-effort GitHub "task completed" status comment for a
+# leaf (same body/marker as single `complete`). Gated on a real GitHub
+# origin so fixture tests stay hermetic. Never fails the caller.
+#   $1 = task_sha (full)   $2 = completion commit sha (for the message)
+post_completion_comment() {
+    local task_sha="$1" completion_sha="$2"
+    local task_msg issue_num issue_url task_title
+    task_msg=$(parse_commit_metadata "$task_sha")
+    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    issue_url=$(extract_field "$task_msg" "URL")
+    task_title=$(get_task_title "$task_sha")
+    if [ -z "$issue_num" ] || [ -z "$issue_url" ] || ! _is_real_github_origin; then
+        return 0
+    fi
+    local repo short_task_sha comment_body
+    repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
+    short_task_sha=$(git rev-parse --short "$task_sha")
+    comment_body=$(printf '%s\n%s\n\n%s\n%s' \
+        "<!-- task-dag:status -->" \
+        "✅ Task **${task_title}** completed!" \
+        "Task SHA: \`${short_task_sha}\`" \
+        "Completion commit: \`$(git rev-parse --short "$completion_sha")\`")
+    if _post_issue_comment "$repo" "$issue_num" "$comment_body" >/dev/null; then
+        printf "${GREEN}✓ Posted completion update to issue #$issue_num${RESET}\n"
+    else
+        printf "${YELLOW}⚠ Could not post completion comment to issue #$issue_num (continuing; completion itself succeeded)${RESET}\n" >&2
+    fi
+    return 0
+}
+
+# Command: complete --leaves — DAG-native BATCH completion of several
+# sibling leaves implemented as a stack of commits in ONE worktree.
+#
+# Each completion merge's FIRST parent is that leaf's implementation commit
+# (docs/DESIGN_PRINCIPLES.md); to keep that true for a whole stack, we graft
+# a completion merge directly above each impl and REPLAY the commits stacked
+# above onto it, producing an honest linear graph:
+#     origin/master → S → M_S → C' → M_C → …
+# This rewrites LOCAL, UNPUSHED commits only (proven against a freshly
+# fetched origin/master); the final tree equals HEAD's, so the worktree/
+# index are untouched, the old tip stays in the reflog + a backup ref, and
+# the later `git push origin HEAD:master` is still a fast-forward.
+#   $1 = leaves spec ("<leaf>:<impl>,<leaf>:<impl>,…")
+#   $2 = no_cleanup (true|false)   $3 = do_force (true|false)
+cmd_complete_batch() {
+    local spec="$1" no_cleanup="$2" do_force="$3"
+
+    # ── parse the spec into parallel arrays ──────────────────────────
+    local -a leaves=() impls=()
+    local -a _pairs=()
+    IFS=',' read -ra _pairs <<< "$spec"
+    local pair leaf impl
+    for pair in "${_pairs[@]}"; do
+        [ -n "$pair" ] || continue
+        case "$pair" in
+            *:*) leaf="${pair%%:*}"; impl="${pair#*:}" ;;
+            *) echo "Error: --leaves entry '$pair' must be '<leaf>:<impl>'." >&2; return 1 ;;
+        esac
+        if [ -z "$leaf" ] || [ -z "$impl" ]; then
+            echo "Error: --leaves entry '$pair' has an empty leaf or impl." >&2; return 1
+        fi
+        leaves+=("$leaf"); impls+=("$impl")
+    done
+    local n=${#leaves[@]}
+    if [ "$n" -lt 1 ]; then
+        echo "Error: --leaves is empty; expected '<leaf>:<impl>[,<leaf>:<impl>...]'." >&2; return 1
+    fi
+
+    # ── strict origin/master fetch (authoritative "unpushed" proof) ──
+    if ! git fetch --quiet --no-tags origin \
+            '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1; then
+        echo "Error: could not fetch origin/master; refusing the batch graft (cannot prove the" >&2
+        echo "       commits are unpushed). Retry when origin is reachable." >&2
+        return 2
+    fi
+    local origin_master old_head
+    origin_master=$(git rev-parse --verify origin/master 2>/dev/null) || {
+        echo "Error: origin/master not resolvable; refusing batch graft." >&2; return 2; }
+    old_head=$(git rev-parse --verify HEAD^{commit}) || return 1
+    if ! git merge-base --is-ancestor "$origin_master" "$old_head"; then
+        echo "Error: HEAD is not ahead of origin/master; rebase onto origin/master first." >&2
+        return 2
+    fi
+
+    # ── resolve leaves + impls to full shas ──────────────────────────
+    local -a task_shas=() impl_shas=() short_shas=()
+    local i
+    for (( i=0; i<n; i++ )); do
+        local ts is
+        ts=$(resolve_sha "${leaves[i]}") || { echo "Error: cannot resolve leaf '${leaves[i]}'." >&2; return 1; }
+        is=$(git rev-parse --verify "${impls[i]}^{commit}" 2>/dev/null) || {
+            echo "Error: cannot resolve impl '${impls[i]}' for leaf '${leaves[i]}'." >&2; return 1; }
+        task_shas+=("$ts"); impl_shas+=("$is"); short_shas+=("$(git rev-parse --short "$ts")")
+    done
+
+    # ── de-dupe: distinct leaves AND distinct impls ──────────────────
+    local a b
+    for (( a=0; a<n; a++ )); do
+        for (( b=a+1; b<n; b++ )); do
+            if [ "${task_shas[a]}" = "${task_shas[b]}" ]; then
+                echo "Error: leaf ${short_shas[a]} is listed twice." >&2; return 1
+            fi
+            if [ "${impl_shas[a]}" = "${impl_shas[b]}" ]; then
+                echo "Error: leaves ${short_shas[a]} and ${short_shas[b]} name the same impl commit" >&2
+                echo "       (${impl_shas[a]:0:12}); each leaf needs its own implementation commit." >&2
+                return 1
+            fi
+        done
+    done
+
+    # ── claim-ownership guard for EVERY leaf before any mutation ──────
+    local -a verified_active=()
+    for (( i=0; i<n; i++ )); do
+        local va
+        va=$(verify_task_claim_ownership "${task_shas[i]}" "${short_shas[i]}" "$do_force") || return $?
+        verified_active+=("$va")
+    done
+
+    # ── idempotency gate: how many are already completed on HEAD? ─────
+    local done_count=0
+    for (( i=0; i<n; i++ )); do
+        if is_task_completed "${task_shas[i]}"; then done_count=$((done_count+1)); fi
+    done
+    if [ "$done_count" -eq "$n" ]; then
+        echo "All ${n} leaves already completed on HEAD; running ref cleanup only (idempotent rerun)."
+        local rc=0
+        for (( i=0; i<n; i++ )); do
+            cleanup_completed_task_refs "${task_shas[i]}" "${short_shas[i]}" "${verified_active[i]}" "$old_head" "$no_cleanup" || rc=$?
+            if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
+                emit_operator_blocked_dispatch complete "${short_shas[i]}"
+            fi
+        done
+        [ "$rc" -eq 0 ] || return "$rc"
+        for (( i=0; i<n; i++ )); do maybe_emit_local_epic_close "${task_shas[i]}"; done
+        return 0
+    elif [ "$done_count" -gt 0 ]; then
+        echo "Error: ${done_count}/${n} of these leaves are already completed on HEAD (partial state)." >&2
+        echo "Refusing a partial batch. Re-run 'complete --leaves' with ONLY the not-yet-completed" >&2
+        echo "leaves (each against its impl), or resolve the state manually." >&2
+        return 2
+    fi
+
+    # ── the replay range origin/master..HEAD must be LINEAR ──────────
+    if [ -n "$(git rev-list --min-parents=2 "$origin_master..$old_head" 2>/dev/null)" ]; then
+        echo "Error: origin/master..HEAD contains merge commits; the batch graft only rewrites a" >&2
+        echo "       LINEAR stack of implementation commits. Complete leaves individually or" >&2
+        echo "       resolve manually (do NOT hand-roll ref surgery)." >&2
+        return 2
+    fi
+    local -a chain=()
+    mapfile -t chain < <(git rev-list --reverse "$origin_master..$old_head")
+    local -A chain_pos=()
+    local idx=0 c
+    for c in "${chain[@]}"; do chain_pos["$c"]=$idx; idx=$((idx+1)); done
+
+    # ── every impl must be an unpushed range commit doing real work ──
+    for (( i=0; i<n; i++ )); do
+        if [ -z "${chain_pos[${impl_shas[i]}]+set}" ]; then
+            echo "Error: impl ${impl_shas[i]:0:12} (leaf ${short_shas[i]}) is not an unpushed commit in" >&2
+            echo "       origin/master..HEAD. If it is already on master, use 'complete-historical';" >&2
+            echo "       otherwise point --leaves at the correct implementation commit." >&2
+            return 2
+        fi
+        if is_task_commit "${impl_shas[i]}"; then
+            echo "Error: impl ${impl_shas[i]:0:12} (leaf ${short_shas[i]}) is a task/control commit, not real work." >&2
+            return 1
+        fi
+        local it ipar ibt
+        it=$(git rev-parse "${impl_shas[i]}^{tree}")
+        ipar=$(get_first_parent "${impl_shas[i]}" 2>/dev/null || true)
+        if [ -n "$ipar" ]; then ibt=$(git rev-parse "$ipar^{tree}"); else ibt="$EMPTY_TREE"; fi
+        if [ "$it" = "$ibt" ]; then
+            echo "Error: impl ${impl_shas[i]:0:12} (leaf ${short_shas[i]}) introduces no tree change vs its" >&2
+            echo "       first parent; it is not a real implementation commit." >&2
+            return 1
+        fi
+    done
+
+    # ── epic-root guard: a leaf must not be a decomposed epic root ───
+    for (( i=0; i<n; i++ )); do
+        local ci="" rrc=0
+        ci=$(task_is_pending_root "${task_shas[i]}") || rrc=$?
+        if [ "$rrc" = 3 ]; then
+            echo "Error: cannot verify whether ${short_shas[i]} is an epic root (origin unreachable)." >&2
+            return 2
+        fi
+        if [ -n "$ci" ]; then
+            echo "Error: ${short_shas[i]} is the epic ROOT for issue #$ci; --leaves completes leaves, not roots." >&2
+            return 2
+        fi
+    done
+
+    # ── dependency check (design review option b): each leaf's deps must
+    #    be satisfied by {already completed} ∪ {earlier in GRAFT order} ──
+    local -a order=()
+    mapfile -t order < <(
+        for (( i=0; i<n; i++ )); do printf '%s %s\n' "${chain_pos[${impl_shas[i]}]}" "$i"; done | sort -n | awk '{print $2}'
+    )
+    local -A completed_in_batch=()
+    local oi dep deps
+    for oi in "${order[@]}"; do
+        deps=$(get_dep_parents "${task_shas[oi]}" || true)
+        while IFS= read -r dep; do
+            [ -n "$dep" ] || continue
+            if is_task_completed "$dep"; then continue; fi
+            if [ -n "${completed_in_batch[$dep]+set}" ]; then continue; fi
+            echo "Error: leaf ${short_shas[oi]} depends on ${dep:0:12}, which is neither already" >&2
+            echo "       completed nor an earlier leaf (in graft order) in this batch." >&2
+            echo "       Ensure the dependency's impl is stacked BELOW this leaf's impl." >&2
+            return 2
+        done <<< "$deps"
+        completed_in_batch["${task_shas[oi]}"]=1
+    done
+
+    # ── graft: walk the chain oldest→newest, replaying each commit and
+    #    inserting a completion merge immediately above each impl ──────
+    local -A impl_idx=()
+    for (( i=0; i<n; i++ )); do impl_idx["${impl_shas[i]}"]=$i; done
+    local -a merge_for=()
+    for (( i=0; i<n; i++ )); do merge_for+=(""); done
+    local running="$origin_master"
+    for c in "${chain[@]}"; do
+        local cnew
+        cnew=$(recommit_onto "$c" "$running") || {
+            echo "Error: failed to replay commit ${c:0:12} during graft; no refs moved." >&2; return 1; }
+        running="$cnew"
+        if [ -n "${impl_idx[$c]+set}" ]; then
+            local li="${impl_idx[$c]}"
+            local msg mtree merge
+            msg=$(build_completion_message "${task_shas[li]}" "$(git show -s --format=%B "$c")")
+            mtree=$(git rev-parse "$cnew^{tree}")
+            merge=$(git commit-tree "$mtree" -p "$cnew" -p "${task_shas[li]}" -m "$msg") || {
+                echo "Error: failed to create completion merge for leaf ${short_shas[li]}; no refs moved." >&2; return 1; }
+            running="$merge"
+            merge_for[li]="$merge"
+        fi
+    done
+    local new_tip="$running"
+
+    # ── assert the graft is a pure reparent (tree unchanged) ─────────
+    if [ "$(git rev-parse "$new_tip^{tree}")" != "$(git rev-parse "$old_head^{tree}")" ]; then
+        echo "Internal error: grafted tip tree != HEAD tree; refusing to move HEAD (no refs touched)." >&2
+        return 1
+    fi
+
+    # ── local recovery backup + single CAS advance of HEAD ───────────
+    # The backup ref is MANDATORY: no backup, no rewrite. A local non-FF
+    # rewrite of unpushed commits must always leave a named recovery ref
+    # (belt-and-braces with the reflog) before HEAD moves.
+    local backup_ref="refs/task-dag-backup/complete-batch/$(date +%s)-$$-${old_head:0:12}"
+    if ! git update-ref -m 'task-dag complete --leaves: backup old HEAD' "$backup_ref" "$old_head" ""; then
+        echo "Error: could not create recovery backup ref $backup_ref; refusing to rewrite HEAD (no refs moved)." >&2
+        return 1
+    fi
+    if ! git update-ref -m 'task-dag complete --leaves: graft batch completions' HEAD "$new_tip" "$old_head"; then
+        echo "Error: HEAD moved during batch complete; refusing (rerun). No task refs were cleaned." >&2
+        git update-ref -d "$backup_ref" 2>/dev/null || true
+        return 1
+    fi
+    printf "${GREEN}✓ Grafted %d completion merge(s) onto their impls; rewrote local unpushed commits.${RESET}\n" "$n"
+    printf "  Old tip %s saved at %s (also recoverable via 'git reflog').\n" "${old_head:0:12}" "$backup_ref"
+
+    # ── per-leaf ref cleanup (each CAS-leased to its own claim) ──────
+    local rc=0
+    for (( i=0; i<n; i++ )); do
+        cleanup_completed_task_refs "${task_shas[i]}" "${short_shas[i]}" "${verified_active[i]}" "${merge_for[i]}" "$no_cleanup" || rc=$?
+        printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "${task_shas[i]}")"
+        if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
+            emit_operator_blocked_dispatch complete "${short_shas[i]}"
+        fi
+    done
+    if [ "$rc" -ne 0 ]; then
+        echo "Error: a task-ref cleanup hit a lease/race conflict; HEAD already has the completions." >&2
+        echo "Resolve the conflicting ref, then re-run the SAME 'complete --leaves' (idempotent)." >&2
+        return "$rc"
+    fi
+
+    # ── best-effort completion comments, then epic auto-close ────────
+    for (( i=0; i<n; i++ )); do
+        post_completion_comment "${task_shas[i]}" "${merge_for[i]}"
+    done
+    # Idempotent: only the call made once the whole subtree is complete
+    # appends the Closes-Epic commit; per distinct epic it fires once.
+    for (( i=0; i<n; i++ )); do
+        maybe_emit_local_epic_close "${task_shas[i]}"
+    done
     return 0
 }
 
