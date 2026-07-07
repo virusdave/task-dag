@@ -41,28 +41,46 @@ process.env.SESSION_COOKIE_SECRET = 'smoke-test-session-secret-please-rotate'
 const clientDist = resolve(heliosRoot, 'dist/client')
 const indexHtmlPath = resolve(clientDist, 'index.html')
 
-if (!existsSync(indexHtmlPath)) {
-  console.error(
-    `[smoke] FAIL: ${indexHtmlPath} not found. Run \`npm run build:client\` first.`,
+// A fresh ephemeral checkout has NO built dist/client: the pre-commit hook
+// builds only the server tree (tsc -p tsconfig.server.json); the heavy
+// ~8 GiB-heap `vite build` is CI/heavy-final-owned (see helios AGENTS.md
+// "Dev-loop checks"). Rather than force every unrelated server/doc commit
+// to pay a full `npm run build:client` just to satisfy this smoke, we boot
+// the server and run the bundle-INDEPENDENT check (the /healthzz probe,
+// which proves the compiled server imports and its core routes register)
+// unconditionally, and skip the built-bundle assertions (SPA-shell body
+// match + real hashed-asset bytes + stale-bundle recovery shim) with a
+// LOUD warning when dist/client is absent (automation#63, operator-endorsed
+// fix idea). When a bundle IS present (a local build, or CI's build job)
+// the full SPA-serving regression coverage still runs.
+const hasClientBundle = existsSync(indexHtmlPath)
+
+let aJsAsset: string | undefined
+let onDiskBytes: Buffer | undefined
+if (hasClientBundle) {
+  const assetsDir = resolve(clientDist, 'assets')
+  const assetFiles = existsSync(assetsDir) ? readdirSync(assetsDir) : []
+  // Pick the .js asset actually referenced from index.html as the entry
+  // bundle. With code-splitting (e.g. lazy `@zxing/browser` import) the
+  // assets/ dir contains additional chunks that aren't referenced from
+  // the SPA shell directly — they're loaded on demand — and which the
+  // smoke test must NOT assert against the index.html.
+  const indexHtmlForEntry = readFileSync(indexHtmlPath, 'utf8')
+  aJsAsset = assetFiles.find((name) => name.endsWith('.js') && indexHtmlForEntry.includes(`/assets/${name}`))
+  if (!aJsAsset) {
+    console.error(`[smoke] FAIL: no .js bundle in ${assetsDir} is referenced from ${indexHtmlPath}.`)
+    process.exit(2)
+  }
+  onDiskBytes = readFileSync(resolve(assetsDir, aJsAsset))
+} else {
+  console.warn(
+    '[smoke] WARNING: dist/client is not built — skipping the SPA-shell / hashed-asset /\n' +
+      '[smoke]          stale-bundle-recovery assertions. Server-boot + /healthzz are still\n' +
+      '[smoke]          verified below. To exercise the full SPA-serving smoke (the class of\n' +
+      '[smoke]          regression that once bricked prod), build the client first:\n' +
+      '[smoke]            NODE_OPTIONS=--max-old-space-size=8192 npm run build:client',
   )
-  process.exit(2)
 }
-
-const assetsDir = resolve(clientDist, 'assets')
-const assetFiles = existsSync(assetsDir) ? readdirSync(assetsDir) : []
-// Pick the .js asset actually referenced from index.html as the entry
-// bundle. With code-splitting (e.g. lazy `@zxing/browser` import) the
-// assets/ dir contains additional chunks that aren't referenced from
-// the SPA shell directly — they're loaded on demand — and which the
-// smoke test must NOT assert against the index.html.
-const indexHtmlForEntry = readFileSync(indexHtmlPath, 'utf8')
-const aJsAsset = assetFiles.find((name) => name.endsWith('.js') && indexHtmlForEntry.includes(`/assets/${name}`))
-if (!aJsAsset) {
-  console.error(`[smoke] FAIL: no .js bundle in ${assetsDir} is referenced from ${indexHtmlPath}.`)
-  process.exit(2)
-}
-
-const onDiskBytes = readFileSync(resolve(assetsDir, aJsAsset))
 
 function fail(msg: string): never {
   console.error(`[smoke] FAIL: ${msg}`)
@@ -114,7 +132,11 @@ try {
 
   // 1b) Anonymous browser navigation to / must NOT leak the SPA
   //     shell — it must redirect into the OAuth flow (or, if Google
-  //     OAuth isn't configured in this env, return a bare 401).
+  //     OAuth isn't configured in this env, return a bare 401). The
+  //     site-wide auth gate runs as a hook before any route handler
+  //     (see buildServer.ts registerAuthGate), so this holds even when
+  //     dist/client is unbuilt and the SPA route isn't registered —
+  //     hence we assert it unconditionally, not behind the bundle guard.
   const anonRoot = await server.inject({
     method: 'GET',
     url: '/',
@@ -127,62 +149,71 @@ try {
     fail('anonymous GET / leaked a Helios-branded HTML body')
   }
 
-  // 2) The SPA shell at / must be HTML, no-store, and reference the
-  //    current hashed asset bundle from the index.html on disk — but
-  //    ONLY when the request carries a valid signed session cookie.
-  const root = await server.inject({
-    method: 'GET',
-    url: '/',
-    headers: { cookie: signedSessionCookie },
-  })
-  if (root.statusCode !== 200) fail(`/ returned ${root.statusCode}`)
-  const ct = String(root.headers['content-type'] ?? '')
-  if (!ct.startsWith('text/html')) fail(`/ content-type was ${ct}`)
-  const expectedHtml = readFileSync(indexHtmlPath, 'utf8')
-  if (root.body !== expectedHtml) {
-    fail(`/ body did not match disk index.html (len server=${root.body.length} disk=${expectedHtml.length})`)
-  }
-  if (!root.body.includes(`/assets/${aJsAsset}`)) {
-    fail(`/ body did not reference /assets/${aJsAsset}`)
-  }
+  // The remaining assertions exercise the SPA shell + hashed-asset
+  // serving, which only exist once dist/client is built. In a fresh
+  // checkout with no bundle we skip them (a loud warning was already
+  // printed above); the server-boot + /healthzz + anonymous-leak checks
+  // above still ran.
+  if (aJsAsset && onDiskBytes) {
+    // 2) The SPA shell at / must be HTML, no-store, and reference the
+    //    current hashed asset bundle from the index.html on disk — but
+    //    ONLY when the request carries a valid signed session cookie.
+    const root = await server.inject({
+      method: 'GET',
+      url: '/',
+      headers: { cookie: signedSessionCookie },
+    })
+    if (root.statusCode !== 200) fail(`/ returned ${root.statusCode}`)
+    const ct = String(root.headers['content-type'] ?? '')
+    if (!ct.startsWith('text/html')) fail(`/ content-type was ${ct}`)
+    const expectedHtml = readFileSync(indexHtmlPath, 'utf8')
+    if (root.body !== expectedHtml) {
+      fail(`/ body did not match disk index.html (len server=${root.body.length} disk=${expectedHtml.length})`)
+    }
+    if (!root.body.includes(`/assets/${aJsAsset}`)) {
+      fail(`/ body did not reference /assets/${aJsAsset}`)
+    }
 
-  // 3) The current hashed asset must serve the REAL bundle bytes, not
-  //    the stale-bundle recovery shim. This is the regression that
-  //    bricked production: with `wildcard: false`, every /assets/*
-  //    request used to fall through to the SPA fallback which
-  //    answered .js requests with the recovery script.
-  const asset = await server.inject({
-    method: 'GET',
-    url: `/assets/${aJsAsset}`,
-    headers: { cookie: signedSessionCookie },
-  })
-  if (asset.statusCode !== 200) fail(`/assets/${aJsAsset} returned ${asset.statusCode}`)
-  const assetCt = String(asset.headers['content-type'] ?? '')
-  if (!/javascript/.test(assetCt)) fail(`/assets/${aJsAsset} content-type=${assetCt}`)
-  const assetBody = Buffer.isBuffer(asset.rawPayload) ? asset.rawPayload : Buffer.from(asset.body)
-  if (assetBody.length !== onDiskBytes.length) {
-    fail(
-      `/assets/${aJsAsset} body length ${assetBody.length} != on-disk ${onDiskBytes.length} ` +
-        '(server may be returning the stale-bundle recovery shim)',
-    )
-  }
-  if (assetBody.includes(Buffer.from('helios stale-bundle reload failed'))) {
-    fail(`/assets/${aJsAsset} returned the recovery shim instead of the real bundle`)
-  }
+    // 3) The current hashed asset must serve the REAL bundle bytes, not
+    //    the stale-bundle recovery shim. This is the regression that
+    //    bricked production: with `wildcard: false`, every /assets/*
+    //    request used to fall through to the SPA fallback which
+    //    answered .js requests with the recovery script.
+    const asset = await server.inject({
+      method: 'GET',
+      url: `/assets/${aJsAsset}`,
+      headers: { cookie: signedSessionCookie },
+    })
+    if (asset.statusCode !== 200) fail(`/assets/${aJsAsset} returned ${asset.statusCode}`)
+    const assetCt = String(asset.headers['content-type'] ?? '')
+    if (!/javascript/.test(assetCt)) fail(`/assets/${aJsAsset} content-type=${assetCt}`)
+    const assetBody = Buffer.isBuffer(asset.rawPayload) ? asset.rawPayload : Buffer.from(asset.body)
+    if (assetBody.length !== onDiskBytes.length) {
+      fail(
+        `/assets/${aJsAsset} body length ${assetBody.length} != on-disk ${onDiskBytes.length} ` +
+          '(server may be returning the stale-bundle recovery shim)',
+      )
+    }
+    if (assetBody.includes(Buffer.from('helios stale-bundle reload failed'))) {
+      fail(`/assets/${aJsAsset} returned the recovery shim instead of the real bundle`)
+    }
 
-  // 4) A genuinely missing JS hash must still trigger the recovery
-  //    shim (so stale tabs can recover), not a hard 404.
-  const missing = await server.inject({
-    method: 'GET',
-    url: '/assets/index-DOESNOTEXIST.js',
-    headers: { cookie: signedSessionCookie },
-  })
-  if (missing.statusCode !== 200) fail(`missing .js returned ${missing.statusCode}`)
-  if (!missing.body.includes('stale bundle pointer')) {
-    fail(`missing .js did not return recovery shim; body=${missing.body.slice(0, 120)}`)
-  }
+    // 4) A genuinely missing JS hash must still trigger the recovery
+    //    shim (so stale tabs can recover), not a hard 404.
+    const missing = await server.inject({
+      method: 'GET',
+      url: '/assets/index-DOESNOTEXIST.js',
+      headers: { cookie: signedSessionCookie },
+    })
+    if (missing.statusCode !== 200) fail(`missing .js returned ${missing.statusCode}`)
+    if (!missing.body.includes('stale bundle pointer')) {
+      fail(`missing .js did not return recovery shim; body=${missing.body.slice(0, 120)}`)
+    }
 
-  console.log('[smoke] OK — server boots; / serves SPA shell; /assets/<hash>.js serves real bundle; missing hash recovers.')
+    console.log('[smoke] OK — server boots; / serves SPA shell; /assets/<hash>.js serves real bundle; missing hash recovers.')
+  } else {
+    console.log('[smoke] OK — server boots and /healthzz responds (SPA/asset assertions skipped: dist/client not built).')
+  }
 } finally {
   await server.close()
 }

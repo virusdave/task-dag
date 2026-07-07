@@ -162,7 +162,17 @@ NODE_OPTIONS=--max-old-space-size=8192 ./node_modules/.bin/vite build
 
 8192 (8 GiB) is comfortable headroom; 4096 also works today but leaves
 little slack as the bundle grows. The same flag applies to `npm run build`
-(which runs `build:client`) and to the `scripts/smoke-server.ts` gate when
-it has to build the client first. The pre-commit hook itself only relies
-on an **already-built** `dist/client`, so if you've just built with the
-flag above the hook's smoke step will pass without re-building.
+(which runs `build:client`).
+
+The pre-commit hook does **not** require a built `dist/client`. When one is
+present (you just built, or CI's build job ran) the smoke step
+(`scripts/smoke-server.ts`) exercises the full SPA-serving path — SPA-shell
+body match, real hashed-asset bytes, and the stale-bundle recovery shim.
+When `dist/client` is **absent** (the normal state of a fresh ephemeral
+checkout), the smoke prints a loud warning and skips only those
+bundle-dependent assertions; it still boots the server and verifies
+`/healthzz` and the anonymous-`/` auth gate. So an unrelated server/doc
+commit no longer forces a heavy `vite build` just to satisfy the hook
+(automation#63). Build the client with the flag above whenever you *do*
+want the hook (or a manual smoke run) to exercise the full SPA-serving
+coverage.

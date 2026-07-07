@@ -106,7 +106,7 @@ from a fresh ephemeral checkout on a prod host; cold runs are slower.
 | `helios/` server (`src/server`, `src/worker`, node-only `src/shared`) | `cd helios && npm run typecheck` (~3s); focused tests `npm run test -- <file-or-pattern>` | server compile + smoke when `helios/` staged | CI `helios` job (`npm run check`) |
 | `helios/` client (`src/client`, browser `src/shared`) | `cd helios && npm run typecheck:client` (~28s); focused tests as above | client typecheck when `helios/` staged (kept — see exception) | CI `helios` job |
 | `helios/` tests | `cd helios && npm run test -- <file-or-pattern>` | not in hook | full `npm run test` (vitest, ~46s) — **CI/heavy-final-only** |
-| `helios/` prod bundle / assets | server+client typecheck + smoke while iterating | smoke checks the already-built SPA shell | `NODE_OPTIONS=--max-old-space-size=8192 npm run build` (~57s) — **CI/heavy-final-only** |
+| `helios/` prod bundle / assets | server+client typecheck + smoke while iterating | smoke exercises the SPA shell **only if `dist/client` is built**; otherwise it warns + skips those assertions (no forced heavy build — automation#63) | `NODE_OPTIONS=--max-old-space-size=8192 npm run build` (~57s) — **CI/heavy-final-only** |
 | `ads/google` | `cd ads/google && npm run typecheck` (~6s; `npm install` ~8s) | typecheck when `ads/google/` staged | CI `ads-google` job |
 
 Focused vitest accepts a path or pattern, e.g.
