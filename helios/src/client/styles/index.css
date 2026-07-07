@@ -11040,3 +11040,178 @@ span.metric-chart-legend-item {
     margin-right: 0.3rem;
   }
 }
+
+/* =========================================================================
+   Parse-correction drawer / mobile bottom sheet
+   (Catalog → Family Explorer → LitAlerts market match; issue #59 T4)
+
+   Mobile-first bottom sheet; ≥720px it becomes a right-anchored side drawer.
+   Modal chrome (focus trap, scroll lock, Escape/scrim close) lives in the
+   component; these rules are layout only.
+   ========================================================================= */
+.pf-drawer-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  /* Above global floating chrome (e.g. the mobile .scroll-top-chip at
+     z-index 1000, rendered after <Outlet/>) so the modal stays inert. */
+  z-index: 2000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.pf-drawer {
+  background: var(--panel, #fff);
+  color: inherit;
+  width: 100%;
+  max-height: 92vh;
+  padding: 1rem 1rem 1.25rem;
+  overflow-y: auto;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.25);
+  box-sizing: border-box;
+}
+
+.pf-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.pf-drawer-title {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.pf-section {
+  margin-top: 0.85rem;
+}
+
+.pf-section-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.pf-context-grid {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) 1fr;
+  gap: 0.3rem 0.75rem;
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.pf-context-grid > dt {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.pf-context-grid > dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+/* current-vs-expected comparison: label | current | expected */
+.pf-compare-grid {
+  display: grid;
+  grid-template-columns: minmax(84px, auto) 1fr 1fr;
+  gap: 0.3rem 0.6rem;
+  margin: 0;
+  font-size: 0.9rem;
+  align-items: baseline;
+}
+
+.pf-compare-grid > dt {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.pf-compare-grid > dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.pf-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+/* Chip-style buttons stay compact inside the drawer. */
+.pf-chip-row .primary-button,
+.pf-chip-row .ghost-button {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+  min-height: 36px;
+}
+
+.pf-field-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem 0.75rem;
+}
+
+.pf-field-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.pf-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.92rem;
+}
+
+.pf-preview {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.6rem;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.75rem;
+  max-height: 40vh;
+  overflow: auto;
+  margin: 0.4rem 0 0;
+}
+
+.pf-drawer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  position: sticky;
+  bottom: 0;
+  background: var(--panel, #fff);
+  padding-top: 0.5rem;
+}
+
+.pf-drawer-actions .primary-button,
+.pf-drawer-actions .ghost-button {
+  min-height: 44px;
+}
+
+@media (min-width: 720px) {
+  .pf-drawer-scrim {
+    justify-content: flex-end;
+    align-items: stretch;
+  }
+  .pf-drawer {
+    width: min(560px, 96vw);
+    max-height: none;
+    height: 100vh;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+    padding: 1.25rem;
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.25);
+  }
+  .pf-field-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}

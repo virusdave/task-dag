@@ -1,15 +1,31 @@
-import { Fragment, useEffect, useMemo, useState, type CSSProperties } from 'react'
-import { useLoaderData } from 'react-router-dom'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
+import { useLoaderData, useRouteLoaderData } from 'react-router-dom'
 
 import {
   BrandFamilyMarketMatchResponseSchema,
   CatalogFamilyExplorerResponseSchema,
+  CreateParseFeedbackResponseSchema,
+  PARSE_FEEDBACK_ID_QUERY_LIMIT,
+  ParseFeedbackListResponseSchema,
   type BrandFamilyMappingSummary,
   type BrandFamilyMarketMatchResponse,
   type BrandFamilyMatchCandidate,
   type BrandFamilyPriceOutlier,
   type BrandFamilyPriceOutlierSummary,
   type CatalogFamilyExplorerResponse,
+  type ConventionPatternChip,
+  type ParseFeedbackIssueType,
+  type ParseFeedbackRecord,
+  type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
 import {
   groupBrandSubdividedFamilies,
@@ -20,10 +36,21 @@ import {
   type FamilyGroup,
   type FamilyMember,
 } from '../../../shared/domain/familyExplorer.js'
-import { loadJson } from '../../app/fetchJson.js'
+import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { nyLongDateTime, nyShortDateTime } from '../../app/nyTime.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
+import {
+  buildCreateBody,
+  buildListingCorrectionDetails,
+  canSave,
+  conventionScopeOptions,
+  emptyConventionDraft,
+  emptyCorrectionDraft,
+  feedbackFetchIds,
+  type ConventionDraft,
+  type CorrectionDraft,
+} from './parseCorrectionDraft.js'
 
 /**
  * Catalog → Family Explorer (issue #55 T1; brand hierarchy issue #58 T1) —
@@ -292,11 +319,13 @@ function PriceReviewStrip({
   showAll,
   onToggleShowAll,
   onFix,
+  feedbackByFuzzySkuId,
 }: {
   data: BrandFamilyMarketMatchResponse
   showAll: boolean
   onToggleShowAll: () => void
   onFix: (c: BrandFamilyMatchCandidate) => void
+  feedbackByFuzzySkuId: Map<number, ParseFeedbackRecord[]>
 }) {
   const all = data.reviewCandidates
   const shown = showAll ? all : all.slice(0, 3)
@@ -351,6 +380,9 @@ function PriceReviewStrip({
             <span className="subtle-copy">{displayOrNull(c.retailer)}</span>
             <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{priceLabel(c)}</span>
             <span className="subtle-copy">{sizeContextLabel(c, data)}</span>
+            {(feedbackByFuzzySkuId.get(c.fuzzySkuId)?.length ?? 0) > 0 ? (
+              <FeedbackSavedPill count={feedbackByFuzzySkuId.get(c.fuzzySkuId)!.length} />
+            ) : null}
             <button
               type="button"
               className="ghost-button"
@@ -372,49 +404,586 @@ function PriceReviewStrip({
   )
 }
 
+// ---------------------------------------------------------------------------
+// Parse-correction drawer / mobile bottom sheet (issue #59 T4).
+//
+// Opened from the `Fix parse` / ✎ affordances. Lets the operator correct a
+// mis-parsed listing's structured fields and OPTIONALLY record the retailer's
+// naming convention, then save to the INERT T3 feedback store. Nothing here
+// changes production scoring/matching, fuzzy_skus, aggregates, or IQR — saved
+// feedback only improves the operator workflow (saved badges, prefill) until a
+// later agent/reviewer promotes it into parsekit (T5). The payload is built
+// purely (parseCorrectionDraft.ts): only fields the operator selected + filled
+// are sent; provenance is derived server-side from the fuzzy_sku, never here.
+// ---------------------------------------------------------------------------
+
+/** Whether the session role may write feedback (POST requires `editor`). */
+function canEditFeedback(session: SessionEnvelope | undefined): boolean {
+  const role = session?.user?.role
+  return role === 'editor' || role === 'approver' || role === 'admin'
+}
+
+/** Human labels for the "What's wrong?" issue chips. */
+const ISSUE_LABELS: Record<ParseFeedbackIssueType, string> = {
+  size: 'Size',
+  pack_qty: 'Pack qty',
+  category_subcategory: 'Category / subcategory',
+  brand: 'Brand',
+  name_tokens_strain: 'Name tokens / strain',
+  price_genuine: 'Price is genuine',
+  no_match: 'Not the same product / no match',
+}
+const ISSUE_ORDER: readonly ParseFeedbackIssueType[] = [
+  'size',
+  'pack_qty',
+  'category_subcategory',
+  'brand',
+  'name_tokens_strain',
+  'price_genuine',
+  'no_match',
+]
+
+/** Human labels for the optional convention pattern chips. */
+const PATTERN_LABELS: Record<ConventionPatternChip, string> = {
+  brand_first: 'Brand first',
+  size_at_end: 'Size at end',
+  pack_before_size: 'Pack before size',
+  total_size_shown: 'Total size shown',
+  unit_size_shown: 'Unit size shown',
+}
+const PATTERN_ORDER: readonly ConventionPatternChip[] = [
+  'brand_first',
+  'size_at_end',
+  'pack_before_size',
+  'total_size_shown',
+  'unit_size_shown',
+]
+
+/** Family-expectation prefill (suggestions only surfaced once a chip is toggled on). */
+function prefillCorrectionDraft(data: BrandFamilyMarketMatchResponse): CorrectionDraft {
+  return {
+    ...emptyCorrectionDraft(),
+    packCount: data.packCount != null ? String(data.packCount) : '',
+    category: data.categoryName ?? '',
+    subcategory: data.subcategoryName ?? '',
+    brand: data.brandName ?? '',
+  }
+}
+
+function toggleArray<T>(arr: readonly T[], value: T): T[] {
+  return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value]
+}
+
+/** A small labelled current-vs-expected comparison row. */
+function CompareRow({ label, current, expected }: { label: string; current: string; expected: string }) {
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd>{current}</dd>
+      <dd>{expected}</dd>
+    </>
+  )
+}
+
 /**
- * Honest placeholder for the Fix-parse seam. T2 wires the click targets + state
- * ownership; T4 replaces this with the real parse-correction drawer / bottom
- * sheet + feedback save (using the same selected candidate + family context).
- * Deliberately does NOT claim anything was saved.
+ * The parse-correction drawer. Mobile bottom-sheet, desktop right-side drawer
+ * (see .pf-drawer CSS). Modal semantics: focus is trapped, Escape / scrim close
+ * (unless a save is in flight), background scroll is locked, and focus returns
+ * to the invoking control on close.
  */
-function FixParsePlaceholder({
+function ParseCorrectionDrawer({
   candidate,
   data,
-  onDismiss,
+  existing,
+  canEdit,
+  onClose,
+  onSaved,
 }: {
   candidate: BrandFamilyMatchCandidate
   data: BrandFamilyMarketMatchResponse
-  onDismiss: () => void
+  /** Existing feedback for this listing, or null when the fetch is unknown (loading/error). */
+  existing: readonly ParseFeedbackRecord[] | null
+  canEdit: boolean
+  onClose: () => void
+  onSaved: (records: readonly ParseFeedbackRecord[]) => void
 }) {
+  const [draft, setDraft] = useState<CorrectionDraft>(() => prefillCorrectionDraft(data))
+  const [convention, setConvention] = useState<ConventionDraft>(() => emptyConventionDraft(candidate.retailerId))
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const asideRef = useRef<HTMLElement | null>(null)
+  const titleId = `pf-drawer-title-${candidate.fuzzySkuId}`
+  const savingRef = useRef(saving)
+  savingRef.current = saving
+
+  // Modal chrome: capture opener, lock scroll, move focus in, restore on close.
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    // Focus the first focusable control (the close button) so keyboard/AT land inside.
+    const focusables = asideRef.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )
+    focusables?.[0]?.focus()
+    return () => {
+      document.body.style.overflow = prevOverflow
+      opener?.focus()
+    }
+  }, [])
+
+  const onKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLElement>) => {
+      if (e.key === 'Escape') {
+        if (!savingRef.current) onClose()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const focusables = asideRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )
+      if (!focusables || focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement
+      if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    },
+    [onClose],
+  )
+
+  const selected = new Set(draft.issueTypes)
+  const scopeOptions = conventionScopeOptions(candidate.retailerId)
+  const preview = buildListingCorrectionDetails(draft)
+  const saveReady = canEdit && !saving && canSave(draft, convention)
+
+  async function handleSave() {
+    if (!saveReady) return
+    setSaving(true)
+    setError(null)
+    try {
+      const body = buildCreateBody(candidate, data, draft, convention)
+      const res = await mutateJson(
+        '/api/catalog/family-explorer/parse-feedback',
+        CreateParseFeedbackResponseSchema,
+        { method: 'POST', body: JSON.stringify(body) },
+      )
+      const saved: ParseFeedbackRecord[] = [res.listingCorrection]
+      if (res.conventionProposal != null) saved.push(res.conventionProposal)
+      onSaved(saved)
+      onClose()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+      setSaving(false)
+    }
+  }
+
+  const capturedAt =
+    candidate.sourceCapturedAt != null ? nyShortDateTime(new Date(candidate.sourceCapturedAt).getTime()) : '—'
+  const retailerLabel =
+    candidate.retailerId != null
+      ? `${displayOrNull(candidate.retailer)} (#${candidate.retailerId})`
+      : `${displayOrNull(candidate.retailer)} (no stable retailer id)`
+
+  const existingCount = existing?.length ?? 0
+
   return (
-    <div
-      style={{
-        border: '1px solid var(--panel-border)',
-        borderLeft: '3px solid var(--accent)',
-        borderRadius: '0.5rem',
-        padding: '0.5rem 0.625rem',
-        marginBottom: '0.5rem',
-        background: 'var(--accent-muted)',
-      }}
-    >
-      <div className="inline-row wrap-row" style={{ gap: '0.5rem', alignItems: 'center' }}>
-        <span style={{ fontWeight: 600 }}>Selected for parse correction</span>
-        <button type="button" className="ghost-button" style={{ marginLeft: 'auto' }} onClick={onDismiss}>
-          Dismiss
-        </button>
-      </div>
-      <p className="subtle-copy" style={{ margin: '0.25rem 0 0' }}>
-        {displayOrNull(candidate.listingName)} · {displayOrNull(candidate.retailer)}
-      </p>
-      <p className="subtle-copy" style={{ margin: '0.125rem 0 0' }}>
-        {sizeContextLabel(candidate, data)}
-      </p>
-      <p className="subtle-copy" style={{ margin: '0.25rem 0 0' }}>
-        The parse-correction drawer (correct the extracted fields + record the retailer naming convention, then save)
-        ships in the next task.
-      </p>
+    <div className="pf-drawer-scrim" role="presentation" onClick={() => (!saving ? onClose() : undefined)}>
+      <aside
+        ref={asideRef}
+        className="pf-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={onKeyDown}
+      >
+        <div className="pf-drawer-header">
+          <div>
+            <h3 id={titleId} className="pf-drawer-title">
+              Fix parse
+            </h3>
+            <p className="subtle-copy" style={{ margin: '0.15rem 0 0' }}>
+              Correct this listing’s extracted fields · saved feedback is inert (no effect on scoring until promoted).
+            </p>
+          </div>
+          <button type="button" className="ghost-button" onClick={onClose} disabled={saving}>
+            Close
+          </button>
+        </div>
+
+        {/* Section 1 — listing context */}
+        <section className="pf-section">
+          <dl className="pf-context-grid">
+            <dt>Listing</dt>
+            <dd>
+              {candidate.url != null ? (
+                <a href={candidate.url} target="_blank" rel="noreferrer">
+                  {displayOrNull(candidate.listingName)}
+                </a>
+              ) : (
+                displayOrNull(candidate.listingName)
+              )}
+            </dd>
+            <dt>Retailer</dt>
+            <dd>{retailerLabel}</dd>
+            <dt>Price ±tax</dt>
+            <dd>
+              {priceLabel(candidate)}
+              {candidate.priceOutlier != null ? (
+                <>
+                  {' '}
+                  <Pill tone="warning" title={outlierBadgeTitle(candidate.priceOutlier)}>
+                    {outlierDirectionGlyph(candidate.priceOutlier.kind)}{' '}
+                    {formatUsdDelta(candidate.priceOutlier.delta)}
+                  </Pill>
+                </>
+              ) : null}
+            </dd>
+            <dt>Distance</dt>
+            <dd>
+              {distanceBandLabel(candidate.distanceBand)}
+              {candidate.distanceMiles != null ? ` · ${candidate.distanceMiles.toFixed(1)} mi` : ''}
+            </dd>
+            <dt>Snapshot</dt>
+            <dd>{capturedAt}</dd>
+            <dt>Score</dt>
+            <dd>{fmtScore(candidate.score)}</dd>
+          </dl>
+        </section>
+
+        {/* Section 2 — current parse vs family expectation */}
+        <section className="pf-section">
+          <h4 className="pf-section-title">Current parse vs family expectation</h4>
+          <dl className="pf-compare-grid">
+            <dt className="subtle-copy">field</dt>
+            <dd className="subtle-copy">current (listing)</dd>
+            <dd className="subtle-copy">expected (family)</dd>
+            <CompareRow
+              label="Brand"
+              current={
+                displayOrNull(candidate.brandRaw) +
+                (candidate.brandNorm != null ? ` / ${candidate.brandNorm}` : '')
+              }
+              expected={displayOrNull(data.brandName)}
+            />
+            <CompareRow
+              label="Category"
+              current={displayOrNull(candidate.categoryNorm)}
+              expected={displayOrNull(data.categoryName)}
+            />
+            <CompareRow
+              label="Subcategory"
+              current={displayOrNull(candidate.subcategoryNorm)}
+              expected={displayOrNull(data.subcategoryName)}
+            />
+            <CompareRow
+              label="Size"
+              current={displayOrNull(candidate.parsedSizeLabel)}
+              expected={data.sizeGroupLabel}
+            />
+            <CompareRow label="Pack" current="— (not parsed)" expected={packLabel(data.packCount)} />
+          </dl>
+        </section>
+
+        {/* Existing feedback for this listing (duplicate-awareness) */}
+        {existing == null ? (
+          <p className="subtle-copy pf-section">Could not load existing feedback for this listing.</p>
+        ) : existingCount > 0 ? (
+          <p className="subtle-copy pf-section">
+            This listing already has {existingCount} saved feedback record{existingCount === 1 ? '' : 's'}. Saving
+            creates <strong>another</strong> draft — it does not edit or replace the prior one(s).
+          </p>
+        ) : null}
+
+        {!canEdit ? (
+          <p className="subtle-copy pf-section">
+            Editing parse feedback needs the <strong>editor</strong> role. This is a read-only view.
+          </p>
+        ) : (
+          <>
+            {/* Section 3 — "what's wrong?" chips */}
+            <section className="pf-section">
+              <h4 className="pf-section-title">What’s wrong?</h4>
+              <div className="pf-chip-row">
+                {ISSUE_ORDER.map((issue) => {
+                  const on = selected.has(issue)
+                  return (
+                    <button
+                      key={issue}
+                      type="button"
+                      className={on ? 'primary-button' : 'ghost-button'}
+                      aria-pressed={on}
+                      onClick={() => setDraft((d) => ({ ...d, issueTypes: toggleArray(d.issueTypes, issue) }))}
+                    >
+                      {ISSUE_LABELS[issue]}
+                    </button>
+                  )
+                })}
+              </div>
+            </section>
+
+            {/* Section 4 — correction fields (revealed per selected chip) */}
+            {selected.has('size') ? (
+              <section className="pf-section">
+                <h4 className="pf-section-title">Corrected size</h4>
+                <div className="pf-field-grid">
+                  <label>
+                    Unit size value
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      min="0"
+                      value={draft.unitSizeValue}
+                      onChange={(e) => setDraft((d) => ({ ...d, unitSizeValue: e.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Unit size unit
+                    <input
+                      type="text"
+                      placeholder="g / mg / ml"
+                      value={draft.unitSizeUnit}
+                      onChange={(e) => setDraft((d) => ({ ...d, unitSizeUnit: e.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Total size value
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      min="0"
+                      value={draft.totalSizeValue}
+                      onChange={(e) => setDraft((d) => ({ ...d, totalSizeValue: e.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Total size unit
+                    <input
+                      type="text"
+                      placeholder="g / mg / ml"
+                      value={draft.totalSizeUnit}
+                      onChange={(e) => setDraft((d) => ({ ...d, totalSizeUnit: e.target.value }))}
+                    />
+                  </label>
+                </div>
+                <p className="subtle-copy" style={{ margin: '0.25rem 0 0' }}>
+                  Enter a value AND its unit for either the unit size or the total size (or both).
+                </p>
+              </section>
+            ) : null}
+
+            {selected.has('pack_qty') ? (
+              <section className="pf-section">
+                <h4 className="pf-section-title">Corrected pack count</h4>
+                <div className="pf-field-grid">
+                  <label>
+                    Pack count
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      step="1"
+                      min="1"
+                      value={draft.packCount}
+                      onChange={(e) => setDraft((d) => ({ ...d, packCount: e.target.value }))}
+                    />
+                  </label>
+                </div>
+              </section>
+            ) : null}
+
+            {selected.has('category_subcategory') ? (
+              <section className="pf-section">
+                <h4 className="pf-section-title">Corrected category / subcategory</h4>
+                <div className="pf-field-grid">
+                  <label>
+                    Category
+                    <input
+                      type="text"
+                      value={draft.category}
+                      onChange={(e) => setDraft((d) => ({ ...d, category: e.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Subcategory
+                    <input
+                      type="text"
+                      value={draft.subcategory}
+                      onChange={(e) => setDraft((d) => ({ ...d, subcategory: e.target.value }))}
+                    />
+                  </label>
+                </div>
+              </section>
+            ) : null}
+
+            {selected.has('brand') ? (
+              <section className="pf-section">
+                <h4 className="pf-section-title">Corrected brand</h4>
+                <div className="pf-field-grid">
+                  <label>
+                    Brand
+                    <input
+                      type="text"
+                      value={draft.brand}
+                      onChange={(e) => setDraft((d) => ({ ...d, brand: e.target.value }))}
+                    />
+                  </label>
+                </div>
+                <p className="subtle-copy" style={{ margin: '0.25rem 0 0' }}>
+                  This records the correct brand for this listing’s parse — it does not change brand→family mapping.
+                </p>
+              </section>
+            ) : null}
+
+            {selected.has('name_tokens_strain') ? (
+              <section className="pf-section">
+                <h4 className="pf-section-title">Corrected name tokens / strain</h4>
+                <div className="pf-field-grid">
+                  <label>
+                    Strain
+                    <input
+                      type="text"
+                      value={draft.strain}
+                      onChange={(e) => setDraft((d) => ({ ...d, strain: e.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Name tokens
+                    <input
+                      type="text"
+                      value={draft.nameTokens}
+                      onChange={(e) => setDraft((d) => ({ ...d, nameTokens: e.target.value }))}
+                    />
+                  </label>
+                </div>
+              </section>
+            ) : null}
+
+            <section className="pf-section">
+              <label>
+                Note (optional)
+                <textarea
+                  rows={2}
+                  value={draft.note}
+                  onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
+                  placeholder="Anything a reviewer should know about this correction"
+                />
+              </label>
+            </section>
+
+            {/* Section 5 — optional convention capture */}
+            <section className="pf-section">
+              <label className="pf-checkbox">
+                <input
+                  type="checkbox"
+                  checked={convention.enabled}
+                  onChange={(e) => setConvention((c) => ({ ...c, enabled: e.target.checked }))}
+                />
+                Also record this retailer’s naming convention
+              </label>
+              {convention.enabled ? (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <div className="pf-field-grid">
+                    <label>
+                      Scope
+                      <select
+                        value={convention.scope}
+                        onChange={(e) =>
+                          setConvention((c) => ({ ...c, scope: e.target.value as ConventionDraft['scope'] }))
+                        }
+                      >
+                        {scopeOptions.map((o) => (
+                          <option key={o.value} value={o.value} disabled={o.disabled}>
+                            {o.label}
+                            {o.disabled ? ' (needs retailer id)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <label style={{ marginTop: '0.5rem', display: 'block' }}>
+                    Convention note
+                    <textarea
+                      rows={2}
+                      value={convention.note}
+                      onChange={(e) => setConvention((c) => ({ ...c, note: e.target.value }))}
+                      placeholder="e.g. brand first, size at end, pack shown before size"
+                    />
+                  </label>
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <span className="subtle-copy">Pattern hints</span>
+                    <div className="pf-chip-row" style={{ marginTop: '0.25rem' }}>
+                      {PATTERN_ORDER.map((chip) => {
+                        const on = convention.patternChips.includes(chip)
+                        return (
+                          <button
+                            key={chip}
+                            type="button"
+                            className={on ? 'primary-button' : 'ghost-button'}
+                            aria-pressed={on}
+                            onClick={() =>
+                              setConvention((c) => ({ ...c, patternChips: toggleArray(c.patternChips, chip) }))
+                            }
+                          >
+                            {PATTERN_LABELS[chip]}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  <p className="subtle-copy" style={{ margin: '0.4rem 0 0' }}>
+                    Auto example from this listing: <em>{displayOrNull(candidate.listingName)}</em>. Add a note or at
+                    least one pattern hint. You never write parser rules — this is a hint for a later reviewer.
+                  </p>
+                </div>
+              ) : null}
+            </section>
+
+            {/* "This will be saved as" echo (no score/production effect) */}
+            <section className="pf-section">
+              <details>
+                <summary className="subtle-copy" style={{ cursor: 'pointer' }}>
+                  This will be saved as…
+                </summary>
+                <pre className="pf-preview">{JSON.stringify(preview, null, 2)}</pre>
+              </details>
+            </section>
+
+            {error != null ? (
+              <p className="pf-section" style={{ color: 'var(--danger)' }}>
+                Save failed: {error}
+              </p>
+            ) : null}
+
+            <div className="pf-drawer-actions">
+              <button type="button" className="ghost-button" onClick={onClose} disabled={saving}>
+                Cancel
+              </button>
+              <button type="button" className="primary-button" onClick={handleSave} disabled={!saveReady}>
+                {saving ? 'Saving…' : 'Save correction'}
+              </button>
+            </div>
+          </>
+        )}
+      </aside>
     </div>
+  )
+}
+
+/** Small "feedback saved" marker for rows/cards that already have ≥1 record. */
+function FeedbackSavedPill({ count }: { count: number }) {
+  return (
+    <Pill tone="success" title={`${count} saved parse-feedback record${count === 1 ? '' : 's'} for this listing`}>
+      ✓ feedback{count > 1 ? ` ×${count}` : ''}
+    </Pill>
   )
 }
 
@@ -522,8 +1091,66 @@ function MarketMatchPanel({ familyKey, brandKey }: { familyKey: string; brandKey
 }
 
 function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
+  const session = useRouteLoaderData('root') as SessionEnvelope | undefined
+  const canEdit = canEditFeedback(session)
   const [showAllReview, setShowAllReview] = useState(false)
   const [fixTarget, setFixTarget] = useState<BrandFamilyMatchCandidate | null>(null)
+
+  // Existing feedback for the visible listings (badge + duplicate-awareness).
+  // status distinguishes "unknown" (loading/error) from a confirmed "none" so
+  // the drawer never mislabels an unknown state as "no prior feedback". This is
+  // purely an operator-workflow read — it NEVER feeds the scorer / ordering /
+  // outlier stats (the feedback store is inert).
+  const [feedbackStatus, setFeedbackStatus] = useState<'loading' | 'loaded' | 'error'>('loading')
+  const [feedbackByFuzzySkuId, setFeedbackByFuzzySkuId] = useState<Map<number, ParseFeedbackRecord[]>>(
+    () => new Map(),
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    const ids = feedbackFetchIds(data, PARSE_FEEDBACK_ID_QUERY_LIMIT)
+    if (ids.length === 0) {
+      setFeedbackStatus('loaded')
+      setFeedbackByFuzzySkuId(new Map())
+      return
+    }
+    setFeedbackStatus('loading')
+    const qs = new URLSearchParams({ fuzzySkuIds: ids.join(',') }).toString()
+    loadJson(`/api/catalog/family-explorer/parse-feedback?${qs}`, ParseFeedbackListResponseSchema)
+      .then((res) => {
+        if (cancelled) return
+        const map = new Map<number, ParseFeedbackRecord[]>()
+        for (const rec of res.feedback) {
+          if (rec.fuzzySkuId == null) continue
+          const list = map.get(rec.fuzzySkuId)
+          if (list) list.push(rec)
+          else map.set(rec.fuzzySkuId, [rec])
+        }
+        setFeedbackByFuzzySkuId(map)
+        setFeedbackStatus('loaded')
+      })
+      .catch(() => {
+        // Non-fatal: badges are a convenience, not the point of the panel.
+        if (cancelled) return
+        setFeedbackStatus('error')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [data])
+
+  const onSaved = useCallback((records: readonly ParseFeedbackRecord[]) => {
+    setFeedbackByFuzzySkuId((prev) => {
+      const next = new Map(prev)
+      for (const rec of records) {
+        if (rec.fuzzySkuId == null) continue
+        const list = next.get(rec.fuzzySkuId)
+        next.set(rec.fuzzySkuId, list ? [...list, rec] : [rec])
+      }
+      return next
+    })
+  }, [])
+
   const capturedRange =
     data.snapshotCapturedAtMin != null
       ? data.snapshotCapturedAtMin === data.snapshotCapturedAtMax
@@ -606,11 +1233,19 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
           showAll={showAllReview}
           onToggleShowAll={() => setShowAllReview((v) => !v)}
           onFix={setFixTarget}
+          feedbackByFuzzySkuId={feedbackByFuzzySkuId}
         />
       ) : null}
 
       {fixTarget != null ? (
-        <FixParsePlaceholder candidate={fixTarget} data={data} onDismiss={() => setFixTarget(null)} />
+        <ParseCorrectionDrawer
+          candidate={fixTarget}
+          data={data}
+          existing={feedbackStatus === 'loaded' ? feedbackByFuzzySkuId.get(fixTarget.fuzzySkuId) ?? [] : null}
+          canEdit={canEdit}
+          onClose={() => setFixTarget(null)}
+          onSaved={onSaved}
+        />
       ) : null}
 
       {data.candidates.length === 0 ? (
@@ -689,18 +1324,16 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
                           ) : (
                             <Pill tone="muted">{fmtScore(c.score)}</Pill>
                           )}
-                          {outlier != null ? (
-                            <button
-                              type="button"
-                              className="ghost-button"
-                              onClick={() => setFixTarget(c)}
-                              aria-label={`Fix parse for ${c.listingName ?? `listing ${c.fuzzySkuId}`}`}
-                              title="Fix parse"
-                              style={{ padding: '0 0.3rem', minWidth: 0, lineHeight: 1.2, fontSize: '0.85rem' }}
-                            >
-                              ✎
-                            </button>
-                          ) : null}
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => setFixTarget(c)}
+                            aria-label={`Fix parse for ${c.listingName ?? `listing ${c.fuzzySkuId}`}`}
+                            title="Fix parse"
+                            style={{ padding: '0 0.3rem', minWidth: 0, lineHeight: 1.2, fontSize: '0.85rem' }}
+                          >
+                            ✎
+                          </button>
                         </span>
                       </td>
                       <td>
@@ -711,6 +1344,12 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
                         ) : (
                           displayOrNull(c.listingName)
                         )}
+                        {(feedbackByFuzzySkuId.get(c.fuzzySkuId)?.length ?? 0) > 0 ? (
+                          <>
+                            {' '}
+                            <FeedbackSavedPill count={feedbackByFuzzySkuId.get(c.fuzzySkuId)!.length} />
+                          </>
+                        ) : null}
                       </td>
                       <td>
                         {displayOrNull(c.brandRaw)}
