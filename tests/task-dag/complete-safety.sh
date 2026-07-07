@@ -152,6 +152,83 @@ if [ -n "$T5" ]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# TEST 6 (issue #7): two stacked sibling-leaf impls in ONE worktree complete
+# cleanly. The worker makes two stacked impl commits (S then C) and completes
+# each against its own (now-ancestor) impl via --commit=<sha>; HEAD only ever
+# moves FORWARD (no ref surgery, no empty-HEAD dead-end).
+# ---------------------------------------------------------------------------
+git checkout -q master 2>/dev/null || true
+git push -q origin HEAD:master 2>/dev/null
+S_LEAF=$(mk_task "issue7 server leaf")
+C_LEAF=$(mk_task "issue7 client leaf")
+if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
+  SLEAF_SHA=$(git rev-parse "refs/heads/tasks/frontier/$S_LEAF")
+  CLEAF_SHA=$(git rev-parse "refs/heads/tasks/frontier/$C_LEAF")
+  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$S_LEAF" >/dev/null 2>&1
+  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$C_LEAF" >/dev/null 2>&1
+  # Two stacked implementation commits on master: S (server) then C (client).
+  echo "server work" > server.txt; git add server.txt; git commit -qm "impl server"
+  S=$(git rev-parse HEAD)
+  echo "client work" > client.txt; git add client.txt; git commit -qm "impl client"
+  C=$(git rev-parse HEAD)
+
+  # Complete SERVER against its impl S — now an ANCESTOR of HEAD (=C). Old
+  # behaviour refused this ("not a fast-forward descendant of HEAD").
+  out1=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$S_LEAF" --commit="$S" 2>&1); rc1=$?
+  # Complete CLIENT against its impl C — an ANCESTOR of the new HEAD.
+  out2=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$C_LEAF" --commit="$C" 2>&1); rc2=$?
+  if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ]; then
+    ok "7: both stacked leaves complete via --commit=<ancestor> (rc1=$rc1 rc2=$rc2)"
+  else
+    bad "7: stacked completion failed rc1=$rc1 rc2=$rc2 :: $out1 :: $out2"
+  fi
+
+  # Both task commits are recorded as completion parents reachable from HEAD.
+  if git log HEAD --format='%P' | tr ' ' '\n' | grep -qx "$SLEAF_SHA" \
+     && git log HEAD --format='%P' | tr ' ' '\n' | grep -qx "$CLEAF_SHA"; then
+    ok "7: both leaves recorded as completion parents reachable from HEAD"
+  else
+    bad "7: a stacked leaf is not reachable as a completion parent"
+  fi
+
+  # HEAD only moved forward: the client impl C is still an ancestor of HEAD.
+  if git merge-base --is-ancestor "$C" HEAD; then
+    ok "7: HEAD advanced forward only (client impl C is an ancestor of HEAD)"
+  else
+    bad "7: HEAD did not move forward past the client impl C"
+  fi
+
+  # The server completion merge (2nd parent == SLEAF_SHA) sits on the tip,
+  # is an EMPTY merge (tree == first parent's tree), and records provenance.
+  MS=$(git rev-list HEAD --parents \
+        | awk -v t="$SLEAF_SHA" '{for(i=3;i<=NF;i++) if($i==t){print $1; exit}}')
+  if [ -n "$MS" ]; then
+    p1=$(git rev-parse "$MS^1")
+    if [ "$(git rev-parse "$MS^{tree}")" = "$(git rev-parse "$p1^{tree}")" ]; then
+      ok "7: server completion merge is an empty merge (tree == first parent)"
+    else
+      bad "7: server completion merge has a non-empty tree diff vs first parent"
+    fi
+    if git log -1 --format=%B "$MS" | grep -qx "Impl-Commit: $S"; then
+      ok "7: server completion merge records Impl-Commit provenance trailer"
+    else
+      bad "7: server completion merge missing 'Impl-Commit: $S' trailer"
+    fi
+  else
+    bad "7: could not locate the server completion merge"
+  fi
+
+  # Refuse completing against an empty completion merge (e.g. HEAD itself).
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$S_LEAF" --commit="$(git rev-parse HEAD)" --force 2>&1); rc=$?
+  if [ $rc -ne 0 ] && echo "$out" | grep -qiE "empty|task/control commit"; then
+    ok "7: refuses --commit at an empty completion/control commit (rc=$rc)"
+  else
+    bad "7: did NOT refuse completing against an empty commit (rc=$rc): $out"
+  fi
+  git push -q origin HEAD:master 2>/dev/null
+fi
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

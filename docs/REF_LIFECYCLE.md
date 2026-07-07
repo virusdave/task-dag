@@ -118,6 +118,35 @@ to do it. `breakdown --json` reports `"claimed": true|false` per child.
 Because `breakdown` itself now consumes the root lock (above), even a
 born-claimed decomposition happens under the single cross-host root CAS.
 
+### Completing several sibling leaves in one worktree (`virusdave/task-dag#7`)
+
+When a root worker implements two+ born-claimed siblings in the **same
+worktree**, it naturally stacks their implementation commits on `master`
+(`… → S → C`, `HEAD=C`) and then completes each. `complete` supports this
+directly — **HEAD only ever moves forward**:
+
+- `complete <leaf> --commit=<sha>` where `<sha> == HEAD`: the completion
+  merge is built on `HEAD` (the normal path).
+- `--commit=<sha>` where `<sha>` is **ahead of** `HEAD`: the merge is
+  built on `<sha>` and `HEAD` fast-forwards up to it (may touch tracked
+  files).
+- `--commit=<sha>` where `<sha>` is **behind** `HEAD` (an already-stacked
+  earlier sibling's impl): the impl already lives in history, so the
+  completion merge is built on the **current tip**, the merge records the
+  real impl via an `Impl-Commit: <sha>` trailer, and `HEAD` advances
+  forward. No `reset`/`cherry-pick` ref surgery, no dangling half-state.
+
+So the worker can commit all sibling impls first and then
+`complete <leaf> --commit=<that leaf's impl>` for each, in any order.
+Each completion merge stays an *empty* merge (tree == its first parent's
+tree); completion is detected purely by the task commit appearing as a
+non-primary parent reachable from `HEAD` (`is_task_completed` /
+`close-completed-issues.sh`), which the forward-only tip merge preserves.
+`complete` still refuses a `--commit` that is an empty task/control/
+completion commit, or one that is neither an ancestor nor a descendant of
+`HEAD`. (Retroactively linking work already on `master` remains
+`complete-historical`.)
+
 ## Born-blocked epics (block at birth via label)
 
 An issue-originated epic can be created **already blocked** so the

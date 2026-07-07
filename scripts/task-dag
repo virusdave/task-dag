@@ -3672,7 +3672,17 @@ Usage: task-dag complete <task-sha> [--commit=SHA] [--no-cleanup] [--force]
 Mark a task as complete by creating a completion commit.
 
 Options:
-  --commit=SHA     Use this commit as base (default: HEAD)
+  --commit=SHA     Implementation commit to complete against (default:
+                   HEAD). SHA may be HEAD, a descendant of HEAD (HEAD
+                   fast-forwards up to it), or an ANCESTOR of HEAD — the
+                   latter lets you stack several sibling-leaf impls in one
+                   worktree and complete each against its own commit; the
+                   completion merge is then built on the current tip and
+                   records the impl via an 'Impl-Commit:' trailer. HEAD
+                   only ever moves forward (no history rewrite). SHA must
+                   be real work (not an empty task/control/completion
+                   commit). To link work already on master, use
+                   'complete-historical'.
   --no-cleanup     Don't delete frontier/active refs
   --force          Complete even if the task's active claim is held by
                    another worker (use only if that claim is known dead).
@@ -3772,30 +3782,49 @@ EOF
     local verified_active_sha
     verified_active_sha=$(verify_task_claim_ownership "$task_sha" "$short_sha" "$do_force") || return $?
 
-    # Get current commit details
-    local tree=$(git rev-parse "$commit_sha^{tree}")
-    local old_message=$(git log -1 --format='%B' "$commit_sha")
-    
-    # Validate: Reject empty commits (tombstone pattern)
-    if git diff-tree --no-commit-id --name-only -r "$commit_sha" | grep -q .; then
-        # Commit has changes - good
-        :
+    # ── Validate the implementation commit is REAL work ──────────────
+    # Mirror complete-historical's operand guards (stronger than a bare
+    # `git diff-tree | grep -q .` check): reject empty-tree task/control
+    # commits, and reject any commit that introduces no tree change vs its
+    # first parent (a completion/close/tombstone merge). This matters now
+    # that we support completing an impl commit behind HEAD: the caller
+    # could otherwise point --commit at an empty completion merge and mark
+    # a task "done" against no real work.
+    if is_task_commit "$commit_sha"; then
+        echo "" >&2
+        echo "${RED}ERROR: --commit=$commit_sha is itself a task/control commit (empty tree), not real implementation work.${RESET}" >&2
+        echo "" >&2
+        echo "Commit your code changes first, then run 'task-dag complete' against that commit." >&2
+        echo "" >&2
+        return 1
+    fi
+    local impl_tree impl_parent impl_base_tree
+    impl_tree=$(git rev-parse "$commit_sha^{tree}") || return 1
+    impl_parent=$(get_first_parent "$commit_sha" 2>/dev/null || true)
+    if [ -n "$impl_parent" ]; then
+        impl_base_tree=$(git rev-parse "$impl_parent^{tree}") || return 1
     else
+        impl_base_tree="$EMPTY_TREE"
+    fi
+    if [ "$impl_tree" = "$impl_base_tree" ]; then
         # Empty commit detected
         echo "" >&2
         echo "${RED}ERROR: Empty commit detected${RESET}" >&2
         echo "" >&2
-        echo "The commit you are completing against ($commit_sha) appears to be empty." >&2
+        echo "The commit you are completing against ($commit_sha) introduces no tree" >&2
+        echo "change vs its first parent — it is not a real implementation commit." >&2
         echo "" >&2
         echo "For normal work, 'task-dag complete' must reference a real implementation" >&2
-        echo "commit with actual code/file changes." >&2
+        echo "commit with actual code/file changes. If you are currently implementing" >&2
+        echo "this task, commit your code changes first, then run 'task-dag complete'." >&2
         echo "" >&2
         echo "Empty 'tombstone' commits are ONLY for retroactive linking of historical" >&2
-        echo "work that predates the task-dag system. If you are currently implementing" >&2
-        echo "this task, commit your code changes first, then run 'task-dag complete'." >&2
+        echo "work that predates the task-dag system (see 'complete-historical')." >&2
         echo "" >&2
         return 1
     fi
+
+    local old_message=$(git log -1 --format='%B' "$commit_sha")
     
     # Warn if commit message looks like a tombstone (starts with tombstone keyword)
     if echo "$old_message" | grep -qiE "^(Task completion tombstone|Tombstone:|Retroactive completion)"; then
@@ -3812,6 +3841,37 @@ EOF
         read -r
     fi
     
+    # ── Choose the completion base (HEAD moves FORWARD only) ─────────
+    # The completion merge only needs the task commit as a reachable 2nd
+    # parent to be recorded as done; it never needs to snapshot the impl's
+    # tree (an empty completion merge always inherits its first parent's
+    # tree). So we keep HEAD moving forward only, which lets one worker
+    # stack several sibling-leaf impl commits and complete each without
+    # ref surgery (issue #7):
+    #   * impl == HEAD          → merge on HEAD              (normal path)
+    #   * HEAD ancestor of impl → merge on impl, ff HEAD up  (the existing
+    #                             --commit=<ahead> path; may touch tracked
+    #                             files via `git merge --ff-only`)
+    #   * impl ancestor of HEAD → the impl already lives in history behind
+    #                             HEAD; build the completion merge on the
+    #                             current HEAD tip, record the impl with an
+    #                             Impl-Commit: trailer, and advance HEAD
+    #                             forward (never backward, no history rewrite)
+    local completion_base impl_trailer="" current
+    current=$(git rev-parse --verify HEAD^{commit}) || return 1
+    if [ "$commit_sha" = "$current" ]; then
+        completion_base="$current"
+    elif git merge-base --is-ancestor "$current" "$commit_sha"; then
+        completion_base="$commit_sha"
+    elif git merge-base --is-ancestor "$commit_sha" "$current"; then
+        completion_base="$current"
+        impl_trailer="$commit_sha"
+    else
+        echo "Error: --commit=$commit_sha is neither an ancestor nor a descendant of HEAD ($current)." >&2
+        echo "Point --commit at a commit in this checkout's history, or check it out in a fresh ephemeral worktree and rerun." >&2
+        return 1
+    fi
+
     # Extract metadata from task commit
     local task_msg=$(parse_commit_metadata "$task_sha")
     local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
@@ -3822,6 +3882,14 @@ EOF
     local new_message="${old_message}
 
 Task-Commit: $task_sha"
+
+    # Record the real implementation commit when it is not the completion
+    # merge's first parent (the impl-behind-HEAD case), so provenance is
+    # not lost even though the merge sits on the current tip.
+    if [ -n "$impl_trailer" ]; then
+        new_message="${new_message}
+Impl-Commit: $impl_trailer"
+    fi
     
     if [ -n "$issue_num" ]; then
         new_message="${new_message}
@@ -3843,13 +3911,22 @@ Status: completed"
 Related: $issue_url"
     fi
     
-    local new_commit=$(git commit-tree "$tree" -p "$commit_sha" -p "$task_sha" -m "$new_message")
-    
-    echo "Created completion commit: $new_commit"
+    # The completion merge inherits the completion base's tree (an empty
+    # merge: no file changes, only a 2nd parent + metadata). Its first
+    # parent is the completion base (HEAD, or the ahead --commit target),
+    # never necessarily the impl commit itself.
+    local tree new_commit
+    tree=$(git rev-parse "$completion_base^{tree}") || return 1
+    new_commit=$(git commit-tree "$tree" -p "$completion_base" -p "$task_sha" -m "$new_message") || return 1
     
     # Advance HEAD non-destructively (NEVER `git reset --hard`, which would
-    # wipe uncommitted work in the caller's cwd peer worktree).
-    advance_head_to_completion "$commit_sha" "$new_commit" || return 1
+    # wipe uncommitted work in the caller's cwd peer worktree). Print the
+    # completion commit only AFTER HEAD is successfully advanced, so a
+    # refused/CAS-lost advance never leaves the caller thinking a dangling
+    # (unreferenced, GC-able) commit is installed.
+    advance_head_to_completion "$completion_base" "$new_commit" || return 1
+
+    echo "Created completion commit: $new_commit"
     
     # Clean up dispatch refs (frontier/active/blocked/blocked-meta) with
     # the same CAS discipline used by complete-historical. Sets
