@@ -15,7 +15,7 @@
     "check": "npm run ensure-build-env && npm run typecheck && npm run typecheck:client && npm run test",
     "check:idempotence": "bash scripts/idempotence-matrix.sh",
     "build:server": "tsc -p tsconfig.server.json && npm run copy:non-ts-server-assets",
-    "copy:non-ts-server-assets": "mkdir -p dist/server/worker/scheduling && cp src/worker/scheduling/extractConstraints.js dist/server/worker/scheduling/extractConstraints.js",
+    "copy:non-ts-server-assets": "mkdir -p dist/server/worker/scheduling dist/server/server/db/migrations dist/server/server/db/schema && cp src/worker/scheduling/extractConstraints.js dist/server/worker/scheduling/extractConstraints.js && cp src/server/db/migrations/*.sql dist/server/server/db/migrations/ && cp src/server/db/schema/*.sql dist/server/server/db/schema/",
     "build:client": "vite build",
     "dev:server": "tsc -p tsconfig.server.json --watch",
     "dev:client": "vite",

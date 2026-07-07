@@ -40,10 +40,31 @@ worker-driven** path, then retire the copy-paste from the banner.
    `psql -f <file>`.**
 
 2. **`psql` is present on the prod host** (`/run/current-system/sw/bin/psql`,
-   PG 17) but is **not** declared in Helios's own nix closure
-   ([`flake.nix`](../../../flake.nix) only pins `nodejs_22`). Relying on
+   PG 17) but is **not** declared in Helios's runtime nix closure. Relying on
    ambient PATH is fragile. **⇒ add `postgresql`/`psql` to the Helios runtime
    closure** so `helios-worker` deterministically has it.
+
+   > **Correction (leaf 3 implementation note).** The runtime closure is
+   > **not** this repo's [`flake.nix`](../../../flake.nix) — that flake only
+   > provides a `nix develop` devShell toolchain and does **not** set any
+   > systemd unit's PATH, so adding `postgresql` there would be a runtime
+   > no-op. The `helios-worker` (and `helios-server`) runtime PATH is owned by
+   > the **`Nicponskis/nixos-sbc`** repo, `modules/helios.nix`
+   > (`systemd.services.helios-worker.path`). The correct change lands there:
+   > add `pkgs.postgresql_17` (pinned to prod's PG 17) to `helios-worker.path`
+   > **and** export a closure-absolute path
+   > `environment.HELIOS_PSQL_BIN = "${pkgs.postgresql_17}/bin/psql"` so the
+   > leaf-4 worker engine can invoke an absolute binary rather than a PATH
+   > lookup. Because it lives in a different repo with a different deploy
+   > (whole-host `ssh vps-nixos-3 self-deploy`, **not** `self-deploy-helios`)
+   > and its own task-dag, this is tracked as a **separate cross-repo
+   > prerequisite** (see leaf 3 completion). It is behaviour-neutral until the
+   > leaf-4 engine actually invokes `psql`, so it only blocks the first real
+   > apply (leaf 9). **Leaf 4 must read `HELIOS_PSQL_BIN`, require it to be an
+   > absolute path, and fail closed in production if it is absent** — never
+   > silently fall back to `/run/current-system/sw/bin/psql` or `which psql`,
+   > which would reintroduce the ambient-host dependency this constraint
+   > removes.
 
 3. **`.sql` files are not shipped to `dist/`.** `build:server` runs `tsc` +
    copies a single JS asset; the migration/schema `.sql` files stay in `src/`.

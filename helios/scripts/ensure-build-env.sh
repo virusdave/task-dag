@@ -59,11 +59,15 @@ else
 fi
 
 # Generalised output-dir creation. build:server copies a non-TS stub into
-# dist/server/worker/scheduling and the tsc/vite outputs land in
+# dist/server/worker/scheduling and the migration/schema .sql artifacts into
+# dist/server/server/db/{migrations,schema} (so the deployed process can run
+# the exact reviewed migration files); the tsc/vite outputs land in
 # dist/server and dist/client respectively.
 mkdir -p \
   dist/server \
   dist/server/worker/scheduling \
+  dist/server/server/db/migrations \
+  dist/server/server/db/schema \
   dist/client
 
 echo "[ensure-build-env] OK"

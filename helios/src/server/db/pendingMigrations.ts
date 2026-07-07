@@ -1445,6 +1445,15 @@ const SENTINELS: MigrationSentinel[] = [
   },
 ]
 
+// The allowlist of known migrationIds, derived from the sentinel registry so
+// it can never drift from the source of truth. The migration-artifact resolver
+// (migrationArtifacts.ts) validates an incoming migrationId against this set
+// before touching the filesystem, so the "Apply Now" flow can only ever run a
+// registered migration — never an arbitrary path from a request.
+export const MIGRATION_SENTINEL_IDS: ReadonlySet<string> = new Set(
+  SENTINELS.map((sentinel) => sentinel.migrationId),
+)
+
 interface CacheEntry {
   readonly pending: PendingMigration[]
   readonly checkedAt: number
