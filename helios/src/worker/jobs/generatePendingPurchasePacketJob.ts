@@ -793,14 +793,28 @@ interface CandidatePoolEntry {
   enrichment: boolean
 }
 
-const PendingPurchaseCategoryListSchema = z.object({
-  data: z.array(z.object({
+const PendingPurchaseCategoryRowSchema = z.object({
+  name: z.string().nullable().optional(),
+  subcategories: z.array(z.object({
     name: z.string().nullable().optional(),
-    subcategories: z.array(z.object({
-      name: z.string().nullable().optional(),
-    }).passthrough()).default([]),
   }).passthrough()).default([]),
 }).passthrough()
+
+// Sweed's `store.product.category.list` returns a BARE ARRAY of categories;
+// some deployments / back-compat paths wrap it as `{ data: [...] }`. Accept
+// both shapes and always yield the array — this mirrors the robust helpers the
+// sibling jobs already use for the very same RPC (CategoryListResponseSchema in
+// configWorkersCatalogRefreshJob, ListResponseSchema in
+// applyPendingPurchaseRequestJob). The object-only schema this replaced threw a
+// raw "expected object, received array" the first time the prospective
+// classifier path invoked this RPC (packet-generation job for PO 159659).
+export const PendingPurchaseCategoryListSchema = z.union([
+  z.array(PendingPurchaseCategoryRowSchema),
+  z
+    .object({ data: z.array(PendingPurchaseCategoryRowSchema).default([]) })
+    .passthrough()
+    .transform((value) => value.data),
+])
 
 /**
  * Build the allowed taxonomy for C4/C5: the auto-classifiable top-level
@@ -809,11 +823,20 @@ const PendingPurchaseCategoryListSchema = z.object({
  * silently shipping an all-`needs-review` packet from an empty subcategory set.
  */
 async function loadPendingPurchaseAllowedTaxonomy(stateDealerId: number): Promise<ClassifierAllowedTaxonomy> {
-  const response = PendingPurchaseCategoryListSchema.parse(
+  const categories = PendingPurchaseCategoryListSchema.parse(
     await callSweedRpc(stateDealerId, 'store.product.category.list', {}),
   )
+  // Fail loud on an empty taxonomy rather than silently shipping an
+  // all-`needs-review` packet built from an empty subcategory allow-list. The
+  // union schema above accepts `{}`/`[]` (back-compat with the wrapped shape),
+  // so this guard, not the parse, enforces the non-empty invariant.
+  if (categories.length === 0) {
+    throw new Error(
+      'Sweed `store.product.category.list` returned no categories; refusing to classify pending purchases against an empty taxonomy.',
+    )
+  }
   const subcategories = new Set<string>()
-  for (const category of response.data) {
+  for (const category of categories) {
     for (const subcategory of category.subcategories) {
       const name = normalizeNonEmptyString(subcategory.name)
       if (name !== null) {
