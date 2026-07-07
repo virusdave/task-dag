@@ -11,18 +11,20 @@ name: Task-DAG
 # broken-master auto-repair epic #1 sat unpicked). This mirrors the per-peer
 # caller template in docs/MIGRATION.md.
 #
-# This caller is now byte-for-byte the canonical per-peer template (all four
-# jobs, including `completion-aggregate`) so task-dag's infra config matches
-# every other peer (FreshlyBakedNYC/automation, Nicponskis/mostly-static-sites,
-# Nicponskis/nixos-sbc, virusdave/top-level). See docs/MIGRATION.md.
+# This caller is the canonical per-peer template (all five jobs, including
+# `completion-aggregate` and `materialise`) so task-dag's infra config matches
+# every other provisioned peer (FreshlyBakedNYC/automation,
+# Nicponskis/mostly-static-sites, Nicponskis/nixos-sbc, virusdave/top-level).
+# See docs/MIGRATION.md.
 #
-# `completion-aggregate` is the ONLY caller job that writes cross-repo (it
-# posts `Satisfies …` completion comments onto virusdave/top-level); the
-# built-in GITHUB_TOKEN is scoped to the running repo only, so it must mint a
-# top-level installation token via the GitHub App (app_id/app_private_key).
-# The other three jobs touch only this repo's own issues, hence GITHUB_TOKEN
-# suffices for them. `virusdave` is a user, not an org, so there is no
-# org-wide secret; each repo carries its own copy.
+# `completion-aggregate` and `materialise` are the caller jobs that write
+# cross-repo: the former posts `Satisfies …` completion comments onto
+# virusdave/top-level; the latter creates peer-repo issues from
+# `Materialise-Child-Epic:` trailers. The built-in GITHUB_TOKEN is scoped to
+# the running repo only, so both mint a peer installation token via the GitHub
+# App (app_id/app_private_key). The other three jobs touch only this repo's
+# own issues, hence GITHUB_TOKEN suffices for them. `virusdave` is a user, not
+# an org, so there is no org-wide secret; each repo carries its own copy.
 #
 # OPERATOR PREREQUISITE — provision these TWO repo secrets BEFORE this lands
 # on master, or the `completion-aggregate` job will fail every master push:
@@ -80,6 +82,27 @@ jobs:
   completion-aggregate:
     if: ${{ github.event_name == 'push' }}
     uses: virusdave/task-dag/.github/workflows/aggregate-cross-repo-completions.yml@master
+    with:
+      base_sha: ${{ github.event.before }}
+      head_sha: ${{ github.sha }}
+    secrets:
+      app_id: ${{ secrets.TASK_DAG_APP_ID }}
+      app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
+
+  # Materialise cross-repo child epics from `Materialise-Child-Epic:` commit
+  # trailers pushed to this repo's master (see docs/MIGRATION.md and
+  # .github/scripts/materialise-child-epics.sh for the trailer contract). Like
+  # `completion-aggregate`, this is a cross-repo-writing job: it mints a
+  # task-dag GitHub App installation token from the SAME two App secrets to
+  # create the peer-repo issue, so it is only safe to wire on repos that have
+  # them provisioned. On trailer-free pushes the script is a no-op. This
+  # mirrors the per-peer template in docs/MIGRATION.md.
+  materialise:
+    if: ${{ github.event_name == 'push' }}
+    uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@master
+    permissions:
+      contents: write
+      issues: write
     with:
       base_sha: ${{ github.event.before }}
       head_sha: ${{ github.sha }}
