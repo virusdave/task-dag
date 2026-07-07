@@ -36,6 +36,7 @@ scripts/
     sync-comment-to-task.yml
     sync-task-to-comment.yml
     aggregate-cross-repo-completions.yml
+    materialise-child-epic.yml        cross-repo child-epic materialisation (any wired peer)
   scripts/                          coordinator / per-repo action helpers (source of truth)
     create-task-commit.sh           issue → task ref
     close-completed-issues.sh       auto-close issues whose tasks are all complete
@@ -58,6 +59,15 @@ scripts, and config live here once; the caller is pure wiring. See
 
 Helper scripts are fetched at job time from this repo's public raw URLs,
 pinned to the same `ref` the caller pins the workflow to.
+
+Cross-repo child-epic materialisation (the `Materialise-Child-Epic:` commit
+trailer that mints an issue in a peer repo and registers the delegation) is
+one of these reusable workflows (`materialise-child-epic.yml`). It works for
+**any** wired peer that adds the `materialise` job and provisions the task-dag
+GitHub App secrets — not only `virusdave/top-level`-originated epics. The
+reusable workflow passes the caller repo's own token as `SOURCE_TOKEN`, so the
+source epic can live in any wired repo. See `docs/MIGRATION.md` for the caller
+template.
 
 ## Status
 

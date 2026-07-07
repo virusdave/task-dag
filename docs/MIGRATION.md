@@ -60,6 +60,21 @@ jobs:
     secrets:
       app_id: ${{ secrets.TASK_DAG_APP_ID }}
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
+  materialise:
+    # Optional: only add this job (and the App secrets) in a peer that must be
+    # able to spawn cross-repo child epics via the Materialise-Child-Epic:
+    # trailer. Keep it a single push-triggered caller so a trailer is processed
+    # exactly once per push (no double execution). Reuses the same two
+    # TASK_DAG_APP_* App secrets as completion-aggregate.
+    if: ${{ github.event_name == 'push' }}
+    uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@master
+    permissions: { contents: write, issues: write }
+    with:
+      base_sha: ${{ github.event.before }}
+      head_sha: ${{ github.sha }}
+    secrets:
+      app_id: ${{ secrets.TASK_DAG_APP_ID }}
+      app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
 ```
 
 Pin `@master` while stabilising; cut a moving `task-dag-v1` tag once the
@@ -69,10 +84,17 @@ branch the workflow is pinned to — keep them aligned.
 
 The caller is the **only** per-repo file (a logic-free shim). The single
 canonical implementation is the set of reusable workflows + scripts + CLI in
-this repo. The one manual per-repo step is provisioning the two
-`completion-aggregate` App secrets (`TASK_DAG_APP_ID`,
-`TASK_DAG_APP_PRIVATE_KEY`) — identical values on every peer; exact runbook in
-[`docs/SECRETS.md`](SECRETS.md).
+this repo. The one manual per-repo step is provisioning the two App secrets
+(`TASK_DAG_APP_ID`, `TASK_DAG_APP_PRIVATE_KEY`) used by `completion-aggregate`
+(and by the optional `materialise` job) — identical values on every peer;
+exact runbook in [`docs/SECRETS.md`](SECRETS.md).
+
+The `materialise` job is **optional**: add it only to peers that must be able
+to spawn cross-repo child epics (via the `Materialise-Child-Epic:` commit
+trailer). It reuses the same two App secrets and is fleet-wide — any wired peer
+with the job + secrets can originate a child epic, not only
+`virusdave/top-level`. The task-dag GitHub App must be installed (Issues: read
+& write) on every peer a child epic may be materialised **in**.
 
 ## Sequenced rollout (CI-safe; canary first)
 
@@ -126,6 +148,18 @@ this repo. The one manual per-repo step is provisioning the two
    (staged via `.github2/REMOVE.txt`, promoted by the operator) rather than
    re-pointed. Peer `AGENTS.md` files already drop stale `scripts/task-dag`
    references and run the CLI via `ephemeral-checkout task-dag`.
+6. **Materialise reusable. [done, #6]** Cross-repo child-epic
+   materialisation was the last non-reusable step: the slug-aware
+   `materialise-child-epics.sh` was canonicalised here (generalised
+   `TOP_LEVEL_TOKEN`→`SOURCE_TOKEN` so any source repo works), wrapped in the
+   reusable `materialise-child-epic.yml` (`on: workflow_call`), and
+   `child-epic-slots` was added to the strict invariant floor
+   (`TASKDAG_KNOWN_GH_NS`). `top-level`'s standalone
+   `materialise-child-epic.yml` + vendored script were retired and repointed
+   at the reusable workflow (single push-triggered caller, no double
+   execution). Any peer can now originate cross-repo child epics by adding the
+   optional `materialise` caller job + the two App secrets — it is no longer
+   `top-level`-only.
 
 ## Ordering hazards
 
