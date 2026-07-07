@@ -70,7 +70,8 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write` |
    | `gh/issues/<N>` | GitHub-side epic mapping | `create-task-commit.sh` |
    | `gh/comments/<N>/<id>` | comment provenance (kept so a comment is never re-ingested) | `ingest-comment` |
-   | `gh/child-epics/<N>/<owner>/<repo>` | materialised child-epic provenance | cross-repo materialisation |
+   | `gh/child-epics/<N>/<owner>/<repo>` | materialised child-epic provenance (default slot, one child per (parent, peer repo)) | cross-repo materialisation |
+   | `gh/child-epic-slots/<N>/<owner>/<repo>/<slug>` | materialised named-slot child-epic provenance (allows multiple children per (parent, peer repo)); `<slug>` is `^[a-z0-9][a-z0-9-]{0,63}$`, validated by the minter | cross-repo materialisation |
 
    **Adding a new namespace is a format change.** You must add it to
    `TASKDAG_KNOWN_*_NS` **and** add a golden fixture in `tests/task-dag/`

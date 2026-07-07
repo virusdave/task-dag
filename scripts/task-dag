@@ -242,7 +242,7 @@ list_task_refs() {
 # ref surgery by hand" mistake this whole subsystem exists to prevent.
 # ─────────────────────────────────────────────────────────────────────
 TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated completions ci-chains"
-TASKDAG_KNOWN_GH_NS="issues comments child-epics"
+TASKDAG_KNOWN_GH_NS="issues comments child-epics child-epic-slots"
 
 # taskdag_ref_violations <objectname> <full-refname>
 # Echoes one human-readable line per invariant violation (nothing when the

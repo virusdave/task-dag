@@ -53,6 +53,11 @@ intent: comment"
 mk_ref "refs/heads/tasks/completions/42/o/r/1/deadbeef" "kind: completion"
 mk_ref "refs/heads/tasks/delegated/42/o/r/1"            "kind: delegated"
 mk_ref "refs/heads/gh/child-epics/42/o/r"              "kind: child-epic"
+# Named-slot child-epic marker (slug namespace) — a valid, tool-minted ref.
+# This is the golden fixture for the child-epic-slots namespace: it would
+# FAIL --strict before that namespace was added to TASKDAG_KNOWN_GH_NS and
+# must PASS after (see docs/INVARIANTS.md known-namespace table).
+mk_ref "refs/heads/gh/child-epic-slots/42/o/r/agent-waste"  "kind: child-epic"
 
 # ---------------------------------------------------------------------------
 # TEST 1: a well-formed DAG passes --strict (exit 0)
@@ -182,6 +187,25 @@ else
     bad "9: --strict --json with violations wrong (rc=$rc, out=$out)"
 fi
 git update-ref -d refs/heads/tasks/bogus/xyz
+
+# ---------------------------------------------------------------------------
+# TEST 10: a `child-epic-slots` ref pointing at a NON-empty-tree commit FAILS
+#          --strict. The namespace is KNOWN (so this isolates the empty-tree
+#          floor, not the namespace check) and the slug path is well-formed,
+#          so the only reason it fails is the invariant floor. Slug-charset
+#          validation is the MINTER's job (valid_slug), NOT the strict floor —
+#          this test deliberately does not assert charset rejection here.
+# ---------------------------------------------------------------------------
+realtree=$(git rev-parse 'HEAD^{tree}')
+nonempty=$(git commit-tree "$realtree" -m "child-epic-slots marker with a non-empty tree")
+git update-ref refs/heads/gh/child-epic-slots/42/o/r/bad-tree "$nonempty"
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -qi "non-empty tree"; then
+    ok "10: non-empty-tree child-epic-slots ref fails validate --strict"
+else
+    bad "10: non-empty-tree child-epic-slots ref did not fail correctly (rc=$rc, out=$out)"
+fi
+git update-ref -d refs/heads/gh/child-epic-slots/42/o/r/bad-tree
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
