@@ -1489,57 +1489,15 @@ const SENTINELS: MigrationSentinel[] = [
       'feature cannot apply its own bootstrap).',
     check: (db) => tableExists(db, 'migration_apply_attempts'),
   },
-  {
-    // Throwaway smoke-test pair (automation#62, leaf 9) that exercises the
-    // admin "Apply Now" worker-driven prod-migration flow end-to-end for the
-    // first time. 100 creates a tiny unreferenced table; 101 (below) drops it,
-    // so applying the pair leaves NO schema behind. Both sentinels + their
-    // migration files are removed again in a cleanup change once the exercise
-    // has run (the audit_events / migration_apply_attempts rows remain as the
-    // durable evidence). Do not build anything on this table.
-    migrationId: '100_migration_flow_smoketest',
-    label:
-      'migration_flow_smoketest throwaway table (automation#62, leaf 9) — ' +
-      'exists ONLY to exercise the admin "Apply Now" psql apply flow end-to-end ' +
-      'for the first time; dropped immediately by 101 so no schema is left ' +
-      'behind. Unreferenced by any production read path.',
-    check: (db) => tableExists(db, 'migration_flow_smoketest'),
-    blessing: {
-      ref: 'https://github.com/FreshlyBakedNYC/automation/issues/62 (leaf 9 first-apply smoke test; Amp thread T-019f3fc3)',
-      reviewedSha: 'e94050affa0890f85c37671a6d304c56a9325cd9',
-      artifactSha256: '4f2b26ff2aa6dbcb6df922c0105c25dde11af3bc315f5a6ed1593da56471ad82',
-      transactionMode: 'transactional',
-      note:
-        'Throwaway smoke-test CREATE TABLE, wrapped in begin/commit, idempotent ' +
-        '(create table if not exists). Dropped by 101. No production data or ' +
-        'read path depends on it.',
-    },
-  },
-  {
-    migrationId: '101_migration_flow_smoketest_drop',
-    label:
-      'drop migration_flow_smoketest (automation#62, leaf 9) — second half of ' +
-      'the throwaway smoke-test pair; drops the table created by 100 so the ' +
-      'first-apply exercise leaves no schema behind. Sentinel reports applied ' +
-      'once the table is absent.',
-    // The "applied" end-state of a drop is the table being ABSENT. This is also
-    // the pre-100 state, so 101 reads as applied until 100 creates the table;
-    // that is intentional — 101 only becomes pending (and apply-eligible) after
-    // 100 has run. Both sentinels are removed in the post-exercise cleanup so
-    // 100 (whose tableExists sentinel reverts to pending once 101 drops the
-    // table) does not linger as a false "pending" banner entry.
-    check: async (db) => !(await tableExists(db, 'migration_flow_smoketest')),
-    blessing: {
-      ref: 'https://github.com/FreshlyBakedNYC/automation/issues/62 (leaf 9 first-apply smoke test; Amp thread T-019f3fc3)',
-      reviewedSha: 'e94050affa0890f85c37671a6d304c56a9325cd9',
-      artifactSha256: '70dd39b0041aa054d4392b7acd45e6cd3a2ec20057b1d0d694ac8e5a7f0e12ce',
-      transactionMode: 'transactional',
-      note:
-        'Throwaway smoke-test DROP TABLE, wrapped in begin/commit, idempotent ' +
-        '(drop table if exists). Undoes 100. No production data or read path ' +
-        'depends on the dropped table.',
-    },
-  },
+  // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and
+  // 101_migration_flow_smoketest_drop were a throwaway create+drop PAIR used to
+  // exercise the admin "Apply Now" psql apply flow end-to-end for the first
+  // time in prod (both applied successfully via the button: real psql run,
+  // sentinel_before=false → sentinel_after=true, net-zero schema). Their
+  // sentinels + migration files were intentionally removed in this cleanup
+  // commit — 100's tableExists sentinel would otherwise report perpetually
+  // "pending" once 101 dropped the table. The durable evidence lives in the
+  // prod migration_apply_attempts + audit_events rows.
 ]
 
 // The allowlist of known migrationIds, derived from the sentinel registry so
