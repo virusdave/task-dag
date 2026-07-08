@@ -1124,6 +1124,38 @@ derive_task_origin() {
     printf '%s\t%s\t%s\n' "$repo" "$issue" "$url"
 }
 
+# Resolve owner/repo from a git remote URL. The task-dag DAG is keyed by
+# owner/repo, NOT by hostname — but the fleet's prepared/ephemeral checkouts
+# rewrite `origin` to an ALIASED SSH host (git@github-<repo>:owner/repo.git)
+# that does not contain the literal 'github.com'. Historically the
+# issue-facing ops (`comment`, the status-comment poster) matched only a
+# literal github.com and so broke in every prepared/aliased worktree,
+# forcing a manual --repo=owner/repo (the recurring epic #41 friction).
+# Handle every URL form the fleet actually uses:
+#   * https://github.com/owner/repo(.git)       (plain HTTPS)
+#   * http://host/owner/repo(.git)
+#   * git@github.com:owner/repo(.git)           (scp-style, plain host)
+#   * git@github-<alias>:owner/repo(.git)       (scp-style, ephemeral SSH alias)
+#   * ssh://[user@]host[:port]/owner/repo(.git)
+#   * git://host/owner/repo(.git)
+# Emits owner/repo on stdout, or nothing when the URL is empty/unparseable
+# (callers keep --repo as the explicit override for genuinely ambiguous or
+# non-standard remotes; bare local fixture paths deliberately yield nothing).
+parse_owner_repo_from_url() {
+    local url="$1" stripped
+    [ -n "$url" ] || return 0
+    # Strip the leading scheme+host (https://host/, http://host/, git@host:,
+    # ssh://[user@]host[:port]/, git://host/) and any trailing .git / slash.
+    stripped=$(printf '%s' "$url" | sed -E \
+        's#^(https?://[^/]+/|git@[^:]+:|ssh://[^/]+/|git://[^/]+/)##; s#\.git/?$##; s#/$##')
+    # Keep only the leading owner/repo pair (drop any deeper path) and require
+    # exactly that shape, so unparseable inputs yield nothing rather than a
+    # bogus repo that would fail downstream validation with a worse message.
+    if [[ "$stripped" =~ ^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/.*)?$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    fi
+}
+
 # Best-effort "is this GitHub issue CLOSED?" used as a defense-in-depth gate
 # in claim-root: an orphan tasks/pending/<N> ref for an already-closed issue
 # (e.g. left behind by a pre-fix close workflow that lacked contents:write,
@@ -4455,7 +4487,7 @@ page_retroactive_link() {
     if [ -z "$repo" ] || [ "$repo" = "$issue_url" ]; then
         local origin_url
         origin_url=$(git remote get-url origin 2>/dev/null || true)
-        repo=$(printf '%s' "$origin_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:|ssh://[^/]+/|git://[^/]+/)##; s#\.git$##')
+        repo=$(parse_owner_repo_from_url "$origin_url")
     fi
 
     local hist_link="$hist_short"
@@ -5057,9 +5089,7 @@ EOF
         if [ -z "$repo" ]; then
             local remote_url
             remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-            if [[ "$remote_url" =~ github\.com[:/]([^/]+/[^/]+?)(\.git)?$ ]]; then
-                repo="${BASH_REMATCH[1]}"; repo="${repo%.git}"
-            fi
+            repo=$(parse_owner_repo_from_url "$remote_url")
         fi
     else
         local task_sha task_msg
@@ -5240,11 +5270,10 @@ EOF
     if [ -n "$issue_url" ]; then
         repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
     else
-        # Try to get from git remote
+        # Try to get owner/repo from the origin remote URL (handles the
+        # github-<repo> SSH host aliases prepared/ephemeral worktrees use).
         local remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-        if [[ "$remote_url" =~ github.com[:/]([^/]+/[^/]+)(\.git)?$ ]]; then
-            repo="${BASH_REMATCH[1]}"
-        fi
+        repo=$(parse_owner_repo_from_url "$remote_url")
     fi
     
     if [ -z "$repo" ]; then
@@ -5335,7 +5364,7 @@ emit_operator_blocked_dispatch() {
 
     # owner/repo of the repo the change happened in, for log/debug only.
     local source_repo
-    source_repo=$(printf '%s' "$origin_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:|ssh://[^/]+/|git://[^/]+/)##; s#\.git$##')
+    source_repo=$(parse_owner_repo_from_url "$origin_url")
 
     # Cap the call so a network stall never hangs the worker (timeout is
     # optional — degrade to a direct call if coreutils timeout is absent).

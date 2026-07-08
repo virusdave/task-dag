@@ -72,14 +72,36 @@ out=$("$TD" comment 999 --repo=acme/widgets --kind=operator-decision --body="nee
 printf '%s' "$out" | grep -q "need a call" \
   && ok "user body is preserved below the marker" || bad "user body lost"
 
-# ---- repo autodetect from a github origin URL (dry-run: no network) ----
+# ---- repo autodetect from the origin URL (dry-run: no network) ----
 # set-url persists to .git/config, so save + restore the real local origin.
+# Covers every remote-URL form the fleet uses, incl. the aliased SSH hosts
+# (git@github-<repo>:owner/repo.git) ephemeral_checkout configures and the
+# ssh://[user@]host[:port]/ form — the epic #41 friction was that only a
+# literal github.com URL was autodetected, so prepared/aliased worktrees had
+# to re-run every issue op with an explicit --repo. (issue #41)
+autodetect_ok() {  # <label> <origin-url>
+  git remote set-url origin "$2"
+  local o; o=$("$TD" comment 999 --kind=status --body="x" --dry-run 2>&1)
+  printf '%s' "$o" | grep -q "acme/widgets#999" \
+    && ok "repo autodetected from $1" \
+    || bad "repo autodetect from $1 failed ($2)"
+}
 real_origin=$(git remote get-url origin)
-git remote set-url origin "https://github.com/acme/widgets.git"
-o=$("$TD" comment 999 --kind=status --body="x" --dry-run 2>&1)
-printf '%s' "$o" | grep -q "acme/widgets#999" \
-  && ok "repo is autodetected from a github origin URL" \
-  || bad "repo autodetect from origin URL failed"
+autodetect_ok "a plain https github URL"        "https://github.com/acme/widgets.git"
+autodetect_ok "an https github URL without .git" "https://github.com/acme/widgets"
+autodetect_ok "a scp-style git@github.com URL"   "git@github.com:acme/widgets.git"
+autodetect_ok "an aliased SSH host (github-<repo>)" "git@github-widgets:acme/widgets.git"
+autodetect_ok "an ssh:// URL"                    "ssh://git@github.com/acme/widgets.git"
+autodetect_ok "an ssh:// URL with a port"        "ssh://git@github.com:22/acme/widgets.git"
+autodetect_ok "a git:// URL"                     "git://github.com/acme/widgets.git"
+git remote set-url origin "$real_origin"
+
+# A bare local path (no scheme/host, e.g. the fixture origins) must NOT
+# autodetect a bogus repo — it should fail closed and demand --repo.
+git remote set-url origin "$ROOT/origin.git"
+"$TD" comment 999 --kind=status --body="x" --dry-run >/dev/null 2>&1 \
+  && bad "bare local-path origin should not autodetect a repo" \
+  || ok "bare local-path origin fails closed (demands --repo)"
 git remote set-url origin "$real_origin"
 
 # ---- ROUND-TRIP: dry-run body must be skipped by the real ingester ----
