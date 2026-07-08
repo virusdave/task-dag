@@ -68,16 +68,25 @@ cd "$ws"
 /home/amp-local/src/top-level/scripts/ephemeral_checkout --remove "$ws"
 ```
 
-## Pre-commit hook (one-time per clone)
+## Pre-commit hook (dispatcher wires it; manual clones opt in once)
 
-This repo ships a `.githooks/` pre-commit gate. Git won't auto-enable a
-tracked hooks dir, so run once:
+This repo ships a `.githooks/` pre-commit gate. **If you were launched by
+the github-worker dispatcher** (a prepared workspace — `AGENT_WORKSPACE_MANIFEST`
+is set), hooks are **already** wired for you: a session-local `core.hooksPath`
+that chains this repo's `.githooks/pre-commit` scanners **and** adds the
+task-dag `commit-msg` + `pre-push` guards. **Do NOT** run `git config
+core.hooksPath .githooks` in that case — it would replace the session hooks
+dir and silently drop the task-dag guards.
+
+**Only in a manual/standalone clone** (no `AGENT_WORKSPACE_MANIFEST`) do you
+enable the tracked hooks dir yourself — git won't auto-enable it — so run once:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-It runs three instant repo-wide scanners on **every** commit
+Either way the pre-commit gate runs three instant repo-wide scanners on
+**every** commit
 (`scan-explicit-any`, `scan-disabled-gates`, `scan-test-resources` — a
 weakened gate anywhere is a master breakage), and adds package-scoped
 checks only when the staged files touch a package: helios server
