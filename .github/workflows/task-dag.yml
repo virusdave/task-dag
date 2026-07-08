@@ -64,6 +64,16 @@ jobs:
       issues: write
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}
+      # task-dag can act as a delegating PARENT (it wires `materialise`, so it
+      # can spawn cross-repo child epics and later run `task-dag close-epic`).
+      # close-epic pushes a `Closes-Epic: #N` merge to master; a GITHUB_TOKEN
+      # push can NOT trigger the push-reactive close-completed workflow (GitHub
+      # recursion guard, issue #9). Pass the App creds so comment-sync pushes
+      # that merge with the shared App token (which already holds contents:write
+      # — see docs/SECRETS.md), which DOES trigger close-completed. Opt-in and
+      # no-op on trailer-free / non-close pushes.
+      app_id: ${{ secrets.TASK_DAG_APP_ID }}
+      app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
 
   close-completed:
     if: ${{ github.event_name == 'push' }}
