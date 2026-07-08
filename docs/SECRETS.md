@@ -41,13 +41,18 @@ delegated epic). If they are supplied but the mint fails, `comment-sync`
 **fails closed** (it does not silently fall back to `GITHUB_TOKEN`, which
 would recreate the bug).
 
-> **App permission prerequisite:** for the App-authenticated close-epic push
-> to succeed, the shared task-dag App installation must have
-> **Contents: Read & write** on that repo (in addition to Issues), and
-> `master` branch protection / rulesets must permit the App identity to push.
-> The App currently needs only Issues for `completion-aggregate` /
-> `materialise`; grant Contents before wiring the App creds into
-> `comment-sync`, or the close-epic push will fail.
+> **App permission (already satisfied):** the App-authenticated close-epic
+> push needs the shared App installation to have **Contents: Read & write**
+> on that repo (in addition to Issues). The one shared App used by
+> `TASK_DAG_APP_*` — **Helios Freshly Baked** (app id `3745508`) — already
+> declares/holds `contents: write`, `issues: write`, `metadata: read`, so
+> **no new grant is required**; wiring the App creds into `comment-sync` is
+> sufficient. (Verify a specific App's declared perms with
+> `gh api /apps/<slug>`.) Branch protection is a non-issue on the current
+> private repos (free plan → protection/rulesets are unavailable, so any
+> `contents: write` token may push `master`, exactly as `github-actions[bot]`
+> does today); if a repo is ever made public / upgraded, ensure any `master`
+> ruleset permits the App identity to push.
 
 `completion-aggregate` is the **only** job that unconditionally writes
 **cross-repo**: it posts
@@ -111,10 +116,14 @@ You are **copying**, not creating, an App.
    secrets into `comment-sync` (only on a delegating-parent repo that
    auto-closes cross-repo epics), the App-authenticated push is to **that
    caller repo's own `master`**, so the App must be installed **on the caller
-   repo** with **Contents: Read & write** (in addition to Issues), and that
-   repo's `master` branch protection / rulesets must permit the App identity
-   to push. Grant this before wiring the App creds into `comment-sync`, or the
-   close-epic push will fail.
+   repo** with **Contents: Read & write** (in addition to Issues). The shared
+   App (**Helios Freshly Baked**, id `3745508`) already holds `contents:write`
+   + `issues:write` and is installed on the peer repos (it already writes
+   there via `completion-aggregate` / `materialise`), so this is **already
+   satisfied — no extra grant needed**; wiring the App creds is sufficient. On
+   the current free-plan private repos there is no `master` branch protection
+   to permit (the API is unavailable), so a `contents:write` token pushes
+   `master` unrestricted.
 
 > **Ordering hazard:** provision these secrets **before** the caller's
 > `completion-aggregate` job lands on `master`. With the job present but the
