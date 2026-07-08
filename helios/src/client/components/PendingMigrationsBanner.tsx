@@ -7,15 +7,22 @@
 // `pendingMigrations` array (empty when the DB is up to date). The
 // server-side check is cached for ~30s so polling here is cheap.
 //
+// This is a DRIFT WARNING ONLY — it no longer emits a psql copy-paste
+// (canon rules/DB_PERFORMANCE.md: a worker/agent applies approved
+// migrations to prod, not an operator). The actual apply lives behind
+// the admin-gated /config/pending-migrations "Apply Now" page, which
+// the banner deep-links to (automation#62).
+//
 // UX (see helios/AGENTS.md + Oracle review): the warning is important
 // but must not permanently eat screen space, especially on mobile.
 //   - Expanded state is rendered IN FLOW (position: sticky) so it pushes
 //     page content down instead of overlaying/hiding it. It is compact
-//     by default — the apply commands live in a collapsed <details>.
+//     by default — the per-migration id/label list lives in a collapsed
+//     <details>; the apply action is the deep-link to the admin page.
 //   - "Hide for this tab" dismisses the *current* migration set for the
 //     browser tab (sessionStorage), collapsing it to a small pill anchored
 //     bottom-right (clear of the mobile bottom-left scroll-top chip).
-//   - Tapping the pill re-expands transiently to peek at the commands.
+//   - Tapping the pill re-expands transiently to peek at the drift set.
 //   - If a NEW/different migration set appears later, the dismissal no
 //     longer matches and the banner re-expands, so a fresh schema drift is
 //     never silently hidden.
@@ -110,17 +117,19 @@ const LIST_STYLE: React.CSSProperties = {
   overflowY: 'auto',
 }
 
-const CMD_STYLE: React.CSSProperties = {
-  display: 'block',
-  marginTop: 3,
-  padding: '2px 6px',
-  background: 'rgba(0, 0, 0, 0.35)',
-  borderRadius: 3,
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-  fontSize: 12,
-  whiteSpace: 'pre-wrap',
-  overflowWrap: 'anywhere',
-  userSelect: 'all',
+const ADMIN_LINK_STYLE: React.CSSProperties = {
+  display: 'inline-block',
+  marginTop: 8,
+  padding: '6px 12px',
+  background: 'rgba(0, 0, 0, 0.28)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.55)',
+  borderRadius: 6,
+  fontSize: 13,
+  fontWeight: 600,
+  lineHeight: 1.2,
+  textDecoration: 'none',
+  whiteSpace: 'nowrap',
 }
 
 const PILL_STYLE: React.CSSProperties = {
@@ -235,8 +244,8 @@ export function PendingMigrationsBanner(): JSX.Element | null {
     <div role="alert" style={BANNER_STYLE} data-testid="pending-migrations-banner">
       <div style={HEADER_ROW_STYLE}>
         <div style={HEADING_STYLE}>
-          ⚠️ Database is behind this Helios build — {countLabel} must be applied manually. Some pages
-          may fail until then.
+          ⚠️ Database is behind this Helios build — {countLabel} pending. Some pages may fail until
+          applied.
         </div>
         <button
           type="button"
@@ -247,13 +256,19 @@ export function PendingMigrationsBanner(): JSX.Element | null {
           Hide for this tab
         </button>
       </div>
+      <a
+        href={buildAppPath('/config/pending-migrations')}
+        style={ADMIN_LINK_STYLE}
+        data-testid="pending-migrations-admin-link"
+      >
+        Review &amp; apply pending migrations →
+      </a>
       <details style={DETAILS_STYLE}>
-        <summary style={SUMMARY_STYLE}>Show migration commands</summary>
+        <summary style={SUMMARY_STYLE}>Show pending migrations</summary>
         <ul style={LIST_STYLE}>
           {pending.map((migration) => (
             <li key={migration.migrationId} style={{ marginBottom: 6 }}>
               <strong>{migration.migrationId}</strong> — {migration.label}
-              <code style={CMD_STYLE}>{migration.applyCommand}</code>
             </li>
           ))}
         </ul>

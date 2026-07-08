@@ -12,7 +12,7 @@ import {
 } from './pendingMigrationsBannerState.js'
 
 function migration(migrationId: string): PendingMigration {
-  return { migrationId, label: `label-${migrationId}`, applyCommand: `apply ${migrationId}` }
+  return { migrationId, label: `label-${migrationId}` }
 }
 
 // Minimal in-memory Storage stand-in for the read/write/clear helpers.
@@ -63,10 +63,10 @@ describe('buildPendingMigrationsSignature', () => {
     expect(one).not.toBe(two)
   })
 
-  it('only depends on migrationId, not label/command', () => {
+  it('only depends on migrationId, not label', () => {
     const base = buildPendingMigrationsSignature([migration('001')])
     const renamed = buildPendingMigrationsSignature([
-      { migrationId: '001', label: 'totally different', applyCommand: 'different cmd' },
+      { migrationId: '001', label: 'totally different' },
     ])
     expect(base).toBe(renamed)
   })

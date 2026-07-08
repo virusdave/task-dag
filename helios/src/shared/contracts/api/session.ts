@@ -16,11 +16,13 @@ export type RuntimeDependencyStatus = z.infer<typeof RuntimeDependencyStatusSche
 // Server-side schema-drift signal: any helios SQL migration that the
 // shipped server code expects to find applied but the live database
 // does not. The SPA surfaces these in an all-pages banner so an
-// operator notices before a user trips into a raw SQL error.
+// operator notices before a user trips into a raw SQL error. The
+// banner is a drift warning only; the actual apply happens via the
+// admin-gated /config/pending-migrations "Apply Now" flow (no operator
+// psql copy-paste), so no per-migration apply command is exposed here.
 export const PendingMigrationSchema = z.object({
   migrationId: z.string(),
   label: z.string(),
-  applyCommand: z.string(),
 })
 export type PendingMigration = z.infer<typeof PendingMigrationSchema>
 

@@ -80,16 +80,6 @@ export interface MigrationSentinel {
 export interface PendingMigration {
   readonly migrationId: string
   readonly label: string
-  readonly applyCommand: string
-}
-
-function makeApplyCommand(migrationId: string): string {
-  // The shipped helper invocation an operator can copy-paste. The
-  // exact `psql` invocation will depend on how they've configured
-  // their credentials (TIGERDATA_CREDENTIALS_FILE, DATABASE_URL,
-  // etc.); we surface the file path and leave the connection string
-  // to the operator.
-  return `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f helios/src/server/db/migrations/${migrationId}.sql`
 }
 
 async function columnExists(db: Queryable, tableName: string, columnName: string): Promise<boolean> {
@@ -1642,7 +1632,6 @@ export async function getPendingMigrations(db: Queryable): Promise<PendingMigrat
           pending.push({
             migrationId: sentinel.migrationId,
             label: sentinel.label,
-            applyCommand: makeApplyCommand(sentinel.migrationId),
           })
         }
       }
