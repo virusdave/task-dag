@@ -37,6 +37,14 @@ _xrepo_trim() {
     printf '%s' "$s"
 }
 
+# Helper: return 0 iff the file's last byte is a newline (empty file: false).
+# Used to preserve an issue body's trailing-newline state byte-for-byte when
+# splicing/appending the delegated_to block.
+_xrepo_file_ends_with_newline() {
+    [ -s "$1" ] || return 1
+    [ -z "$(tail -c1 "$1")" ]
+}
+
 # Helper: assert a command is available (gh, jq, etc.).
 _xrepo_need_cmd() {
     local c="$1"
@@ -339,118 +347,226 @@ cmd_delegate() {
     _xrepo_log "pushed ${delegated_ref}"
 }
 
-# Helper: idempotently update/insert the ```yaml ... delegated_to: ... ``` block.
+# Helper: parse ONE legacy python-rendered `delegated_to:` YAML block body
+# (read on stdin) into a compact JSON array of {repo,issue[,note]} objects.
+#
+# This is a ONE-TIME compatibility reader for the EXACT shape the old
+# embedded-python renderer produced:
+#     delegated_to:
+#       - repo: owner/repo
+#         issue: 123
+#         note: optional text
+# It is intentionally strict — it fails closed (rc 3) on anything that is
+# not that exact shape — because the ONLY writer of this block is
+# `_xrepo_upsert_delegated_block`, which after the first update rewrites the
+# block into the canonical jq-rendered JSON form. Each entry is assembled
+# with `jq` (never hand-built), so an arbitrary `note` cannot inject JSON.
+_xrepo_legacy_delegated_to_json() {
+    local line started=0
+    local cur_seen=0 cur_repo="" cur_issue="" cur_note=""
+    local seen_repo=0 seen_issue=0 seen_note=0
+    local -a objs=()
+    # Emit the current entry (if one has started). Fails closed (rc 3) on a
+    # started-but-incomplete entry so a corrupt legacy block is never
+    # silently truncated: `repo` is mandatory and `issue` must be a decimal.
+    _xrepo_ldj_flush() {
+        [ "$cur_seen" -eq 1 ] || return 0
+        [ "$seen_repo" -eq 1 ] || return 3
+        [[ "$cur_issue" =~ ^(0|[1-9][0-9]*)$ ]] || return 3
+        local obj
+        if [ "$seen_note" -eq 1 ]; then
+            obj=$(jq -nc --arg r "$cur_repo" --arg i "$cur_issue" --arg n "$cur_note" \
+                '{repo:$r, issue:($i|tonumber), note:$n}') || return 3
+        else
+            obj=$(jq -nc --arg r "$cur_repo" --arg i "$cur_issue" \
+                '{repo:$r, issue:($i|tonumber)}') || return 3
+        fi
+        objs+=("$obj")
+    }
+    # Parse one `key: value` field into the current entry. Rejects unknown
+    # keys and duplicate keys within one entry (fail closed).
+    _xrepo_ldj_kv() {
+        local kv="$1" k v
+        case "$kv" in
+            *:*) k="${kv%%:*}"; v="${kv#*:}" ;;
+            *) return 3 ;;
+        esac
+        k="$(_xrepo_trim "$k")"; v="$(_xrepo_trim "$v")"
+        case "$k" in
+            repo)  [ "$seen_repo"  -eq 0 ] || return 3; cur_repo="$v";  seen_repo=1 ;;
+            issue) [ "$seen_issue" -eq 0 ] || return 3; cur_issue="$v"; seen_issue=1 ;;
+            note)  [ "$seen_note"  -eq 0 ] || return 3; cur_note="$v";  seen_note=1 ;;
+            *) return 3 ;;
+        esac
+        cur_seen=1
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$started" -eq 0 ]; then
+            [ "$(_xrepo_trim "$line")" = "delegated_to:" ] && started=1
+            continue
+        fi
+        [ -n "$(_xrepo_trim "$line")" ] || continue
+        case "$line" in
+            "  - "*)
+                _xrepo_ldj_flush || return 3
+                cur_seen=0; cur_repo=""; cur_issue=""; cur_note=""
+                seen_repo=0; seen_issue=0; seen_note=0
+                _xrepo_ldj_kv "$(_xrepo_trim "${line#"  - "}")" || return 3
+                ;;
+            "    "*)
+                # a sub-field must belong to an already-started list entry
+                [ "$cur_seen" -eq 1 ] || return 3
+                _xrepo_ldj_kv "$(_xrepo_trim "$line")" || return 3
+                ;;
+            *)
+                return 3
+                ;;
+        esac
+    done
+    _xrepo_ldj_flush || return 3
+    [ "$started" -eq 1 ] || return 3
+    if [ "${#objs[@]}" -eq 0 ]; then
+        printf '[]'
+    else
+        printf '%s\n' "${objs[@]}" | jq -sc '.'
+    fi
+}
+
+# Helper: idempotently update/insert the ```yaml ... delegated_to ... ```
+# block that lists an epic's cross-repo delegated children.
+#
+# The block payload is stored as JSON *inside* the ```yaml fence — JSON is a
+# strict subset of YAML 1.2, so the fence stays labelled `yaml` and remains a
+# valid parse, while jq (already required by `delegate`) does all parsing,
+# upserting, sorting and rendering. This is the ONLY reader/writer of the
+# block, so its internal byte-layout is not contractual — only that it is
+# deterministic and a valid parse. The issue body OUTSIDE the fence is
+# preserved byte-for-byte. A one-time compatibility path
+# (`_xrepo_legacy_delegated_to_json`) reads the old python-rendered YAML
+# shape so existing issue bodies keep their entries; the first update
+# rewrites the block into the canonical jq JSON form.
+#
+# An arbitrary `note` (newlines, colons, quotes, backslashes, or a line that
+# looks like `  - repo: evil`) cannot inject a new entry or a fake fence: it
+# is stored as a JSON string, and jq escapes newlines to \n on output, so a
+# note can never emit a line that is a bare ``` fence or a legacy entry line.
 #
 # Args: input-body-file output-body-file repo issue note
 _xrepo_upsert_delegated_block() {
     local in="$1" out="$2" repo="$3" issue="$4" note="$5"
 
-    _xrepo_need_cmd python3 || return 2
+    _xrepo_need_cmd jq || return 2
 
-    DELEGATE_REPO="$repo" \
-    DELEGATE_ISSUE="$issue" \
-    DELEGATE_NOTE="$note" \
-    python3 - "$in" "$out" <<'PY'
-import os, re, sys
+    # Locate the first ```yaml ... ``` fenced block whose content mentions
+    # delegated_to. This is text-region location (find fence line numbers),
+    # not YAML parsing. awk reads a file (no upstream pipe), so an early
+    # `exit` is safe here (cannot SIGPIPE a producer). An unclosed yaml
+    # fence that already contains delegated_to is a corrupt body: awk exits
+    # non-zero so we fail closed rather than append a second (split-brain)
+    # block. `found` is set before the successful exit so the END rule does
+    # not misfire after that exit.
+    local locinfo openln="" closeln=""
+    if ! locinfo="$(awk '
+        BEGIN { open = 0; found = 0 }
+        {
+            if (open == 0) {
+                if ($0 ~ /^```yaml[[:space:]]*$/) { open = NR; has = 0 }
+            } else if ($0 ~ /^```[[:space:]]*$/) {
+                if (has) { print open, NR; found = 1; exit }
+                open = 0
+            } else if (index($0, "delegated_to") > 0) {
+                has = 1
+            }
+        }
+        END { if (!found && open != 0 && has) exit 3 }
+    ' "$in")"; then
+        _xrepo_die "delegated_to: unclosed yaml fence containing delegated_to"
+        return 2
+    fi
 
-in_path, out_path = sys.argv[1], sys.argv[2]
-repo  = os.environ["DELEGATE_REPO"]
-issue = int(os.environ["DELEGATE_ISSUE"])
-note  = os.environ.get("DELEGATE_NOTE", "") or None
+    # Compute the entries JSON array from the existing block (if any).
+    local entries_json="[]"
+    if [ -n "$locinfo" ]; then
+        openln="${locinfo%% *}"
+        closeln="${locinfo##* }"
+        local inner
+        inner="$(sed -n "$((openln + 1)),$((closeln - 1))p" "$in")"
+        # New (JSON) form: a JSON object with a .delegated_to array.
+        if ! entries_json="$(printf '%s\n' "$inner" | jq -c '
+                if type == "object" and (.delegated_to | type == "array")
+                then .delegated_to else empty end
+            ' 2>/dev/null)" || [ -z "$entries_json" ]; then
+            # Legacy (python-rendered YAML) form: one-time compat read.
+            entries_json="$(printf '%s\n' "$inner" | _xrepo_legacy_delegated_to_json)" || {
+                _xrepo_die "delegated_to: cannot parse existing block"
+                return 2
+            }
+        fi
+    fi
 
-with open(in_path, "r", encoding="utf-8") as f:
-    body = f.read()
+    # Upsert (repo,issue), drop any stale duplicate, sort by (repo,issue),
+    # omit an empty note, and render deterministically. Entry field types are
+    # validated so a malformed pre-existing entry fails loudly rather than
+    # sorting mixed types. `issue` is passed as a string and normalised via
+    # tonumber so a non-canonical decimal (e.g. 001) is accepted like the old
+    # python int() and rendered canonically.
+    local block_payload
+    block_payload="$(jq -n \
+        --argjson entries "$entries_json" \
+        --arg repo "$repo" \
+        --arg issue "$issue" \
+        --arg note "$note" '
+        ($entries
+            | map(
+                if (.repo | type) != "string" then error("non-string repo") else . end
+                | if (.issue | type) != "number" then error("non-number issue") else . end
+                | if (has("note")) and ((.note | type) != "string") then error("non-string note") else . end
+              )
+            | map(select(.repo != $repo or .issue != ($issue | tonumber)))
+        )
+        + [ {repo: $repo, issue: ($issue | tonumber)}
+            + (if $note == "" then {} else {note: $note} end) ]
+        | sort_by(.repo, .issue)
+        | {delegated_to: .}
+    ')" || {
+        _xrepo_die "delegated_to: failed to render block"
+        return 2
+    }
 
-# Find an existing ```yaml ... delegated_to: ... ``` block.
-block_re = re.compile(
-    r"(?ms)^```yaml\s*\n(.*?delegated_to:.*?)\n```\s*$"
-)
-m = block_re.search(body)
+    local rendered_block
+    rendered_block="$(printf '```yaml\n%s\n```' "$block_payload")"
 
-entries = []  # list of (repo, issue, note)
-
-def parse_block(text):
-    """Very small bespoke parser for our exact schema. Tolerant of
-    blank lines and trailing whitespace; rejects anything else."""
-    out = []
-    cur = {}
-    lines = [ln.rstrip() for ln in text.splitlines()]
-    # skip up to and including the "delegated_to:" line
-    i = 0
-    while i < len(lines) and lines[i].strip() != "delegated_to:":
-        i += 1
-    i += 1
-    for ln in lines[i:]:
-        if not ln.strip():
-            continue
-        if ln.startswith("  - "):
-            if cur:
-                out.append(cur)
-                cur = {}
-            kv = ln[4:].strip()
-            if ":" not in kv:
-                raise SystemExit(f"malformed delegated_to entry: {ln!r}")
-            k, v = kv.split(":", 1)
-            cur[k.strip()] = v.strip()
-        elif ln.startswith("    "):
-            kv = ln.strip()
-            if ":" not in kv:
-                raise SystemExit(f"malformed delegated_to subline: {ln!r}")
-            k, v = kv.split(":", 1)
-            cur[k.strip()] = v.strip()
-        else:
-            raise SystemExit(f"unexpected line in delegated_to block: {ln!r}")
-    if cur:
-        out.append(cur)
-    return out
-
-if m:
-    parsed = parse_block(m.group(1))
-    for e in parsed:
-        r = e.get("repo", "").strip()
-        try:
-            n = int(e.get("issue", "").strip())
-        except ValueError:
-            raise SystemExit(f"non-integer issue in delegated_to entry: {e!r}")
-        nt = e.get("note")
-        entries.append((r, n, nt))
-
-# Upsert
-found = False
-for idx, (r, n, nt) in enumerate(entries):
-    if r == repo and n == issue:
-        entries[idx] = (r, n, note)
-        found = True
-        break
-if not found:
-    entries.append((repo, issue, note))
-
-# Sort by repo, then issue.
-entries.sort(key=lambda x: (x[0], x[1]))
-
-# Render
-def render(es):
-    lines = ["```yaml", "delegated_to:"]
-    for r, n, nt in es:
-        lines.append(f"  - repo: {r}")
-        lines.append(f"    issue: {n}")
-        if nt:
-            lines.append(f"    note: {nt}")
-    lines.append("```")
-    return "\n".join(lines)
-
-new_block = render(entries)
-
-if m:
-    new_body = body[:m.start()] + new_block + body[m.end():]
-else:
-    # Append two-newline-separated to the end of the body.
-    sep = "" if body.endswith("\n") else "\n"
-    new_body = body + sep + "\n" + new_block + "\n"
-
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write(new_body)
-PY
+    if [ -n "$locinfo" ]; then
+        # Splice the new block in place of the old one, preserving the body
+        # outside the fence byte-for-byte (stream with head/tail, never via
+        # command substitution which would strip trailing newlines).
+        local total_lines
+        total_lines="$(awk 'END { print NR }' "$in")"
+        {
+            if [ "$openln" -gt 1 ]; then
+                head -n "$((openln - 1))" "$in"
+            fi
+            printf '%s' "$rendered_block"
+            if [ "$closeln" -lt "$total_lines" ]; then
+                printf '\n'
+                tail -n +"$((closeln + 1))" "$in"
+            elif _xrepo_file_ends_with_newline "$in"; then
+                printf '\n'
+            fi
+        } > "$out"
+    else
+        # No existing block: append after the body, matching the historical
+        # layout (a blank line, then the block, then a trailing newline).
+        {
+            cat "$in"
+            if _xrepo_file_ends_with_newline "$in"; then
+                printf '\n'
+            else
+                printf '\n\n'
+            fi
+            printf '%s\n' "$rendered_block"
+        } > "$out"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────
