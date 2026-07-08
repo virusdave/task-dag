@@ -58,3 +58,30 @@ describe('buildPrimarySidebarNodes — agent-waste review queue nav entry (#57)'
     expect(findByNavKey(nodes, 'config.agents.waste-review')).toBeUndefined()
   })
 })
+
+// Admin-gated navbar entry for the pending-migrations "Apply Now" page
+// (automation#62, leaf 7). Same discoverability-not-access-control rule as
+// the agent-waste queue: the page + both server APIs are independently
+// admin-gated, so the nav entry must appear ONLY for admins.
+describe('buildPrimarySidebarNodes — pending-migrations nav entry (#62)', () => {
+  it('shows the admin-gated Pending migrations leaf for an admin', () => {
+    const nodes = buildPrimarySidebarNodes({}, sessionForRole('admin'))
+    const leaf = findByNavKey(nodes, 'config.database.pending-migrations')
+    expect(leaf).toBeDefined()
+    expect(leaf?.kind).toBe('leaf')
+    expect(leaf && leaf.kind === 'leaf' ? leaf.to : undefined).toBe('/config/pending-migrations')
+    // Nested under a Database group inside Admin & Config.
+    expect(findByNavKey(nodes, 'config.database')).toBeDefined()
+  })
+
+  it('hides the leaf for a non-admin (viewer)', () => {
+    const nodes = buildPrimarySidebarNodes({}, sessionForRole('viewer'))
+    expect(findByNavKey(nodes, 'config.database.pending-migrations')).toBeUndefined()
+    expect(findByNavKey(nodes, 'config.database')).toBeUndefined()
+  })
+
+  it('hides the leaf while the session is still loading (null)', () => {
+    const nodes = buildPrimarySidebarNodes({}, null)
+    expect(findByNavKey(nodes, 'config.database.pending-migrations')).toBeUndefined()
+  })
+})

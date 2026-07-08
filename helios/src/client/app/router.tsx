@@ -58,6 +58,7 @@ import {
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
 import { AgentWasteReviewPage } from '../routes/config/AgentWasteReviewPage.js'
+import { PendingMigrationsPage } from '../routes/config/PendingMigrationsPage.js'
 import {
   ConfigBedrockModelsPage,
   configBedrockModelsLoader,
@@ -575,6 +576,15 @@ export const router = createBrowserRouter([
         // queue in the primary sidebar (admin-gated, see AppShell.tsx).
         element: <AgentWasteReviewPage />,
         path: 'config/agent-waste',
+      },
+      {
+        // Admin-gated pending-migrations "Apply Now" page (automation#62,
+        // leaf 7). Route-level admin guard lives in the page; both server
+        // APIs are independently admin-gated. Reached via Admin & Config →
+        // Database → Pending migrations in the primary sidebar (admin-gated,
+        // see AppShell.tsx).
+        element: <PendingMigrationsPage />,
+        path: 'config/pending-migrations',
       },
       {
         element: <SweedAuthLogPage />,

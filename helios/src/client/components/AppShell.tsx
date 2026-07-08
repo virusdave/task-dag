@@ -390,6 +390,23 @@ export function buildPrimarySidebarNodes(
         },
       ],
     })
+    adminConfigChildren.push({
+      // Database — admin surfaces over the Helios schema. Today the
+      // worker-driven pending-migration "Apply Now" page (automation#62);
+      // grouped so future DB-admin surfaces have a discoverable home. The
+      // page + both its server APIs are independently admin-gated.
+      kind: 'branch',
+      navKey: 'config.database',
+      label: 'Database',
+      children: [
+        {
+          kind: 'leaf',
+          navKey: 'config.database.pending-migrations',
+          label: 'Pending migrations',
+          to: buildHeliosModulePath('config', 'pending-migrations'),
+        },
+      ],
+    })
   }
   const adminConfig: TreeNavNode = {
     kind: 'branch',
