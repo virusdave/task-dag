@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# task-dag pre-push guard (canonical, repo-agnostic).
+#
+# Refuses a push that lands PLAIN implementation work on master while the
+# current prepared worker STILL HOLDS an unresolved task-dag claim in this
+# repo — i.e. it skipped 'task-dag complete'. Canon requires the finalize
+# order commit -> git fetch -> rebase origin/master -> 'task-dag complete'
+# (which builds the completion MERGE locally, linking the task by git
+# parentage) -> push. Pushing the implementation commit first races another
+# landing commit and forces a 'complete-historical' recovery that encodes the
+# task<->commit link only in a message trailer, losing the queryable git
+# parentage (top-level rules/WORKFLOW.md 'Finalize' / 'complete-historical').
+#
+# This hook DELEGATES the check to the canonical 'task-dag guard-pre-push' so
+# the claim/shape knowledge lives in exactly one place. It is IDENTICAL across
+# every cohort repo — copy it verbatim into each repo's hooks dir.
+#
+# Enable (per clone; git will not auto-activate a committed hooks dir):
+#     git config core.hooksPath .githooks
+#
+# It fails OPEN (allows the push, with a loud stderr note) whenever it cannot
+# evaluate confidently — no TASK_DAG_CLAIMER, no CLI, unreachable objects — so
+# it never bricks ordinary human/maintenance pushes. Do NOT bypass a real
+# rejection with 'git push --no-verify'.
+set -euo pipefail
+
+# Locate the canonical CLI without re-encoding any of its logic:
+#   1. explicit override (TASK_DAG_BIN)
+#   2. task-dag on PATH
+#   3. scripts/task-dag inside this repo (the task-dag repo itself)
+td="${TASK_DAG_BIN:-}"
+if [ -z "$td" ]; then
+  if command -v task-dag >/dev/null 2>&1; then
+    td="$(command -v task-dag)"
+  else
+    root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$root" ] && [ -x "$root/scripts/task-dag" ]; then
+      td="$root/scripts/task-dag"
+    fi
+  fi
+fi
+
+if [ -z "$td" ]; then
+  # Fail OPEN (with a loud note) when the CLI is unavailable: this is a
+  # dev-side convenience gate, and bricking every push in a CLI-less checkout
+  # would just push people to --no-verify. Set TASK_DAG_BIN to enforce.
+  echo "[pre-push] task-dag CLI not found; skipping the task-dag complete-before-push guard (set TASK_DAG_BIN to enforce)." >&2
+  exit 0
+fi
+
+# Capability probe — fail OPEN on an older CLI. This hook ships to every cohort
+# repo, but a clone (or a cached TASK_DAG_BIN) may still have a task-dag that
+# predates 'guard-pre-push'. Bricking pushes there would just drive people to
+# --no-verify, so skip rather than error. 'guard-pre-push --help' exits 0 on a
+# CLI that supports it and non-zero ("Unknown command") on one that doesn't,
+# and it reads no stdin.
+if ! "$td" guard-pre-push --help >/dev/null 2>&1; then
+  echo "[pre-push] task-dag CLI ($td) has no 'guard-pre-push'; skipping the complete-before-push guard (upgrade task-dag to enforce)." >&2
+  exit 0
+fi
+
+# Git passes '<remote-name> <remote-url>' as args and the ref updates on stdin;
+# forward both verbatim.
+exec "$td" guard-pre-push "$@"

@@ -136,13 +136,23 @@ get_dep_parents() {
 # on the very first line — e.g. HEAD's own 2nd parent) would be reported
 # NOT completed intermittently (a real dispatch/epic-close correctness
 # bug). Scanning the full stream keeps the producer's exit status 0.
-is_task_completed() {
-    local task_sha="$1"
-    git log HEAD --format='%P' 2>/dev/null |
+# Helper: is <task_sha> completed *as seen from an arbitrary tip*? Same exact
+# whole-token parent-field match as is_task_completed, but against a caller-
+# supplied commit instead of HEAD. guard-pre-push needs this to ask "is this
+# task already linked in the history I'm about to PUSH (local_sha)?" without
+# depending on HEAD (a pre-push hook may push an explicit SHA, not HEAD).
+task_is_completed_at_commit() {
+    local tip="$1" task_sha="$2"
+    git log "$tip" --format='%P' 2>/dev/null |
         awk -v sha="$task_sha" '
             { for (i = 1; i <= NF; i++) if ($i == sha) found = 1 }
             END { exit found ? 0 : 1 }
         '
+}
+
+is_task_completed() {
+    local task_sha="$1"
+    task_is_completed_at_commit HEAD "$task_sha"
 }
 
 # Helper: true iff every dependency parent of <sha> is completed, i.e.
@@ -175,6 +185,49 @@ is_task_commit() {
     local sha="$1" tree
     tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || return 1
     [ "$tree" = "$EMPTY_TREE" ]
+}
+
+# Helper: true iff <subject> uses a Conventional-Commits `type(scope):` prefix,
+# which canon forbids (rules/WORKFLOW.md 'Commit messages' — subjects must be a
+# plain, capitalized, imperative sentence). Single source of truth for the
+# match, shared by the commit-msg guard AND the complete-time backstop. The
+# pattern is deliberately narrow (high-signal only): a leading lowercase type,
+# optional `(scope)` and/or `!`, immediately followed by `: `. So capitalized
+# subjects, `fixup!`/`squash!` (no colon), git `Revert "..."`/`Merge ...`
+# subjects, and `word://…` (no space after the colon) never match.
+subject_is_conventional_commits() {
+    grep -qE '^[a-z][a-z0-9-]*(\([^)]+\))?!?: ' <<<"$1"
+}
+
+# Helper: true iff <sha> is a SANCTIONED task-dag "tip" shape that legitimately
+# lands on master WITHOUT being plain implementation work — i.e. a shape the
+# tooling itself mints as the push tip:
+#   • a completion/link MERGE: has a 2nd parent that is a task commit
+#     (empty-tree) and whose own tree equals its first parent's tree (adds only
+#     the parent edge, never file changes) — this covers `complete`,
+#     `complete --leaves`, and `complete-historical` link commits;
+#   • an epic-close commit: carries a `Closes-Epic:` trailer and is tree-equal
+#     to its first parent.
+# Used by guard-pre-push to allow a properly-completed push through. Never keys
+# off HEAD — the caller passes the exact commit being pushed.
+is_sanctioned_tip_commit() {
+    local sha="$1" first second first_tree self_tree
+    self_tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || return 1
+    first=$(get_first_parent "$sha" 2>/dev/null || true)
+    [ -n "$first" ] || return 1
+    first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null) || return 1
+    # Completion/link merge: 2nd parent is a task commit, tree-equal to parent.
+    second=$(get_parents "$sha" 2>/dev/null | sed -n '2p')
+    if [ -n "$second" ] && [ "$self_tree" = "$first_tree" ] && is_task_commit "$second"; then
+        return 0
+    fi
+    # Epic-close commit: Closes-Epic trailer, tree-equal to first parent.
+    if [ "$self_tree" = "$first_tree" ] \
+       && git log -1 --format='%B' "$sha" 2>/dev/null \
+            | grep -qE '^Closes-Epic:'; then
+        return 0
+    fi
+    return 1
 }
 
 # Helper: walk the FIRST-parent (breakdown/structural) lineage of <sha>
@@ -3880,6 +3933,34 @@ EOF
         return 1
     fi
 
+    # ── Commit-subject style backstop (canon rules/WORKFLOW.md) ──────
+    # The commit-msg hook is the primary gate, but it only runs where the
+    # hook is installed and can be bypassed. `complete` is the last reliable
+    # point to stop a Conventional-Commits subject from being LINKED as task
+    # work (the completion merge preserves the impl commit's message). Block
+    # live completion here — historical linking (complete-historical) only
+    # WARNS, since that work predates the rule and must not be stranded.
+    local impl_subject; impl_subject=$(git show -s --format='%s' "$commit_sha")
+    if subject_is_conventional_commits "$impl_subject"; then
+        printf '%b' "${RED}" >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        echo " task-dag: refusing to complete against a Conventional-Commits subject" >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        echo " Impl commit: ${commit_sha:0:12}" >&2
+        echo " Subject:     $impl_subject" >&2
+        echo "" >&2
+        echo " Canon (rules/WORKFLOW.md 'Commit messages') requires a plain," >&2
+        echo " capitalized, imperative subject — never a type(scope): prefix." >&2
+        echo "   Bad:  feat(helios): add report export" >&2
+        echo "   Good: Add report export for Helios" >&2
+        echo "" >&2
+        echo " Amend the implementation commit's subject, then re-run complete." >&2
+        echo " (Use complete-historical only for already-landed historical work.)" >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        printf '%b' "${RESET}" >&2
+        return 1
+    fi
+
     local old_message=$(git log -1 --format='%B' "$commit_sha")
     
     # Warn if commit message looks like a tombstone (starts with tombstone keyword)
@@ -4141,6 +4222,33 @@ cmd_complete_batch() {
             fi
         done
     done
+
+    # ── commit-subject style backstop for EVERY impl before mutation ──
+    # Same canon rule as single-leaf complete (rules/WORKFLOW.md). Report
+    # ALL offending impl subjects up front so the operator fixes them in one
+    # pass, and refuse before any graft/link side effect.
+    local -a _bad_subjects=()
+    for (( i=0; i<n; i++ )); do
+        local _s; _s=$(git show -s --format='%s' "${impl_shas[i]}")
+        if subject_is_conventional_commits "$_s"; then
+            _bad_subjects+=("${impl_shas[i]:0:12}  $_s")
+        fi
+    done
+    if [ ${#_bad_subjects[@]} -gt 0 ]; then
+        printf '%b' "${RED}" >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        echo " task-dag: refusing --leaves complete — Conventional-Commits subject(s)" >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        local _b
+        for _b in "${_bad_subjects[@]}"; do echo "   • $_b" >&2; done
+        echo "" >&2
+        echo " Canon (rules/WORKFLOW.md 'Commit messages') requires a plain," >&2
+        echo " capitalized, imperative subject — never a type(scope): prefix." >&2
+        echo " Amend the offending implementation commit(s) and re-run." >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        printf '%b' "${RESET}" >&2
+        return 1
+    fi
 
     # ── claim-ownership guard for EVERY leaf before any mutation ──────
     local -a verified_active=()
@@ -4462,6 +4570,18 @@ EOF
     if [ "$hist_tree" = "$hist_base_tree" ]; then
         echo "Error: --commit=$hist_sha introduces no tree change vs its first parent; it is not a real historical implementation commit." >&2
         return 1
+    fi
+
+    # ── Commit-subject style: WARN only (do not block) ────────────────
+    # Historical work predates / bypassed the commit-msg guard; refusing to
+    # link it would strand real landed work. Flag it so the operator knows
+    # the subject is off-canon, but proceed.
+    local hist_subject; hist_subject=$(git show -s --format='%s' "$hist_sha")
+    if subject_is_conventional_commits "$hist_subject"; then
+        echo "${YELLOW}WARNING: historical commit ${hist_sha:0:12} has a Conventional-Commits subject:${RESET}" >&2
+        echo "  $hist_subject" >&2
+        echo "  Canon (rules/WORKFLOW.md) wants a plain, capitalized, imperative subject." >&2
+        echo "  Linking it anyway (historical work is not rewritten)." >&2
     fi
 
     # ── Epic-root guard (same as complete): never link an undecomposed
@@ -5729,6 +5849,7 @@ main() {
         issue-update) cmd_issue_update "$@" ;;
         check-workflow) cmd_check_workflow "$@" ;;
         guard-commit-message) cmd_guard_message "$@" ;;
+        guard-pre-push) cmd_guard_pre_push "$@" ;;
         delegate) cmd_delegate "$@" ;;
         ingest-comment) cmd_ingest_comment "$@" ;;
         ingest-completion) cmd_ingest_completion "$@" ;;
@@ -5864,6 +5985,175 @@ EOF
 # Deliberately NOT flagged: cross-repo trailers a normal implementation
 # commit legitimately carries by hand — Satisfies:, Phase:,
 # Materialise-Child-Epic:, Amp-Thread-ID:, Co-authored-by:.
+
+# ─────────────────────────────────────────────────────────────────────
+# guard-pre-push: the body of a repo `pre-push` hook. Enforces exactly ONE
+# invariant — do not push plain implementation work to master while you
+# still hold an UNRESOLVED task-dag claim in THIS repo (i.e. you skipped
+# `task-dag complete`, the footgun behind the lost-parentage race the whole
+# top-level#45 fix targets). Everything else passes:
+#   • cross-repo `Satisfies:`-linked plain commits (no active claim here);
+#   • ordinary maintenance pushes (no active claim here);
+#   • properly-completed pushes (tip is a completion/close shape, and/or the
+#     claim's active ref is gone / the task is already linked in the pushed
+#     history).
+# Fail-OPEN, like the commit-msg hook: this is a dev-side convenience gate,
+# not an adversary fence. Anything we cannot evaluate with confidence (no
+# claimer identity, unreachable objects, shallow clones, non-origin remote)
+# ALLOWS the push with a loud stderr note.
+# ─────────────────────────────────────────────────────────────────────
+
+# Helper: does the git range contain >=1 REAL implementation commit (not an
+# empty-tree task/control commit, not a completion/link/close shape)?
+range_has_impl_commit() {
+    local range="$1" c
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        is_task_commit "$c" && continue
+        is_sanctioned_tip_commit "$c" && continue
+        return 0
+    done < <(git rev-list "$range" 2>/dev/null)
+    return 1
+}
+
+# Helper: print the short-shas of active claims OWNED by (claimer,host[,pid])
+# whose task is NOT already linked in <tip>'s history (space-separated). An
+# owned+unresolved claim means "you hold this task in flight and haven't
+# completed it as of the commit you're pushing".
+owned_unresolved_active_claims() {
+    local claimer="$1" host="$2" tip="$3"
+    local sha ref msg cl chost cpid tsk out=""
+    while IFS=' ' read -r sha ref; do
+        [ -n "$ref" ] || continue
+        msg=$(git log -1 --format='%B' "$sha" 2>/dev/null) || continue
+        cl=$(extract_field "$msg" "Claimer")
+        chost=$(extract_field "$msg" "Claimer-Host")
+        [ "$cl" = "$claimer" ] || continue
+        [ "$chost" = "$host" ] || continue
+        # Optional PID narrowing (only when BOTH sides present): a different
+        # pid means a different session's claim, not mine.
+        if [ -n "${TASK_DAG_CLAIMER_PID:-}" ]; then
+            cpid=$(extract_field "$msg" "Claimer-PID")
+            if [ -n "$cpid" ] && [ "$cpid" != "$TASK_DAG_CLAIMER_PID" ]; then
+                continue
+            fi
+        fi
+        tsk=$(get_first_parent "$sha" 2>/dev/null || true)
+        [ -n "$tsk" ] || continue
+        task_is_completed_at_commit "$tip" "$tsk" && continue
+        out+="${ref##refs/heads/tasks/active/} "
+    done < <(git for-each-ref refs/heads/tasks/active/ --format='%(objectname) %(refname)')
+    printf '%s' "$out"
+}
+
+cmd_guard_pre_push() {
+    if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+        cat <<EOF
+Usage: task-dag guard-pre-push [<remote-name> <remote-url>]
+
+Body of a repo 'pre-push' hook. Git invokes the hook as
+'pre-push <remote-name> <remote-url>' with one line per ref update on stdin:
+  <local-ref> SP <local-sha> SP <remote-ref> SP <remote-sha>
+
+Refuses (exit 1) a push that lands PLAIN implementation work on master while
+you still hold an unresolved task-dag claim in this repo — i.e. you skipped
+'task-dag complete'. All other pushes pass (cross-repo Satisfies: work,
+maintenance commits, and properly-completed pushes). Fails OPEN (exit 0 +
+stderr note) when it cannot evaluate confidently. Wire it up as:
+
+    exec task-dag guard-pre-push "\$@"
+
+Exit codes: 0 = allow, 1 = rejected (complete before pushing).
+EOF
+        return 0
+    fi
+
+    local remote_name="${1:-}"
+
+    # Non-origin remote: task refs are origin-scoped, so we can't reason about
+    # claims. Allow with a note.
+    if [ -n "$remote_name" ] && [ "$remote_name" != "origin" ]; then
+        echo "[pre-push] remote '$remote_name' is not origin; skipping the task-dag complete-before-push guard." >&2
+        return 0
+    fi
+
+    # Identity: require an explicit claimer (prepared-worker context). No
+    # \$USER fallback — that would over-match ordinary human/maintenance pushes.
+    local claimer="${TASK_DAG_CLAIMER:-}"
+    if [ -z "$claimer" ]; then
+        echo "[pre-push] TASK_DAG_CLAIMER unset; skipping the task-dag complete-before-push guard." >&2
+        return 0
+    fi
+    local claimer_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+
+    local blocked=0
+    local local_ref local_sha remote_ref remote_sha
+    while read -r local_ref local_sha remote_ref remote_sha; do
+        [ -n "${local_ref:-}" ] || continue
+        [ "$remote_ref" = "refs/heads/master" ] || continue
+        # master deletion (local_sha all zeros) — not our concern.
+        case "$local_sha" in *[!0]*) : ;; *) continue ;; esac
+
+        local local_commit
+        local_commit=$(git rev-parse --verify "${local_sha}^{commit}" 2>/dev/null) || {
+            echo "[pre-push] cannot resolve pushed object ${local_sha}; skipping guard for this ref." >&2
+            continue
+        }
+
+        # First push of master (remote_sha all zeros): don't scan all history.
+        local remote_commit
+        case "$remote_sha" in
+            *[!0]*)
+                remote_commit=$(git rev-parse --verify "${remote_sha}^{commit}" 2>/dev/null) || {
+                    echo "[pre-push] remote base ${remote_sha} unavailable (shallow clone?); skipping guard." >&2
+                    continue
+                }
+                ;;
+            *)
+                echo "[pre-push] first push of master (no remote base); skipping complete-before-push guard." >&2
+                continue
+                ;;
+        esac
+
+        # Only care if the push actually adds real implementation work.
+        if ! range_has_impl_commit "${remote_commit}..${local_commit}"; then
+            continue
+        fi
+        # A properly-completed push: the tip is a completion/close shape.
+        if is_sanctioned_tip_commit "$local_commit"; then
+            continue
+        fi
+        # Plain-impl tip: only a violation if I hold an unresolved claim here.
+        local held
+        held=$(owned_unresolved_active_claims "$claimer" "$claimer_host" "$local_commit")
+        if [ -n "$held" ]; then
+            blocked=1
+            printf '%b' "${RED}" >&2
+            echo "════════════════════════════════════════════════════════════════════" >&2
+            echo " task-dag: refusing to push implementation work before 'task-dag complete'" >&2
+            echo "════════════════════════════════════════════════════════════════════" >&2
+            echo " You are pushing a plain implementation commit to master, but you still" >&2
+            echo " hold an unresolved task-dag claim in this repo:" >&2
+            echo "" >&2
+            local t
+            for t in $held; do echo "   • tasks/active/$t" >&2; done
+            echo "" >&2
+            echo " Canon finalize order (rules/WORKFLOW.md): commit → git fetch → rebase" >&2
+            echo " origin/master → 'task-dag complete <sha>' (builds the completion MERGE" >&2
+            echo " locally) → push. Pushing first races another landing commit and forces" >&2
+            echo " a 'complete-historical' recovery that encodes the task↔commit link only" >&2
+            echo " in a trailer, losing the queryable git parentage." >&2
+            echo "" >&2
+            echo " Run 'task-dag complete' for the task(s) above, then push again." >&2
+            echo " Do NOT bypass with 'git push --no-verify'." >&2
+            echo "════════════════════════════════════════════════════════════════════" >&2
+            printf '%b' "${RESET}" >&2
+        fi
+    done
+
+    [ "$blocked" -eq 0 ]
+}
+
 cmd_guard_message() {
     local msg_file="" from_stdin=false
     while [[ $# -gt 0 ]]; do
@@ -5936,7 +6226,7 @@ EOF
     # leading lowercase word (optionally `(scope)` and/or `!`) immediately
     # followed by `: `. Capitalized subjects, `fixup!`/`squash!` (no colon),
     # and `word://…` (no space after the colon) never match.
-    if grep -qE '^[a-z][a-z0-9-]*(\([^)]+\))?!?: ' <<<"$subject"; then
+    if subject_is_conventional_commits "$subject"; then
         printf '%b' "${RED}" >&2
         echo "════════════════════════════════════════════════════════════════════" >&2
         echo " task-dag: refusing a Conventional-Commits commit subject" >&2
