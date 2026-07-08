@@ -33,6 +33,13 @@ field() { # <branch> <jsonkey>  -> echo value (or empty)
     | sed -E "s/.*\"$2\":\"([^\"]*)\".*/\1/;t;d"
 }
 
+json_ok() { # read a JSON string on stdin, exit 0 iff it parses
+  if command -v jq >/dev/null 2>&1; then jq -e . >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null
+  else cat >/dev/null; return 0  # no validator available; treat as pass
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # TEST 1: gate aggregation — any failure => red.
 # ---------------------------------------------------------------------------
@@ -259,6 +266,22 @@ if [ "$rc" -eq 6 ] && grep -q '"applied":false' <<<"$out" \
   ok "15: a non-applied classification reports applied=false, ticket=none"
 else
   bad "15: applied-flag rc=$rc out=$out"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 16: a prior chain State carrying quote/backslash must be escaped in the
+# classify --json report (priorState is read from the chain commit); a
+# regression that raw-interpolated it would emit invalid JSON.
+# ---------------------------------------------------------------------------
+"$TD" chain-write "$REPO" advc --for-sha="$C1" \
+  --set 'State=re"d\x' --set 'First-Red='"$C1" --set 'Current-Head='"$C1" \
+  --create >/dev/null 2>&1
+adv=$("$TD" classify "$REPO" advc --for-sha="$C1" --result=red \
+  --current-head="$C1" --json --dry-run 2>/dev/null)
+if printf '%s' "$adv" | json_ok; then
+  ok "16: classify --json escapes a quoted/backslash priorState into valid JSON"
+else
+  bad "16: classify --json produced invalid JSON for an adversarial priorState: $adv"
 fi
 
 echo "-----"

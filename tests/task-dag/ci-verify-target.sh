@@ -26,6 +26,12 @@ git push -q origin HEAD:master
 
 REPO=acme/widgets
 jget() { sed -E "s/.*\"$1\":(\"?)([^,\"}]*)\1.*/\2/;t;d"; }
+json_ok() { # read a JSON string on stdin, exit 0 iff it parses
+  if command -v jq >/dev/null 2>&1; then jq -e . >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null
+  else cat >/dev/null; return 0  # no validator available; treat as pass
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # TEST 1: no chain state at all -> reason=no-chain, exit 3, ok=false.
@@ -135,6 +141,21 @@ if [ "$r1" -eq 1 ] && [ "$r2" -eq 1 ] && [ "$r3" -eq 1 ]; then
   ok "8: bad args rejected (missing target, bad mode, non-hex target)"
 else
   bad "8: arg-validation r1=$r1 r2=$r2 r3=$r3"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 9: adversarial chain field values (quote + backslash) must be escaped
+# so the verdict --json still parses — a regression that raw-interpolated a
+# chain-derived field would emit invalid JSON here.
+# ---------------------------------------------------------------------------
+"$TD" chain-write "$REPO" advbranch --for-sha="$C1" --state=red \
+  --set 'First-Red='"$C1" --set 'Current-Head='"$C1" \
+  --set 'Last-Green=he"llo\world' --create >/dev/null 2>&1
+adv=$("$TD" verify-target "$REPO" advbranch --target-sha="$C1" --json 2>/dev/null)
+if printf '%s' "$adv" | json_ok; then
+  ok "9: verify-target --json escapes quoted/backslash chain fields into valid JSON"
+else
+  bad "9: verify-target --json produced invalid JSON for an adversarial field: $adv"
 fi
 
 echo

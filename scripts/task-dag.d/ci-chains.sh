@@ -123,19 +123,6 @@ _cichain_remote_sha() {
     printf '%s' "$out" | awk '{print $1; exit}'
 }
 
-# Helper: escape a string for embedding inside a JSON double-quoted value.
-# Field values reach JSON via the generic `--set Field=Value`, so a quote,
-# backslash, or control char must not be able to emit invalid JSON.
-_cichain_jstr() {
-    local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\t'/\\t}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\n'/\\n}"
-    printf '%s' "$s"
-}
-
 # Helper: extract a single field's value from a chain-state commit message.
 _cichain_field() {
     local commit="$1" field="$2"
@@ -212,8 +199,8 @@ EOF
 
     if [ -z "$sha" ]; then
         if [ "$json" = true ]; then
-            printf '{"exists":false,"repo":"%s","branch":"%s","ref":"%s"}\n' \
-                "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")"
+            printf '{"exists":false,"repo":%s,"branch":%s,"ref":%s}\n' \
+                "$(json_escape "$repo")" "$(json_escape "$branch")" "$(json_escape "$ref")"
         else
             printf "${YELLOW}No CI chain state for %s@%s${RESET}\n" "$repo" "$branch" >&2
         fi
@@ -221,15 +208,15 @@ EOF
     fi
 
     if [ "$json" = true ]; then
-        printf '{"exists":true,"repo":"%s","branch":"%s","ref":"%s","commit":"%s"' \
-            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")" "$sha"
+        printf '{"exists":true,"repo":%s,"branch":%s,"ref":%s,"commit":%s' \
+            "$(json_escape "$repo")" "$(json_escape "$branch")" "$(json_escape "$ref")" "$(json_escape "$sha")"
         local f key
         for f in "${_CICHAIN_FIELDS[@]}"; do
             # JSON key: Current-Head -> currentHead
             key="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]' | sed -E 's/-([a-z])/\U\1/g')"
-            printf ',"%s":"%s"' "$key" "$(_cichain_jstr "$(_cichain_field "$sha" "$f")")"
+            printf ',"%s":%s' "$key" "$(json_escape "$(_cichain_field "$sha" "$f")")"
         done
-        printf ',"updatedAt":"%s"}\n' "$(_cichain_jstr "$(_cichain_field "$sha" Updated-At)")"
+        printf ',"updatedAt":%s}\n' "$(json_escape "$(_cichain_field "$sha" Updated-At)")"
     else
         printf "${BOLD}CI chain: %s@%s${RESET}\n" "$repo" "$branch"
         printf "  Ref:    %s\n" "$ref"
@@ -392,8 +379,8 @@ EOF
     # baseline means "expected absent".
     if [ "$have_expect" = true ] && [ "$old" != "$expect_old" ]; then
         if [ "$json" = true ]; then
-            printf '{"ok":false,"reason":"expect-mismatch","ref":"%s","expectedOld":"%s","actualOld":"%s"}\n' \
-                "$(_cichain_jstr "$ref")" "$(_cichain_jstr "$expect_old")" "$(_cichain_jstr "$old")"
+            printf '{"ok":false,"reason":"expect-mismatch","ref":%s,"expectedOld":%s,"actualOld":%s}\n' \
+                "$(json_escape "$ref")" "$(json_escape "$expect_old")" "$(json_escape "$old")"
         else
             printf "${YELLOW}Chain state for %s@%s moved since it was read (expected %s, found %s) — refusing CAS write.${RESET}\n" \
                 "$repo" "$branch" "${expect_old:-<absent>}" "${old:-<absent>}" >&2
@@ -421,7 +408,7 @@ EOF
 
     if [ "$do_create" = true ] && [ -n "$old" ]; then
         if [ "$json" = true ]; then
-            printf '{"ok":false,"reason":"exists","ref":"%s"}\n' "$(_cichain_jstr "$ref")"
+            printf '{"ok":false,"reason":"exists","ref":%s}\n' "$(json_escape "$ref")"
         else
             printf "${RED}Chain state already exists for %s@%s (--create refused).${RESET}\n" \
                 "$repo" "$branch" >&2
@@ -451,8 +438,8 @@ EOF
             if [ "$anc_rc" -eq 0 ]; then
                 # Proven stale: for_sha is an ancestor of the stored head.
                 if [ "$json" = true ]; then
-                    printf '{"ok":false,"reason":"stale","ref":"%s","forSha":"%s","storedHead":"%s"}\n' \
-                        "$(_cichain_jstr "$ref")" "$for_sha" "$(_cichain_jstr "$stored_head")"
+                    printf '{"ok":false,"reason":"stale","ref":%s,"forSha":%s,"storedHead":%s}\n' \
+                        "$(json_escape "$ref")" "$(json_escape "$for_sha")" "$(json_escape "$stored_head")"
                 else
                     printf "${YELLOW}Stale CI run: %s is superseded by stored Current-Head %s — refusing to write.${RESET}\n" \
                         "$for_sha" "$stored_head" >&2
@@ -467,8 +454,8 @@ EOF
                 # an older run clobbering newer state. The caller can deepen
                 # history and retry, or pass --allow-stale if it is certain.
                 if [ "$json" = true ]; then
-                    printf '{"ok":false,"reason":"stale-indeterminate","ref":"%s","forSha":"%s","storedHead":"%s"}\n' \
-                        "$(_cichain_jstr "$ref")" "$for_sha" "$(_cichain_jstr "$stored_head")"
+                    printf '{"ok":false,"reason":"stale-indeterminate","ref":%s,"forSha":%s,"storedHead":%s}\n' \
+                        "$(json_escape "$ref")" "$(json_escape "$for_sha")" "$(json_escape "$stored_head")"
                 else
                     printf "${RED}Cannot determine whether %s supersedes stored Current-Head %s (object missing locally) — refusing to write (fail-closed).${RESET}\n" \
                         "$for_sha" "$stored_head" >&2
@@ -522,8 +509,8 @@ Updated-At: $(_cichain_now)"
         local readback
         if ! readback="$(_cichain_remote_sha "$ref")"; then
             if [ "$json" = true ]; then
-                printf '{"ok":false,"reason":"not-confirmed","ref":"%s","commit":"%s"}\n' \
-                    "$(_cichain_jstr "$ref")" "$new_commit"
+                printf '{"ok":false,"reason":"not-confirmed","ref":%s,"commit":%s}\n' \
+                    "$(json_escape "$ref")" "$(json_escape "$new_commit")"
             else
                 printf "${YELLOW}Chain-write push for %s@%s succeeded but origin readback was unreachable; could not confirm.${RESET}\n" \
                     "$repo" "$branch" >&2
@@ -533,8 +520,8 @@ Updated-At: $(_cichain_now)"
         if [ "$readback" != "$new_commit" ]; then
             _cichain_fetch "$ref"
             if [ "$json" = true ]; then
-                printf '{"ok":false,"reason":"race-lost","ref":"%s","expected":"%s","actual":"%s"}\n' \
-                    "$(_cichain_jstr "$ref")" "$new_commit" "${readback:-}"
+                printf '{"ok":false,"reason":"race-lost","ref":%s,"expected":%s,"actual":%s}\n' \
+                    "$(json_escape "$ref")" "$(json_escape "$new_commit")" "$(json_escape "${readback:-}")"
             else
                 printf "${RED}✗ Chain-write push succeeded but origin readback shows %s (expected %s); another writer raced us.${RESET}\n" \
                     "${readback:-<missing>}" "$new_commit" >&2
@@ -547,8 +534,8 @@ Updated-At: $(_cichain_now)"
         git update-ref "$ref" "$new_commit" 2>/dev/null \
             || echo "Warning: origin updated but local mirror of $ref failed" >&2
         if [ "$json" = true ]; then
-            printf '{"ok":true,"ref":"%s","commit":"%s","currentHead":"%s","state":"%s"}\n' \
-                "$(_cichain_jstr "$ref")" "$new_commit" "${vals[Current-Head]:-}" "$(_cichain_jstr "${vals[State]:-}")"
+            printf '{"ok":true,"ref":%s,"commit":%s,"currentHead":%s,"state":%s}\n' \
+                "$(json_escape "$ref")" "$(json_escape "$new_commit")" "$(json_escape "${vals[Current-Head]:-}")" "$(json_escape "${vals[State]:-}")"
         else
             printf "${GREEN}✓ Chain state for %s@%s -> %s (Current-Head %s, State %s)${RESET}\n" \
                 "$repo" "$branch" "$(git rev-parse --short "$new_commit")" \
@@ -560,7 +547,7 @@ Updated-At: $(_cichain_now)"
     if echo "$push_output" | grep -qiE 'rejected|stale info|non-fast-forward|fetch first'; then
         _cichain_fetch "$ref"
         if [ "$json" = true ]; then
-            printf '{"ok":false,"reason":"race-lost","ref":"%s"}\n' "$(_cichain_jstr "$ref")"
+            printf '{"ok":false,"reason":"race-lost","ref":%s}\n' "$(json_escape "$ref")"
         else
             printf "${YELLOW}Lost chain-write CAS race for %s@%s (another writer won).${RESET}\n" \
                 "$repo" "$branch" >&2
@@ -570,7 +557,7 @@ Updated-At: $(_cichain_now)"
     fi
 
     if [ "$json" = true ]; then
-        printf '{"ok":false,"reason":"push-failed","ref":"%s"}\n' "$(_cichain_jstr "$ref")"
+        printf '{"ok":false,"reason":"push-failed","ref":%s}\n' "$(json_escape "$ref")"
     else
         printf "${RED}Chain-write push failed:${RESET}\n%s\n" "$push_output" >&2
     fi

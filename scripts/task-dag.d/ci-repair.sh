@@ -156,7 +156,8 @@ EOF
     fi
 
     if [ "$as_json" = true ]; then
-        printf '{"treeFix":true,"ticket":"%s","chain":"%s","mode":"%s"}\n' "$fix" "$chain" "$mode"
+        printf '{"treeFix":true,"ticket":%s,"chain":%s,"mode":%s}\n' \
+            "$(json_escape "$fix")" "$(json_escape "$chain")" "$(json_escape "$mode")"
     else
         printf 'Tree-Fix: %s\nTree-Fix-Chain: %s\nTree-Fix-Mode: %s\n' "$fix" "$chain" "$mode"
     fi
@@ -493,10 +494,10 @@ EOF
         local rc="$1" applied="$2" tk="$ticket"
         [ "$applied" = true ] || tk="none"
         if [ "$json" = true ]; then
-            printf '{"result":"%s","action":"%s","ticket":"%s","current":%s,"applied":%s,"ref":"%s","forSha":"%s","firstRed":"%s","priorState":"%s","rc":%s}\n' \
-                "$result" "$action" "$tk" "$is_current" "$applied" \
-                "$(_cichain_jstr "$ref")" "$for_sha" \
-                "$(_cichain_jstr "${prior_first_red:-}")" "$(_cichain_jstr "${prior_state:-}")" "$rc"
+            printf '{"result":%s,"action":%s,"ticket":%s,"current":%s,"applied":%s,"ref":%s,"forSha":%s,"firstRed":%s,"priorState":%s,"rc":%s}\n' \
+                "$(json_escape "$result")" "$(json_escape "$action")" "$(json_escape "$tk")" "$is_current" "$applied" \
+                "$(json_escape "$ref")" "$(json_escape "$for_sha")" \
+                "$(json_escape "${prior_first_red:-}")" "$(json_escape "${prior_state:-}")" "$rc"
         else
             printf "${BOLD}classify %s@%s${RESET} result=%s action=%s ticket=%s (current=%s applied=%s rc=%s)\n" \
                 "$repo" "$branch" "$result" "$action" "$tk" "$is_current" "$applied" "$rc"
@@ -900,12 +901,12 @@ EOF
         local rc="$1" applied="$2" tk="$ticket" tsk="$task" pg="$page"
         if [ "$applied" != true ]; then tk="none"; tsk="none"; pg=false; fi
         if [ "$json" = true ]; then
-            printf '{"result":"%s","action":"%s","ticket":"%s","task":"%s","page":%s,"current":%s,"applied":%s,"ref":"%s","forSha":"%s","chain":"%s","mode":"%s","firstRed":"%s","priorState":"%s","repairAttempt":"%s","failSignature":"%s","sameSigCount":"%s","threshold":%s,"rc":%s}\n' \
-                "$result" "$action" "$tk" "$tsk" "$pg" "$is_current" "$applied" \
-                "$(_cichain_jstr "$ref")" "$for_sha" "$(_cichain_jstr "$tf_chain")" \
-                "$(_cichain_jstr "$tf_mode")" "$(_cichain_jstr "${p_first_red:-}")" \
-                "$(_cichain_jstr "${p_state:-}")" "$(_cichain_jstr "${new_attempt:-}")" \
-                "$(_cichain_jstr "${new_sig:-}")" "$(_cichain_jstr "${new_count:-}")" \
+            printf '{"result":%s,"action":%s,"ticket":%s,"task":%s,"page":%s,"current":%s,"applied":%s,"ref":%s,"forSha":%s,"chain":%s,"mode":%s,"firstRed":%s,"priorState":%s,"repairAttempt":%s,"failSignature":%s,"sameSigCount":%s,"threshold":%s,"rc":%s}\n' \
+                "$(json_escape "$result")" "$(json_escape "$action")" "$(json_escape "$tk")" "$(json_escape "$tsk")" "$pg" "$is_current" "$applied" \
+                "$(json_escape "$ref")" "$(json_escape "$for_sha")" "$(json_escape "$tf_chain")" \
+                "$(json_escape "$tf_mode")" "$(json_escape "${p_first_red:-}")" \
+                "$(json_escape "${p_state:-}")" "$(json_escape "${new_attempt:-}")" \
+                "$(json_escape "${new_sig:-}")" "$(json_escape "${new_count:-}")" \
                 "$threshold" "$rc"
         else
             printf "${BOLD}tree-fix-outcome %s@%s${RESET} result=%s action=%s ticket=%s task=%s page=%s (current=%s applied=%s rc=%s)\n" \
@@ -1088,8 +1089,8 @@ EOF
             [ -n "$sha" ] && _cichain_fetch "$ref"
         else
             if [ "$json" = true ]; then
-                printf '{"ok":false,"reason":"origin-error","repo":"%s","branch":"%s","ref":"%s","rc":4}\n' \
-                    "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")"
+                printf '{"ok":false,"reason":"origin-error","repo":%s,"branch":%s,"ref":%s,"rc":4}\n' \
+                    "$(json_escape "$repo")" "$(json_escape "$branch")" "$(json_escape "$ref")"
             else
                 printf "${RED}verify-target: cannot reach origin for %s@%s — failing closed.${RESET}\n" "$repo" "$branch" >&2
             fi
@@ -1145,13 +1146,13 @@ EOF
     fi
 
     if [ "$json" = true ]; then
-        printf '{"ok":%s,"reason":"%s","repo":"%s","branch":"%s","ref":"%s","targetSha":"%s","chainCommit":"%s","state":"%s","firstRed":"%s","currentHead":"%s","lastGreen":"%s","repairIssue":"%s","repairMode":"%s","repairAttempt":"%s","claimed":%s,"rc":%s}\n' \
-            "$ok" "$reason" \
-            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")" \
-            "$target" "${sha:-}" \
-            "$(_cichain_jstr "$state")" "$(_cichain_jstr "$first_red")" \
-            "$(_cichain_jstr "$current_head")" "$(_cichain_jstr "$last_green")" \
-            "$(_cichain_jstr "$r_issue")" "$(_cichain_jstr "$r_mode")" "$(_cichain_jstr "$r_attempt")" \
+        printf '{"ok":%s,"reason":%s,"repo":%s,"branch":%s,"ref":%s,"targetSha":%s,"chainCommit":%s,"state":%s,"firstRed":%s,"currentHead":%s,"lastGreen":%s,"repairIssue":%s,"repairMode":%s,"repairAttempt":%s,"claimed":%s,"rc":%s}\n' \
+            "$ok" "$(json_escape "$reason")" \
+            "$(json_escape "$repo")" "$(json_escape "$branch")" "$(json_escape "$ref")" \
+            "$(json_escape "$target")" "$(json_escape "${sha:-}")" \
+            "$(json_escape "$state")" "$(json_escape "$first_red")" \
+            "$(json_escape "$current_head")" "$(json_escape "$last_green")" \
+            "$(json_escape "$r_issue")" "$(json_escape "$r_mode")" "$(json_escape "$r_attempt")" \
             "$claimed" "$rc"
     else
         if [ "$ok" = true ]; then
@@ -1343,8 +1344,8 @@ EOF
     # No chain ref at all: nothing has ever gone red here -> nothing to do.
     if [ -z "$sha" ]; then
         if [ "$json" = true ]; then
-            printf '{"action":"noop-nochain","repo":"%s","branch":"%s","ref":"%s"}\n' \
-                "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")"
+            printf '{"action":"noop-nochain","repo":%s,"branch":%s,"ref":%s}\n' \
+                "$(json_escape "$repo")" "$(json_escape "$branch")" "$(json_escape "$ref")"
         else
             printf "${YELLOW}No CI chain state for %s@%s — no repair ticket to reconcile.${RESET}\n" "$repo" "$branch" >&2
         fi
@@ -1490,8 +1491,8 @@ EOF
                 age=$(( now - lease_ts ))
                 if [ "$age" -lt "$lease_ttl" ]; then
                     if [ "$json" = true ]; then
-                        printf '{"action":"create-in-progress","repo":"%s","branch":"%s","leaseAge":%s}\n' \
-                            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$age"
+                        printf '{"action":"create-in-progress","repo":%s,"branch":%s,"leaseAge":%s}\n' \
+                            "$(json_escape "$repo")" "$(json_escape "$branch")" "$age"
                     else
                         printf "${YELLOW}Repair ticket creation already in progress for %s@%s (lease age %ss < TTL %ss); standing down.${RESET}\n" \
                             "$repo" "$branch" "$age" "$lease_ttl" >&2
@@ -1513,8 +1514,8 @@ EOF
                     >/dev/null 2>&1 || lease_rc=$?
                 if [ "$lease_rc" -ne 0 ]; then
                     if [ "$json" = true ]; then
-                        printf '{"action":"lease-lost","repo":"%s","branch":"%s","rc":%s}\n' \
-                            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$lease_rc"
+                        printf '{"action":"lease-lost","repo":%s,"branch":%s,"rc":%s}\n' \
+                            "$(json_escape "$repo")" "$(json_escape "$branch")" "$lease_rc"
                     else
                         printf "${YELLOW}Lost the repair-ticket create-lease for %s@%s (another runner is creating); rerun reconciles.${RESET}\n" \
                             "$repo" "$branch" >&2
@@ -1636,10 +1637,10 @@ EOF
     fi
 
     if [ "$json" = true ]; then
-        printf '{"action":"%s","state":"%s","repo":"%s","branch":"%s","firstRed":"%s","ticket":"%s","dryRun":%s}\n' \
-            "$(_cichain_jstr "$action")" "$(_cichain_jstr "$state")" \
-            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" \
-            "$(_cichain_jstr "$first_red")" "$(_cichain_jstr "$ticket_number")" "$dry_run"
+        printf '{"action":%s,"state":%s,"repo":%s,"branch":%s,"firstRed":%s,"ticket":%s,"dryRun":%s}\n' \
+            "$(json_escape "$action")" "$(json_escape "$state")" \
+            "$(json_escape "$repo")" "$(json_escape "$branch")" \
+            "$(json_escape "$first_red")" "$(json_escape "$ticket_number")" "$dry_run"
     else
         printf "${BOLD}repair-ticket %s@%s${RESET} state=%s action=%s ticket=%s\n" \
             "$repo" "$branch" "$state" "$action" "${ticket_number:-<none>}"
