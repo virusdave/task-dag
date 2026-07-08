@@ -1393,11 +1393,11 @@ cmd_frontier() {
             [ "$first" = false ] && echo ","
             cat <<JSON
     {
-        "sha": "$sha",
-        "shortSha": "$short_sha",
-        "title": "$title",
-        "issue": ${issue:-null},
-        "status": "${status:-pending}"
+        "sha": $(json_escape "$sha"),
+        "shortSha": $(json_escape "$short_sha"),
+        "title": $(json_escape "$title"),
+        "issue": $(json_int_or_null "$issue"),
+        "status": $(json_escape "${status:-pending}")
     }
 JSON
             first=false
@@ -2541,8 +2541,8 @@ EOF
         if [ "$json" = true ]; then
             [ "$first" = false ] && echo ","
             first=false
-            printf '    {"issue": %s, "sha": "%s", "title": "%s", "state": "%s"}' \
-                "$issue" "$root_sha" "${title//\"/\\\"}" "$state"
+            printf '    {"issue": %s, "sha": %s, "title": %s, "state": %s}' \
+                "$(json_int_or_null "$issue")" "$(json_escape "$root_sha")" "$(json_escape "$title")" "$(json_escape "$state")"
         else
             printf "%-8s %-50s %-12s\n" "#$issue" "${title:0:50}" "$state"
         fi
@@ -2613,18 +2613,18 @@ cmd_active() {
             [ "$first" = false ] && echo ","
             cat <<JSON
     {
-        "shortSha": "$short_ref",
-        "taskSha": "$task_sha",
-        "claimCommit": "$claim_sha",
-        "issue": ${issue:-null},
-        "title": "$title",
-        "claimer": "${claimer:-unknown}",
-        "claimerHost": "${claimer_host:-unknown}",
-        "claimerPid": ${claimer_pid:-null},
-        "claimedAt": "${claimed_at:-unknown}",
-        "ttlHours": ${ttl_hours:-null},
+        "shortSha": $(json_escape "$short_ref"),
+        "taskSha": $(json_escape "$task_sha"),
+        "claimCommit": $(json_escape "$claim_sha"),
+        "issue": $(json_int_or_null "$issue"),
+        "title": $(json_escape "$title"),
+        "claimer": $(json_escape "${claimer:-unknown}"),
+        "claimerHost": $(json_escape "${claimer_host:-unknown}"),
+        "claimerPid": $(json_int_or_null "$claimer_pid"),
+        "claimedAt": $(json_escape "${claimed_at:-unknown}"),
+        "ttlHours": $(json_number_or_null "$ttl_hours"),
         "dead": $dead,
-        "deadReason": "$dead_reason"
+        "deadReason": $(json_escape "$dead_reason")
     }
 JSON
             first=false
@@ -2693,17 +2693,17 @@ cmd_show() {
     if [ "$json" = true ]; then
         cat <<JSON
 {
-    "sha": "$sha",
-    "shortSha": "$(git rev-parse --short "$sha")",
-    "title": "$title",
-    "issue": ${issue:+\"$issue\"},
-    "author": ${author:+\"$author\"},
-    "status": "${status:-pending}",
-    "type": "${type:-task}",
-    "parentTask": ${parent_task:+\"$parent_task\"},
-    "firstParent": ${first_parent:+\"$first_parent\"},
-    "dependencies": [$(echo "$deps" | while read d; do echo -n "\"$d\","; done | sed 's/,$//')],
-    "refs": [$(echo "$refs" | while read r; do echo -n "\"$r\","; done | sed 's/,$//')],
+    "sha": $(json_escape "$sha"),
+    "shortSha": $(json_escape "$(git rev-parse --short "$sha")"),
+    "title": $(json_escape "$title"),
+    "issue": $(json_str_or_null "$issue"),
+    "author": $(json_str_or_null "$author"),
+    "status": $(json_escape "${status:-pending}"),
+    "type": $(json_escape "${type:-task}"),
+    "parentTask": $(json_str_or_null "$parent_task"),
+    "firstParent": $(json_str_or_null "$first_parent"),
+    "dependencies": $(printf '%s\n' "$deps" | json_str_array),
+    "refs": $(printf '%s\n' "$refs" | json_str_array),
     "completed": $(is_task_completed "$sha" && echo "true" || echo "false")
 }
 JSON
@@ -2826,9 +2826,9 @@ cmd_deps() {
             [ "$first" = false ] && echo ","
             cat <<JSON
     {
-        "sha": "$dep",
-        "shortSha": "$dep_short",
-        "title": "$dep_title",
+        "sha": $(json_escape "$dep"),
+        "shortSha": $(json_escape "$dep_short"),
+        "title": $(json_escape "$dep_title"),
         "completed": $completed
     }
 JSON
@@ -5470,6 +5470,33 @@ json_str_or_null() {
     if [ -n "$1" ]; then json_escape "$1"; else printf 'null'; fi
 }
 
+# Helper: emit a bare JSON integer iff the value is all digits, else null.
+# Fields like `issue` and `claimerPid` come from commit/ref metadata; a
+# malformed value (e.g. `Issue: #41abc`) must NOT be interpolated raw or it
+# recreates the "invalid JSON -> dispatcher skips the whole repo" outage.
+json_int_or_null() {
+    if [[ "${1:-}" =~ ^(0|[1-9][0-9]*)$ ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
+
+# Helper: emit a bare JSON number (integer or decimal) iff well-formed,
+# else null. Used for metadata like `ttlHours`. Rejects leading-zero
+# forms (e.g. 007, 01.5) that jq tolerates but strict JSON parsers reject.
+json_number_or_null() {
+    if [[ "${1:-}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
+
+# Helper: read newline-separated raw values on stdin and emit a compact
+# JSON array of escaped strings ([] when empty). `awk NF` drops blank
+# lines so an empty input yields [] rather than the [""] the old
+# hand-rolled `while read` + trailing-comma-strip produced.
+json_str_array() {
+    awk 'NF' | { command -v jq >/dev/null 2>&1 \
+        && jq -R . | jq -sc . \
+        || { printf '['; local first=1 line; while IFS= read -r line; do
+                 [ "$first" = 1 ] || printf ','; first=0; json_escape "$line";
+             done; printf ']'; }; }
+}
+
 # Command: blocked - list parked (blocked) tasks
 cmd_blocked() {
     local json=false issue_filter="" do_fetch=true kind_filter=""
@@ -5570,7 +5597,7 @@ EOF
             [ "$first" = false ] && echo ","
             printf '    {"sha": %s, "shortSha": %s, "title": %s, "issue": %s, "repo": %s, "issueUrl": %s, "kind": %s, "reason": %s, "requestUrl": %s, "blockedAt": %s, "blockedBy": %s, "hasMeta": %s}' \
                 "$(json_escape "$sha")" "$(json_escape "$short_sha")" "$(json_escape "$title")" \
-                "${issue:-null}" "$(json_str_or_null "$repo")" "$(json_str_or_null "$source_url")" \
+                "$(json_int_or_null "$issue")" "$(json_str_or_null "$repo")" "$(json_str_or_null "$source_url")" \
                 "$(json_escape "$kind")" "$(json_str_or_null "$reason")" "$(json_str_or_null "$request_url")" \
                 "$(json_str_or_null "$blocked_at")" "$(json_str_or_null "$blocked_by")" "$has_meta"
             first=false
