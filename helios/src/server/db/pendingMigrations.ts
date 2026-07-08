@@ -1443,6 +1443,16 @@ const SENTINELS: MigrationSentinel[] = [
       return hasParserId && hasRuleId && hasConfigSha && hasCheck
     },
   },
+  {
+    migrationId: '099_migration_apply_attempts',
+    label:
+      'migration_apply_attempts lifecycle table (automation#62, leaf 2) — ' +
+      'the audit/record table that backs the admin "Apply Now" pending-' +
+      'migrations flow. Additive + admin-only; nothing in the production read ' +
+      'path joins it. Bootstrapped via the manual/canon apply path (the ' +
+      'feature cannot apply its own bootstrap).',
+    check: (db) => tableExists(db, 'migration_apply_attempts'),
+  },
 ]
 
 // The allowlist of known migrationIds, derived from the sentinel registry so
