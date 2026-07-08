@@ -1176,6 +1176,25 @@ issue_is_closed_remote() {
     [ "$state" = "CLOSED" ]
 }
 
+# Three-valued live GitHub issue state, for the reconcile-closed-issue
+# fail-safe. Unlike issue_is_closed_remote (which fails OPEN, conflating
+# "open" with "couldn't tell"), this DISTINGUISHES a determined state from
+# an undetermined one so reconcile-closed-issue can refuse to mutate on any
+# uncertainty (the conservative direction here is "don't delete").
+#   args:   <repo owner/name> <issue-number>
+#   stdout: the live state (e.g. CLOSED, OPEN) when determined
+#   return: 0 -> determined (state printed on stdout)
+#           3 -> undetermined (gh missing/unauth/API error/empty state)
+issue_state_remote() {
+    local repo="$1" issue="$2" state
+    [ -n "$repo" ] && [ -n "$issue" ] || return 3
+    command -v gh >/dev/null 2>&1 || return 3
+    state="$(gh issue view "$issue" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || return 3
+    [ -n "$state" ] || return 3
+    printf '%s\n' "$state"
+    return 0
+}
+
 # Helper: build the blocked-meta side-commit (tree == task tree, first
 # parent == task commit, body holds the metadata). We pin a CONSTANT
 # author/committer identity and use the blocked-at timestamp as the
@@ -1291,6 +1310,11 @@ COMMANDS:
                            /--kind=<k> filter by blocker kind)
     drop <sha>             Housecleaning: remove an orphaned/irrelevant task
                            from the pickable/blocked sets
+    reconcile-closed-issue <issue>
+                           Drop the lingering frontier/blocked/blocked-meta
+                           refs of tasks whose GitHub issue is CONFIRMED
+                           CLOSED (fail-safe: never acts under uncertainty).
+                           --dry-run/--json/--yes, --repo=owner/repo.
     comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
@@ -5904,6 +5928,409 @@ EOF
     return 0
 }
 
+# Tri-state origin ref probe for reconcile-closed-issue: prints the ref's
+# CURRENT origin SHA on stdout (empty when absent). Return:
+#   0 -> present (sha on stdout)
+#   2 -> cleanly absent (no matching ref on origin)
+#   3 -> transport/auth error (undetermined — caller must NOT treat as absent)
+# `git ls-remote --exit-code` returns 2 when nothing matches, 0 on a hit,
+# and other codes on a transport/auth failure, so a network hiccup can never
+# masquerade as "ref already gone" (which would let a real delete failure
+# pass as a clean no-op).
+_reconcile_remote_ref_sha() {
+    local ref="$1" out rc=0
+    out=$(git ls-remote --exit-code origin "$ref" 2>/dev/null) || rc=$?
+    case "$rc" in
+        0) printf '%s\n' "$out" | awk '{print $1; exit}'; return 0 ;;
+        2) return 2 ;;
+        *) return 3 ;;
+    esac
+}
+
+# Command: reconcile-closed-issue - drop the lingering scheduling refs
+# (tasks/frontier/<short>, tasks/blocked/<full-sha>, tasks/blocked-meta/
+# <full-sha>) left behind by tasks whose GitHub issue is CONFIRMED CLOSED.
+#
+# The github-worker dispatcher only prunes the LOCAL refs when it observes a
+# task's issue CLOSED; the authoritative origin refs survive and re-
+# materialise on every fetch, so a closed-issue task clutters the frontier
+# and the operator dashboards forever (top-level#48). The existing sweep
+# (.github/scripts/cleanup-closed-issue-task-refs.sh) only fires on the bot
+# `Closes-Epic:` push path and only enumerates BLOCKED tasks; this command
+# also catches pickable FRONTIER-only tasks and can be run manually or from
+# an `issues:[closed]` workflow.
+#
+# FAIL-SAFE: nothing is mutated unless gh confirms the issue is CLOSED, and
+# nothing is deleted under any uncertainty. Deletes honour the frontier-
+# first + --force-with-lease discipline proven in the cleanup script, so a
+# concurrent breakdown that re-pointed a short-sha ref is never clobbered
+# and no pickable window opens. It never touches tasks/pending/<N>,
+# tasks/root-active/<N>, tasks/active/*, tasks/delegated/*, or the
+# gh/comments/<N>/<id> provenance refs.
+cmd_reconcile_closed_issue() {
+    local issue="" repo_opt="" dry_run=false json=false yes=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run=true; shift ;;
+            --json) json=true; shift ;;
+            --yes|-y) yes=true; shift ;;
+            --repo=*) repo_opt="${1#*=}"; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag reconcile-closed-issue <issue> [--repo=owner/repo]
+                                       [--dry-run] [--json] [--yes]
+
+Reconcile the task-dag scheduling refs for a CONFIRMED-CLOSED GitHub issue:
+delete the lingering tasks/frontier/<short>, tasks/blocked/<full-sha> and
+tasks/blocked-meta/<full-sha> refs of every task that resolves to
+(this repo, <issue>), so a closed-issue task stops cluttering the frontier
+and the operator-blocked #29 dashboard and stops reappearing on git fetch.
+
+FAIL-SAFE — never acts under uncertainty:
+  * The issue state is confirmed live via 'gh issue view … --json state'.
+    - CLOSED                -> reconcile.
+    - any other state (OPEN)-> clean no-op, exit 0.
+    - undetermined (gh missing/unauth/API error) -> no-op + report for
+      manual review, exit 3.
+  * A cross-repo block (Repo: other/repo referencing this issue number) is
+    NOT a match and is left alone.
+  * Deletes are frontier-FIRST under a --force-with-lease on the observed
+    SHA; the blocked overlay is removed only once its frontier is confirmed
+    clear (no zombie-dispatch window) and only when origin still points it
+    at the expected task SHA.
+
+It NEVER deletes tasks/pending/<N> (epic identity), tasks/root-active/<N>,
+tasks/active/* (a live claim self-cleans on complete), tasks/delegated/*,
+or gh/comments/<N>/<id> (comment provenance).
+
+Options:
+  --repo=owner/repo  Override the repo (default: derived from origin).
+  --dry-run          Report exactly what WOULD be removed; delete no origin
+                     refs. (Local task refs may still be synced to build an
+                     authoritative report.)
+  --json             Machine-readable output (removed SHAs/refs, skipped
+                     items with reasons, and summary counts).
+  --yes, -y          Required for a non-dry run when stdin is not a TTY.
+
+Idempotent: a second run over an already-clean issue is a successful no-op.
+Reverse a mistaken reconcile from the emitted audit record (recreate the
+ref from the retained task SHA + pending/provenance refs).
+EOF
+                return 0 ;;
+            -*) echo "Unknown option: $1" >&2; return 2 ;;
+            *) if [ -z "$issue" ]; then issue="$1"; else
+                   echo "Unknown argument: $1" >&2; return 2; fi; shift ;;
+        esac
+    done
+
+    [ -n "$issue" ] || { echo "Error: <issue> is required" >&2; return 2; }
+    [[ "$issue" =~ ^[0-9]+$ ]] || { echo "Error: <issue> must be numeric, got: $issue" >&2; return 2; }
+    if [ "$json" = true ]; then require_jq_for_json || return 2; fi
+
+    # Resolve THIS repo (owner/repo): --repo overrides, else derive from the
+    # origin remote (handles aliased ephemeral SSH remotes).
+    local repo="$repo_opt"
+    if [ -z "$repo" ]; then
+        local remote_url; remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+        repo=$(parse_owner_repo_from_url "$remote_url")
+    fi
+    [ -n "$repo" ] || { echo "Error: could not determine owner/repo; pass --repo=owner/repo" >&2; return 2; }
+
+    # A small JSON summary emitter for the early-exit (no-mutation) paths.
+    _rci_emit_summary() {
+        local ok="$1" state_json="$2" reason="$3" errors="$4"
+        jq -nc --argjson issue "$issue" --arg repo "$repo" \
+            --argjson ok "$ok" --argjson state "$state_json" \
+            --arg reason "$reason" --argjson dry "$dry_run" \
+            --argjson errors "$errors" \
+            '{ok:$ok, issue:$issue, repo:$repo, state:$state, dryRun:$dry,
+              reason:$reason, removed:[], skipped:[],
+              counts:{targets:0, removed:0, skipped:0, errors:$errors}}'
+    }
+
+    # ── 1. Confirm the issue is CLOSED (fail-safe) ───────────────────────
+    local state st_rc=0
+    state=$(issue_state_remote "$repo" "$issue") || st_rc=$?
+    if [ "$st_rc" -ne 0 ]; then
+        # Undetermined: gh missing/unauth/API error. Never assume closed.
+        if [ "$json" = true ]; then
+            _rci_emit_summary false null "undetermined-issue-state" 1
+        else
+            echo "Error: could not determine GitHub state of ${repo}#${issue}" >&2
+            echo "       (gh missing/unauthenticated/API error); refusing to reconcile." >&2
+            echo "       Surfaced for manual review." >&2
+        fi
+        return 3
+    fi
+    if [ "$state" != "CLOSED" ]; then
+        if [ "$json" = true ]; then
+            _rci_emit_summary true "$(json_escape "$state")" "issue-not-closed" 0
+        else
+            echo "Issue ${repo}#${issue} is ${state}, not CLOSED — nothing to reconcile."
+        fi
+        return 0
+    fi
+
+    # Non-dry mutations require --yes when not attached to a TTY (mirror drop).
+    if [ "$dry_run" = false ] && [ "$yes" = false ] && [ ! -t 0 ]; then
+        echo "Error: refusing to reconcile without --yes in non-interactive mode" >&2
+        return 2
+    fi
+
+    # ── 2. Enumerate target task SHAs resolving to (repo, issue) ─────────
+    # Sync the task refs so a fresh checkout sees them. Fail LOUD on a fetch
+    # failure: an incomplete local view could silently skip lingering refs
+    # (the exact bug this command exists to fix).
+    if ! fetch_task_refs_strict 2>/dev/null; then
+        if [ "$json" = true ]; then
+            _rci_emit_summary false '"CLOSED"' "fetch-failed" 1
+        else
+            echo "Error: could not sync task refs from origin; refusing to reconcile" >&2
+            echo "       (incomplete view could miss lingering refs)." >&2
+        fi
+        return 3
+    fi
+
+    declare -A TARGETS=()
+    # FRONTIER: every frontier ref whose task commit resolves to (repo,
+    # issue). We scan the ref namespace directly (NOT `cmd_frontier`, which
+    # intentionally hides blocked/not-ready/claimed rows) so no lingering
+    # frontier ref for the closed issue is missed.
+    local objsha refname derived d_repo d_issue
+    while IFS=$'\t' read -r objsha refname; do
+        [ -n "$objsha" ] || continue
+        derived=$(derive_task_origin "$objsha")
+        d_repo=$(printf '%s' "$derived" | cut -f1)
+        d_issue=$(printf '%s' "$derived" | cut -f2)
+        [ "$d_issue" = "$issue" ] || continue
+        [ -z "$d_repo" ] || [ "$d_repo" = "$repo" ] || continue
+        TARGETS["$objsha"]=1
+    done < <(git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname)%09%(refname)')
+
+    # BLOCKED: use the canonical `blocked --json` resolution (meta-overridden
+    # issue + derived repo) so we never re-parse commit bodies or drift from
+    # the CLI. A CLI failure is LOUD, never coerced into an empty list.
+    local blocked_json cli_rc=0 cli_err
+    cli_err=$(mktemp)
+    blocked_json=$(cmd_blocked --json --no-fetch 2>"$cli_err") || cli_rc=$?
+    if [ "$cli_rc" -ne 0 ] || ! printf '%s' "$blocked_json" | jq -e . >/dev/null 2>&1; then
+        local errtxt; errtxt=$(tr '\n' ' ' < "$cli_err" 2>/dev/null || true)
+        rm -f "$cli_err"
+        if [ "$json" = true ]; then
+            _rci_emit_summary false '"CLOSED"' "blocked-enumeration-failed" 1
+        else
+            echo "Error: 'task-dag blocked --json' failed or produced invalid JSON" >&2
+            echo "       (rc=$cli_rc): $errtxt" >&2
+            echo "       Refusing to reconcile with an incomplete blocked view." >&2
+        fi
+        return 3
+    fi
+    rm -f "$cli_err"
+    local bsha
+    while IFS= read -r bsha; do
+        [ -n "$bsha" ] && TARGETS["$bsha"]=1
+    done < <(printf '%s' "$blocked_json" | jq -r \
+        --argjson n "$issue" --arg repo "$repo" '
+        .[]
+        | select((.issue // null) == $n)
+        | select((.repo // "") == "" or (.repo == $repo))
+        | .sha')
+
+    # ── 3. Re-confirm CLOSED right before the first mutation ─────────────
+    # Cannot make issue-state and ref-deletion atomic, but a second check
+    # after enumeration shrinks the closed->reopened race. Skip for dry-run
+    # (it mutates nothing).
+    if [ "$dry_run" = false ]; then
+        local recheck rc2=0
+        recheck=$(issue_state_remote "$repo" "$issue") || rc2=$?
+        if [ "$rc2" -ne 0 ]; then
+            if [ "$json" = true ]; then
+                _rci_emit_summary false null "undetermined-issue-state-recheck" 1
+            else
+                echo "Error: issue ${repo}#${issue} state became undetermined before mutating; aborting." >&2
+            fi
+            return 3
+        fi
+        if [ "$recheck" != "CLOSED" ]; then
+            if [ "$json" = true ]; then
+                _rci_emit_summary true "$(json_escape "$recheck")" "issue-reopened-before-mutation" 0
+            else
+                echo "Issue ${repo}#${issue} is now ${recheck} (reopened before mutation) — no-op."
+            fi
+            return 0
+        fi
+    fi
+
+    # ── 4. Delete per target, frontier-FIRST, origin-authoritative ───────
+    # Snapshot origin's frontier listing ONCE (a big sweep is not O(tasks)
+    # round-trips). A frontier ref created AFTER this snapshot is invisible
+    # here (the lease only guards refs in the snapshot); re-running heals it.
+    local frontier_listing
+    if ! frontier_listing=$(git ls-remote origin 'refs/heads/tasks/frontier/*' 2>/dev/null); then
+        if [ "$json" = true ]; then
+            _rci_emit_summary false '"CLOSED"' "frontier-listing-failed" 1
+        else
+            echo "Error: could not list frontier refs from origin; refusing to delete any" >&2
+            echo "       blocked overlay (would risk zombie dispatch)." >&2
+        fi
+        return 3
+    fi
+
+    local -a removed_objs=() skipped_objs=()
+    local n_removed=0 n_skipped=0 n_errors=0 n_targets=0
+
+    local target
+    for target in "${!TARGETS[@]}"; do
+        n_targets=$((n_targets + 1))
+        local short; short=$(git rev-parse --short "$target" 2>/dev/null || echo "${target:0:12}")
+        local -a refs_removed=()
+        local frontier_clear=true
+
+        # 4a. Delete every frontier ref pointing at THIS target, leased to
+        # the exact sha we observed, so a concurrent breakdown that re-
+        # pointed a short-sha ref at a DIFFERENT task is never clobbered.
+        local fsha fref
+        while read -r fsha fref; do
+            [ -n "$fref" ] || continue
+            [ "$fsha" = "$target" ] || continue
+            if [ "$dry_run" = true ]; then
+                refs_removed+=("$fref"); continue
+            fi
+            if git push origin --force-with-lease="$fref:$fsha" ":$fref" 2>/dev/null; then
+                refs_removed+=("$fref")
+                if git show-ref --verify --quiet "refs/heads/${fref#refs/heads/}" 2>/dev/null; then
+                    git update-ref -d "refs/heads/${fref#refs/heads/}" 2>/dev/null || true
+                fi
+                continue
+            fi
+            # Lease failed: re-probe origin. Gone or re-pointed elsewhere =>
+            # not ours (success); still at target => genuine failure that
+            # leaves the pickable window open, so skip the blocked delete.
+            local now
+            if ! now=$(git ls-remote origin "$fref" 2>/dev/null | awk '{print $1; exit}'); then
+                echo "Error: could not re-query origin for $fref" >&2
+                frontier_clear=false; continue
+            fi
+            if [ -z "$now" ] || [ "$now" != "$target" ]; then
+                : # gone or re-pointed elsewhere — not ours, treated as clear
+            else
+                echo "Error: failed to lease-delete $fref (still points at $short)" >&2
+                frontier_clear=false
+            fi
+        done <<< "$frontier_listing"
+
+        if [ "$frontier_clear" = false ]; then
+            skipped_objs+=("$(jq -nc --arg sha "$target" --arg short "$short" \
+                '{sha:$sha, shortSha:$short, reason:"frontier-not-clear"}')")
+            n_skipped=$((n_skipped + 1)); n_errors=$((n_errors + 1))
+            continue
+        fi
+
+        # 4b. Blocked overlay: delete only once frontier is confirmed clear,
+        # and only if origin still points the overlay at THIS task SHA (its
+        # name embeds the full sha, so a mismatch is an invariant violation).
+        local bref="refs/heads/tasks/blocked/$target"
+        local bref_now brc=0
+        bref_now=$(_reconcile_remote_ref_sha "$bref") || brc=$?
+        case "$brc" in
+            0)
+                if [ "$bref_now" = "$target" ]; then
+                    if [ "$dry_run" = true ]; then
+                        refs_removed+=("$bref")
+                    elif git push origin --force-with-lease="$bref:$bref_now" ":${bref#refs/heads/}" 2>/dev/null; then
+                        refs_removed+=("$bref")
+                        if git show-ref --verify --quiet "$bref" 2>/dev/null; then
+                            git update-ref -d "$bref" 2>/dev/null || true
+                        fi
+                    else
+                        echo "Error: failed to lease-delete $bref" >&2
+                        n_errors=$((n_errors + 1))
+                    fi
+                else
+                    echo "Error: $bref points at ${bref_now:0:12}, not $short — invariant violation, skipping" >&2
+                    n_errors=$((n_errors + 1))
+                fi ;;
+            2) : ;;  # cleanly absent — nothing to do (idempotent)
+            *)
+                echo "Error: could not query origin for $bref; refusing to treat it as absent" >&2
+                n_errors=$((n_errors + 1)) ;;
+        esac
+
+        # 4c. Blocked-meta side ref: a DISTINCT descriptive commit, so lease
+        # to its own observed SHA (not the task SHA).
+        local bmref="refs/heads/tasks/blocked-meta/$target"
+        local bmref_now bmrc=0
+        bmref_now=$(_reconcile_remote_ref_sha "$bmref") || bmrc=$?
+        case "$bmrc" in
+            0)
+                if [ "$dry_run" = true ]; then
+                    refs_removed+=("$bmref")
+                elif git push origin --force-with-lease="$bmref:$bmref_now" ":${bmref#refs/heads/}" 2>/dev/null; then
+                    refs_removed+=("$bmref")
+                    if git show-ref --verify --quiet "$bmref" 2>/dev/null; then
+                        git update-ref -d "$bmref" 2>/dev/null || true
+                    fi
+                else
+                    echo "Error: failed to lease-delete $bmref" >&2
+                    n_errors=$((n_errors + 1))
+                fi ;;
+            2) : ;;  # cleanly absent
+            *)
+                echo "Error: could not query origin for $bmref; refusing to treat it as absent" >&2
+                n_errors=$((n_errors + 1)) ;;
+        esac
+
+        if [ "${#refs_removed[@]}" -gt 0 ]; then
+            local refs_json
+            refs_json=$(printf '%s\n' "${refs_removed[@]}" | jq -R . | jq -sc .)
+            removed_objs+=("$(jq -nc --arg sha "$target" --arg short "$short" \
+                --argjson refs "$refs_json" \
+                '{sha:$sha, shortSha:$short, refs:$refs}')")
+            n_removed=$((n_removed + 1))
+        fi
+    done
+
+    # ── 5. Report ────────────────────────────────────────────────────────
+    if [ "$json" = true ]; then
+        local removed_arr='[]' skipped_arr='[]'
+        [ "${#removed_objs[@]}" -gt 0 ] && removed_arr=$(printf '%s\n' "${removed_objs[@]}" | jq -sc .)
+        [ "${#skipped_objs[@]}" -gt 0 ] && skipped_arr=$(printf '%s\n' "${skipped_objs[@]}" | jq -sc .)
+        local ok_json=true; [ "$n_errors" -gt 0 ] && ok_json=false
+        jq -nc --argjson issue "$issue" --arg repo "$repo" \
+            --argjson ok "$ok_json" --argjson dry "$dry_run" \
+            --argjson removed "$removed_arr" --argjson skipped "$skipped_arr" \
+            --argjson targets "$n_targets" --argjson nrem "$n_removed" \
+            --argjson nskip "$n_skipped" --argjson nerr "$n_errors" \
+            '{ok:$ok, issue:$issue, repo:$repo, state:"CLOSED", dryRun:$dry,
+              removed:$removed, skipped:$skipped,
+              counts:{targets:$targets, removed:$nrem, skipped:$nskip, errors:$nerr}}'
+    else
+        local verb="Reconciled"; [ "$dry_run" = true ] && verb="[dry-run] would reconcile"
+        if [ "$n_targets" -eq 0 ]; then
+            echo "$verb ${repo}#${issue}: no lingering task refs — already clean."
+        else
+            printf "%s ${repo}#${issue}: %d task(s), %d removed, %d skipped, %d error(s).\n" \
+                "$verb" "$n_targets" "$n_removed" "$n_skipped" "$n_errors"
+            local o
+            for o in "${removed_objs[@]:-}"; do
+                [ -n "$o" ] || continue
+                printf '  removed %s: %s\n' \
+                    "$(printf '%s' "$o" | jq -r .shortSha)" \
+                    "$(printf '%s' "$o" | jq -r '.refs | join(", ")')"
+            done
+            for o in "${skipped_objs[@]:-}"; do
+                [ -n "$o" ] || continue
+                printf '  skipped %s (%s)\n' \
+                    "$(printf '%s' "$o" | jq -r .shortSha)" \
+                    "$(printf '%s' "$o" | jq -r .reason)"
+            done
+        fi
+    fi
+
+    [ "$n_errors" -eq 0 ] || return 1
+    return 0
+}
+
 # Main dispatch
 main() {
     if [ $# -eq 0 ]; then
@@ -5935,6 +6362,7 @@ main() {
         unblock) cmd_unblock "$@" ;;
         blocked) cmd_blocked "$@" ;;
         drop) cmd_drop "$@" ;;
+        reconcile-closed-issue) cmd_reconcile_closed_issue "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;

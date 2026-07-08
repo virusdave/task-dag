@@ -11,9 +11,9 @@ orchestration lock** that closes the root/leaf double-dispatch
 |---|---|---|---|
 | `tasks/pending/<N>` | issue-to-task workflow on issue open/edit/reopen (`create-task-commit.sh`) | **Epic root / identity** for issue `#N`. The durable identity used by closure (`close-epic` / `close-completed-issues.sh`), cross-repo delegation, and comment-ingest ancestry. It is an *identity*, **not** a lock. | Intentionally **kept** for the issue's life; deleted by `close-completed-issues.sh` when the epic closes. |
 | `tasks/root-active/<N>` | `task-dag claim-root <N>` | The cross-host **orchestration lock** on the epic root: "this host is decomposing issue `#N`." Atomic CAS, keyed by issue number, recording Claimer / Claimer-Host / Claimer-PID / Claimed-At, exactly like a leaf claim. | `task-dag breakdown` (which **consumes** it when it publishes the leaves), `release-root`, or `close-completed-issues.sh`. |
-| `tasks/frontier/<short>` | `task-dag breakdown` (run by an agent that holds the root lock) | A claimable **implementation leaf**. One per child task, published up front. | `task-dag claim` (renamed to `active`) or `complete`/`drop`. |
+| `tasks/frontier/<short>` | `task-dag breakdown` (run by an agent that holds the root lock) | A claimable **implementation leaf**. One per child task, published up front. | `task-dag claim` (renamed to `active`) or `complete`/`drop`; **also** `reconcile-closed-issue` (frontier-first) for a confirmed-CLOSED issue's tasks. |
 | `tasks/active/<short>` | `task-dag claim` | The cross-host distributed lock on a leaf: this leaf is in flight. The claim commit records Claimer / Claimer-Host / Claimer-PID / Claimed-At. | `complete` (lands the task) or `release` (back to `frontier`). |
-| `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. The overlay ref points straight at the task commit (source of truth for "is this task blocked"). | `unblock` / `complete` / `drop`; **also** `close-completed-issues.sh` (via `cleanup-closed-issue-task-refs.sh`) for any of the closed issue's tasks — most often the epic ROOT, which is closed by the `Closes-Epic` merge and so never `complete`d. |
+| `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. The overlay ref points straight at the task commit (source of truth for "is this task blocked"). | `unblock` / `complete` / `drop`; **also** `close-completed-issues.sh` (via `cleanup-closed-issue-task-refs.sh`) for any of the closed issue's tasks — most often the epic ROOT, which is closed by the `Closes-Epic` merge and so never `complete`d — and `reconcile-closed-issue` for out-of-band (manual) closes. |
 | `tasks/blocked-meta/<sha>` | `task-dag block` | Optional **side metadata** for a parked task: a deterministic side-commit (tree == task tree, first parent == task commit) whose body records `Blocker-Kind` (`operator`/`downstream`), durable `Reason`, optional `Request-URL`, derived `Repo`/`Issue`/`Source-URL`, and `Blocked-By`/`Blocked-Host`/`Blocked-At`. Consumed by the operator-blocked #29 dashboard so it need not reparse task bodies. A blocked task with **no** meta ref (a legacy block) is still fully valid. | `unblock` / `complete` / `drop` (cleared in lockstep with the overlay ref); **also** `close-completed-issues.sh` on epic close. |
 
 ## Non-task namespace: CI repair chains (`tasks/ci-chains/...`)
@@ -308,12 +308,49 @@ re-dispatched), then its `blocked/<sha>` + `blocked-meta/<sha>`. It leaves
 `active/*` alone (the owning worker CAS-cleans that on `complete`). Fixture
 coverage: `tests/task-dag/close-issue-ref-cleanup.sh`.
 
-**Follow-up (not yet done):** the *manual*-close path
-(`page-on-manual-issue-close.sh`) still performs **no** ref cleanup at all
-— an operator manually closing a task-tracked issue orphans its
-`pending/<N>`, `root-active/<N>`, and any `blocked` overlay. Tracked
-separately; the extracted `cleanup-closed-issue-task-refs.sh` is
-deliberately reusable by that path.
+## Reconciling a CONFIRMED-CLOSED issue (`reconcile-closed-issue`)
+
+The epic-close sweep above only fires on the sanctioned bot `Closes-Epic:`
+push path and only enumerates **blocked** tasks. A task whose issue is
+closed **out of band** (an operator closing it by hand — the common case
+behind top-level#48) is skipped by the dispatcher (which prunes only the
+*local* ref) while its authoritative `frontier`/`blocked`/`blocked-meta`
+refs survive on origin and re-materialise on every fetch. Such a task —
+frequently a **pickable frontier leaf**, which the epic-close sweep never
+touched — clutters the frontier and dashboards forever.
+
+`task-dag reconcile-closed-issue <issue> [--repo=owner/repo] [--dry-run]
+[--json] [--yes]` closes that gap. It is **fail-safe**:
+
+- confirms the issue is **CLOSED** live via `gh issue view … --json state`
+  (its own three-valued `issue_state_remote`): `CLOSED` → reconcile; any
+  other state (OPEN) → clean no-op exit 0; **undetermined** (gh missing /
+  unauth / API error) → no-op + report, exit 3 (never assume closed);
+- enumerates every task resolving to **(this repo, issue)** — both
+  `frontier/<short>` refs (scanned directly, since `frontier`'s pickable
+  listing hides blocked/not-ready rows) and `blocked` tasks (via the
+  canonical `blocked --json` meta-overridden resolution); a cross-repo
+  `Repo:` block referencing the same number is **not** a match;
+- deletes `frontier/<short>` **first** under a `--force-with-lease` on the
+  observed SHA (so a racing breakdown that re-pointed a short-sha ref is
+  never clobbered and no pickable window opens), then the `blocked/<sha>` +
+  `blocked-meta/<sha>` overlay only once the frontier is confirmed clear
+  and only while origin still points the overlay at the expected task SHA;
+- never touches `pending/<N>`, `root-active/<N>`, `active/*`,
+  `delegated/*`, or the `gh/comments/<N>/<id>` provenance refs;
+- is idempotent (a second run is a clean no-op) and emits a machine-
+  readable `--json` audit (removed SHAs/refs, skipped items + reasons,
+  counts) from which a mistaken reconcile is reversible.
+
+Fixture coverage: `tests/task-dag/reconcile-closed-issue.sh`.
+
+**Follow-ups (tracked as frontier leaves under #12):** (1) refactor
+`cleanup-closed-issue-task-refs.sh` onto this command for a single code
+path (preserving its hint-SHA belt-and-braces fallback), and (2) an opt-in,
+offline-preserving closed-issue audit mode for `validate`. The
+`issues:[closed]` automation that invokes this command
+(`page-on-manual-issue-close.sh`) is child 3 of the parent epic
+top-level#48.
 
 ## Closing an ops-only (no-code) epic (`close-ops-epic`)
 
