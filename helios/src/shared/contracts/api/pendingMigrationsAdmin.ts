@@ -90,3 +90,25 @@ export const AdminPendingMigrationsResponseSchema = z.object({
 export type AdminPendingMigrationsResponse = z.infer<
   typeof AdminPendingMigrationsResponseSchema
 >
+
+// POST /api/admin/pending-migrations/:id/apply request/response (automation#62,
+// leaf 6). The type-to-confirm value the admin typed; the server rejects unless
+// it exactly equals the path `:id` (the deliberate operator "go"). See
+// docs/helios/pending-migrations-admin-apply/DESIGN.md "API contract" +
+// "Gating / safety model" item 3.
+export const AdminPendingMigrationApplyRequestSchema = z.object({
+  confirmMigrationId: z.string().min(1),
+})
+export type AdminPendingMigrationApplyRequest = z.infer<
+  typeof AdminPendingMigrationApplyRequestSchema
+>
+
+// On success the endpoint returns the enqueued (or in-flight, deduped) urgent
+// `db.migration.apply` job id; the SPA (leaf 7) polls GET /api/jobs/:jobId with
+// it. The apply itself runs entirely in the worker.
+export const AdminPendingMigrationApplyResponseSchema = z.object({
+  jobId: z.number().int(),
+})
+export type AdminPendingMigrationApplyResponse = z.infer<
+  typeof AdminPendingMigrationApplyResponseSchema
+>
