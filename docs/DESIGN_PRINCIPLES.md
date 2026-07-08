@@ -64,6 +64,36 @@ parent), so completion detection stays a parent-edge query; only the
 carry it after the fact. This exception is admin-recovery only and pages
 the operator on every use.
 
+## Commit-message guard (stop accidental hand-crafted task commits)
+
+Every task-dag control commit — task/epic root, claim, blocked-meta,
+completion merge, close merge, historical link (see
+[`INVARIANTS.md`](./INVARIANTS.md) "Per-kind commit shapes") — is built with
+`git commit-tree`, which **bypasses git hooks**. That asymmetry is load-
+bearing: a `commit-msg` hook can therefore treat the presence of any
+control-plane marker in a *hook-visible* `git commit` as proof that a human
+or agent is hand-crafting a task-impacting commit instead of using the CLI
+(the footgun behind the fabricated `Task-Commit` in
+`FreshlyBakedNYC/automation@53c9e712b`, which recorded a completion against a
+task SHA that never existed).
+
+- The canonical check is `task-dag guard-commit-message <file>`. It rejects a
+  message whose non-comment lines carry any of: a `Task:` subject, `Type:`,
+  `Task-Commit:`, `Status: completed|pending`, `Closes-Epic:`,
+  `Historical-Commit:`, `Retroactive:`, `Blocked-Meta:` — and points at the
+  subcommand that should have produced it. Cross-repo trailers a normal impl
+  commit legitimately carries by hand (`Satisfies:`, `Phase:`,
+  `Materialise-Child-Epic:`) are deliberately allowed.
+- The marker→tooling map is the **single source of truth** in the CLI. The
+  per-repo hook ([`.githooks/commit-msg`](../.githooks/commit-msg)) is
+  repo-agnostic and only *delegates* to the CLI — it must never re-encode the
+  list (no duplicated logic).
+- Enable per clone (git will not auto-activate a committed hooks dir):
+  `git config core.hooksPath .githooks`. If the CLI is unavailable the hook
+  fails **open** with a warning (set `TASK_DAG_BIN` to enforce): the goal is
+  to reliably stop an agent from *accidentally* doing this by hand, not to
+  defeat a determined adversary.
+
 ## Consequences for `complete` (and why the #7 fix is DAG-native)
 
 When one worker stacks several sibling-leaf implementation commits in one

@@ -5701,6 +5701,7 @@ main() {
         comment) cmd_comment "$@" ;;
         issue-update) cmd_issue_update "$@" ;;
         check-workflow) cmd_check_workflow "$@" ;;
+        guard-commit-message) cmd_guard_message "$@" ;;
         delegate) cmd_delegate "$@" ;;
         ingest-comment) cmd_ingest_comment "$@" ;;
         ingest-completion) cmd_ingest_completion "$@" ;;
@@ -5815,6 +5816,118 @@ EOF
     fi
     
     return 0
+}
+
+# Command: guard-commit-message — refuse a HAND-WRITTEN commit that carries
+# task-dag control-plane markers. This is the canonical check behind the
+# per-repo `commit-msg` hook (docs/DESIGN_PRINCIPLES.md → "Commit-message
+# guard"). Rationale: EVERY task-dag control commit (task/claim/blocked-meta/
+# completion merge/close merge/historical link — see
+# docs/INVARIANTS.md "Per-kind commit shapes") is built with
+# `git commit-tree`, which BYPASSES git hooks. So any of these markers
+# appearing in a hook-visible `git commit` means a human/agent is
+# hand-crafting a task-impacting commit instead of going through the tooling
+# (the exact footgun behind the fabricated Task-Commit in
+# FreshlyBakedNYC/automation@53c9e712b). The marker→tooling map below is the
+# SINGLE SOURCE OF TRUTH; the hook must call this, never re-encode it.
+#
+# Deliberately NOT flagged: cross-repo trailers a normal implementation
+# commit legitimately carries by hand — Satisfies:, Phase:,
+# Materialise-Child-Epic:, Amp-Thread-ID:, Co-authored-by:.
+cmd_guard_message() {
+    local msg_file="" from_stdin=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --stdin) from_stdin=true; shift ;;
+            --file=*) msg_file="${1#*=}"; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag guard-commit-message <message-file>
+       task-dag guard-commit-message --file=<message-file>
+       task-dag guard-commit-message --stdin
+
+Exit non-zero if the commit message names task-dag control-plane content
+that only the tooling may emit (Task: subject, Type:, Task-Commit:,
+Status: completed/pending, Closes-Epic:, Historical-Commit:, Retroactive:,
+Blocked-Meta:). All such commits are built with 'git commit-tree' (which
+bypasses hooks), so these markers only ever appear in a manual 'git commit'
+— i.e. someone is hand-crafting a task-impacting commit. Intended as the
+body of a repo 'commit-msg' hook:
+
+    exec task-dag guard-commit-message "\$1"
+
+Exit codes: 0 = clean (allow), 1 = reserved marker found (reject),
+2 = usage error.
+EOF
+                return 0 ;;
+            -*) echo "Unknown option: $1" >&2; return 2 ;;
+            *) if [ -z "$msg_file" ]; then msg_file="$1"; else echo "Unknown argument: $1" >&2; return 2; fi; shift ;;
+        esac
+    done
+
+    local raw
+    if [ -n "$msg_file" ]; then
+        [ -f "$msg_file" ] || { echo "Error: commit-message file not found: $msg_file" >&2; return 2; }
+        raw=$(cat "$msg_file")
+    elif [ "$from_stdin" = true ]; then
+        raw=$(cat)
+    else
+        echo "Error: provide a commit-message file (positional or --file=), or --stdin." >&2
+        return 2
+    fi
+
+    # Ignore git's comment lines (default '#'); honour a single-char
+    # core.commentChar override. 'auto' or multi-char → fall back to '#'.
+    # Compare the first char literally (never build a regex from cc — a
+    # regex-special value like ']' or '\' would corrupt the filter and,
+    # under the '|| true' below, silently fail open).
+    local cc; cc=$(git config core.commentChar 2>/dev/null || true)
+    [ ${#cc} -eq 1 ] || cc='#'
+    local scan; scan=$(awk -v cc="$cc" 'substr($0,1,1) != cc' <<<"$raw")
+
+    local -a hits=()
+    # Use a here-string + read for the subject (no producer pipe that can
+    # SIGPIPE→141 under 'set -o pipefail' on a long message).
+    local subject=""
+    while IFS= read -r subject; do
+        case "$subject" in ""|[[:space:]]*) [ -z "${subject//[[:space:]]/}" ] && continue ;; esac
+        break
+    done <<<"$scan"
+    case "$subject" in
+        Task:*) hits+=("subject 'Task:'  → task commits are minted by 'task-dag breakdown' (or the issue→task workflow), never by hand") ;;
+    esac
+    # here-string (not a pipe) so an early 'grep -q' exit can't SIGPIPE a
+    # producer and flip a real match into a pipefail non-match.
+    _gm_has() { grep -qiE "$1" <<<"$scan"; }
+    _gm_has '^Task-Commit:'                          && hits+=("Task-Commit:       → the impl↔task link is the completion MERGE's parentage; use 'task-dag complete'")
+    _gm_has '^Status:[[:space:]]*(completed|pending)([[:space:]]|$)' && hits+=("Status: …          → task lifecycle is set by 'task-dag complete' / 'breakdown', not a hand-written trailer")
+    _gm_has '^Closes-Epic:'                          && hits+=("Closes-Epic:       → epics are closed by 'task-dag close-epic' / 'close-ops-epic'")
+    _gm_has '^Historical-Commit:'                    && hits+=("Historical-Commit: → retroactive links use 'task-dag complete-historical'")
+    _gm_has '^Retroactive:[[:space:]]*true'          && hits+=("Retroactive: true  → use 'task-dag complete-historical'")
+    _gm_has '^Blocked-Meta:'                         && hits+=("Blocked-Meta:      → blocking is done by 'task-dag block'")
+    _gm_has '^Type:[[:space:]]*(epic|task|leaf)([[:space:]]|$)' && hits+=("Type: …            → task commits are minted by tooling ('task-dag breakdown')")
+
+    [ ${#hits[@]} -eq 0 ] && return 0
+
+    printf '%b' "${RED}" >&2
+    echo "════════════════════════════════════════════════════════════════════" >&2
+    echo " task-dag: refusing a HAND-WRITTEN task-impacting commit" >&2
+    echo "════════════════════════════════════════════════════════════════════" >&2
+    echo " This commit message carries task-dag control-plane content that ONLY" >&2
+    echo " the tooling may produce (it builds such commits with 'git commit-tree'," >&2
+    echo " which is why this hook never fires on legitimate task-dag commits):" >&2
+    echo "" >&2
+    local h
+    for h in "${hits[@]}"; do echo "   • $h" >&2; done
+    echo "" >&2
+    echo " Task semantics live in the git DAG/refs, created via the CLI — never by" >&2
+    echo " hand-writing these trailers (see docs/DESIGN_PRINCIPLES.md). Re-run the" >&2
+    echo " right 'task-dag' subcommand above. If this is real implementation work," >&2
+    echo " drop the trailer(s) and commit normally, then link it with the CLI." >&2
+    echo " Do NOT bypass this with 'git commit --no-verify'." >&2
+    echo "════════════════════════════════════════════════════════════════════" >&2
+    printf '%b' "${RESET}" >&2
+    return 1
 }
 
 # Execute (must be the final statement so all functions, including those
