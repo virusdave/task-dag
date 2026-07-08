@@ -344,11 +344,40 @@ touched — clutters the frontier and dashboards forever.
 
 Fixture coverage: `tests/task-dag/reconcile-closed-issue.sh`.
 
-**Follow-ups (tracked as frontier leaves under #12):** (1) refactor
-`cleanup-closed-issue-task-refs.sh` onto this command for a single code
-path (preserving its hint-SHA belt-and-braces fallback), and (2) an opt-in,
-offline-preserving closed-issue audit mode for `validate`. The
-`issues:[closed]` automation that invokes this command
+### Auditing closed-issue debris without acting (`validate --closed-issue-audit`)
+
+`reconcile-closed-issue` *fixes* one issue's lingering refs. To *detect* the
+debris across the whole DAG — e.g. from a scheduled fleet audit that pages
+the operator — `task-dag validate --closed-issue-audit [--repo=owner/repo]
+[--json]` surfaces (never deletes) exactly the refs reconcile would clean:
+
+- It is the **only** validate mode that goes live. Plain `validate` and
+  `validate --strict` stay **100% offline** (no `gh`, no fetch); the audit
+  runs only behind this explicit opt-in flag.
+- It shares the **one** candidate resolver (`closed_issue_candidate_rows`)
+  with `reconcile-closed-issue`, so the two can never drift: same direct
+  frontier scan + canonical `blocked --json` meta-overridden resolution,
+  same repo filter (a cross-repo `Repo:` block referencing the same number
+  is not a match), and the same "never touch `pending`/`root-active`/
+  `active`/`delegated`/`gh/comments` refs" scope.
+- It does a **strict** task-ref sync (a partial view could false-clean —
+  the exact bug it exists to catch) then confirms each issue's state live,
+  **grouped so gh is queried at most once per unique issue** (rate-limit
+  safe). A **CONFIRMED-CLOSED** issue's lingering refs are reported as
+  **errors** (exit 3), so an audit can gate/page; an **undetermined** state
+  (gh missing/unauth/API error) is a **warning** with `complete:false` in
+  the JSON, never assumed closed — exit 0 means "no confirmed debris found",
+  **not** "proved clean".
+- `--json` extends validate's summary with a `closedIssueAudit` object
+  (`repo`, `complete`, `lingering:[{issue,state,refs,shas}]`, `undetermined`,
+  and `counts`). The non-audit `--json` shape is unchanged.
+
+Fixture coverage: `tests/task-dag/validate-closed-issue-audit.sh`.
+
+**Follow-up (tracked as a frontier leaf under #12):** refactor
+`cleanup-closed-issue-task-refs.sh` onto `reconcile-closed-issue` for a
+single code path (preserving its hint-SHA belt-and-braces fallback). The
+`issues:[closed]` automation that invokes reconcile
 (`page-on-manual-issue-close.sh`) is child 3 of the parent epic
 top-level#48.
 

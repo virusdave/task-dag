@@ -1364,7 +1364,10 @@ COMMANDS:
     issue-update <sha>     Update GitHub issue with task progress
     validate               Validate DAG structure; --strict audits EVERY
                            task/gh ref (empty-tree + known namespace) and
-                           FAILS on violations — the hand-crafted-ref catcher
+                           FAILS on violations — the hand-crafted-ref catcher.
+                           --closed-issue-audit surfaces CONFIRMED-CLOSED
+                           issues' lingering refs (opt-in, LIVE; the offline
+                           default/--strict never hit the network).
     check-workflow         Validate recent commits follow task-dag convention
 
 CROSS-REPO COORDINATION:
@@ -5061,6 +5064,8 @@ Related: $issue_url"
 cmd_validate() {
     local json=false
     local strict=false
+    local audit=false
+    local repo_opt=""
     local scope=""
     
     while [[ $# -gt 0 ]]; do
@@ -5071,14 +5076,21 @@ cmd_validate() {
             # ERRORS, so it can gate CI / a scheduled fleet audit. --all-refs
             # is an accepted alias (the strict walk is always all-refs).
             --strict|--all-refs) strict=true; shift ;;
+            # --closed-issue-audit is the ONLY switch that makes validate go
+            # live: it surfaces task refs whose GitHub issue is CONFIRMED
+            # CLOSED (the top-level#48 lingering-ref debris). Default validate
+            # and --strict stay 100% offline; this flag is strictly opt-in.
+            --closed-issue-audit) audit=true; shift ;;
+            --repo=*) repo_opt="${1#*=}"; shift ;;
             --help|-h)
                 cat <<'EOF'
-Usage: task-dag validate [scope] [--strict|--all-refs] [--json]
+Usage: task-dag validate [scope] [--strict|--all-refs]
+                         [--closed-issue-audit [--repo=owner/repo]] [--json]
 
 Validate task-DAG structure.
 
 Default: light structural checks (empty-tree task commits; frontier refs
-are leaf/task-typed).
+are leaf/task-typed). Fully OFFLINE — no network, no gh.
 
 --strict (alias --all-refs): audit EVERY ref under refs/heads/tasks/** and
 refs/heads/gh/** against the grandfather-safe invariant floor and FAIL
@@ -5087,9 +5099,30 @@ refs/heads/gh/** against the grandfather-safe invariant floor and FAIL
   • it must live under a KNOWN namespace.
 An unknown namespace is the classic "I did the ref surgery by hand"
 mistake — do NOT hand-craft task refs. See docs/INVARIANTS.md.
+--strict is also fully OFFLINE and read-only.
 
-Strict mode is race-tolerant (a ref whose object vanishes mid-walk is
-skipped, not failed) and read-only.
+--closed-issue-audit: the ONLY mode that goes LIVE. It surfaces (does NOT
+delete) the lingering scheduling refs — tasks/frontier/<short>,
+tasks/blocked/<sha>, tasks/blocked-meta/<sha> — of tasks whose GitHub issue
+is CONFIRMED CLOSED, i.e. exactly what 'task-dag reconcile-closed-issue'
+would clean (top-level#48). It:
+  • does a strict sync of the task refs and confirms each issue's state
+    live via 'gh issue view … --json state' (grouped: one call per unique
+    issue), so it never assumes closed;
+  • reports a CONFIRMED-CLOSED issue's lingering refs as ERRORS (exit 3),
+    so a scheduled fleet audit can gate/page — run reconcile-closed-issue
+    to clear them;
+  • reports issues whose state could NOT be determined (gh missing/unauth/
+    API error) as WARNINGS (coverage gap), never as errors — exit 0 means
+    "no confirmed debris found", NOT "proved clean";
+  • never reports pending/<N>, root-active/<N>, active/*, delegated/* or
+    gh/comments/<N>/<id> refs.
+  --repo=owner/repo overrides the repo (default: derived from origin) and
+  is valid ONLY with --closed-issue-audit. Requires jq (and gh for the
+  live state).
+
+All modes are race-tolerant (a ref whose object vanishes mid-walk is
+skipped, not failed) and NEVER mutate origin.
 EOF
                 return 0
                 ;;
@@ -5097,7 +5130,21 @@ EOF
         esac
     done
 
+    # --repo only makes sense for the live audit (it selects which repo's
+    # issue state to confirm). Reject it elsewhere rather than silently
+    # ignore it, so a mistaken invocation fails loud.
+    if [ -n "$repo_opt" ] && [ "$audit" = false ]; then
+        echo "Error: --repo is only valid with --closed-issue-audit" >&2
+        return 2
+    fi
+
     if [ "$json" = true ]; then require_jq_for_json || return 1; fi
+    # The audit's canonical blocked resolution and JSON assembly both need jq
+    # even without --json, so require it up front with a clear message.
+    if [ "$audit" = true ] && ! command -v jq >/dev/null 2>&1; then
+        echo "Error: jq is required for --closed-issue-audit" >&2
+        return 2
+    fi
 
     local errors=0
     local warnings=0
@@ -5167,13 +5214,131 @@ EOF
             done <<< "$out"
         done <<< "$snapshot"
     fi
-    
+
+    # ── Closed-issue audit (--closed-issue-audit ONLY): LIVE, opt-in ─────
+    # Everything above is OFFLINE. Nothing below runs unless the operator
+    # explicitly asked for the audit, so plain `validate` / `validate
+    # --strict` never touch the network. This mode SURFACES (never deletes)
+    # the lingering scheduling refs of CONFIRMED-CLOSED issues; it shares the
+    # ONE candidate resolver with reconcile-closed-issue so the two agree.
+    local audit_json="null"
+    if [ "$audit" = true ]; then
+        # Resolve THIS repo: --repo overrides, else derive from origin.
+        local a_repo="$repo_opt"
+        if [ -z "$a_repo" ]; then
+            local a_remote; a_remote=$(git remote get-url origin 2>/dev/null || echo "")
+            a_repo=$(parse_owner_repo_from_url "$a_remote")
+        fi
+
+        if [ -z "$a_repo" ]; then
+            errors=$((errors + 1))
+            [ "$json" = false ] && printf "${RED}✗${RESET} closed-issue audit: could not determine owner/repo (pass --repo=owner/repo); audit incomplete\n"
+            audit_json=$(jq -nc \
+                '{complete:false, repo:null, reason:"repo-undetermined",
+                  lingering:[], undetermined:[],
+                  counts:{issuesChecked:0, closedWithLingeringRefs:0, lingeringRefs:0, undetermined:0}}')
+        elif ! fetch_task_refs_strict 2>/dev/null; then
+            # A partial/stale local view could FALSE-CLEAN (miss lingering
+            # refs) — the exact bug this audit exists to catch — so a sync
+            # failure is a hard audit error, not a warning.
+            errors=$((errors + 1))
+            [ "$json" = false ] && printf "${RED}✗${RESET} closed-issue audit: could not sync task refs from origin; audit incomplete\n"
+            audit_json=$(jq -nc --arg repo "$a_repo" \
+                '{complete:false, repo:$repo, reason:"fetch-failed",
+                  lingering:[], undetermined:[],
+                  counts:{issuesChecked:0, closedWithLingeringRefs:0, lingeringRefs:0, undetermined:0}}')
+        else
+            local a_rows a_rc=0
+            a_rows=$(closed_issue_candidate_rows "$a_repo") || a_rc=$?
+            if [ "$a_rc" -ne 0 ]; then
+                errors=$((errors + 1))
+                [ "$json" = false ] && printf "${RED}✗${RESET} closed-issue audit: could not enumerate task refs ('blocked --json' failed/invalid); audit incomplete\n"
+                audit_json=$(jq -nc --arg repo "$a_repo" \
+                    '{complete:false, repo:$repo, reason:"enumeration-failed",
+                      lingering:[], undetermined:[],
+                      counts:{issuesChecked:0, closedWithLingeringRefs:0, lingeringRefs:0, undetermined:0}}')
+            else
+                # Group candidates by issue so we hit gh at most ONCE per
+                # unique issue (rate-limit friendly). Only numeric issues are
+                # queryable; a non-numeric/underivable candidate is skipped.
+                declare -A A_REFS=() A_SHAS=()
+                local cr_repo cr_issue cr_sha cr_ref cr_kind
+                while IFS=$'\t' read -r cr_repo cr_issue cr_sha cr_ref cr_kind; do
+                    [ -n "$cr_issue" ] || continue
+                    A_REFS["$cr_issue"]+="${cr_ref}"$'\n'
+                    case " ${A_SHAS[$cr_issue]:-} " in
+                        *" $cr_sha "*) ;;
+                        *) A_SHAS["$cr_issue"]+="$cr_sha " ;;
+                    esac
+                done <<< "$a_rows"
+
+                local -a lingering_objs=() undet_objs=()
+                local n_issues=0 n_closed=0 n_lref=0 n_undet=0
+                local iss st st_rc
+                for iss in "${!A_REFS[@]}"; do
+                    [[ "$iss" =~ ^[0-9]+$ ]] || continue
+                    n_issues=$((n_issues + 1))
+                    st_rc=0
+                    st=$(issue_state_remote "$a_repo" "$iss") || st_rc=$?
+                    if [ "$st_rc" -ne 0 ]; then
+                        n_undet=$((n_undet + 1)); warnings=$((warnings + 1))
+                        undet_objs+=("$(jq -nc --argjson issue "$iss" \
+                            '{issue:$issue, reason:"undetermined-issue-state"}')")
+                        [ "$json" = false ] && printf "${YELLOW}⚠${RESET} closed-issue audit: ${a_repo}#${iss} state undetermined (gh missing/unauth/API error); could not check\n"
+                        continue
+                    fi
+                    [ "$st" = "CLOSED" ] || continue
+                    # CONFIRMED CLOSED with lingering refs => debris => error.
+                    local refs_list refs_json shas_json nrefs
+                    refs_list=$(printf '%s' "${A_REFS[$iss]}" | sed '/^$/d')
+                    nrefs=$(printf '%s\n' "$refs_list" | grep -c . || true)
+                    refs_json=$(printf '%s\n' "$refs_list" | jq -R . | jq -sc 'map(select(length>0))')
+                    shas_json=$(printf '%s\n' ${A_SHAS[$iss]:-} | jq -R . | jq -sc 'map(select(length>0))')
+                    lingering_objs+=("$(jq -nc --argjson issue "$iss" \
+                        --argjson refs "$refs_json" --argjson shas "$shas_json" \
+                        '{issue:$issue, state:"CLOSED", refs:$refs, shas:$shas}')")
+                    n_closed=$((n_closed + 1))
+                    n_lref=$((n_lref + nrefs))
+                    errors=$((errors + 1))
+                    if [ "$json" = false ]; then
+                        printf "${RED}✗${RESET} closed-issue audit: ${a_repo}#${iss} is CLOSED but has %d lingering task ref(s) (run reconcile-closed-issue):\n" "$nrefs"
+                        local rl
+                        while IFS= read -r rl; do
+                            [ -n "$rl" ] && printf "      %s\n" "$rl"
+                        done <<< "$refs_list"
+                    fi
+                done
+
+                local lingering_arr='[]' undet_arr='[]' complete_json=true
+                [ "${#lingering_objs[@]}" -gt 0 ] && lingering_arr=$(printf '%s\n' "${lingering_objs[@]}" | jq -sc .)
+                [ "${#undet_objs[@]}" -gt 0 ] && undet_arr=$(printf '%s\n' "${undet_objs[@]}" | jq -sc .)
+                [ "$n_undet" -gt 0 ] && complete_json=false
+                audit_json=$(jq -nc --arg repo "$a_repo" --argjson complete "$complete_json" \
+                    --argjson lingering "$lingering_arr" --argjson undet "$undet_arr" \
+                    --argjson issues "$n_issues" --argjson closed "$n_closed" \
+                    --argjson lrefs "$n_lref" --argjson undetc "$n_undet" \
+                    '{complete:$complete, repo:$repo, reason:null,
+                      lingering:$lingering, undetermined:$undet,
+                      counts:{issuesChecked:$issues, closedWithLingeringRefs:$closed,
+                              lingeringRefs:$lrefs, undetermined:$undetc}}')
+            fi
+        fi
+    fi
+
     if [ "$json" = true ]; then
         local valid=false
         [ "$errors" -eq 0 ] && valid=true
-        jq -nc --argjson errors "$errors" --argjson warnings "$warnings" \
-            --argjson strict "$strict" --argjson valid "$valid" \
-            '{errors:$errors,warnings:$warnings,strict:$strict,valid:$valid}'
+        if [ "$audit" = true ]; then
+            jq -nc --argjson errors "$errors" --argjson warnings "$warnings" \
+                --argjson strict "$strict" --argjson valid "$valid" \
+                --argjson audit "$audit_json" \
+                '{errors:$errors,warnings:$warnings,strict:$strict,valid:$valid,closedIssueAudit:$audit}'
+        else
+            # Preserve the exact pre-existing --json shape when not auditing.
+            jq -nc --argjson errors "$errors" --argjson warnings "$warnings" \
+                --argjson strict "$strict" --argjson valid "$valid" \
+                '{errors:$errors,warnings:$warnings,strict:$strict,valid:$valid}'
+        fi
     else
         echo ""
         if [ $errors -eq 0 ]; then
@@ -6173,6 +6338,89 @@ _reconcile_remote_ref_sha() {
     esac
 }
 
+# ─────────────────────────────────────────────────────────────────────
+# Shared closed-issue candidate enumeration (ONE resolution path).
+#
+# Emit the lingering scheduling refs (frontier/<short>, blocked/<sha>,
+# blocked-meta/<sha>) of the tasks that resolve to <target_repo> (and,
+# optionally, a single <issue_filter>). This is the SINGLE (repo,issue)->
+# task resolution both `reconcile-closed-issue` (which deletes them) and
+# `validate --closed-issue-audit` (which only reports them) consume, so the
+# two can never drift and neither re-parses commit bodies ad hoc.
+#
+#   args:   <target_repo owner/repo> [issue_filter]
+#   stdout: TSV rows  <repo>\t<issue>\t<task_sha>\t<refname>\t<kind>
+#             kind ∈ frontier | blocked | blocked-meta
+#             <repo> is the task's DERIVED repo ("" when underivable)
+#   return: 0 on success; 1 if the canonical blocked enumeration failed
+#           (invalid/failed `blocked --json`). Callers MUST treat a non-zero
+#           return as an ERROR, never as an empty candidate set (an
+#           incomplete view is the exact bug this machinery exists to fix).
+#
+# Preconditions: the caller has already synced the task refs it cares about
+# (this is a PURE, read-only local walk — it never fetches or mutates), and
+# jq is available (the blocked resolution goes through `blocked --json`).
+# It resolves ONLY (repo, issue) associations — it never touches
+# tasks/pending/<N>, tasks/root-active/<N>, tasks/active/*, tasks/delegated/*
+# or the gh/comments/<N>/<id> provenance refs.
+#
+# Repo filter (identical to reconcile): a task whose derived repo is empty
+# matches any target repo; a cross-repo `Repo:` block referencing the same
+# issue number in a DIFFERENT repo is NOT a match.
+closed_issue_candidate_rows() {
+    local target_repo="$1" issue_filter="${2:-}"
+
+    # FRONTIER: scan the ref namespace directly (NOT cmd_frontier, which hides
+    # blocked/not-ready/claimed rows) so no lingering frontier ref is missed.
+    local objsha refname derived d_repo d_issue
+    while IFS=$'\t' read -r objsha refname; do
+        [ -n "$objsha" ] || continue
+        # Race-tolerant: a ref whose object vanished mid-walk is skipped, not
+        # fatal (mirrors validate's Check 2/3 discipline under set -e).
+        derived=$(derive_task_origin "$objsha" 2>/dev/null) || continue
+        d_repo=$(printf '%s' "$derived" | cut -f1)
+        d_issue=$(printf '%s' "$derived" | cut -f2)
+        [ -n "$d_issue" ] || continue
+        [ -z "$issue_filter" ] || [ "$d_issue" = "$issue_filter" ] || continue
+        [ -z "$d_repo" ] || [ "$d_repo" = "$target_repo" ] || continue
+        printf '%s\t%s\t%s\t%s\tfrontier\n' "$d_repo" "$d_issue" "$objsha" "$refname"
+    done < <(git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname)%09%(refname)')
+
+    # BLOCKED: canonical `blocked --json` resolution (meta-overridden issue +
+    # derived repo). A CLI failure / invalid JSON is LOUD (return 1), never
+    # coerced into an empty list.
+    local blocked_json cli_rc=0
+    blocked_json=$(cmd_blocked --json --no-fetch 2>/dev/null) || cli_rc=$?
+    if [ "$cli_rc" -ne 0 ] || ! printf '%s' "$blocked_json" | jq -e . >/dev/null 2>&1; then
+        return 1
+    fi
+    # Emit blocked (+ blocked-meta when present) rows for each matching task.
+    # Only refs that actually exist locally (after the caller's strict sync)
+    # are reported, so the audit lists ACTUAL lingering refs, never inferred
+    # ones. A blocked task always has its overlay ref (blocked --json reads
+    # it); the blocked-meta side ref is optional (legacy blocks lack it).
+    local bsha bissue brepo bref bmref
+    while IFS=$'\t' read -r brepo bissue bsha; do
+        [ -n "$bsha" ] || continue
+        bref="refs/heads/tasks/blocked/$bsha"
+        if git show-ref --verify --quiet "$bref" 2>/dev/null; then
+            printf '%s\t%s\t%s\t%s\tblocked\n' "$brepo" "$bissue" "$bsha" "$bref"
+        fi
+        bmref="refs/heads/tasks/blocked-meta/$bsha"
+        if git show-ref --verify --quiet "$bmref" 2>/dev/null; then
+            printf '%s\t%s\t%s\t%s\tblocked-meta\n' "$brepo" "$bissue" "$bsha" "$bmref"
+        fi
+    done < <(printf '%s' "$blocked_json" | jq -r \
+        --arg repo "$target_repo" --arg issf "$issue_filter" '
+        .[]
+        | select((.issue // null) != null)
+        | select(($issf == "") or ((.issue|tostring) == $issf))
+        | select((.repo // "") == "" or (.repo == $repo))
+        | [ (.repo // ""), (.issue|tostring), .sha ] | @tsv')
+
+    return 0
+}
+
 # Command: reconcile-closed-issue - drop the lingering scheduling refs
 # (tasks/frontier/<short>, tasks/blocked/<full-sha>, tasks/blocked-meta/
 # <full-sha>) left behind by tasks whose GitHub issue is CONFIRMED CLOSED.
@@ -6317,50 +6565,29 @@ EOF
         return 3
     fi
 
-    declare -A TARGETS=()
-    # FRONTIER: every frontier ref whose task commit resolves to (repo,
-    # issue). We scan the ref namespace directly (NOT `cmd_frontier`, which
-    # intentionally hides blocked/not-ready/claimed rows) so no lingering
-    # frontier ref for the closed issue is missed.
-    local objsha refname derived d_repo d_issue
-    while IFS=$'\t' read -r objsha refname; do
-        [ -n "$objsha" ] || continue
-        derived=$(derive_task_origin "$objsha")
-        d_repo=$(printf '%s' "$derived" | cut -f1)
-        d_issue=$(printf '%s' "$derived" | cut -f2)
-        [ "$d_issue" = "$issue" ] || continue
-        [ -z "$d_repo" ] || [ "$d_repo" = "$repo" ] || continue
-        TARGETS["$objsha"]=1
-    done < <(git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname)%09%(refname)')
-
-    # BLOCKED: use the canonical `blocked --json` resolution (meta-overridden
-    # issue + derived repo) so we never re-parse commit bodies or drift from
-    # the CLI. A CLI failure is LOUD, never coerced into an empty list.
-    local blocked_json cli_rc=0 cli_err
-    cli_err=$(mktemp)
-    blocked_json=$(cmd_blocked --json --no-fetch 2>"$cli_err") || cli_rc=$?
-    if [ "$cli_rc" -ne 0 ] || ! printf '%s' "$blocked_json" | jq -e . >/dev/null 2>&1; then
-        local errtxt; errtxt=$(tr '\n' ' ' < "$cli_err" 2>/dev/null || true)
-        rm -f "$cli_err"
+    # Enumerate the target task SHAs resolving to (repo, issue) via the ONE
+    # shared candidate resolver (direct frontier scan + canonical
+    # `blocked --json`), so reconcile and `validate --closed-issue-audit`
+    # never drift. A non-zero return means the blocked enumeration failed —
+    # LOUD, never coerced into an empty set (an incomplete view could
+    # silently skip lingering refs, the exact bug this command exists to fix).
+    local cand_rows cand_rc=0
+    cand_rows=$(closed_issue_candidate_rows "$repo" "$issue") || cand_rc=$?
+    if [ "$cand_rc" -ne 0 ]; then
         if [ "$json" = true ]; then
             _rci_emit_summary false '"CLOSED"' "blocked-enumeration-failed" 1
         else
-            echo "Error: 'task-dag blocked --json' failed or produced invalid JSON" >&2
-            echo "       (rc=$cli_rc): $errtxt" >&2
-            echo "       Refusing to reconcile with an incomplete blocked view." >&2
+            echo "Error: could not enumerate task refs for ${repo}#${issue}" >&2
+            echo "       ('task-dag blocked --json' failed or produced invalid JSON);" >&2
+            echo "       refusing to reconcile with an incomplete view." >&2
         fi
         return 3
     fi
-    rm -f "$cli_err"
-    local bsha
-    while IFS= read -r bsha; do
-        [ -n "$bsha" ] && TARGETS["$bsha"]=1
-    done < <(printf '%s' "$blocked_json" | jq -r \
-        --argjson n "$issue" --arg repo "$repo" '
-        .[]
-        | select((.issue // null) == $n)
-        | select((.repo // "") == "" or (.repo == $repo))
-        | .sha')
+    declare -A TARGETS=()
+    local _cr_repo _cr_issue _cr_sha _cr_ref _cr_kind
+    while IFS=$'\t' read -r _cr_repo _cr_issue _cr_sha _cr_ref _cr_kind; do
+        [ -n "$_cr_sha" ] && TARGETS["$_cr_sha"]=1
+    done <<< "$cand_rows"
 
     # ── 3. Re-confirm CLOSED right before the first mutation ─────────────
     # Cannot make issue-state and ref-deletion atomic, but a second check
