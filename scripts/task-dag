@@ -5845,10 +5845,13 @@ EOF
     return 0
 }
 
-# Command: guard-commit-message — refuse a HAND-WRITTEN commit that carries
-# task-dag control-plane markers. This is the canonical check behind the
-# per-repo `commit-msg` hook (docs/DESIGN_PRINCIPLES.md → "Commit-message
-# guard"). Rationale: EVERY task-dag control commit (task/claim/blocked-meta/
+# Command: guard-commit-message — refuse a hand-written commit that either
+# (a) uses a Conventional-Commits subject prefix (canon requires a plain,
+# capitalized, imperative subject — see top-level rules/WORKFLOW.md "Commit
+# messages"), or (b) carries task-dag control-plane markers. This is the
+# canonical check behind the per-repo `commit-msg` hook
+# (docs/DESIGN_PRINCIPLES.md → "Commit-message guard").
+# Rationale for (b): EVERY task-dag control commit (task/claim/blocked-meta/
 # completion merge/close merge/historical link — see
 # docs/INVARIANTS.md "Per-kind commit shapes") is built with
 # `git commit-tree`, which BYPASSES git hooks. So any of these markers
@@ -5873,18 +5876,20 @@ Usage: task-dag guard-commit-message <message-file>
        task-dag guard-commit-message --file=<message-file>
        task-dag guard-commit-message --stdin
 
-Exit non-zero if the commit message names task-dag control-plane content
-that only the tooling may emit (Task: subject, Type:, Task-Commit:,
-Status: completed/pending, Closes-Epic:, Historical-Commit:, Retroactive:,
-Blocked-Meta:). All such commits are built with 'git commit-tree' (which
-bypasses hooks), so these markers only ever appear in a manual 'git commit'
-— i.e. someone is hand-crafting a task-impacting commit. Intended as the
-body of a repo 'commit-msg' hook:
+Exit non-zero if the commit message either (a) has a Conventional-Commits
+subject prefix (feat:, fix(scope):, chore!:, …) — canon requires a plain,
+capitalized, imperative subject (rules/WORKFLOW.md 'Commit messages') — or
+(b) names task-dag control-plane content that only the tooling may emit
+(Task: subject, Type:, Task-Commit:, Status: completed/pending, Closes-Epic:,
+Historical-Commit:, Retroactive:, Blocked-Meta:). The control-plane commits
+are all built with 'git commit-tree' (which bypasses hooks), so those markers
+only ever appear in a manual 'git commit' — i.e. someone is hand-crafting a
+task-impacting commit. Intended as the body of a repo 'commit-msg' hook:
 
     exec task-dag guard-commit-message "\$1"
 
-Exit codes: 0 = clean (allow), 1 = reserved marker found (reject),
-2 = usage error.
+Exit codes: 0 = clean (allow), 1 = rejected (Conventional-Commits subject
+or a reserved control-plane marker), 2 = usage error.
 EOF
                 return 0 ;;
             -*) echo "Unknown option: $1" >&2; return 2 ;;
@@ -5923,6 +5928,31 @@ EOF
     case "$subject" in
         Task:*) hits+=("subject 'Task:'  → task commits are minted by 'task-dag breakdown' (or the issue→task workflow), never by hand") ;;
     esac
+    # Canon commit-style (rules/WORKFLOW.md "Commit messages"): the subject is
+    # a plain, capitalized, imperative sentence — NEVER a Conventional-Commits
+    # `type(scope):` prefix (feat:, fix(mss):, chore!:, seo(faq):, …). This is
+    # a distinct failure from the control-plane markers above, so it gets its
+    # own message and short-circuits. Match only the high-signal pattern: a
+    # leading lowercase word (optionally `(scope)` and/or `!`) immediately
+    # followed by `: `. Capitalized subjects, `fixup!`/`squash!` (no colon),
+    # and `word://…` (no space after the colon) never match.
+    if grep -qE '^[a-z][a-z0-9-]*(\([^)]+\))?!?: ' <<<"$subject"; then
+        printf '%b' "${RED}" >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        echo " task-dag: refusing a Conventional-Commits commit subject" >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        echo " Subject: $subject" >&2
+        echo "" >&2
+        echo " Canon (rules/WORKFLOW.md 'Commit messages') requires a plain," >&2
+        echo " capitalized, imperative sentence — never a type(scope): prefix." >&2
+        echo "   Bad:  feat(helios): add report export" >&2
+        echo "   Good: Add report export for Helios" >&2
+        echo "" >&2
+        echo " Amend the subject and retry. Do NOT bypass with 'git commit --no-verify'." >&2
+        echo "════════════════════════════════════════════════════════════════════" >&2
+        printf '%b' "${RESET}" >&2
+        return 1
+    fi
     # here-string (not a pipe) so an early 'grep -q' exit can't SIGPIPE a
     # producer and flip a real match into a pipefail non-match.
     _gm_has() { grep -qiE "$1" <<<"$scan"; }

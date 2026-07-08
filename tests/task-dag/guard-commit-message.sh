@@ -27,9 +27,31 @@ allow() {
   [ $? -eq 0 ] && ok "allows $name" || bad "wrongly rejected $name"
 }
 
-# ── reserved control markers → REJECT ───────────────────────────────
+# ── Conventional-Commits subject prefixes → REJECT ──────────────────
+reject "feat: prefix"                    "feat: add a thing"
+reject "fix(scope): prefix"              "fix(mss): correct parsing"
+reject "chore! breaking prefix"          "chore!: drop the old api"
+reject "scoped+bang prefix"              "feat(api)!: change return shape"
+reject "seo(faq): prefix"                "seo(faq): enforce ads-policy lint in approval gate"
+reject "docs: prefix"                    "docs: update the readme"
+reject "lowercase scope-like prefix"     "helios: bump version"
+
+# ── canonical subjects → ALLOW ──────────────────────────────────────
+allow "capitalized imperative subject"   "Add report export for Helios"
+allow "capitalized with a later colon"   "Update sitemap: add FAQ routes"
+allow "fixup! autosquash (no colon)"     "fixup! Add report export"
+allow "squash! autosquash (no colon)"    "squash! Add report export"
+allow "mixed-case first word (iOS)"      "iOS build fix for the parser"
+allow "url in subject (no space after colon)" "Add https://example.com to allowlist"
+# Blast-radius: git-generated subjects must never be blocked.
+allow "git revert subject"               'Revert "feat: add report export"'
+allow "git merge-branch subject"         "Merge branch 'master' into feature"
+allow "git merge-PR subject"             "Merge pull request #123 from user/topic"
+
+# ── reserved control markers → REJECT (with canonical subjects, so the
+#    marker — not the subject style — is what triggers the rejection) ──
 reject "Status: completed (fake completion)" \
-"seo: enforce ads-policy lint
+"Enforce ads-policy lint
 
 Task-Commit: 5e1860cc50cf8ddb46d0b51259f52ea69c2ed7f5
 Status: completed"
@@ -50,22 +72,21 @@ reject "Status: pending"                 "new task
 Status: pending"
 
 # ── ordinary work → ALLOW ───────────────────────────────────────────
-allow "plain impl commit"                "seo(faq): enforce ads-policy lint in approval gate"
 allow "impl commit with Satisfies/Phase" \
-"seo(faq): enforce ads-policy lint
+"Enforce ads-policy lint in the approval gate
 
 Wire the scanner into the approval gate.
 
 Phase: P5. Satisfies: virusdave/top-level#17.
 Co-authored-by: Amp <amp@ampcode.com>"
 allow "prose mentioning a task casually" \
-"fix: handle the completed state in the UI
+"Handle the completed state in the UI
 
 This renders the Status label when a task is completed."
 
 # ── comment lines (git strips them) must NOT trigger ────────────────
 allow "reserved marker only inside a # comment line" \
-"chore: tidy
+"Tidy up
 
 # Task-Commit: this line is a git comment and must be ignored
 # Status: completed"
@@ -79,7 +100,7 @@ allow "reserved marker only inside a # comment line" \
   for i in $(seq 1 5000); do echo "filler line $i lorem ipsum dolor sit amet"; done; } > "$ROOT/m"
 "$TD" guard-commit-message "$ROOT/m" >/dev/null 2>&1
 [ $? -eq 1 ] && ok "rejects marker even in a very long message" || bad "long message missed the marker (SIGPIPE/pipefail?)"
-{ echo "seo: a perfectly ordinary but very long commit"; echo
+{ echo "A perfectly ordinary but very long commit"; echo
   for i in $(seq 1 5000); do echo "filler line $i lorem ipsum dolor sit amet"; done; } > "$ROOT/m"
 "$TD" guard-commit-message "$ROOT/m" >/dev/null 2>&1
 [ $? -eq 0 ] && ok "allows a long marker-free message (no exit 141)" || bad "long marker-free message did not exit 0"
@@ -90,10 +111,10 @@ allow "reserved marker only inside a # comment line" \
 CC_REPO=$(mktemp -d)
 git -C "$CC_REPO" init -q
 git -C "$CC_REPO" config core.commentChar ']'
-printf ']  Task-Commit: this is a comment, ignore it\nseo: real work\n' > "$CC_REPO/m"
+printf ']  Task-Commit: this is a comment, ignore it\nReal work\n' > "$CC_REPO/m"
 ( cd "$CC_REPO" && "$TD" guard-commit-message "$CC_REPO/m" >/dev/null 2>&1 )
 [ $? -eq 0 ] && ok "special core.commentChar (']') strips comment, allows clean msg" || bad "special commentChar corrupted the filter"
-printf 'seo: real work\n]  filler\nTask-Commit: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' > "$CC_REPO/m"
+printf 'Real work\n]  filler\nTask-Commit: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' > "$CC_REPO/m"
 ( cd "$CC_REPO" && "$TD" guard-commit-message "$CC_REPO/m" >/dev/null 2>&1 )
 [ $? -eq 1 ] && ok "special core.commentChar still rejects a real marker" || bad "special commentChar caused a false allow"
 rm -rf "$CC_REPO"

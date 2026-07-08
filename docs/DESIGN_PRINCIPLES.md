@@ -84,6 +84,14 @@ task SHA that never existed).
   subcommand that should have produced it. Cross-repo trailers a normal impl
   commit legitimately carries by hand (`Satisfies:`, `Phase:`,
   `Materialise-Child-Epic:`) are deliberately allowed.
+- The same check **also enforces canon commit style** (top-level
+  `rules/WORKFLOW.md` "Commit messages"): it rejects a Conventional-Commits
+  subject prefix (`feat:`, `fix(scope):`, `chore!:`, `seo(faq):`, …) because
+  canon requires a plain, capitalized, imperative subject. This is the
+  mechanical half of the fleet-wide commit-style fix (top-level#45); it
+  matches only the high-signal leading-lowercase-`type(scope):` pattern, so
+  capitalized subjects, `fixup!`/`squash!`, and git-generated `Revert "…"` /
+  `Merge …` subjects always pass.
 - The marker→tooling map is the **single source of truth** in the CLI. The
   per-repo hook ([`.githooks/commit-msg`](../.githooks/commit-msg)) is
   repo-agnostic and only *delegates* to the CLI — it must never re-encode the
