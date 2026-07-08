@@ -136,28 +136,31 @@ MD
 # Machine-readable manifest. The helios cluster-proposals page uses
 # `manifest_present` (computed from the existence of this file) to
 # render the "complete" vs "in progress / incomplete" pill.
-{
-  printf '{\n'
-  printf '  "schema_version": 0,\n'
-  printf '  "run_id": %s,\n' "$(jq -Rn --arg s "${RUN_ID}" '$s')"
-  printf '  "generated_at": %s,\n' "$(jq -Rn --arg s "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '$s')"
-  printf '  "kind": "placeholder",\n'
-  printf '  "note": "Stub run; replace once P1c of the gemini-clusters epic lands.",\n'
-  printf '  "clusters": [\n'
-  first=1
-  for slug in "${SLUGS[@]}"; do
-    if [[ $first -eq 1 ]]; then
-      first=0
-    else
-      printf ',\n'
-    fi
-    printf '    { "slug": %s, "files": ["verdict.md"] }' "$(jq -Rn --arg s "${slug}" '$s')"
-  done
-  printf '\n  ],\n'
-  printf '  "repairs": [],\n'
-  printf '  "strategic_context_present": %s\n' \
-    "$([[ -f "${STRATEGIC_CLUSTERS_YAML}" ]] && echo true || echo false)"
-  printf '}\n'
-} > "${RUN_DIR}/manifest.json"
+#
+# Built natively by jq (never hand-assembled braces/commas): the scalars
+# arrive as --arg/--argjson and the slug list as positional --args, so
+# jq owns all JSON structure/escaping and a future field/order edit can't
+# desync a comma into invalid JSON.
+if [[ -f "${STRATEGIC_CLUSTERS_YAML}" ]]; then
+  strategic_context_present=true
+else
+  strategic_context_present=false
+fi
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --argjson strategic_context_present "${strategic_context_present}" \
+  --args \
+  '{
+    schema_version: 0,
+    run_id: $run_id,
+    generated_at: $generated_at,
+    kind: "placeholder",
+    note: "Stub run; replace once P1c of the gemini-clusters epic lands.",
+    clusters: ($ARGS.positional | map({ slug: ., files: ["verdict.md"] })),
+    repairs: [],
+    strategic_context_present: $strategic_context_present
+  }' \
+  "${SLUGS[@]}" > "${RUN_DIR}/manifest.json"
 
 echo "wrote ${RUN_DIR}"
