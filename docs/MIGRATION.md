@@ -42,7 +42,16 @@ jobs:
     if: ${{ github.event_name == 'issue_comment' }}
     uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@master
     permissions: { contents: write, issues: write }
-    secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
+    # Add the two App secrets ONLY on a repo whose comment-sync can auto-close
+    # a cross-repo delegated epic (it runs `task-dag close-epic`, which pushes a
+    # `Closes-Epic: #N` merge to master). A GITHUB_TOKEN push cannot trigger the
+    # push-reactive close-completed workflow (GitHub recursion guard, issue #9);
+    # the App token can. Requires the App to have contents:write on this repo
+    # (see docs/SECRETS.md). Omit them on ordinary peers (unchanged behaviour).
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
+      # app_id: ${{ secrets.TASK_DAG_APP_ID }}
+      # app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
   close-completed:
     if: ${{ github.event_name == 'push' }}
     uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
@@ -86,8 +95,10 @@ The caller is the **only** per-repo file (a logic-free shim). The single
 canonical implementation is the set of reusable workflows + scripts + CLI in
 this repo. The one manual per-repo step is provisioning the two App secrets
 (`TASK_DAG_APP_ID`, `TASK_DAG_APP_PRIVATE_KEY`) used by `completion-aggregate`
-(and by the optional `materialise` job) — identical values on every peer;
-exact runbook in [`docs/SECRETS.md`](SECRETS.md).
+(and by the optional `materialise` job, and — on delegating-parent repos that
+auto-close cross-repo epics — by the optional `comment-sync` App path) —
+identical values on every peer; exact runbook in
+[`docs/SECRETS.md`](SECRETS.md).
 
 The `materialise` job is **optional**: add it only to peers that must be able
 to spawn cross-repo child epics (via the `Materialise-Child-Epic:` commit

@@ -1,11 +1,12 @@
 # task-dag secrets — operator runbook
 
-The task-dag automation needs **two** GitHub Actions secrets, and only for
-the single cross-repo writer job (`completion-aggregate`). This is the one
-manual, per-repo step that cannot be expressed as code, because GitHub stores
-Actions secrets per repository and `virusdave` is a **user account**, not an
-org (so there is no org-wide secret to inherit — confirmed: the
-`/orgs/virusdave/actions/secrets` API returns 404).
+The task-dag automation needs **two** GitHub Actions secrets, primarily for
+the cross-repo writer job (`completion-aggregate`), plus the optional
+`materialise` job and the optional `comment-sync` App path (see below). This
+is the one manual, per-repo step that cannot be expressed as code, because
+GitHub stores Actions secrets per repository and `virusdave` is a **user
+account**, not an org (so there is no org-wide secret to inherit — confirmed:
+the `/orgs/virusdave/actions/secrets` API returns 404).
 
 | Secret | What it is |
 |---|---|
@@ -14,12 +15,42 @@ org (so there is no org-wide secret to inherit — confirmed: the
 
 ## Why these exist (and only here)
 
-Three of the four caller jobs — `issue-to-task`, `comment-sync`,
-`close-completed` — read/write **only the caller repo's own** issues, so the
-built-in `secrets.GITHUB_TOKEN` (scoped to the running repo, carries
-`issues: write`) is sufficient. No App secret is involved.
+Two of the four caller jobs — `issue-to-task` and `close-completed` —
+read/write **only the caller repo's own** issues, so the built-in
+`secrets.GITHUB_TOKEN` (scoped to the running repo, carries `issues: write`)
+is sufficient. No App secret is involved. `comment-sync` is the same for
+ordinary peers, but has an **optional** App path (below).
 
-`completion-aggregate` is the **only** job that writes **cross-repo**: it posts
+### `comment-sync` — optional App creds on delegating-parent repos
+
+`comment-sync` normally uses only `GITHUB_TOKEN`. But on a repo whose
+`comment-sync` can **auto-close a cross-repo delegated epic**, it runs
+`task-dag close-epic`, which pushes a tree-equal `Closes-Epic: #N` merge to
+`master`. A push made with `GITHUB_TOKEN` **cannot start a new `push`
+workflow run** (GitHub's recursion guard), so that merge never triggers
+`close-completed-issues.yml` — the issue is never closed and
+`tasks/pending/<N>` is never cleaned up (issue #9).
+
+Fix: pass the **same two** `TASK_DAG_APP_*` secrets to `comment-sync` on such
+repos. When both are present the job mints an App installation token and uses
+it as the git remote credential, so the close-epic master push is
+App-authenticated and **does** trigger `close-completed`. These secrets are
+**optional** on `comment-sync`: omit them and the legacy `GITHUB_TOKEN`-only
+behaviour is unchanged (fine for any repo that never auto-closes a cross-repo
+delegated epic). If they are supplied but the mint fails, `comment-sync`
+**fails closed** (it does not silently fall back to `GITHUB_TOKEN`, which
+would recreate the bug).
+
+> **App permission prerequisite:** for the App-authenticated close-epic push
+> to succeed, the shared task-dag App installation must have
+> **Contents: Read & write** on that repo (in addition to Issues), and
+> `master` branch protection / rulesets must permit the App identity to push.
+> The App currently needs only Issues for `completion-aggregate` /
+> `materialise`; grant Contents before wiring the App creds into
+> `comment-sync`, or the close-epic push will fail.
+
+`completion-aggregate` is the **only** job that unconditionally writes
+**cross-repo**: it posts
 `Satisfies: …` completion comments onto `virusdave/top-level`. The automatic
 `GITHUB_TOKEN` cannot write to a different repo, so the job mints a *top-level*
 installation token via the App
@@ -69,15 +100,27 @@ You are **copying**, not creating, an App.
    # expect: TASK_DAG_APP_ID  and  TASK_DAG_APP_PRIVATE_KEY
    ```
 
-5. **Confirm the App is installed where it writes.** The App only needs to be
+5. **Confirm the App is installed where it writes.** For
+   `completion-aggregate` (and `materialise`) the App only needs to be
    installed on the **destination** (`virusdave/top-level`, already done — the
-   other peers write there successfully). It does **not** need installing on
-   the new caller repo; the secrets are all that repo needs.
+   other peers write there successfully) with **Issues: Read & write**; it
+   does **not** need installing on the caller repo, and the caller repo's
+   secrets are all that repo needs for those two jobs.
+
+   **Exception — the optional `comment-sync` App path.** When you wire the App
+   secrets into `comment-sync` (only on a delegating-parent repo that
+   auto-closes cross-repo epics), the App-authenticated push is to **that
+   caller repo's own `master`**, so the App must be installed **on the caller
+   repo** with **Contents: Read & write** (in addition to Issues), and that
+   repo's `master` branch protection / rulesets must permit the App identity
+   to push. Grant this before wiring the App creds into `comment-sync`, or the
+   close-epic push will fail.
 
 > **Ordering hazard:** provision these secrets **before** the caller's
 > `completion-aggregate` job lands on `master`. With the job present but the
 > secrets absent, the App-token mint step fails and every `master` push shows a
-> failed job. (The other three jobs are unaffected.)
+> failed job. (The other jobs are unaffected — `comment-sync` mints only when
+> its optional App secrets are explicitly supplied.)
 
 ## Rotation
 
