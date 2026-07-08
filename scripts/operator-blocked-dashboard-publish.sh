@@ -184,7 +184,8 @@ ensure_app_jwt() {
     now="$(date +%s)"
     exp=$((now + 540))                       # ~9 min; GitHub max is 10.
     header="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
-    payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 30)) "$exp" "$APP_ID" | b64url)"
+    payload="$(jq -jcn --argjson iat "$((now - 30))" --argjson exp "$exp" \
+        --arg iss "$APP_ID" '{iat:$iat,exp:$exp,iss:$iss}' | b64url)"
     sig="$(printf '%s.%s' "$header" "$payload" \
         | openssl dgst -sha256 -sign "$APP_KEY_FILE" -binary | b64url)"
     JWT="$header.$payload.$sig"
