@@ -29,6 +29,7 @@ export const AuditEntityTypeSchema = z.enum([
   'purchase_inventory_lifecycle_run',
   'seo_faq_set',
   'seo_bundle',
+  'migration_apply_attempt',
 ])
 export const AuditEventTypeSchema = z.enum([
   'auth.user.signed_in',
@@ -153,6 +154,14 @@ export const AuditEventTypeSchema = z.enum([
   // L3 (automation#54): automation + monitoring sweep.
   'purchase.lifecycle.advance_completed',
   'purchase.lifecycle.alerted',
+  // Worker-driven pending-migration apply (automation#62, leaf 4). The
+  // immutable event log for a web-triggered prod schema mutation (canon
+  // rules/DB_PERFORMANCE.md step 7). `.requested` is emitted by the enqueue
+  // API (leaf 6); the worker emits `.started` before psql runs and exactly
+  // one terminal `.succeeded` / `.failed`.
+  'db.migration.apply.started',
+  'db.migration.apply.succeeded',
+  'db.migration.apply.failed',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>

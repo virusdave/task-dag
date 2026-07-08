@@ -70,6 +70,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.faq_hybrid_sync',
   'catalog.maintenance.upload_group_image',
   'inventory.lifecycle.advance',
+  'db.migration.apply',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
 
@@ -416,6 +417,35 @@ export const InventoryLifecycleAdvanceJobPayloadSchema = z.object({
 export type InventoryLifecycleAdvanceJobPayload = z.infer<
   typeof InventoryLifecycleAdvanceJobPayloadSchema
 >
+
+/**
+ * Worker-driven production migration apply (automation#62, leaf 4). See
+ * docs/helios/pending-migrations-admin-apply/DESIGN.md. Enqueued by the
+ * admin "Apply Now" endpoint at `JOB_PRIORITY_URGENT` with
+ * `dedupeKey='migration-apply:<migrationId>'` and
+ * `concurrencyKey='migration-apply'`. The worker re-validates everything
+ * server-side; the payload is untrusted input, never a source of SQL.
+ *
+ *  - `migrationId`         — the registered sentinel id, e.g.
+ *                            `097_litalerts_parse_feedback`. Resolved through
+ *                            the allowlisted registry → committed artifact.
+ *  - `requestedByUserId`   — the admin who clicked "Apply Now" (the operator
+ *                            go); recorded for the canon-step-7 audit trail.
+ *  - `confirmMigrationId`  — the type-to-confirm value; the worker refuses
+ *                            unless it exactly equals `migrationId` (matches
+ *                            the server-side check, defense in depth).
+ *  - `blessingArtifactSha256` — the artifact-closure digest captured from the
+ *                            registry blessing at enqueue time; the worker
+ *                            refuses unless the live re-resolved digest AND the
+ *                            registry blessing both still equal it.
+ */
+export const DbMigrationApplyJobPayloadSchema = z.object({
+  migrationId: z.string().min(1),
+  requestedByUserId: z.number().int().positive(),
+  confirmMigrationId: z.string().min(1),
+  blessingArtifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
+})
+export type DbMigrationApplyJobPayload = z.infer<typeof DbMigrationApplyJobPayloadSchema>
 
 /**
  * Periodic edible THC clamp sweep. Walks Bronx + Midtown (the two

@@ -107,6 +107,10 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'proposal.generate.description_batch': { pool: 'system', requiresSweedSession: false },
   'proposal.generate.pricing_batch': { pool: 'system', requiresSweedSession: false },
   'proposal.import.review_json': { pool: 'system', requiresSweedSession: false },
+  // Worker-driven pending-migration apply (automation#62, leaf 4): Postgres +
+  // an out-of-process `psql` child only, never Sweed. Enqueued at
+  // JOB_PRIORITY_URGENT so the fast-lane loop picks it up near-instantly.
+  'db.migration.apply': { pool: 'system', requiresSweedSession: false },
 }
 
 /**

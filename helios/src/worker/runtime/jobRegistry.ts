@@ -34,6 +34,7 @@ import {
   ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema,
   ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
+  DbMigrationApplyJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
   ProposalGenerateDescriptionBatchJobPayloadSchema,
   ProposalGeneratePricingBatchJobPayloadSchema,
@@ -104,6 +105,7 @@ import { runSchedulingGenerateCandidatesJob } from '../jobs/schedulingGenerateCa
 import { runCatalogSyncDiscoverOrphanGroupsJob } from '../jobs/catalogSyncDiscoverOrphanGroupsJob.js'
 import { runCatalogSyncGroupDetailJob } from '../jobs/syncGroupDetailJob.js'
 import { runCatalogSyncFullSummaryJob } from '../jobs/syncFullSummaryJob.js'
+import { runDbMigrationApplyJob } from '../jobs/dbMigrationApplyJob.js'
 import { runUndoExecuteJob } from '../jobs/undoExecuteJob.js'
 import { withJobAuthContext } from '../sweed/authLog.js'
 import { withSweedSession } from '../sweed/session.js'
@@ -364,6 +366,9 @@ const handlers: Record<JobType, JobHandler> = {
       context,
       ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema.parse(context.payload),
     )
+  },
+  'db.migration.apply': async (context) => {
+    await runDbMigrationApplyJob(context, DbMigrationApplyJobPayloadSchema.parse(context.payload))
   },
 }
 

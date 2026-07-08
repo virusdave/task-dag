@@ -25,10 +25,56 @@
 
 import type { Queryable } from './pool.js'
 
+/**
+ * Transaction handling of a migration artifact, recorded from the reviewed
+ * blessing so the apply engine can label the attempt without parsing SQL.
+ *   - `transactional`        — the file wraps its own `begin;`/`commit;`.
+ *   - `nontransactional-cic` — contains `CREATE INDEX CONCURRENTLY` (or another
+ *                              statement that cannot run inside a txn) and is
+ *                              intentionally NOT wrapped.
+ *   - `mixed`                — a combination (rare; blessing must justify it).
+ */
+export type MigrationTransactionMode = 'transactional' | 'nontransactional-cic' | 'mixed'
+
+/**
+ * Oracle-blessing + operator-provenance bound to a migration artifact
+ * (automation#62; see DESIGN.md "Data model" / "Gating / safety model").
+ * A migration is apply-eligible ONLY when it carries a complete blessing AND
+ * the deployed artifact-closure digest still equals `artifactSha256` — a later
+ * edit to a shared `schema/*.sql` include changes the recomputed digest and
+ * invalidates the stale blessing rather than silently running unblessed SQL.
+ * The blessing is recorded in git by the migration author when it lands, so
+ * provenance is version-controlled, not a mutable DB flag. This is intentionally
+ * absent from every migration until leaf 9 blesses `097` (+ operator approval),
+ * so the apply engine fails closed on everything today.
+ */
+export interface MigrationBlessing {
+  /** Human-referenceable Oracle blessing ref (thread URL / review id). */
+  readonly ref: string
+  /** The reviewed source SHA the blessing was granted against. */
+  readonly reviewedSha: string
+  /**
+   * sha256 over the reviewed unit: the main migration file PLUS its full
+   * `\i`/`\ir` include closure, exactly as {@link resolveMigrationArtifact}
+   * computes it. Lowercase hex.
+   */
+  readonly artifactSha256: string
+  /** How the artifact handles transactions (recorded onto the attempt row). */
+  readonly transactionMode: MigrationTransactionMode
+  /** Optional free-text note (non-transactional caveats, etc). */
+  readonly note?: string
+}
+
 export interface MigrationSentinel {
   readonly migrationId: string
   readonly label: string
   readonly check: (db: Queryable) => Promise<boolean>
+  /**
+   * Present ONLY once the migration has been Oracle-blessed + is
+   * operator-approvable via the admin "Apply Now" flow (automation#62). Absent
+   * ⇒ the migration is not apply-eligible and the worker refuses it.
+   */
+  readonly blessing?: MigrationBlessing
 }
 
 export interface PendingMigration {
@@ -1463,6 +1509,48 @@ const SENTINELS: MigrationSentinel[] = [
 export const MIGRATION_SENTINEL_IDS: ReadonlySet<string> = new Set(
   SENTINELS.map((sentinel) => sentinel.migrationId),
 )
+
+const SENTINELS_BY_ID: ReadonlyMap<string, MigrationSentinel> = new Map(
+  SENTINELS.map((sentinel) => [sentinel.migrationId, sentinel]),
+)
+
+/**
+ * Look up a single sentinel by its migrationId, or null if unregistered.
+ * The apply engine (automation#62, leaf 4) uses this to run one sentinel's
+ * `check` directly against a live client — bypassing the ~30s
+ * {@link getPendingMigrations} cache — for its before/after verification.
+ */
+export function getMigrationSentinel(migrationId: string): MigrationSentinel | null {
+  return SENTINELS_BY_ID.get(migrationId) ?? null
+}
+
+/**
+ * Run one migration's sentinel LIVE (cache bypassed) against `db`, returning
+ * true iff the migration is applied. Unlike {@link getPendingMigrations} this
+ * never reads or writes the module cache, so the apply engine's
+ * before/after sentinel verification always reflects the real current schema.
+ * A throwing sentinel (e.g. the underlying table doesn't exist yet) is treated
+ * as "not applied" — identical to the batch path — so a missing dependency
+ * surfaces as pending rather than an exception.
+ */
+export async function isMigrationAppliedLive(
+  db: Queryable,
+  migrationId: string,
+): Promise<boolean> {
+  const sentinel = getMigrationSentinel(migrationId)
+  if (sentinel === null) {
+    return false
+  }
+  try {
+    return await sentinel.check(db)
+  } catch (error) {
+    console.warn(
+      `[pendingMigrations] live sentinel for ${migrationId} threw; treating as not-applied:`,
+      error,
+    )
+    return false
+  }
+}
 
 interface CacheEntry {
   readonly pending: PendingMigration[]
