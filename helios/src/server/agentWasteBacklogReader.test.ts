@@ -11,8 +11,8 @@ import {
   getBacklog,
   getBacklogSourceStatus,
 } from './agentWasteRepo.js'
-import { __resetTopLevelMirrorForTests, initTopLevelMirror } from './topLevelMirror.js'
-import { initAgentWasteBacklogReader, topLevelBacklogReader } from './agentWasteBacklogReader.js'
+import { __resetAgentPainPointsMirrorForTests, initAgentPainPointsMirror } from './agentPainPointsMirror.js'
+import { initAgentWasteBacklogReader, agentPainPointsBacklogReader } from './agentWasteBacklogReader.js'
 
 const BACKLOG_REL = 'docs/agent-runtime/agent-waste-backlog.ndjson'
 
@@ -22,8 +22,8 @@ const BACKLOG_REL = 'docs/agent-runtime/agent-waste-backlog.ndjson'
  * no prod resources — this is the fixture the reader reads through the
  * mirror module's local-checkout mode.
  */
-function makeTopLevelFixture(backlog: string | null): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'top-level-fixture-'))
+function makeAgentPainPointsFixture(backlog: string | null): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-pain-points-fixture-'))
   const git = (...args: string[]): void => {
     execFileSync('git', args, {
       cwd: dir,
@@ -52,18 +52,21 @@ function makeTopLevelFixture(backlog: string | null): string {
 const tempDirs: string[] = []
 
 beforeEach(() => {
-  __resetTopLevelMirrorForTests()
+  __resetAgentPainPointsMirrorForTests()
   __resetBacklogReaderForTests()
-  delete process.env.TOP_LEVEL_REPO_PATH
-  delete process.env.HELIOS_TOP_LEVEL_LOCAL_DIR
-  delete process.env.HELIOS_TOP_LEVEL_DEPLOY_KEY
+  delete process.env.AGENT_PAIN_POINTS_REPO_PATH
+  delete process.env.HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR
+  delete process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DIR
+  delete process.env.HELIOS_AGENT_PAIN_POINTS_DEPLOY_KEY
   delete process.env.HELIOS_AGENT_WASTE_BACKLOG_PATH
 })
 
 afterEach(() => {
-  __resetTopLevelMirrorForTests()
+  __resetAgentPainPointsMirrorForTests()
   __resetBacklogReaderForTests()
-  delete process.env.TOP_LEVEL_REPO_PATH
+  delete process.env.AGENT_PAIN_POINTS_REPO_PATH
+  delete process.env.HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR
+  delete process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DIR
   while (tempDirs.length > 0) {
     const d = tempDirs.pop()
     if (d) fs.rmSync(d, { recursive: true, force: true })
@@ -71,16 +74,16 @@ afterEach(() => {
 })
 
 async function wireFixture(backlog: string | null): Promise<void> {
-  const dir = makeTopLevelFixture(backlog)
+  const dir = makeAgentPainPointsFixture(backlog)
   tempDirs.push(dir)
-  process.env.TOP_LEVEL_REPO_PATH = dir
+  process.env.AGENT_PAIN_POINTS_REPO_PATH = dir
   // No deploy key / no LOCAL_DIR → local-checkout mode, no network.
-  await initTopLevelMirror()
+  await initAgentPainPointsMirror()
   initAgentWasteBacklogReader()
 }
 
-describe('topLevelBacklogReader — mirror available, backlog file present', () => {
-  it('parses committed NDJSON observations off the top-level mirror', async () => {
+describe('agentPainPointsBacklogReader — mirror available, backlog file present', () => {
+  it('parses committed NDJSON observations off the agent-pain-points mirror', async () => {
     const backlog = [
       JSON.stringify({
         time: '2026-07-06T02:47:10Z',
@@ -109,12 +112,12 @@ describe('topLevelBacklogReader — mirror available, backlog file present', () 
     ].join('\n')
     await wireFixture(backlog)
 
-    const observations = await topLevelBacklogReader.readBacklog()
+    const observations = await agentPainPointsBacklogReader.readBacklog()
     expect(observations.map((o) => o.id)).toEqual(['a', 'b'])
   })
 })
 
-describe('topLevelBacklogReader — mirror available, backlog file missing', () => {
+describe('agentPainPointsBacklogReader — mirror available, backlog file missing', () => {
   it('reports available with a fail-safe empty backlog', async () => {
     await wireFixture(null)
 
@@ -123,14 +126,50 @@ describe('topLevelBacklogReader — mirror available, backlog file missing', () 
   })
 })
 
-describe('topLevelBacklogReader — mirror unavailable', () => {
+describe('agentPainPointsBacklogReader — mirror unavailable', () => {
   it('reports unavailable and throws AgentWasteUnavailableError (route 503-degrades)', async () => {
-    // No init, no TOP_LEVEL_REPO_PATH → mirror is not available. No network.
+    // No init, no AGENT_PAIN_POINTS_REPO_PATH → mirror is not available. No network.
     initAgentWasteBacklogReader()
 
     const status = getBacklogSourceStatus()
     expect(status.available).toBe(false)
-    expect(status.detail).toMatch(/top-level mirror unavailable/i)
+    expect(status.detail).toMatch(/agent-pain-points mirror unavailable/i)
     await expect(getBacklog()).rejects.toBeInstanceOf(AgentWasteUnavailableError)
+  })
+})
+
+describe('read mirror vs promote write clone must not share a directory (design §5)', () => {
+  it('refuses to run the read mirror when MIRROR_DIR equals WRITE_DIR (never deletes the write clone)', async () => {
+    // Stand up a working-tree checkout (the shape of the promote write clone).
+    const clone = makeAgentPainPointsFixture('{"time":"t","kind":"k","id":"keep"}\n')
+    tempDirs.push(clone)
+    const sentinel = path.join(clone, '.git', 'config')
+    expect(fs.existsSync(sentinel)).toBe(true)
+
+    // Point BOTH the read mirror dir and the write clone dir at it. Arming the
+    // mirror must refuse rather than rm -rf the working tree.
+    process.env.HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR = clone
+    process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DIR = clone
+
+    const result = await initAgentPainPointsMirror()
+    // Fail closed: the mirror does not run, so the backlog is unavailable …
+    expect(result.available).toBe(false)
+    // … and the working-tree clone is untouched.
+    expect(fs.existsSync(sentinel)).toBe(true)
+  })
+
+  it('refuses to delete a working-tree checkout pinned as the mirror dir', async () => {
+    // Even without a WRITE_DIR set, a MIRROR_DIR that is a working tree must
+    // not be blown away by the bare-mirror bootstrap (defense-in-depth).
+    const clone = makeAgentPainPointsFixture(null)
+    tempDirs.push(clone)
+    const sentinel = path.join(clone, '.git', 'config')
+    expect(fs.existsSync(sentinel)).toBe(true)
+
+    process.env.HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR = clone
+
+    const result = await initAgentPainPointsMirror()
+    expect(result.available).toBe(false)
+    expect(fs.existsSync(sentinel)).toBe(true)
   })
 })

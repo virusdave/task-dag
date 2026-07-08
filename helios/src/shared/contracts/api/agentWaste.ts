@@ -251,7 +251,7 @@ export type PromoteAdvisoryRequest = z.infer<typeof PromoteAdvisoryRequestSchema
 
 /** Structured failure codes for the promote path. */
 export const PROMOTE_ADVISORY_FAILURE_CODES = [
-  'top_level_unavailable',
+  'agent_pain_points_unavailable',
   'invalid_request',
   'catalog_current_invalid',
   'id_exists',
@@ -270,9 +270,9 @@ export const PromoteAdvisoryResponseSchema = z.object({
   ok: z.literal(true),
   /** Advisory id that was added. */
   id: z.string(),
-  /** File path committed, relative to the top-level repo root. */
+  /** File path committed, relative to the agent-pain-points repo root. */
   relPath: z.string(),
-  /** Commit SHA created in virusdave/top-level. */
+  /** Commit SHA created in virusdave/agent-pain-points. */
   commitSha: z.string(),
   /** GitHub URL of the commit, for the UI to link to. */
   commitUrl: z.string(),

@@ -2,7 +2,7 @@ import { buildServer } from './app/buildServer.js'
 import { getServerEnv } from './config/env.js'
 import { bootstrapParserRegistry } from '../lib/parsekit/node/index.js'
 import { initTaskDagMirror } from './taskDagMirror.js'
-import { initTopLevelMirror } from './topLevelMirror.js'
+import { initAgentPainPointsMirror } from './agentPainPointsMirror.js'
 import { initAgentWasteBacklogReader } from './agentWasteBacklogReader.js'
 
 const env = getServerEnv()
@@ -26,18 +26,19 @@ await bootstrapParserRegistry({ log: gitFetchLog })
 // so this mirror is the only source of task refs in prod.
 await initTaskDagMirror({ log: gitFetchLog })
 
-// Initial top-level mirror fetch + arm periodic refresh. Loud-but-non-fatal:
-// the agent-waste backlog reports "unavailable" (structured 503) rather than
-// crashing if the mirror can't be fetched (e.g. the read deploy key is not
-// yet provisioned). This is a SECOND read-only mirror (of virusdave/top-level)
-// alongside the automation task-DAG mirror; it feeds the agent-waste backlog
-// reader (issue #60).
-await initTopLevelMirror({ log: gitFetchLog })
+// Initial agent-pain-points mirror fetch + arm periodic refresh.
+// Loud-but-non-fatal: the agent-waste backlog reports "unavailable"
+// (structured 503) rather than crashing if the mirror can't be fetched
+// (e.g. the read deploy key is not yet provisioned). This is a read-only
+// mirror (of virusdave/agent-pain-points) alongside the automation task-DAG
+// mirror; it feeds the agent-waste backlog reader (issue #64 — the
+// agent-pain-points migration moved this storage out of top-level).
+await initAgentPainPointsMirror({ log: gitFetchLog })
 
-// Install the top-level-mirror-backed agent-waste backlog reader, replacing
-// the default unavailable reader so GET /api/agent-waste/backlog returns real
-// pending-review items. Must run AFTER initTopLevelMirror. Still 503-degrades
-// (never 500s) while the mirror is unavailable (issue #60).
+// Install the agent-pain-points-mirror-backed agent-waste backlog reader,
+// replacing the default unavailable reader so GET /api/agent-waste/backlog
+// returns real pending-review items. Must run AFTER initAgentPainPointsMirror.
+// Still 503-degrades (never 500s) while the mirror is unavailable (issue #64).
 initAgentWasteBacklogReader()
 
 try {

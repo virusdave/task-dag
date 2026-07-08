@@ -25,16 +25,18 @@ import { buildAppPath } from '../../app/paths.js'
 
 /**
  * The reviewed advisory catalog an observation is promoted INTO. Promotion
- * edits `advisories.yaml` in virusdave/top-level and IS a behavior-changing
- * mutation (it adds allowlisted text the dispatcher may inject into future
- * agents). As of issue #61 this is done via an in-Helios admin button
- * (server-side commit+push; operator decision D3), so these links are just
- * for reference. The catalog contract governing that file lives alongside it.
+ * edits `advisories.yaml` in virusdave/agent-pain-points and IS a
+ * behavior-changing mutation (it adds allowlisted text the dispatcher may
+ * inject into future agents). As of issue #61 this is done via an in-Helios
+ * admin button (server-side commit+push; operator decision D3), so these
+ * links are just for reference. The catalog contract governing that file
+ * lives alongside it. (Issue #64 moved this storage out of virusdave/top-level
+ * into the dedicated agent-pain-points repo.)
  */
 export const ADVISORY_CATALOG_URL =
-  'https://github.com/virusdave/top-level/blob/master/docs/agent-runtime/advisories.yaml'
+  'https://github.com/virusdave/agent-pain-points/blob/master/docs/agent-runtime/advisories.yaml'
 export const ADVISORY_CATALOG_DOC_URL =
-  'https://github.com/virusdave/top-level/blob/master/docs/agent-runtime/ADVISORY_CATALOG.md'
+  'https://github.com/virusdave/agent-pain-points/blob/master/docs/agent-runtime/ADVISORY_CATALOG.md'
 
 /**
  * Raised when GET /api/agent-waste/backlog returns the structured 503
@@ -297,7 +299,7 @@ export type PromoteSubmitResult =
 /**
  * POST a validated promotion to the admin endpoint. Never throws for an
  * expected server rejection — returns a structured `{ok:false, code, message}`
- * so the UI can render it inline (including the 503 `top_level_unavailable`
+ * so the UI can render it inline (including the 503 `agent_pain_points_unavailable`
  * degrade when the write path is not yet wired).
  */
 export async function submitPromoteAdvisory(

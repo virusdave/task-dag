@@ -36,7 +36,7 @@ const PROMOTE_BODY_LIMIT_BYTES = 64 * 1024
 /** Map a structured promote failure to an HTTP status. */
 function promoteFailureStatus(code: PromoteAdvisoryFailureCode): number {
   switch (code) {
-    case 'top_level_unavailable':
+    case 'agent_pain_points_unavailable':
       return 503
     case 'invalid_request':
       return 400
@@ -93,7 +93,7 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
   })
 
   // POST /api/agent-waste/promote - promote a reviewed observation into the
-  // reviewed advisory catalog (advisories.yaml in virusdave/top-level). This
+  // reviewed advisory catalog (advisories.yaml in virusdave/agent-pain-points). This
   // is a BEHAVIOR-CHANGING mutation (the selector may inject the advisory's
   // `text` into future agents), so it is admin-gated (an admin submitting this
   // request IS the operator-approval safety gate), server-side
@@ -129,7 +129,7 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
           requestId: request.id ?? null,
         })
         if (result.ok) {
-          // Audit: the top-level commit is the primary immutable record; this
+          // Audit: the agent-pain-points commit is the primary immutable record; this
           // structured log line gives in-Helios traceability of every
           // promotion (actor, advisory id, source observation, commit).
           server.log.info(

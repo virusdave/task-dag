@@ -543,7 +543,7 @@ function PromoteForm({
 
       {result && !result.ok ? (
         <p className="promote-errors" role="alert">
-          {result.code === 'top_level_unavailable'
+          {result.code === 'agent_pain_points_unavailable'
             ? 'The advisory write path is not wired up yet on this server, so the promotion could not be committed. ' +
               result.message
             : `Promotion failed (${result.code}): ${result.message}`}

@@ -104,7 +104,7 @@ describe('POST /api/agent-waste/promote', () => {
   beforeEach(() => {
     // The route must never touch prod; ensure no writable clone is wired so
     // the apply path fails closed instead of attempting a real git write.
-    delete process.env.HELIOS_TOP_LEVEL_LOCAL_DIR
+    delete process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DIR
   })
 
   it('is admin-gated: a non-admin gets 403', async () => {
@@ -136,11 +136,11 @@ describe('POST /api/agent-waste/promote', () => {
     expect(res.json().code).toBe('invalid_request')
   })
 
-  it('degrades to 503 top_level_unavailable when no writable clone is configured', async () => {
+  it('degrades to 503 agent_pain_points_unavailable when no writable clone is configured', async () => {
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/promote', payload: validBody })
     expect(res.statusCode).toBe(503)
     const body = res.json()
     expect(body.ok).toBe(false)
-    expect(body.code).toBe('top_level_unavailable')
+    expect(body.code).toBe('agent_pain_points_unavailable')
   })
 })

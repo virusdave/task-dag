@@ -1,13 +1,25 @@
 /**
- * Promote-to-advisory apply-and-push (issue #61).
+ * Promote-to-advisory apply-and-push (issue #61; retargeted to
+ * agent-pain-points by issue #64).
  *
  * Commits one admin-authored advisory entry to `advisories.yaml` in
- * virusdave/top-level and pushes it to `master`, reusing the parser-config
- * apply discipline (`parsekit/applyConfig.ts`): validate → write → git add →
- * reject no-op → commit → push → reset-on-push-failure, with a subprocess
- * timeout. This path carries a bigger blast radius (a repo-wide top-level
- * WRITE key), so it hardens the git boundary further and serializes all
- * promotions:
+ * virusdave/agent-pain-points and pushes it to `master`, reusing the
+ * parser-config apply discipline (`parsekit/applyConfig.ts`): validate →
+ * write → git add → reject no-op → commit → push → reset-on-push-failure,
+ * with a subprocess timeout. This path carries a bigger blast radius (a
+ * repo-wide WRITE key), so it hardens the git boundary further and
+ * serializes all promotions:
+ *
+ * NOTE: this uses a SEPARATE working-tree clone dir
+ * (HELIOS_AGENT_PAIN_POINTS_WRITE_DIR) + its own WRITE deploy key, distinct
+ * from the read-only bare mirror in agentPainPointsMirror.ts. The two must
+ * not share a dir (design §5 hazard: a bare mirror has no worktree; a
+ * working-tree clone needs `.git`).
+ *
+ * (Before the agent-pain-points migration this committed to
+ * virusdave/top-level; the migration moved the canonical advisory storage
+ * into the dedicated repo so agent-waste writes no longer bump the canon
+ * SHA. The relative file path is unchanged.)
  *
  *   - a module-level async mutex serializes concurrent Helios promotions so
  *     two requests never race on the shared working tree / index;
@@ -24,9 +36,10 @@
  *     resolved by checking whether the commit is reachable from
  *     `origin/master` before reporting failure.
  *
- * When the writable top-level clone / write key is not configured (child epic
- * #1 infra), it fails closed with `top_level_unavailable` and never attempts
- * a write — the endpoint deploys inert until the key lands.
+ * When the writable agent-pain-points clone / write key is not configured
+ * (nixos-sbc child epic infra), it fails closed with
+ * `agent_pain_points_unavailable` and never attempts a write — the endpoint
+ * deploys inert until the key lands.
  */
 
 import { execFile } from 'node:child_process'
@@ -47,19 +60,20 @@ import {
 
 const execFileAsync = promisify(execFile)
 
-/** Path of the catalog inside the top-level repo. */
+/** Path of the catalog inside the agent-pain-points repo. */
 const ADVISORIES_REL_PATH = 'docs/agent-runtime/advisories.yaml'
 
 /** Default write remote; overridable for tests / alternate hosts. */
-const DEFAULT_TOP_LEVEL_REPO_URL = 'git@github.com:virusdave/top-level.git'
+const DEFAULT_AGENT_PAIN_POINTS_REPO_URL = 'git@github.com:virusdave/agent-pain-points.git'
 
 /**
- * Conventional agenix path for the top-level WRITE deploy key on the Helios
- * prod host, owned by / readable only by the `helios` service user. Mirrors
- * taskDagMirror.ts's conventional automation read-key path. Provisioned by
- * child epic #1; when absent the promote path fails closed.
+ * Conventional agenix path for the agent-pain-points WRITE deploy key on the
+ * Helios prod host, owned by / readable only by the `helios` service user.
+ * Mirrors taskDagMirror.ts's conventional automation read-key path.
+ * Provisioned by the nixos-sbc child epic; when absent the promote path
+ * fails closed.
  */
-const CONVENTIONAL_WRITE_DEPLOY_KEY = '/run/agenix/helios-github-top-level-write-deploy-key'
+const CONVENTIONAL_WRITE_DEPLOY_KEY = '/run/agenix/helios-github-agent-pain-points-write-deploy-key'
 
 const GIT_TIMEOUT_MS = 30_000
 const MAX_PUSH_ATTEMPTS = 3
@@ -92,7 +106,7 @@ export interface PromoteAdvisoryFailure {
 
 export type PromoteAdvisoryResult = PromoteAdvisorySuccess | PromoteAdvisoryFailure
 
-interface TopLevelWriteConfig {
+interface AgentPainPointsWriteConfig {
   repoRoot: string
   deployKey: string | null
   repoUrl: string
@@ -103,14 +117,19 @@ function envStr(name: string): string | null {
   return v === '' ? null : v
 }
 
-/** Resolve the writable top-level clone + write key, or null if unconfigured. */
-export function resolveTopLevelWriteConfig(): TopLevelWriteConfig | null {
-  const repoRoot = envStr('HELIOS_TOP_LEVEL_LOCAL_DIR')
+/**
+ * Resolve the writable agent-pain-points clone + write key, or null if
+ * unconfigured. Uses a SEPARATE working-tree clone dir from the read-only
+ * mirror (design §5 hazard) and its own write key.
+ */
+export function resolveAgentPainPointsWriteConfig(): AgentPainPointsWriteConfig | null {
+  const repoRoot = envStr('HELIOS_AGENT_PAIN_POINTS_WRITE_DIR')
   if (!repoRoot) return null
   const deployKey =
-    envStr('HELIOS_TOP_LEVEL_DEPLOY_KEY') ??
+    envStr('HELIOS_AGENT_PAIN_POINTS_WRITE_DEPLOY_KEY') ??
     (existsSync(CONVENTIONAL_WRITE_DEPLOY_KEY) ? CONVENTIONAL_WRITE_DEPLOY_KEY : null)
-  const repoUrl = envStr('HELIOS_TOP_LEVEL_REPO_URL') ?? DEFAULT_TOP_LEVEL_REPO_URL
+  const repoUrl =
+    envStr('HELIOS_AGENT_PAIN_POINTS_REPO_URL') ?? DEFAULT_AGENT_PAIN_POINTS_REPO_URL
   return { repoRoot, deployKey, repoUrl }
 }
 
@@ -148,7 +167,7 @@ interface GitResult {
   stderr: string
 }
 
-async function runGit(cfg: TopLevelWriteConfig, args: string[]): Promise<GitResult> {
+async function runGit(cfg: AgentPainPointsWriteConfig, args: string[]): Promise<GitResult> {
   try {
     const { stdout, stderr } = await execFileAsync('git', args, {
       cwd: cfg.repoRoot,
@@ -231,7 +250,7 @@ function buildCommitMessage(input: PromoteAdvisoryInput): string {
 
 /**
  * Promote one advisory entry: validate against the catalog contract, commit,
- * and push to top-level master. Serialized + bounded-retry. All failures are
+ * and push to agent-pain-points master. Serialized + bounded-retry. All failures are
  * structured; a push failure never leaves a local commit behind.
  */
 export function promoteAdvisory(input: PromoteAdvisoryInput): Promise<PromoteAdvisoryResult> {
@@ -239,16 +258,19 @@ export function promoteAdvisory(input: PromoteAdvisoryInput): Promise<PromoteAdv
 }
 
 async function promoteAdvisoryLocked(input: PromoteAdvisoryInput): Promise<PromoteAdvisoryResult> {
-  const cfg = resolveTopLevelWriteConfig()
+  const cfg = resolveAgentPainPointsWriteConfig()
   if (!cfg) {
     return fail(
-      'top_level_unavailable',
-      'The writable top-level clone is not configured (HELIOS_TOP_LEVEL_LOCAL_DIR). ' +
-        'The promote write path is inert until the top-level write key + clone are provisioned.',
+      'agent_pain_points_unavailable',
+      'The writable agent-pain-points clone is not configured (HELIOS_AGENT_PAIN_POINTS_WRITE_DIR). ' +
+        'The promote write path is inert until the agent-pain-points write key + clone are provisioned.',
     )
   }
   if (!existsSync(join(cfg.repoRoot, '.git'))) {
-    return fail('top_level_unavailable', `HELIOS_TOP_LEVEL_LOCAL_DIR (${cfg.repoRoot}) is not a git working tree`)
+    return fail(
+      'agent_pain_points_unavailable',
+      `HELIOS_AGENT_PAIN_POINTS_WRITE_DIR (${cfg.repoRoot}) is not a git working tree`,
+    )
   }
 
   // Fail closed: a network remote (the prod SSH URL) MUST have a write key,
@@ -256,10 +278,11 @@ async function promoteAdvisoryLocked(input: PromoteAdvisoryInput): Promise<Promo
   // local file remotes (tests) may run keyless.
   if (remoteNeedsDeployKey(cfg.repoUrl) && !cfg.deployKey) {
     return fail(
-      'top_level_unavailable',
-      'The top-level write deploy key is not configured (HELIOS_TOP_LEVEL_DEPLOY_KEY / ' +
-        'conventional agenix path). Refusing to attempt an unauthenticated push to ' +
-        `${cfg.repoUrl}. The promote write path is inert until the key is provisioned.`,
+      'agent_pain_points_unavailable',
+      'The agent-pain-points write deploy key is not configured ' +
+        '(HELIOS_AGENT_PAIN_POINTS_WRITE_DEPLOY_KEY / conventional agenix path). Refusing to ' +
+        `attempt an unauthenticated push to ${cfg.repoUrl}. The promote write path is inert ` +
+        'until the key is provisioned.',
     )
   }
 
@@ -301,7 +324,10 @@ async function promoteAdvisoryLocked(input: PromoteAdvisoryInput): Promise<Promo
 
     // 2. Read + validate the CURRENT catalog; refuse to build on a broken base.
     if (!existsSync(absPath)) {
-      return fail('catalog_current_invalid', `${ADVISORIES_REL_PATH} not found in top-level checkout`)
+      return fail(
+        'catalog_current_invalid',
+        `${ADVISORIES_REL_PATH} not found in agent-pain-points checkout`,
+      )
     }
     const currentText = readFileSync(absPath, 'utf8')
     const currentValidation = validateCatalogYaml(currentText)
@@ -414,7 +440,7 @@ async function promoteAdvisoryLocked(input: PromoteAdvisoryInput): Promise<Promo
 }
 
 function success(
-  cfg: TopLevelWriteConfig,
+  cfg: AgentPainPointsWriteConfig,
   id: string,
   commitSha: string,
   pushed: boolean,

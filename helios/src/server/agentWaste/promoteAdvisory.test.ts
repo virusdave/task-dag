@@ -1,6 +1,6 @@
 // Deterministic, prod-resource-free tests for the promote apply path.
 // Everything runs against EPHEMERAL local git repos in a temp dir (a bare
-// "origin" + a working clone); NEVER prod virusdave/top-level. No network,
+// "origin" + a working clone); NEVER prod virusdave/agent-pain-points. No network,
 // no ssh key (a local file remote needs none).
 
 import { execFileSync } from 'node:child_process'
@@ -65,8 +65,8 @@ function setupRepos(catalog: string): void {
   git(workDir, ['config', 'user.name', 'Work'])
   git(workDir, ['config', 'commit.gpgsign', 'false'])
 
-  process.env.HELIOS_TOP_LEVEL_LOCAL_DIR = workDir
-  process.env.HELIOS_TOP_LEVEL_REPO_URL = originDir
+  process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DIR = workDir
+  process.env.HELIOS_AGENT_PAIN_POINTS_REPO_URL = originDir
 }
 
 function baseRequest(overrides: Partial<PromoteAdvisoryRequest> = {}): PromoteAdvisoryRequest {
@@ -90,7 +90,7 @@ function input(request: PromoteAdvisoryRequest) {
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'promote-adv-'))
-  for (const k of ['HELIOS_TOP_LEVEL_LOCAL_DIR', 'HELIOS_TOP_LEVEL_REPO_URL', 'HELIOS_TOP_LEVEL_DEPLOY_KEY']) {
+  for (const k of ['HELIOS_AGENT_PAIN_POINTS_WRITE_DIR', 'HELIOS_AGENT_PAIN_POINTS_REPO_URL', 'HELIOS_AGENT_PAIN_POINTS_WRITE_DEPLOY_KEY']) {
     savedEnv[k] = process.env[k]
     delete process.env[k]
   }
@@ -105,11 +105,11 @@ afterEach(() => {
 })
 
 describe('promoteAdvisory', () => {
-  it('fails closed when the top-level write clone is not configured', async () => {
+  it('fails closed when the agent-pain-points write clone is not configured', async () => {
     const res = await promoteAdvisory(input(baseRequest()))
     expect(res.ok).toBe(false)
     if (res.ok) return
-    expect(res.code).toBe('top_level_unavailable')
+    expect(res.code).toBe('agent_pain_points_unavailable')
   })
 
   it('fails closed on a network remote when no write deploy key is configured', async () => {
@@ -117,12 +117,12 @@ describe('promoteAdvisory', () => {
     // Point at a network (SSH) remote but provide no key: must refuse rather
     // than attempt an unauthenticated push. (The local clone is real; only the
     // declared remote URL flips it into "needs a key" territory.)
-    process.env.HELIOS_TOP_LEVEL_REPO_URL = 'git@github.com:virusdave/top-level.git'
-    delete process.env.HELIOS_TOP_LEVEL_DEPLOY_KEY
+    process.env.HELIOS_AGENT_PAIN_POINTS_REPO_URL = 'git@github.com:virusdave/agent-pain-points.git'
+    delete process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DEPLOY_KEY
     const res = await promoteAdvisory(input(baseRequest()))
     expect(res.ok).toBe(false)
     if (res.ok) return
-    expect(res.code).toBe('top_level_unavailable')
+    expect(res.code).toBe('agent_pain_points_unavailable')
     // origin (the local bare repo) must be untouched.
     expect(git(originDir, ['rev-list', '--count', 'master'])).toBe('1')
   })
@@ -133,14 +133,14 @@ describe('promoteAdvisory', () => {
     // bare repo (unparseable owner/repo) — the identity guard must fail closed.
     // A dummy key satisfies the deploy-key precheck; it is never used because
     // we fail before any authenticated git op.
-    process.env.HELIOS_TOP_LEVEL_REPO_URL = 'git@github.com:virusdave/top-level.git'
-    process.env.HELIOS_TOP_LEVEL_DEPLOY_KEY = path.join(tmpRoot, 'dummy-key')
-    fs.writeFileSync(process.env.HELIOS_TOP_LEVEL_DEPLOY_KEY, 'not-a-real-key')
+    process.env.HELIOS_AGENT_PAIN_POINTS_REPO_URL = 'git@github.com:virusdave/agent-pain-points.git'
+    process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DEPLOY_KEY = path.join(tmpRoot, 'dummy-key')
+    fs.writeFileSync(process.env.HELIOS_AGENT_PAIN_POINTS_WRITE_DEPLOY_KEY, 'not-a-real-key')
     const res = await promoteAdvisory(input(baseRequest()))
     expect(res.ok).toBe(false)
     if (res.ok) return
     expect(res.code).toBe('git_command_failed')
-    expect(res.message).toContain('expected virusdave/top-level')
+    expect(res.message).toContain('expected virusdave/agent-pain-points')
     expect(git(originDir, ['rev-list', '--count', 'master'])).toBe('1')
   })
 

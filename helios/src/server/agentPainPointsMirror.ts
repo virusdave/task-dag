@@ -1,21 +1,30 @@
 /**
- * Second read-only git mirror — `virusdave/top-level` (issue #60, child
- * epic #3 of the agent-waste review queue).
+ * Read-only git mirror of `virusdave/agent-pain-points` (issue #64, the
+ * automation/Helios child of the agent-pain-points migration — parent
+ * virusdave/top-level#40).
  *
  * The agent-waste pending-review backlog is exported by github-worker into
  * a small git file co-located with `docs/agent-runtime/advisories.yaml` in
- * `virusdave/top-level` (operator decisions D1/D2 — see
- * docs/helios/agent-waste-review/RESOLVED_DESIGN.md). Helios reads it
- * read-only. The production Helios deploy is an artifact tarball with
- * `.git` stripped, so — exactly like the task-DAG mirror — we maintain our
- * OWN lightweight bare mirror of top-level under the helios state dir and
- * refresh it on a timer. The backlog reader (agentWasteRepo backlog reader
- * leaf) reads the exported file out of whatever git dir this module
- * exposes.
+ * `virusdave/agent-pain-points` — the dedicated advisories repo the
+ * migration moved this storage into (it reverses Lever-D decision D1's
+ * "storage in top-level"; see docs/helios/agent-waste-review/RESOLVED_DESIGN.md).
+ * Helios reads it read-only. The production Helios deploy is an artifact
+ * tarball with `.git` stripped, so — exactly like the task-DAG mirror — we
+ * maintain our OWN lightweight bare mirror of agent-pain-points under the
+ * helios state dir and refresh it on a timer. The backlog reader
+ * (agentWasteBacklogReader.ts) reads the exported file out of whatever git
+ * dir this module exposes.
  *
- * This is a SECOND, independent mirror alongside taskDagMirror.ts (which
+ * This is an independent read mirror alongside taskDagMirror.ts (which
  * mirrors `automation`); it uses the same proven pattern but its own
- * config, its own bare dir, and its own read-only deploy key.
+ * config, its own bare dir, and its own read-only deploy key. It replaces
+ * the earlier top-level mirror that fed this backlog before the migration.
+ *
+ * IMPORTANT: this dir is a BARE MIRROR (read). The promote WRITE path uses
+ * a SEPARATE working-tree clone dir + its own write key
+ * (HELIOS_AGENT_PAIN_POINTS_WRITE_DIR in agentWaste/promoteAdvisory.ts).
+ * Do not point both at the same dir (design §5 hazard: a bare mirror has no
+ * worktree, a working-tree clone needs `.git`).
  *
  * Loud-but-non-fatal (taskDagMirror semantics): a fetch failure keeps the
  * last-good mirror in place and is surfaced as a "stale"/"unavailable"
@@ -23,16 +32,16 @@
  * structured 503, never a raw 500.
  *
  * Config (env):
- *   HELIOS_TOP_LEVEL_REPO_URL        git URL to mirror (default: top-level)
- *   HELIOS_TOP_LEVEL_LOCAL_DIR       bare mirror dir (pins mirror mode)
- *   HELIOS_TOP_LEVEL_REFRESH_SECONDS refresh cadence (default 60)
- *   HELIOS_TOP_LEVEL_DEPLOY_KEY      ssh key with read access to top-level
- *   HELIOS_TOP_LEVEL_DISABLE         set truthy to disable entirely
+ *   HELIOS_AGENT_PAIN_POINTS_REPO_URL        git URL to mirror (default: agent-pain-points)
+ *   HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR      bare mirror dir (pins mirror mode)
+ *   HELIOS_AGENT_PAIN_POINTS_REFRESH_SECONDS refresh cadence (default 60)
+ *   HELIOS_AGENT_PAIN_POINTS_DEPLOY_KEY      ssh key with read access to agent-pain-points
+ *   HELIOS_AGENT_PAIN_POINTS_DISABLE         set truthy to disable entirely
  *
- * In local dev (no LOCAL_DIR configured) the module falls back to reading
- * an existing top-level checkout at TOP_LEVEL_REPO_PATH if it happens to be
- * a real git repo, so a developer with a normal checkout needs no extra
- * setup.
+ * In local dev (no MIRROR_DIR configured) the module falls back to reading
+ * an existing agent-pain-points checkout at AGENT_PAIN_POINTS_REPO_PATH if
+ * it happens to be a real git repo, so a developer with a normal checkout
+ * needs no extra setup.
  */
 
 import { execFile } from 'node:child_process'
@@ -43,28 +52,29 @@ import * as path from 'node:path'
 
 const execFileAsync = promisify(execFile)
 
-const DEFAULT_REPO_URL = 'git@github.com:virusdave/top-level.git'
+const DEFAULT_REPO_URL = 'git@github.com:virusdave/agent-pain-points.git'
 const DEFAULT_REFRESH_SECONDS = 60
 
 /**
- * The default branch top-level backlog/advisory files live on. Canon's
- * default branch is `master` fleet-wide.
+ * The default branch agent-pain-points backlog/advisory files live on.
+ * Canon's default branch is `master` fleet-wide, and the exporter + Helios
+ * default/hardcode `master` (design §5 "master is a hidden contract").
  */
-export const TOP_LEVEL_DEFAULT_REF = 'master'
+export const AGENT_PAIN_POINTS_DEFAULT_REF = 'master'
 
 /**
- * Conventional agenix path for the top-level READ-ONLY deploy key on the
- * Helios prod host (vps-nixos-3), provisioned for the `helios` service user
- * by child epic #1 (D2). Same shape as the automation read key at
- * `/run/agenix/helios-github-automation-deploy-key` that taskDagMirror.ts
- * reads. We treat the presence of this file as the signal that we are
- * running in prod and should self-enable mirror mode even when no
- * HELIOS_TOP_LEVEL_* env vars are wired, so a helios-only deploy is
- * sufficient once the key is present.
+ * Conventional agenix path for the agent-pain-points READ-ONLY deploy key
+ * on the Helios prod host (vps-nixos-3), provisioned for the `helios`
+ * service user by the nixos-sbc child epic. Same shape as the automation
+ * read key at `/run/agenix/helios-github-automation-deploy-key` that
+ * taskDagMirror.ts reads. We treat the presence of this file as the signal
+ * that we are running in prod and should self-enable mirror mode even when
+ * no HELIOS_AGENT_PAIN_POINTS_* env vars are wired, so a helios-only deploy
+ * is sufficient once the key is present.
  */
-const CONVENTIONAL_DEPLOY_KEY = '/run/agenix/helios-github-top-level-deploy-key'
+const CONVENTIONAL_DEPLOY_KEY = '/run/agenix/helios-github-agent-pain-points-deploy-key'
 
-export interface TopLevelMirrorSourceStatus {
+export interface AgentPainPointsMirrorSourceStatus {
   /** True when a usable git dir is currently readable. */
   available: boolean
   /** Where the data comes from. */
@@ -77,7 +87,7 @@ export interface TopLevelMirrorSourceStatus {
   lastError: string | null
 }
 
-export interface TopLevelMirrorLogger {
+export interface AgentPainPointsMirrorLogger {
   info: (msg: string, meta?: Record<string, unknown>) => void
   warn: (msg: string, meta?: Record<string, unknown>) => void
   error: (msg: string, meta?: Record<string, unknown>) => void
@@ -91,10 +101,10 @@ interface MirrorConfig {
 }
 
 let config: MirrorConfig | null = null
-let log: TopLevelMirrorLogger | null = null
+let log: AgentPainPointsMirrorLogger | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
-const status: TopLevelMirrorSourceStatus = {
+const status: AgentPainPointsMirrorSourceStatus = {
   available: false,
   mode: 'none',
   lastAttemptAtMs: null,
@@ -153,23 +163,23 @@ function isWorkingRepo(dir: string): boolean {
  * source is available. In mirror mode this is the bare mirror; in dev it
  * may be a plain checkout.
  */
-export function getTopLevelMirrorDir(): string | null {
+export function getAgentPainPointsMirrorDir(): string | null {
   if (config && isBareRepo(config.localDir)) {
     return config.localDir
   }
-  // Dev fallback: a real checkout at TOP_LEVEL_REPO_PATH.
-  const repoPath = envStr('TOP_LEVEL_REPO_PATH')
+  // Dev fallback: a real checkout at AGENT_PAIN_POINTS_REPO_PATH.
+  const repoPath = envStr('AGENT_PAIN_POINTS_REPO_PATH')
   if (repoPath && (isWorkingRepo(repoPath) || isBareRepo(repoPath))) {
     return repoPath
   }
   return null
 }
 
-export function getTopLevelMirrorSourceStatus(): TopLevelMirrorSourceStatus {
+export function getAgentPainPointsMirrorSourceStatus(): AgentPainPointsMirrorSourceStatus {
   // Recompute availability lazily so dev-mode (no mirror config) still
   // reports correctly without a refresh loop.
   if (!config) {
-    const dir = getTopLevelMirrorDir()
+    const dir = getAgentPainPointsMirrorDir()
     return {
       ...status,
       available: dir != null,
@@ -180,24 +190,24 @@ export function getTopLevelMirrorSourceStatus(): TopLevelMirrorSourceStatus {
 }
 
 /**
- * Read a file at `relPath` from the mirrored top-level default branch.
- * Returns the file contents, or null when the file does not exist on that
- * ref. Throws when no mirror dir is available or git otherwise fails, so
- * the caller can distinguish "source unreadable" (surface as unavailable)
- * from "file absent" (fail-safe empty).
+ * Read a file at `relPath` from the mirrored agent-pain-points default
+ * branch. Returns the file contents, or null when the file does not exist
+ * on that ref. Throws when no mirror dir is available or git otherwise
+ * fails, so the caller can distinguish "source unreadable" (surface as
+ * unavailable) from "file absent" (fail-safe empty).
  *
  * Works against both a bare mirror (no worktree) and a dev checkout by
  * addressing the blob through `git show <ref>:<relPath>`.
  */
-export async function readTopLevelFile(relPath: string): Promise<string | null> {
-  const dir = getTopLevelMirrorDir()
+export async function readAgentPainPointsFile(relPath: string): Promise<string | null> {
+  const dir = getAgentPainPointsMirrorDir()
   if (dir == null) {
-    throw new Error('top-level mirror is not available')
+    throw new Error('agent-pain-points mirror is not available')
   }
   // Normalise to forward slashes; git object paths are always POSIX.
   const objPath = relPath.replace(/^\.?\/+/, '').split(path.sep).join('/')
   try {
-    return await runGit(dir, ['show', `${TOP_LEVEL_DEFAULT_REF}:${objPath}`], 30_000)
+    return await runGit(dir, ['show', `${AGENT_PAIN_POINTS_DEFAULT_REF}:${objPath}`], 30_000)
   } catch (err) {
     // `git show` exits non-zero for a path that does not exist on the ref.
     // Distinguish that (return null → fail-safe empty) from a genuine
@@ -223,16 +233,16 @@ export async function readTopLevelFile(relPath: string): Promise<string | null> 
  */
 function resolveMirrorConfig(): MirrorConfig | null {
   const refreshMs =
-    (Number(envStr('HELIOS_TOP_LEVEL_REFRESH_SECONDS')) || DEFAULT_REFRESH_SECONDS) * 1000
-  const repoUrl = envStr('HELIOS_TOP_LEVEL_REPO_URL') ?? DEFAULT_REPO_URL
-  const explicitLocalDir = envStr('HELIOS_TOP_LEVEL_LOCAL_DIR')
+    (Number(envStr('HELIOS_AGENT_PAIN_POINTS_REFRESH_SECONDS')) || DEFAULT_REFRESH_SECONDS) * 1000
+  const repoUrl = envStr('HELIOS_AGENT_PAIN_POINTS_REPO_URL') ?? DEFAULT_REPO_URL
+  const explicitLocalDir = envStr('HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR')
   const deployKey =
-    envStr('HELIOS_TOP_LEVEL_DEPLOY_KEY') ??
+    envStr('HELIOS_AGENT_PAIN_POINTS_DEPLOY_KEY') ??
     (fs.existsSync(CONVENTIONAL_DEPLOY_KEY) ? CONVENTIONAL_DEPLOY_KEY : null)
 
   // Prefer reading a real local checkout when one exists and the operator
   // hasn't explicitly pinned a mirror dir (typical dev box).
-  const repoPath = envStr('TOP_LEVEL_REPO_PATH')
+  const repoPath = envStr('AGENT_PAIN_POINTS_REPO_PATH')
   const hasLocalCheckout = repoPath != null && (isWorkingRepo(repoPath) || isBareRepo(repoPath))
   if (!explicitLocalDir && hasLocalCheckout) return null
 
@@ -242,7 +252,25 @@ function resolveMirrorConfig(): MirrorConfig | null {
 
   const home = (process.env.HOME ?? '').trim() !== '' ? (process.env.HOME as string) : os.tmpdir()
   const localDir =
-    explicitLocalDir ?? path.join(home, '.cache', 'helios', 'top-level', 'top-level.git')
+    explicitLocalDir ??
+    path.join(home, '.cache', 'helios', 'agent-pain-points', 'agent-pain-points.git')
+
+  // Design §5 hazard: the read mirror is a BARE mirror (fetchMirror rm's and
+  // re-clones its dir), while the promote path uses a WORKING-TREE clone. If
+  // an operator points both at the same directory, arming the mirror would
+  // DELETE the promote write clone. Refuse to run mirror mode in that case
+  // (fail closed → the backlog reports unavailable, and the write clone is
+  // never touched) rather than nuking a working tree.
+  const writeDir = envStr('HELIOS_AGENT_PAIN_POINTS_WRITE_DIR')
+  if (writeDir && path.resolve(writeDir) === path.resolve(localDir)) {
+    log?.error(
+      'agent-pain-points mirror: MIRROR_DIR equals WRITE_DIR; refusing to run the read mirror ' +
+        '(it would delete the promote write clone). Point them at distinct directories.',
+      { mirrorDir: localDir, writeDir },
+    )
+    return null
+  }
+
   return { repoUrl, localDir, refreshMs, deployKey }
 }
 
@@ -254,12 +282,24 @@ async function fetchMirror(): Promise<void> {
 
   try {
     if (!isBareRepo(localDir)) {
+      // Never destroy a WORKING-TREE checkout (has `.git`): that is the shape
+      // of the promote write clone, and blowing it away would be a data-loss
+      // footgun (design §5). The equal-dir case is already refused in
+      // resolveMirrorConfig; this is defense-in-depth for any other path that
+      // happens to be a working tree.
+      if (isWorkingRepo(localDir)) {
+        throw new Error(
+          `agent-pain-points mirror dir ${localDir} is a working-tree checkout, not a bare ` +
+            `mirror; refusing to delete it. Point HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR at a ` +
+            `dedicated bare-mirror directory.`,
+        )
+      }
       // Fresh mirror. Remove any half-baked dir first, then clone.
       fs.mkdirSync(path.dirname(localDir), { recursive: true })
       if (fs.existsSync(localDir)) {
         fs.rmSync(localDir, { recursive: true, force: true })
       }
-      log?.info('top-level mirror: cloning', { repoUrl, localDir })
+      log?.info('agent-pain-points mirror: cloning', { repoUrl, localDir })
       // --mirror gives us all refs; we only need to read a small text file
       // off the default branch, but blobless keeps the initial clone cheap
       // and fetches the blob on demand at `git show` time.
@@ -286,14 +326,14 @@ async function fetchMirror(): Promise<void> {
   } catch (err) {
     status.lastError = errMessage(err)
     status.available = isBareRepo(localDir)
-    log?.error('top-level mirror: fetch failed', { err: status.lastError })
+    log?.error('agent-pain-points mirror: fetch failed', { err: status.lastError })
     // Re-throw so the initial bootstrap can log, but keep last-good state.
     throw err
   }
 }
 
 /** Force a refresh now (used by routes / manual triggers). Best-effort. */
-export async function refreshTopLevelMirror(): Promise<void> {
+export async function refreshAgentPainPointsMirror(): Promise<void> {
   if (!config) return
   try {
     await fetchMirror()
@@ -303,64 +343,65 @@ export async function refreshTopLevelMirror(): Promise<void> {
 }
 
 /**
- * Initialise the top-level mirror. In mirror mode this performs an initial
- * fetch (loud-but-non-fatal) and arms a periodic refresh. In dev mode
- * (no LOCAL_DIR) it just records availability of any local checkout.
+ * Initialise the agent-pain-points mirror. In mirror mode this performs an
+ * initial fetch (loud-but-non-fatal) and arms a periodic refresh. In dev
+ * mode (no MIRROR_DIR) it just records availability of any local checkout.
  */
-export async function initTopLevelMirror(
-  opts: { log?: TopLevelMirrorLogger } = {},
-): Promise<TopLevelMirrorSourceStatus> {
+export async function initAgentPainPointsMirror(
+  opts: { log?: AgentPainPointsMirrorLogger } = {},
+): Promise<AgentPainPointsMirrorSourceStatus> {
   log = opts.log ?? null
 
-  if (envBool('HELIOS_TOP_LEVEL_DISABLE')) {
+  if (envBool('HELIOS_AGENT_PAIN_POINTS_DISABLE')) {
     status.mode = 'none'
     status.available = false
-    log?.info('top-level mirror: disabled via HELIOS_TOP_LEVEL_DISABLE')
-    return getTopLevelMirrorSourceStatus()
+    log?.info('agent-pain-points mirror: disabled via HELIOS_AGENT_PAIN_POINTS_DISABLE')
+    return getAgentPainPointsMirrorSourceStatus()
   }
 
   config = resolveMirrorConfig()
   if (!config) {
     // No mirror configured. Fall back to a local checkout at
-    // TOP_LEVEL_REPO_PATH if one exists (dev with a normal clone),
+    // AGENT_PAIN_POINTS_REPO_PATH if one exists (dev with a normal clone),
     // otherwise the backlog reader reports the source unavailable.
-    const dir = getTopLevelMirrorDir()
+    const dir = getAgentPainPointsMirrorDir()
     status.mode = dir != null ? 'local-checkout' : 'none'
     status.available = dir != null
     if (dir == null) {
       log?.warn(
-        'top-level mirror: no mirror config (no HELIOS_TOP_LEVEL_LOCAL_DIR, no deploy key) and no ' +
-          'git repo at TOP_LEVEL_REPO_PATH; the agent-waste backlog will report unavailable',
+        'agent-pain-points mirror: no mirror config (no HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR, no ' +
+          'deploy key) and no git repo at AGENT_PAIN_POINTS_REPO_PATH; the agent-waste backlog ' +
+          'will report unavailable',
       )
     }
-    return getTopLevelMirrorSourceStatus()
+    return getAgentPainPointsMirrorSourceStatus()
   }
   status.mode = 'mirror'
 
   try {
     await fetchMirror()
-    log?.info('top-level mirror: initial fetch ok', {
+    log?.info('agent-pain-points mirror: initial fetch ok', {
       localDir: config.localDir,
       deployKey: config.deployKey ?? '(none)',
     })
   } catch (err) {
-    log?.error('top-level mirror: initial fetch failed (will retry)', {
+    log?.error('agent-pain-points mirror: initial fetch failed (will retry)', {
       err: errMessage(err),
     })
   }
 
   if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = setInterval(() => {
-    void refreshTopLevelMirror()
+    void refreshAgentPainPointsMirror()
   }, config.refreshMs)
   // Don't keep the event loop alive solely for the refresh timer.
   if (typeof refreshTimer.unref === 'function') refreshTimer.unref()
 
-  return getTopLevelMirrorSourceStatus()
+  return getAgentPainPointsMirrorSourceStatus()
 }
 
 /** Test-only: reset module state between tests. */
-export function __resetTopLevelMirrorForTests(): void {
+export function __resetAgentPainPointsMirrorForTests(): void {
   if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = null
   config = null

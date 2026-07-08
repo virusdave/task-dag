@@ -48,6 +48,24 @@ Resolved in comments
 and
 [#4889080428](https://github.com/FreshlyBakedNYC/automation/issues/57#issuecomment-4889080428):
 
+> **AMENDMENT (agent-pain-points migration, issue
+> [#64](https://github.com/FreshlyBakedNYC/automation/issues/64) / parent
+> [virusdave/top-level#40](https://github.com/virusdave/top-level/issues/40)):**
+> **D1's storage location is reversed.** The canonical `advisories.yaml` and
+> `agent-waste-backlog.ndjson` now live in the dedicated repo
+> **`virusdave/agent-pain-points`**, NOT `top-level`. The reason: every worker
+> re-reads canon whenever `top-level` `master` moves, and the agent-waste
+> exporter + Helios promote button both pushed to `top-level` `master` on
+> normal operation, churning the canon SHA constantly. Moving this storage to
+> its own repo (the "dedicated advisories repo" option originally considered
+> and declined under D1) stops those writes from bumping canon. **The relative
+> paths (`docs/agent-runtime/{advisories.yaml,ADVISORY_CATALOG.md,agent-waste-backlog.ndjson}`)
+> and everything else in D1/D2/D3 below are unchanged** — only the repo root
+> moved. Helios now uses a read-only bare mirror of `agent-pain-points`
+> (`HELIOS_AGENT_PAIN_POINTS_MIRROR_DIR` + read key) for the backlog and a
+> SEPARATE working-tree write clone (`HELIOS_AGENT_PAIN_POINTS_WRITE_DIR` +
+> write key) for promote. Read D1/D2/D3 below with `top-level` → `agent-pain-points`.
+
 - **D1 — Storage: git-backed in `top-level`.** The producer
   (github-worker, already has push creds to `top-level`) exports the
   pending-review backlog to a small git file **co-located with**
