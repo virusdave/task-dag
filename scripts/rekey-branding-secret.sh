@@ -110,6 +110,19 @@
 set -euo pipefail
 umask 077
 
+# Innocuous --help / -h: print this tool's header usage and exit 0 before any
+# effect (canon: rules/QUALITY_GATES.md "Every tool must have an innocuous
+# --help"). Handled first, ahead of all defaults, option parsing, and every
+# network/git/agenix side effect, so probing the interface is always safe.
+for _arg in "$@"; do
+  case "$_arg" in
+    -h|--help)
+      sed -n '2,108p' "$0"
+      exit 0
+      ;;
+  esac
+done
+
 # ── Defaults / config (override via env or flags) ────────────────────────────
 TOP_LEVEL_URL="${TOP_LEVEL_URL:-git@github.com:virusdave/top-level.git}"
 NIXOS_SBC_URL="${NIXOS_SBC_URL:-git@github.com:Nicponskis/nixos-sbc.git}"
@@ -159,7 +172,6 @@ while [[ $# -gt 0 ]]; do
     --source=*)     SRC_REL="${1#*=}"; SOURCE_EXPLICIT=1 ;;
     --hosts)        HOSTS="${2:?--hosts needs a value like '1 2 3'}"; shift ;;
     --hosts=*)      HOSTS="${1#*=}" ;;
-    -h|--help)      sed -n '2,108p' "$0"; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift

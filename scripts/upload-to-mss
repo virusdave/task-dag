@@ -4,13 +4,38 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Upload files to mss-one-offs server
+
+Usage: upload-to-mss <file> [note] [ttl-seconds]
+
+Arguments:
+  file          Path to the file to upload (served as index.html)
+  note          Optional free-text note (default: "File uploaded by <user>")
+  ttl-seconds   Optional lifetime in seconds (default: 86400 = 24 hours)
+
+Examples:
+  upload-to-mss report.html
+  upload-to-mss report.html "Phase D Review"
+  upload-to-mss report.html "Test upload" 3600
+EOF
+}
+
+# Innocuous --help / -h: print usage and exit 0 before any effect (no upload,
+# no slot claim, no file writes) — canon: rules/QUALITY_GATES.md "Every tool
+# must have an innocuous --help". Handled first, ahead of all other work.
+for _arg in "$@"; do
+  case "$_arg" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+done
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: upload-to-mss <file> [note] [ttl-seconds]"
-  echo ""
-  echo "Examples:"
-  echo "  upload-to-mss report.html"
-  echo "  upload-to-mss report.html \"Phase D Review\""
-  echo "  upload-to-mss report.html \"Test upload\" 3600"
+  usage >&2
   exit 1
 fi
 

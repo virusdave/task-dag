@@ -65,6 +65,19 @@
 
 set -euo pipefail
 
+# Innocuous --help / -h: print this tool's header usage and exit 0 before any
+# effect (canon: rules/QUALITY_GATES.md "Every tool must have an innocuous
+# --help"). Handled first, ahead of all other work, so probing the interface
+# never triggers a scan.
+for _arg in "$@"; do
+  case "$_arg" in
+    -h|--help)
+      awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+      exit 0
+      ;;
+  esac
+done
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
