@@ -363,6 +363,40 @@ fetch_task_refs() {
     fetch_task_refs_strict 2>/dev/null || true
 }
 
+# normalize_task_ref: validate + normalize a task ref before it is ever
+# interpolated into a git refspec. Accepts either the short namespace form
+# (`tasks/<ns>/<short>`) or the fully-qualified `refs/heads/tasks/<ns>/<short>`
+# and prints the normalized short form (`tasks/<ns>/<short>`) on stdout.
+# Returns non-zero for anything outside the `tasks/*` namespace or containing
+# refspec/rev metacharacters — NEVER feed an unchecked manifest/user value
+# straight into `git fetch` (design §3 Layer A step 1, §5 risk 3).
+normalize_task_ref() {
+    local ref="$1"
+    ref="${ref#refs/heads/}"
+    case "$ref" in
+        tasks/*) : ;;
+        *) return 1 ;;
+    esac
+    # Reject refspec-injection / rev-metacharacter payloads and empty
+    # trailing components. A well-formed task ref is a plain slash path.
+    case "$ref" in
+        *' '*|*'	'*|*'*'*|*'..'*|*'~'*|*'^'*|*':'*|*'?'*|*'['*|*'\'*|*'+'*) return 1 ;;
+        */) return 1 ;;
+    esac
+    printf '%s\n' "$ref"
+}
+
+# fetch_task_ref_exact: fetch exactly one already-normalized task ref into the
+# LOCAL refs/heads/tasks/* namespace (the same namespace the CLI enumerates —
+# NOT refs/remotes/origin/tasks/*, per design §5 risk 4). No --prune (we are
+# fetching a single ref, not syncing a namespace) and no --depth (dependency
+# completeness needs full parent history, design §2 / §5 risk 6). Returns
+# git's exit status so callers can fall back.
+fetch_task_ref_exact() {
+    local ref="$1"
+    git fetch --quiet --no-tags origin "+refs/heads/${ref}:refs/heads/${ref}"
+}
+
 # Helper: print 'yes' iff the remote currently has a tasks/active/<short>
 # ref. The remote is the source of truth for claim state — local refs may
 # lag if another worker just won the CAS.
@@ -1291,8 +1325,15 @@ COMMANDS:
                            (decomposed/claimed/pickable); --pickable for
                            the dispatch discovery surface
     active                 List currently-claimed (in-flight) tasks
-    show <sha>             Show task details
-    deps <sha>             Show task dependencies
+    show <sha>             Show task details (fetches origin task refs first;
+                           --no-fetch to skip)
+    deps <sha>             Show task dependencies (fetches first; --no-fetch)
+    context <sha>          Fetch-then-show YOUR assigned task: guarantees the
+                           task object is present, then prints its body,
+                           kind/ref, epic + dependency parents, related local
+                           refs, and suggested next commands. Start here in a
+                           prepared workspace. --ref refs/heads/tasks/<ns>/<short>
+                           fetches exactly that ref.
     breakdown <parent>     Create task breakdown
     complete <sha>         Mark task as complete
     complete-historical <sha> --commit=<historical-sha>
@@ -2793,13 +2834,15 @@ JSON
 # Command: show - show task details
 cmd_show() {
     local json=false
+    local do_fetch=true
     local sha=""
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
             --help|-h) 
-                echo "Usage: task-dag show <sha> [--json]"
+                echo "Usage: task-dag show <sha> [--json] [--no-fetch]"
                 return 0
                 ;;
             *) 
@@ -2817,6 +2860,14 @@ cmd_show() {
     if [ -z "$sha" ]; then
         echo "Error: SHA required" >&2
         return 1
+    fi
+    
+    # Fetch BEFORE resolve so a prepared/single-branch clone that lacks the
+    # task object can still inspect it (design §3 Layer B). Ordering is
+    # fetch → resolve_sha, never the reverse. --no-fetch skips the network
+    # round-trip for offline / deliberately-stale inspection.
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
     fi
     
     sha=$(resolve_sha "$sha") || return 1
@@ -2893,14 +2944,16 @@ JSON
 cmd_deps() {
     local json=false
     local check_complete=false
+    local do_fetch=true
     local sha=""
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
             --check-complete) check_complete=true; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
             --help|-h)
-                echo "Usage: task-dag deps <sha> [--json] [--check-complete]"
+                echo "Usage: task-dag deps <sha> [--json] [--check-complete] [--no-fetch]"
                 echo "  --check-complete: Exit with code 2 if any dependency is not met"
                 return 0
                 ;;
@@ -2919,6 +2972,14 @@ cmd_deps() {
     if [ -z "$sha" ]; then
         echo "Error: SHA required" >&2
         return 1
+    fi
+    
+    # Fetch BEFORE resolve (fetch → resolve_sha ordering) so dependency
+    # parents are present and their completion state is read against a
+    # fresh view. --no-fetch skips it (offline, or internal callers that
+    # already fetched — e.g. cmd_complete).
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
     fi
     
     sha=$(resolve_sha "$sha") || return 1
@@ -3006,14 +3067,16 @@ JSON
 cmd_dag() {
     local json=false
     local depth=-1
+    local do_fetch=true
     local sha=""
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
             --depth=*) depth="${1#*=}"; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
             --help|-h)
-                echo "Usage: task-dag dag <ref> [--json] [--depth=N]"
+                echo "Usage: task-dag dag <ref> [--json] [--depth=N] [--no-fetch]"
                 return 0
                 ;;
             *)
@@ -3033,6 +3096,13 @@ cmd_dag() {
         return 1
     fi
     
+    # Fetch BEFORE resolve (fetch → resolve_sha ordering) so both the task
+    # object and the refs/heads/tasks/ tips the graph walk decorates are
+    # present. --no-fetch skips the network round-trip.
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
+    fi
+    
     sha=$(resolve_sha "$sha") || return 1
     
     if [ "$json" = true ]; then
@@ -3048,7 +3118,163 @@ cmd_dag() {
     
     echo ""
     printf "${BOLD}Task Details:${RESET}\n"
-    cmd_show "$sha"
+    cmd_show "$sha" --no-fetch
+}
+
+# Command: context - one blessed "read my assigned task" command (design §3
+# Layer B). Guarantees the task object is present (fetch-then-verify), then
+# prints the task body + DAG neighbourhood + suggested next commands so an
+# agent in a prepared/single-branch workspace never hand-rolls `git fetch`
+# just to inspect its own task.
+#
+#   task-dag context <sha> [--ref refs/heads/tasks/<ns>/<short>] [--no-fetch]
+#
+# With --ref it fetches EXACTLY that ref (validated/normalized) into the local
+# refs/heads/tasks/* namespace, falling back once to the canonical task
+# namespaces if the exact-ref fetch fails; without --ref it fetches the
+# canonical namespaces. Remote stays authoritative — the fetched local refs
+# are an inspection cache only (design §2). Live frontier / dependency-
+# completion / blocked state must still be read via the fetch-first commands.
+cmd_context() {
+    local ref=""
+    local do_fetch=true
+    local sha=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ref=*) ref="${1#*=}"; shift ;;
+            --ref)
+                if [ $# -lt 2 ]; then
+                    echo "Error: --ref requires a value" >&2
+                    return 1
+                fi
+                ref="$2"; shift 2 ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --help|-h)
+                echo "Usage: task-dag context <sha> [--ref refs/heads/tasks/<ns>/<short>] [--no-fetch]"
+                echo "  Fetch-then-show the assigned task: body, kind/ref, epic + dependency"
+                echo "  parents, related local refs, and suggested next commands."
+                return 0
+                ;;
+            *)
+                if [ -z "$sha" ]; then
+                    sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$sha" ]; then
+        echo "Error: SHA required" >&2
+        return 1
+    fi
+
+    # 1. Fetch (fetch → verify → resolve ordering). Exact ref if given, else
+    #    the canonical namespaces; a failed exact-ref fetch falls back once.
+    if [ "$do_fetch" = true ]; then
+        if [ -n "$ref" ]; then
+            local norm
+            if ! norm=$(normalize_task_ref "$ref"); then
+                echo "Error: invalid --ref '$ref'" >&2
+                echo "  Expected 'tasks/<ns>/<short>' or 'refs/heads/tasks/<ns>/<short>'." >&2
+                return 1
+            fi
+            if ! fetch_task_ref_exact "$norm" 2>/dev/null; then
+                # Exact ref unavailable (moved/deleted/renamed) — fall back
+                # once to the canonical namespaces before giving up.
+                fetch_task_refs
+            fi
+        else
+            fetch_task_refs
+        fi
+    fi
+
+    # 2. Verify the object is actually present now (design §3 Layer B step 2).
+    if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+        echo "Error: task object '$sha' is not present after fetch." >&2
+        if [ -z "$ref" ]; then
+            echo "  If you know the ref, retry: task-dag context $sha --ref refs/heads/tasks/<ns>/<short>" >&2
+        fi
+        echo "  (The commit may have been completed/dropped, or the SHA is wrong.)" >&2
+        return 1
+    fi
+
+    # 3. Resolve + gather details.
+    sha=$(resolve_sha "$sha") || return 1
+    local short; short=$(git rev-parse --short "$sha")
+    local msg; msg=$(parse_commit_metadata "$sha")
+    local title; title=$(get_task_title "$sha")
+    local body; body=$(git log -1 --format='%b' "$sha")
+    local issue; issue=$(extract_field "$msg" "Issue")
+    local author; author=$(extract_field "$msg" "Author")
+    local status; status=$(extract_field "$msg" "Status")
+    local type; type=$(extract_field "$msg" "Type")
+    local parent_task; parent_task=$(extract_field "$msg" "Parent-Task")
+    local first_parent; first_parent=$(get_first_parent "$sha")
+    local deps; deps=$(get_dep_parents "$sha")
+    # Local refs pointing at this task (the "related local refs" surface).
+    local refs; refs=$(git for-each-ref --format='%(refname:short)' --points-at "$sha" | grep '^tasks/' || true)
+
+    printf "${BOLD}Task: ${RESET}%s\n" "$title"
+    printf "${BOLD}SHA:${RESET}   %s\n" "$sha"
+    printf "${BOLD}Short:${RESET} %s\n" "$short"
+    [ -n "$issue" ]  && printf "${BOLD}Issue:${RESET}  %s\n" "$issue"
+    [ -n "$author" ] && printf "${BOLD}Author:${RESET} %s\n" "$author"
+    printf "${BOLD}Status:${RESET} %s\n" "${status:-pending}"
+    printf "${BOLD}Kind:${RESET}   %s\n" "${type:-task}"
+
+    if [ -n "$refs" ]; then
+        printf "${BOLD}Related local refs:${RESET}\n"
+        echo "$refs" | while read -r r; do echo "  - $r"; done
+    fi
+
+    # Epic / breakdown parent (first parent) — the structural parent.
+    local epic_parent="${parent_task:-$first_parent}"
+    if [ -n "$epic_parent" ]; then
+        local ep_title ep_short
+        ep_title=$(get_task_title "$epic_parent" 2>/dev/null || echo "(not present locally)")
+        ep_short=$(git rev-parse --short "$epic_parent" 2>/dev/null || echo "$epic_parent")
+        printf "${BOLD}Epic/breakdown parent:${RESET} %s - %s\n" "$ep_short" "$ep_title"
+    fi
+
+    # Dependency parents (2nd+) with completion state.
+    if [ -n "$deps" ]; then
+        printf "${BOLD}Dependencies:${RESET}\n"
+        echo "$deps" | while read -r dep; do
+            [ -z "$dep" ] && continue
+            local dep_title dep_short
+            dep_title=$(get_task_title "$dep" 2>/dev/null || echo "(not present locally)")
+            dep_short=$(git rev-parse --short "$dep" 2>/dev/null || echo "$dep")
+            if is_task_completed "$dep" 2>/dev/null; then
+                printf "  ${GREEN}✓${RESET} %s - %s\n" "$dep_short" "$dep_title"
+            else
+                printf "  ${RED}✗${RESET} %s - %s\n" "$dep_short" "$dep_title"
+            fi
+        done
+    fi
+
+    if is_task_completed "$sha"; then
+        printf "${GREEN}✓ Task completed${RESET}\n"
+    else
+        printf "${YELLOW}○ Task pending${RESET}\n"
+    fi
+
+    if [ -n "$body" ]; then
+        printf "\n${BOLD}── Task body ──${RESET}\n%s\n" "$body"
+    fi
+
+    printf "\n${BOLD}Suggested next commands:${RESET}\n"
+    printf "  task-dag deps %s        # check dependency readiness (fetches fresh)\n" "$short"
+    printf "  task-dag dag %s         # view the DAG neighbourhood\n" "$short"
+    printf "  task-dag complete %s    # after committing your implementation\n" "$short"
+    printf "  task-dag block %s --reason=\"…\"  # if stalled awaiting a decision/dependency\n" "$short"
+    printf "\n${BOLD}Note:${RESET} the assigned task commit is immutable — 'git show %s' now works\n" "$short"
+    printf "for body inspection. Live frontier / dependency / blocked state is\n"
+    printf "authoritative on origin; always read it via the task-dag commands above.\n"
 }
 
 # Command: breakdown - create task breakdown from spec
@@ -3961,9 +4187,9 @@ EOF
     fi
 
     # Check dependencies
-    if ! cmd_deps "$task_sha" --check-complete >/dev/null 2>&1; then
+    if ! cmd_deps "$task_sha" --check-complete --no-fetch >/dev/null 2>&1; then
         echo "Error: Dependencies not met for task $task_sha" >&2
-        cmd_deps "$task_sha"
+        cmd_deps "$task_sha" --no-fetch
         return 2
     fi
     
@@ -4707,9 +4933,9 @@ EOF
 
     # ── Dependency guard (same as complete): the task's dependency tasks
     # must themselves be completed/linked. ──
-    if ! cmd_deps "$task_sha" --check-complete >/dev/null 2>&1; then
+    if ! cmd_deps "$task_sha" --check-complete --no-fetch >/dev/null 2>&1; then
         echo "Error: dependencies not met for task $task_sha (its dependency tasks are not yet completed/linked)." >&2
-        cmd_deps "$task_sha" >&2
+        cmd_deps "$task_sha" --no-fetch >&2
         return 2
     fi
 
@@ -6355,6 +6581,7 @@ main() {
         show) cmd_show "$@" ;;
         deps) cmd_deps "$@" ;;
         dag) cmd_dag "$@" ;;
+        context) cmd_context "$@" ;;
         breakdown) cmd_breakdown "$@" ;;
         complete) cmd_complete "$@" ;;
         complete-historical) cmd_complete_historical "$@" ;;
