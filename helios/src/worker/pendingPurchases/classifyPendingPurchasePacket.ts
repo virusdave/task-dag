@@ -60,6 +60,15 @@ const CLASSIFIER_OUTPUT_BASE_TOKENS = 1500
 const CLASSIFIER_OUTPUT_TOKENS_PER_ROW = 350
 const CLASSIFIER_OUTPUT_TOKENS_CEILING = 32_000
 
+// A highly-capable model occasionally returns JSON that is ALMOST right — one
+// bad reuseEvidence.source, a null rationale, a stray cited id. Feeding the
+// exact validation error back and asking it to correct itself is far cheaper
+// than failing an entire rare, expensive purchase run on a single fixable
+// slip. Bounded: the initial call plus at most this many repair round-trips.
+// (Purchases are rare and operator-chosen to use an advanced model, so a few
+// extra round-trips for correctness are an acceptable trade.)
+const CLASSIFIER_MAX_REPAIR_ATTEMPTS = 2
+
 // Input guards. These bound the single Bedrock call; exceeding any of them
 // fails loud (the operator narrows the event / hint set) rather than silently
 // dropping rows or context.
@@ -180,20 +189,58 @@ export async function classifyPendingPurchasePacketWithLlm(
     CLASSIFIER_OUTPUT_TOKENS_CEILING,
   )
 
-  const { content } = await callClassifierModel({
-    model,
-    systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-    serializedUserPayload: serialized,
-    maxTokens,
-  })
+  // The untrusted event data travels as the first user message; the system
+  // prompt is the only authoritative instruction. On a validation failure we
+  // append the model's own (rejected) reply plus a repair instruction and let
+  // it try again — see CLASSIFIER_MAX_REPAIR_ATTEMPTS. Only a reply that passes
+  // the SAME strict parseAndValidateDrafts is ever returned, so the fail-loud
+  // posture is preserved: a model that cannot fix its output still throws.
+  const messages: ClassifierChatMessage[] = [
+    { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
+    { role: 'user', content: serialized },
+  ]
+  const validationErrors: string[] = []
 
-  const drafts = parseAndValidateDrafts(content, input)
+  for (let repairAttempt = 0; ; repairAttempt += 1) {
+    // The model call is OUTSIDE the repair try/catch on purpose: transport,
+    // truncation, and missing-token failures also throw
+    // PendingPurchaseClassifierError but are NOT the model producing
+    // almost-correct JSON, so they must propagate immediately (the job's own
+    // retry layer handles the transient ones) rather than being fed back as a
+    // "repair" instruction.
+    const { content } = await callClassifierModel({ model, messages, maxTokens })
 
-  return {
-    schemaVersion: PENDING_PURCHASE_CLASSIFIER_SCHEMA_VERSION,
-    model,
-    promptVersion: PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION,
-    drafts,
+    let drafts: PendingPurchaseLlmDraftRow[]
+    try {
+      drafts = parseAndValidateDrafts(content, input)
+    } catch (error) {
+      // Only parse/schema/boundary-invariant failures — the model's own fixable
+      // near-misses — reach here and are eligible for a repair round-trip.
+      if (!(error instanceof PendingPurchaseClassifierError)) throw error
+      validationErrors.push(error.message)
+      if (repairAttempt >= CLASSIFIER_MAX_REPAIR_ATTEMPTS) {
+        throw new PendingPurchaseClassifierError(
+          `model output failed validation after ${repairAttempt} repair attempt(s): ${validationErrors.join(' | ')}`,
+        )
+      }
+      messages.push(
+        { role: 'assistant', content },
+        { role: 'user', content: buildClassifierRepairPrompt(error.message) },
+      )
+      continue
+    }
+
+    if (repairAttempt > 0) {
+      console.warn(
+        `[pendingPurchaseClassifier] model=${model} output validated after ${repairAttempt} repair attempt(s); prior errors: ${validationErrors.join(' | ')}`,
+      )
+    }
+    return {
+      schemaVersion: PENDING_PURCHASE_CLASSIFIER_SCHEMA_VERSION,
+      model,
+      promptVersion: PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION,
+      drafts,
+    }
   }
 }
 
@@ -337,10 +384,35 @@ interface ClassifierModelCallResult {
   readonly content: string
 }
 
+/** One chat turn sent to the model (system/user data, plus repair turns). */
+interface ClassifierChatMessage {
+  readonly role: 'system' | 'user' | 'assistant'
+  readonly content: string
+}
+
+/**
+ * Turn a strict-validation failure into a corrective instruction for the model.
+ * Deliberately restates the hard invariants (allowed sources, non-empty
+ * rationale, no invented ids/taxonomy) so the model fixes the reported problem
+ * without wandering — and tells it how to back out an unsupportable reuse
+ * proposal rather than fabricating evidence to satisfy the schema.
+ */
+function buildClassifierRepairPrompt(validationError: string): string {
+  return [
+    'Your previous response FAILED strict validation and was rejected.',
+    `Validation errors:\n${validationError}`,
+    'Return the COMPLETE corrected result as one JSON object of the exact shape {"drafts": [ <one draft per input row> ]} — a full replacement, not a patch or diff.',
+    'Emit exactly one draft per input row, echoing each row\'s "rowKey", "distributorProductId", and "distributorProductName" verbatim, and introduce no key that is not in the schema.',
+    'Do NOT invent rowKeys, product ids, cited hint ids, or taxonomy values; cited ids must appear in hintFacts and taxonomy must be in the allowed set.',
+    'When reuseEvidence is present, reuseEvidence.source MUST be exactly one of "current-distributor-link", "sweed-suggestion", "sibling-po", "live-catalog-search", or "model-inference", and reuseEvidence.rationale MUST be a non-empty one-sentence string.',
+    'If you cannot support a reuse proposal with an allowed source AND a real rationale, drop it: set both reuseProductIdCandidate and reuseEvidence to null and choose a coherent proposedAction ("catalog-create" only if the product is genuinely new, otherwise "needs-review").',
+    'Return ONLY the JSON. No prose, no markdown.',
+  ].join(' ')
+}
+
 async function callClassifierModel(input: {
   model: string
-  systemPrompt: string
-  serializedUserPayload: string
+  messages: readonly ClassifierChatMessage[]
   maxTokens: number
 }): Promise<ClassifierModelCallResult> {
   const env = getWorkerEnv()
@@ -354,12 +426,14 @@ async function callClassifierModel(input: {
     response = await fetch(`${env.bedrockMantleBaseUrl}/chat/completions`, {
       body: JSON.stringify({
         max_tokens: input.maxTokens,
-        messages: [
-          { content: input.systemPrompt, role: 'system' },
-          // Untrusted event data travels as a DATA payload, never
-          // interpolated into the instruction prompt.
-          { content: input.serializedUserPayload, role: 'user' },
-        ],
+        // The caller assembles the turn sequence: [system, user(data)] on the
+        // first pass, plus [assistant(rejected reply), user(repair)] appended
+        // per repair round-trip. Untrusted event data still travels only as a
+        // DATA payload in the user turn, never interpolated into instructions.
+        messages: input.messages.map((message) => ({
+          content: message.content,
+          role: message.role,
+        })),
         model: input.model,
         response_format: { type: 'json_object' },
         temperature: 0,

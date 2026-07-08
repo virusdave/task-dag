@@ -119,7 +119,23 @@ function modelResponse(body: unknown, finishReason = 'stop'): Response {
 }
 
 function stubFetch(response: Response | (() => Response)) {
-  const fetchMock = vi.fn(async () => (typeof response === 'function' ? response() : response))
+  // A Response body can only be read once. The classifier's repair loop may
+  // fetch several times, so when given a single Response we snapshot its body
+  // and hand out a FRESH equivalent Response per call (the function form is
+  // simply re-invoked, so it is already fresh).
+  let cachedText: string | null = null
+  let cachedStatus = 200
+  const fetchMock = vi.fn(async () => {
+    if (typeof response === 'function') return response()
+    if (cachedText === null) {
+      cachedText = await response.text()
+      cachedStatus = response.status
+    }
+    return new Response(cachedText, {
+      headers: { 'content-type': 'application/json' },
+      status: cachedStatus,
+    })
+  })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
@@ -345,5 +361,94 @@ describe('classifyPendingPurchasePacketWithLlm — input guards', () => {
     stubFetch(modelResponse({ drafts: [modelDraft()] }))
     const input = buildInput({ rows: [rowInput({ rowKey: 'dup' }), rowInput({ rowKey: 'dup', distributorProductId: 'dp-2' })] })
     await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(/Duplicate input rowKey/)
+  })
+})
+
+describe('classifyPendingPurchasePacketWithLlm — schema-repair retry', () => {
+  // Return a FRESH Response per call (factories, since a body reads once) so we
+  // can simulate a bad first reply followed by a corrected one. The last
+  // factory is reused if more calls happen than factories provided.
+  function stubFetchSequence(responseFactories: Array<() => Response>) {
+    let call = 0
+    const fetchMock = vi.fn(async () => {
+      const factory = responseFactories[Math.min(call, responseFactories.length - 1)]!
+      call += 1
+      return factory()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  // fetch is called as fetch(url, { body, ... }); pull the messages array out
+  // of the JSON request body for a given call.
+  function messagesOf(
+    fetchMock: ReturnType<typeof vi.fn>,
+    callIndex: number,
+  ): Array<{ role: string; content: string }> {
+    const options = fetchMock.mock.calls[callIndex]![1] as { body: string }
+    return JSON.parse(options.body).messages
+  }
+
+  it('recovers from the exact prod failure (invalid source + null rationale) via one repair round-trip', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // First reply reproduces prod job 614752: reuseEvidence.source is not in the
+    // enum and rationale is null. Second reply is corrected.
+    const fetchMock = stubFetchSequence([
+      () =>
+        modelResponse({
+          drafts: [
+            modelDraft({
+              proposedAction: 'mapping-only',
+              reuseProductIdCandidate: 7001,
+              reuseEvidence: { source: 'catalog-search', rationale: null, citedHintIds: [] },
+            }),
+          ],
+        }),
+      () => modelResponse({ drafts: [modelDraft()] }),
+    ])
+
+    const result = await classifyPendingPurchasePacketWithLlm(buildInput())
+
+    expect(result.drafts).toHaveLength(1)
+    expect(result.drafts[0]!.reuseEvidence?.source).toBe('live-catalog-search')
+    // Exactly two model calls: the failed one and the repaired one.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // The repair turn carries the model's rejected reply + a corrective user
+    // message that quotes the validation error.
+    const repairMessages = messagesOf(fetchMock, 1)
+    expect(repairMessages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user'])
+    expect(repairMessages[3]!.content).toMatch(/FAILED strict validation/)
+    expect(repairMessages[3]!.content).toMatch(/reuseEvidence/)
+    expect(warn).toHaveBeenCalledOnce()
+  })
+
+  it('fails loud after exhausting the repair budget (initial + 2 repairs = 3 calls)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const badReply = () =>
+      modelResponse({
+        drafts: [
+          modelDraft({
+            proposedAction: 'mapping-only',
+            reuseProductIdCandidate: 7001,
+            reuseEvidence: { source: 'catalog-search', rationale: null, citedHintIds: [] },
+          }),
+        ],
+      })
+    const fetchMock = stubFetchSequence([badReply])
+
+    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
+      /after 2 repair attempt\(s\)/,
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does NOT repair-retry a truncated response (not a fixable near-miss)', async () => {
+    const fetchMock = stubFetchSequence([
+      () => modelResponse({ drafts: [modelDraft()] }, 'length'),
+      () => modelResponse({ drafts: [modelDraft()] }),
+    ])
+    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/truncated/)
+    // Truncation is fatal on the first call — no repair round-trip.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
