@@ -9,6 +9,8 @@ import type { FaqSet } from '../../server/seo/contracts.js'
 import { faqSetContentSha256 } from '../../server/seo/faqContent.js'
 import type { FaqSyncPlan } from '../../server/seo/faqHybridSyncPlan.js'
 import {
+  buildFaqReviewUrl,
+  resolveAppBaseUrl,
   resolveFaqHybridSyncPublishConfig,
   toFaqSyncObservation,
   verifyPublishCandidatesPresent,
@@ -110,6 +112,44 @@ describe('verifyPublishCandidatesPresent', () => {
     const problems = verifyPublishCandidatesPresent(plan, [set])
     expect(problems).toHaveLength(1)
     expect(problems[0]).toMatch(/approved fingerprint changed/)
+  })
+})
+
+describe('buildFaqReviewUrl', () => {
+  it('builds the absolute review deep link from a plain origin', () => {
+    expect(buildFaqReviewUrl('https://helios.freshlybaked.us', 'faq_global_01')).toBe(
+      'https://helios.freshlybaked.us/seo/faq/faq_global_01/review',
+    )
+  })
+
+  it('honors a base path baked into the app base URL', () => {
+    expect(buildFaqReviewUrl('https://example.test/helios/', 'faq_x')).toBe(
+      'https://example.test/helios/seo/faq/faq_x/review',
+    )
+  })
+
+  it('url-encodes the faq set id', () => {
+    expect(buildFaqReviewUrl('https://helios.freshlybaked.us', 'a/b?c')).toBe(
+      'https://helios.freshlybaked.us/seo/faq/a%2Fb%3Fc/review',
+    )
+  })
+})
+
+describe('resolveAppBaseUrl', () => {
+  it('uses APP_BASE_URL when set and valid', () => {
+    expect(resolveAppBaseUrl({ APP_BASE_URL: 'https://staging.test/' })).toBe(
+      'https://staging.test/',
+    )
+  })
+
+  it('falls back to the prod origin when unset', () => {
+    expect(resolveAppBaseUrl({})).toBe('https://helios.freshlybaked.us')
+  })
+
+  it('falls back rather than throwing on a malformed value', () => {
+    expect(resolveAppBaseUrl({ APP_BASE_URL: 'not a url' })).toBe(
+      'https://helios.freshlybaked.us',
+    )
   })
 })
 

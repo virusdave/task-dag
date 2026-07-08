@@ -30,6 +30,7 @@
 import { readFileSync } from 'node:fs'
 
 import type { ConfigWorkersFaqHybridSyncJobPayload, JsonValue } from '../../shared/contracts/index.js'
+import { deriveBasePathFromAppBaseUrl, joinBasePath } from '../../shared/config/appBasePath.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { getPool } from '../../server/db/pool.js'
 import type { Queryable } from '../../server/db/pool.js'
@@ -111,6 +112,43 @@ export function resolveFaqHybridSyncPublishConfig(
     publicKeyPem,
     automationGitSha,
   }
+}
+
+// ── operator deep-link (page-dave) ─────────────────────────────────────
+
+/**
+ * Prod Helios origin, used as the fallback base for the review deep link
+ * when the worker process has no `APP_BASE_URL` in its environment (the
+ * page is a convenience link, so a missing env must never crash the job).
+ */
+const DEFAULT_HELIOS_APP_BASE_URL = 'https://helios.freshlybaked.us'
+
+/** Resolve the Helios app base URL for building operator links. */
+export function resolveAppBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.APP_BASE_URL?.trim()
+  if (!raw) {
+    return DEFAULT_HELIOS_APP_BASE_URL
+  }
+  // Guard against a malformed env value — fall back rather than throw from
+  // inside a notification path.
+  try {
+    new URL(raw)
+    return raw
+  } catch {
+    return DEFAULT_HELIOS_APP_BASE_URL
+  }
+}
+
+/**
+ * Build the absolute URL of the Helios FAQ-set review page for `faqSetId`
+ * (`<base>/seo/faq/<faqSetId>/review`), honoring any base path baked into
+ * `appBaseUrl`. Pure + unit-tested so the operator page always deep-links
+ * to the exact review/approve surface.
+ */
+export function buildFaqReviewUrl(appBaseUrl: string, faqSetId: string): string {
+  const basePath = deriveBasePathFromAppBaseUrl(appBaseUrl)
+  const path = joinBasePath(basePath, `/seo/faq/${encodeURIComponent(faqSetId)}/review`)
+  return new URL(path, appBaseUrl).toString()
 }
 
 // ── pure helpers (unit-tested) ─────────────────────────────────────────
@@ -256,10 +294,12 @@ export async function runFaqHybridSyncJob(
   // 5a. Path (b): page-dave for each changed source needing review. Naturally
   //     at-most-once across runs — a re-import of unchanged content yields no
   //     review page, so steady-state runs page nobody.
+  const appBaseUrl = resolveAppBaseUrl()
   for (const reviewPage of plan.reviewPages) {
+    const reviewUrl = buildFaqReviewUrl(appBaseUrl, reviewPage.faqSetId)
     await pageDave(
       `FAQ source "${reviewPage.sourceKey}" ${reviewPage.reason} a draft (set ${reviewPage.faqSetId}, ` +
-        `content ${reviewPage.contentSha256.slice(0, 12)}). Review + approve in Helios before it can publish.`,
+        `content ${reviewPage.contentSha256.slice(0, 12)}). Review + approve before it can publish: ${reviewUrl}`,
       { priority: 3, title: 'FAQ source change needs review' },
     )
     await appendAuditEvent(pool, {
@@ -273,6 +313,7 @@ export async function runFaqHybridSyncJob(
         sourceKey: reviewPage.sourceKey,
         reason: reviewPage.reason,
         contentSha256: reviewPage.contentSha256,
+        reviewUrl,
       },
       requestId: null,
       scope: null,
