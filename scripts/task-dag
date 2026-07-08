@@ -1604,6 +1604,8 @@ EOF
         return 1
     fi
 
+    if [ "$json" = true ]; then require_jq_for_json || return 1; fi
+
     task_sha=$(resolve_sha "$task_sha") || return 1
     local short_sha
     short_sha=$(git rev-parse --short "$task_sha")
@@ -1617,9 +1619,8 @@ EOF
     # so a parked task can never be claimed back into flight by accident.
     if [ "$do_force" = false ] && is_task_blocked "$task_sha"; then
         if [ "$json" = true ]; then
-            cat <<JSON
-{"ok":false,"reason":"blocked","sha":"$task_sha","shortSha":"$short_sha"}
-JSON
+            jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                '{ok:false,reason:"blocked",sha:$sha,shortSha:$short}'
         else
             printf "${RED}Task %s is BLOCKED (parked) — not claimable.${RESET}\n" "$short_sha" >&2
             echo "Revive it with 'task-dag unblock $short_sha', or --force if you know the block is stale." >&2
@@ -1638,9 +1639,9 @@ JSON
             local blocking_short
             blocking_short=$(git rev-parse --short "$blocking_ancestor" 2>/dev/null || echo "$blocking_ancestor")
             if [ "$json" = true ]; then
-                cat <<JSON
-{"ok":false,"reason":"ancestor-blocked","sha":"$task_sha","shortSha":"$short_sha","blockedAncestor":"$blocking_ancestor"}
-JSON
+                jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                    --arg anc "$blocking_ancestor" \
+                    '{ok:false,reason:"ancestor-blocked",sha:$sha,shortSha:$short,blockedAncestor:$anc}'
             else
                 printf "${RED}Task %s has a BLOCKED ancestor (%s) — not claimable.${RESET}\n" "$short_sha" "$blocking_short" >&2
                 echo "Revive it with 'task-dag unblock $blocking_short', or --force if you know the block is stale." >&2
@@ -1689,9 +1690,10 @@ JSON
            && [ "$existing_pid" = "$claimer_pid" ] \
            && [ "$existing_first_parent" = "$task_sha" ]; then
             if [ "$json" = true ]; then
-                cat <<JSON
-{"ok":true,"sha":"$task_sha","shortSha":"$short_sha","claimer":"$claimer","claimerHost":"$claimer_host","claimerPid":${claimer_pid:-null},"alreadyHeld":true}
-JSON
+                jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                    --arg claimer "$claimer" --arg host "$claimer_host" \
+                    --argjson pid "$(json_int_or_null "$claimer_pid")" \
+                    '{ok:true,sha:$sha,shortSha:$short,claimer:$claimer,claimerHost:$host,claimerPid:$pid,alreadyHeld:true}'
             else
                 printf "${GREEN}✓ Task %s already claimed by you (%s, pid %s on %s) — verified.${RESET}\n" \
                     "$short_sha" "$claimer" "$claimer_pid" "$claimer_host"
@@ -1699,9 +1701,12 @@ JSON
             return 0
         fi
         if [ "$json" = true ]; then
-            cat <<JSON
-{"ok":false,"reason":"already-claimed","sha":"$task_sha","shortSha":"$short_sha","claimer":"${existing_claimer:-unknown}","claimerHost":"${existing_host:-unknown}","claimerPid":${existing_pid:-null},"claimedAt":"${existing_when:-unknown}"}
-JSON
+            jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                --arg claimer "${existing_claimer:-unknown}" \
+                --arg host "${existing_host:-unknown}" \
+                --argjson pid "$(json_int_or_null "$existing_pid")" \
+                --arg when "${existing_when:-unknown}" \
+                '{ok:false,reason:"already-claimed",sha:$sha,shortSha:$short,claimer:$claimer,claimerHost:$host,claimerPid:$pid,claimedAt:$when}'
         else
             printf "${RED}Task %s is already claimed by %s (pid %s on %s) at %s${RESET}\n" \
                 "$short_sha" "${existing_claimer:-unknown}" "${existing_pid:-?}" \
@@ -1718,9 +1723,8 @@ JSON
     remote_frontier_sha=$(task_frontier_on_remote "$short_sha")
     if [ -z "$remote_frontier_sha" ] && [ "$do_force" = false ]; then
         if [ "$json" = true ]; then
-            cat <<JSON
-{"ok":false,"reason":"no-frontier","sha":"$task_sha","shortSha":"$short_sha"}
-JSON
+            jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                '{ok:false,reason:"no-frontier",sha:$sha,shortSha:$short}'
         else
             printf "${RED}Task %s has no frontier ref on origin — already completed or retracted.${RESET}\n" \
                 "$short_sha" >&2
@@ -1802,9 +1806,9 @@ JSON
             # Refresh local refs so we don't keep stale state on disk.
             fetch_task_refs >/dev/null 2>&1 || true
             if [ "$json" = true ]; then
-                cat <<JSON
-{"ok":false,"reason":"claim-not-confirmed","sha":"$task_sha","shortSha":"$short_sha","attemptedClaimCommit":"$claim_commit","actualActiveSha":"${readback_sha:-}"}
-JSON
+                jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                    --arg claim "$claim_commit" --arg readback "${readback_sha:-}" \
+                    '{ok:false,reason:"claim-not-confirmed",sha:$sha,shortSha:$short,attemptedClaimCommit:$claim,actualActiveSha:$readback}'
             else
                 printf "${RED}✗ Claim push appeared to succeed but origin readback shows tasks/active/%s = %s (expected %s).${RESET}\n" \
                     "$short_sha" "${readback_sha:-<missing>}" "$claim_commit" >&2
@@ -1819,9 +1823,12 @@ JSON
             git update-ref -d "$frontier_local_ref"
         fi
         if [ "$json" = true ]; then
-            cat <<JSON
-{"ok":true,"sha":"$task_sha","shortSha":"$short_sha","claimCommit":"$claim_commit","claimer":"$claimer","claimerHost":"$claimer_host","claimerPid":${claimer_pid:-null},"ttlHours":$ttl_hours}
-JSON
+            jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                --arg claim "$claim_commit" --arg claimer "$claimer" \
+                --arg host "$claimer_host" \
+                --argjson pid "$(json_int_or_null "$claimer_pid")" \
+                --argjson ttl "$(json_number_or_null "$ttl_hours")" \
+                '{ok:true,sha:$sha,shortSha:$short,claimCommit:$claim,claimer:$claimer,claimerHost:$host,claimerPid:$pid,ttlHours:$ttl}'
         else
             printf "${GREEN}✓ Claimed task %s as %s@%s (pid %s, TTL %sh, verified on origin)${RESET}\n" \
                 "$short_sha" "$claimer" "$claimer_host" "${claimer_pid:-?}" "$ttl_hours"
@@ -1834,9 +1841,8 @@ JSON
     # push output.
     if echo "$push_output" | grep -qiE 'rejected|stale info|non-fast-forward|fetch first'; then
         if [ "$json" = true ]; then
-            cat <<JSON
-{"ok":false,"reason":"race-lost","sha":"$task_sha","shortSha":"$short_sha"}
-JSON
+            jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                '{ok:false,reason:"race-lost",sha:$sha,shortSha:$short}'
         else
             printf "${YELLOW}Lost claim race for %s (another worker won).${RESET}\n" "$short_sha" >&2
             echo "$push_output" >&2
@@ -1845,9 +1851,14 @@ JSON
     fi
 
     if [ "$json" = true ]; then
-        cat <<JSON
-{"ok":false,"reason":"push-failed","sha":"$task_sha","shortSha":"$short_sha","error":$(printf '%s' "$push_output" | head -c 500 | jq -Rs . 2>/dev/null || printf '"%s"' "$push_output")}
-JSON
+        # Truncate with bash parameter expansion (no pipe): piping into
+        # `head -c 500` can hand `printf` a SIGPIPE once head has its 500
+        # bytes, and under `set -o pipefail` that would abort the emit
+        # (exit 141) before we print the result object.
+        local err_snippet="${push_output:0:500}"
+        jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+            --arg error "$err_snippet" \
+            '{ok:false,reason:"push-failed",sha:$sha,shortSha:$short,error:$error}'
     else
         printf "${RED}Push failed:${RESET}\n%s\n" "$push_output" >&2
     fi
@@ -1898,6 +1909,8 @@ EOF
         return 1
     fi
 
+    if [ "$json" = true ]; then require_jq_for_json || return 1; fi
+
     task_sha=$(resolve_sha "$task_sha") || return 1
     local short_sha
     short_sha=$(git rev-parse --short "$task_sha")
@@ -1911,7 +1924,7 @@ EOF
     remote_active_sha=$(git ls-remote origin "refs/heads/tasks/active/$short_sha" 2>/dev/null | awk '{print $1; exit}')
     if [ -z "$remote_active_sha" ]; then
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"not-claimed\",\"sha\":\"$task_sha\"}"
+            jq -nc --arg sha "$task_sha" '{ok:false,reason:"not-claimed",sha:$sha}'
         else
             printf "${YELLOW}No active claim on %s — nothing to release.${RESET}\n" "$short_sha" >&2
         fi
@@ -1946,9 +1959,9 @@ EOF
         if [ -n "$readback_sha" ]; then
             fetch_task_refs >/dev/null 2>&1 || true
             if [ "$json" = true ]; then
-                cat <<JSON
-{"ok":false,"reason":"release-not-confirmed","sha":"$task_sha","shortSha":"$short_sha","actualActiveSha":"$readback_sha"}
-JSON
+                jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
+                    --arg actual "$readback_sha" \
+                    '{ok:false,reason:"release-not-confirmed",sha:$sha,shortSha:$short,actualActiveSha:$actual}'
             else
                 printf "${RED}✗ Release push appeared to succeed but origin readback shows tasks/active/%s still present (%s).${RESET}\n" \
                     "$short_sha" "$readback_sha" >&2
@@ -1962,7 +1975,7 @@ JSON
             git update-ref -d "$active_local_ref"
         fi
         if [ "$json" = true ]; then
-            echo "{\"ok\":true,\"sha\":\"$task_sha\"}"
+            jq -nc --arg sha "$task_sha" '{ok:true,sha:$sha}'
         else
             printf "${GREEN}✓ Released %s back to frontier (verified on origin)${RESET}\n" "$short_sha"
         fi
@@ -1970,7 +1983,7 @@ JSON
     fi
 
     if [ "$json" = true ]; then
-        echo "{\"ok\":false,\"reason\":\"push-failed\",\"sha\":\"$task_sha\"}"
+        jq -nc --arg sha "$task_sha" '{ok:false,reason:"push-failed",sha:$sha}'
     else
         printf "${RED}Release push failed:${RESET}\n%s\n" "$push_output" >&2
     fi
@@ -2064,12 +2077,14 @@ EOF
         return 1
     fi
 
+    if [ "$json" = true ]; then require_jq_for_json || return 1; fi
+
     # Origin is the source of truth for the root identity + lock state.
     local root_sha
     root_sha=$(pending_sha_on_remote "$issue")
     if [ -z "$root_sha" ]; then
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"no-pending-root\",\"issue\":$issue}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"no-pending-root",issue:$issue}'
         else
             printf "${RED}No epic root tasks/pending/%s on origin — unknown or closed issue.${RESET}\n" "$issue" >&2
         fi
@@ -2084,7 +2099,7 @@ EOF
     # else already decomposed).
     if ! fetch_root_refs "$issue"; then
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"origin-unreadable\",\"issue\":$issue}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"origin-unreadable",issue:$issue}'
         else
             printf "${RED}Cannot reach origin to verify epic root #%s state — refusing to claim.${RESET}\n" "$issue" >&2
         fi
@@ -2101,7 +2116,7 @@ EOF
     IFS=$'\t' read -r origin_repo origin_issue _ignore_url < <(derive_task_origin "$root_sha")
     if issue_is_closed_remote "$origin_repo" "${origin_issue:-$issue}"; then
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"issue-closed\",\"issue\":$issue}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"issue-closed",issue:$issue}'
         else
             printf "${RED}Epic root #%s belongs to a CLOSED issue — refusing to claim (orphan pending ref).${RESET}\n" "$issue" >&2
         fi
@@ -2141,7 +2156,10 @@ EOF
            && [ "$existing_pid" = "$claimer_pid" ] \
            && [ "$existing_taskcommit" = "$root_sha" ]; then
             if [ "$json" = true ]; then
-                echo "{\"ok\":true,\"issue\":$issue,\"claimer\":\"$claimer\",\"claimerHost\":\"$claimer_host\",\"claimerPid\":${claimer_pid:-null},\"alreadyHeld\":true}"
+                jq -nc --argjson issue "$(json_int_or_null "$issue")" \
+                    --arg claimer "$claimer" --arg host "$claimer_host" \
+                    --argjson pid "$(json_int_or_null "$claimer_pid")" \
+                    '{ok:true,issue:$issue,claimer:$claimer,claimerHost:$host,claimerPid:$pid,alreadyHeld:true}'
             else
                 printf "${GREEN}✓ Epic root #%s already claimed by you (%s, pid %s on %s) — verified.${RESET}\n" \
                     "$issue" "$claimer" "$claimer_pid" "$claimer_host"
@@ -2149,7 +2167,12 @@ EOF
             return 0
         fi
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"already-claimed\",\"issue\":$issue,\"claimer\":\"${existing_claimer:-unknown}\",\"claimerHost\":\"${existing_host:-unknown}\",\"claimerPid\":${existing_pid:-null},\"claimedAt\":\"${existing_when:-unknown}\"}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" \
+                --arg claimer "${existing_claimer:-unknown}" \
+                --arg host "${existing_host:-unknown}" \
+                --argjson pid "$(json_int_or_null "$existing_pid")" \
+                --arg when "${existing_when:-unknown}" \
+                '{ok:false,reason:"already-claimed",issue:$issue,claimer:$claimer,claimerHost:$host,claimerPid:$pid,claimedAt:$when}'
         else
             printf "${RED}Epic root #%s is already claimed by %s (pid %s on %s) at %s${RESET}\n" \
                 "$issue" "${existing_claimer:-unknown}" "${existing_pid:-?}" "${existing_host:-unknown}" "${existing_when:-unknown}" >&2
@@ -2162,7 +2185,7 @@ EOF
     # are the unit of work now). Skip when forcing a steal.
     if [ "$do_force" = false ] && task_has_children "$root_sha" >/dev/null; then
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"already-decomposed\",\"issue\":$issue}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"already-decomposed",issue:$issue}'
         else
             printf "${RED}Epic root #%s is already decomposed — claim its frontier leaves instead.${RESET}\n" "$issue" >&2
         fi
@@ -2207,7 +2230,9 @@ EOF
         if [ "$readback" != "$claim_commit" ]; then
             fetch_root_refs "$issue" >/dev/null 2>&1 || true
             if [ "$json" = true ]; then
-                echo "{\"ok\":false,\"reason\":\"claim-not-confirmed\",\"issue\":$issue,\"attemptedClaimCommit\":\"$claim_commit\",\"actualActiveSha\":\"${readback:-}\"}"
+                jq -nc --argjson issue "$(json_int_or_null "$issue")" \
+                    --arg claim "$claim_commit" --arg readback "${readback:-}" \
+                    '{ok:false,reason:"claim-not-confirmed",issue:$issue,attemptedClaimCommit:$claim,actualActiveSha:$readback}'
             else
                 printf "${RED}✗ Root claim push appeared to succeed but origin readback shows tasks/root-active/%s = %s (expected %s).${RESET}\n" \
                     "$issue" "${readback:-<missing>}" "$claim_commit" >&2
@@ -2227,7 +2252,7 @@ EOF
         if [ "$do_force" = false ] && [ "$pending_now" != "$root_sha" ]; then
             if ! _release_our_root_claim "$issue" "$claim_commit"; then
                 if [ "$json" = true ]; then
-                    echo "{\"ok\":false,\"reason\":\"pending-moved-claim-not-released\",\"issue\":$issue}"
+                    jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"pending-moved-claim-not-released",issue:$issue}'
                 else
                     printf "${RED}Epic root #%s identity changed during claim (pending now %s) but our orchestration claim could NOT be released — run 'task-dag release-root %s'.${RESET}\n" \
                         "$issue" "${pending_now:-<gone>}" "$issue" >&2
@@ -2235,7 +2260,7 @@ EOF
                 return 4
             fi
             if [ "$json" = true ]; then
-                echo "{\"ok\":false,\"reason\":\"pending-moved\",\"issue\":$issue}"
+                jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"pending-moved",issue:$issue}'
             else
                 printf "${RED}Epic root #%s identity changed during claim (pending now %s); released our claim.${RESET}\n" \
                     "$issue" "${pending_now:-<gone>}" >&2
@@ -2258,14 +2283,14 @@ EOF
         if [ "$do_force" = false ] && ! fetch_root_refs "$issue"; then
             if ! _release_our_root_claim "$issue" "$claim_commit"; then
                 if [ "$json" = true ]; then
-                    echo "{\"ok\":false,\"reason\":\"postclaim-unreadable-claim-not-released\",\"issue\":$issue}"
+                    jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"postclaim-unreadable-claim-not-released",issue:$issue}'
                 else
                     printf "${RED}Claimed epic root #%s but could not re-verify origin, and our orchestration claim could NOT be released — run 'task-dag release-root %s'.${RESET}\n" "$issue" "$issue" >&2
                 fi
                 return 4
             fi
             if [ "$json" = true ]; then
-                echo "{\"ok\":false,\"reason\":\"origin-unreadable-postclaim\",\"issue\":$issue}"
+                jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"origin-unreadable-postclaim",issue:$issue}'
             else
                 printf "${RED}Claimed epic root #%s but could not re-verify origin afterwards; released our claim — retry.${RESET}\n" "$issue" >&2
             fi
@@ -2276,14 +2301,14 @@ EOF
                 # Our claim is still on origin and we could not drop it —
                 # surface it loudly so the stale lock gets cleaned up.
                 if [ "$json" = true ]; then
-                    echo "{\"ok\":false,\"reason\":\"stale-claim-not-released\",\"issue\":$issue}"
+                    jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"stale-claim-not-released",issue:$issue}'
                 else
                     printf "${RED}Epic root #%s was decomposed concurrently but our orchestration claim could NOT be released — run 'task-dag release-root %s'.${RESET}\n" "$issue" "$issue" >&2
                 fi
                 return 4
             fi
             if [ "$json" = true ]; then
-                echo "{\"ok\":false,\"reason\":\"already-decomposed\",\"issue\":$issue}"
+                jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"already-decomposed",issue:$issue}'
             else
                 printf "${RED}Epic root #%s was decomposed concurrently; released our claim. Claim its frontier leaves instead.${RESET}\n" "$issue" >&2
             fi
@@ -2291,7 +2316,12 @@ EOF
         fi
 
         if [ "$json" = true ]; then
-            echo "{\"ok\":true,\"issue\":$issue,\"rootSha\":\"$root_sha\",\"claimCommit\":\"$claim_commit\",\"claimer\":\"$claimer\",\"claimerHost\":\"$claimer_host\",\"claimerPid\":${claimer_pid:-null},\"ttlHours\":$ttl_hours}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" \
+                --arg rootSha "$root_sha" --arg claim "$claim_commit" \
+                --arg claimer "$claimer" --arg host "$claimer_host" \
+                --argjson pid "$(json_int_or_null "$claimer_pid")" \
+                --argjson ttl "$(json_number_or_null "$ttl_hours")" \
+                '{ok:true,issue:$issue,rootSha:$rootSha,claimCommit:$claim,claimer:$claimer,claimerHost:$host,claimerPid:$pid,ttlHours:$ttl}'
         else
             printf "${GREEN}✓ Claimed epic root #%s as %s@%s (pid %s, TTL %sh, verified on origin)${RESET}\n" \
                 "$issue" "$claimer" "$claimer_host" "${claimer_pid:-?}" "$ttl_hours"
@@ -2302,7 +2332,7 @@ EOF
 
     if echo "$push_output" | grep -qiE 'rejected|stale info|non-fast-forward|fetch first'; then
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"race-lost\",\"issue\":$issue}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"race-lost",issue:$issue}'
         else
             printf "${YELLOW}Lost root claim race for #%s (another worker won).${RESET}\n" "$issue" >&2
             echo "$push_output" >&2
@@ -2310,7 +2340,7 @@ EOF
         return 2
     fi
     if [ "$json" = true ]; then
-        echo "{\"ok\":false,\"reason\":\"push-failed\",\"issue\":$issue}"
+        jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"push-failed",issue:$issue}'
     else
         printf "${RED}Root claim push failed:${RESET}\n%s\n" "$push_output" >&2
     fi
@@ -2356,12 +2386,14 @@ EOF
         return 1
     fi
 
+    if [ "$json" = true ]; then require_jq_for_json || return 1; fi
+
     local root_active_ref="refs/heads/tasks/root-active/$issue"
     local active_sha
     active_sha=$(root_active_sha_on_remote "$issue")
     if [ -z "$active_sha" ]; then
         if [ "$json" = true ]; then
-            echo "{\"ok\":false,\"reason\":\"not-claimed\",\"issue\":$issue}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"not-claimed",issue:$issue}'
         else
             printf "${YELLOW}Epic root #%s has no orchestration claim to release.${RESET}\n" "$issue" >&2
         fi
@@ -2391,14 +2423,14 @@ EOF
         ":$root_active_ref" 2>&1); then
         git update-ref -d "$root_active_ref" 2>/dev/null || true
         if [ "$json" = true ]; then
-            echo "{\"ok\":true,\"issue\":$issue}"
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:true,issue:$issue}'
         else
             printf "${GREEN}✓ Released orchestration claim on epic root #%s${RESET}\n" "$issue"
         fi
         return 0
     fi
     if [ "$json" = true ]; then
-        echo "{\"ok\":false,\"reason\":\"push-failed\",\"issue\":$issue}"
+        jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"push-failed",issue:$issue}'
     else
         printf "${RED}Release-root push failed:${RESET}\n%s\n" "$push_output" >&2
     fi
@@ -2478,6 +2510,8 @@ EOF
         esac
     done
 
+    if [ "$json" = true ]; then require_jq_for_json || return 1; fi
+
     if [ "$do_fetch" = true ]; then
         fetch_task_refs
     fi
@@ -2485,9 +2519,10 @@ EOF
     local entries="" count=0
     add_reap_entry() {
         local kind="$1" id_key="$2" id_val="$3" claim_sha="$4" reason="$5" reclaimed="$6" obj
-        obj=$(printf '{"kind":"%s","%s":"%s","claimCommit":"%s","deadReason":"%s","reclaimed":%s}' \
-            "$kind" "$id_key" "$id_val" "$claim_sha" "$reason" "$reclaimed")
         if [ "$json" = true ]; then
+            obj=$(jq -nc --arg kind "$kind" --arg idk "$id_key" --arg idv "$id_val" \
+                --arg cc "$claim_sha" --arg dr "$reason" --argjson reclaimed "$reclaimed" \
+                '{kind:$kind,($idk):$idv,claimCommit:$cc,deadReason:$dr,reclaimed:$reclaimed}')
             if [ "$count" -gt 0 ]; then
                 entries="${entries},${obj}"
             else
@@ -2874,11 +2909,11 @@ cmd_deps() {
     # a parent blocked mid-flight must not strand an in-progress child.
     local blocking_ancestor blocked_ancestor_json
     blocking_ancestor=$(blocked_structural_ancestor "$sha" || true)
-    if [ -n "$blocking_ancestor" ]; then
-        blocked_ancestor_json="\"$blocking_ancestor\""
-    else
-        blocked_ancestor_json="null"
-    fi
+    # json_str_or_null: escaped JSON string for a real ancestor sha, bare
+    # `null` when there is none — replacing the old raw `"$blocking_ancestor"`
+    # interpolation. (Keeps the surrounding spaced/multiline object as-is;
+    # only this value is hardened.)
+    blocked_ancestor_json=$(json_str_or_null "$blocking_ancestor")
 
     if [ -z "$deps" ]; then
         if [ "$json" = true ]; then
@@ -3514,18 +3549,27 @@ EOF
 
     # ── report ───────────────────────────────────────────────────────
     if [ "$json" = true ]; then
-        local k first=true
-        printf '{"ok":true,"parent":"%s","count":%s,"tasks":[' "$parent_sha" "$count"
+        local k task_objs=()
         for (( k=0; k<count; k++ )); do
-            [ "$first" = false ] && printf ','
-            first=false
             local k_claimed=false
             [ -n "${claim_commits[k]}" ] && k_claimed=true
-            printf '{"sha":"%s","shortSha":"%s","claimed":%s}' \
-                "${created_shas[k]}" "$(git rev-parse --short "${created_shas[k]}")" \
-                "$k_claimed"
+            task_objs+=("$(jq -nc --arg sha "${created_shas[k]}" \
+                --arg short "$(git rev-parse --short "${created_shas[k]}")" \
+                --argjson claimed "$k_claimed" \
+                '{sha:$sha,shortSha:$short,claimed:$claimed}')")
         done
-        printf ']}\n'
+        # Slurp the per-task objects into the tasks array so the whole
+        # result is emitted by jq (compact, authored key order) rather than
+        # hand-concatenated. Handle the zero-task case explicitly since
+        # `jq -s` on empty input would error.
+        if [ "${#task_objs[@]}" -gt 0 ]; then
+            printf '%s\n' "${task_objs[@]}" | jq -sc \
+                --arg parent "$parent_sha" --argjson count "$count" \
+                '{ok:true,parent:$parent,count:$count,tasks:.}'
+        else
+            jq -nc --arg parent "$parent_sha" --argjson count "$count" \
+                '{ok:true,parent:$parent,count:$count,tasks:[]}'
+        fi
     else
         printf "${GREEN}✓ Created %s task(s) under %s — '%s'${RESET}\n" \
             "$count" "${parent_sha:0:12}" "$parent_title"
@@ -4802,7 +4846,9 @@ EOF
             *) scope="$1"; shift ;;
         esac
     done
-    
+
+    if [ "$json" = true ]; then require_jq_for_json || return 1; fi
+
     local errors=0
     local warnings=0
     
@@ -4873,7 +4919,11 @@ EOF
     fi
     
     if [ "$json" = true ]; then
-        echo "{\"errors\": $errors, \"warnings\": $warnings, \"strict\": $strict, \"valid\": $([ $errors -eq 0 ] && echo "true" || echo "false")}"
+        local valid=false
+        [ "$errors" -eq 0 ] && valid=true
+        jq -nc --argjson errors "$errors" --argjson warnings "$warnings" \
+            --argjson strict "$strict" --argjson valid "$valid" \
+            '{errors:$errors,warnings:$warnings,strict:$strict,valid:$valid}'
     else
         echo ""
         if [ $errors -eq 0 ]; then
@@ -5644,6 +5694,20 @@ json_str_array() {
         || { printf '['; local first=1 line; while IFS= read -r line; do
                  [ "$first" = 1 ] || printf ','; first=0; json_escape "$line";
              done; printf ']'; }; }
+}
+
+# Preflight guard for commands whose --json result objects are emitted with
+# direct `jq -nc` (claim/release/claim-root/release-root/reap/breakdown/
+# validate). Those emitters have NO pure-bash fallback, and several run
+# AFTER a push / update-ref side effect — so a missing jq would otherwise
+# complete the git mutation and then die 127 mid-emit. Call this right after
+# argument parsing (before any side effect) when --json is requested so we
+# fail LOUD and early instead.
+require_jq_for_json() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Error: jq is required for --json output" >&2
+        return 1
+    fi
 }
 
 # Command: blocked - list parked (blocked) tasks

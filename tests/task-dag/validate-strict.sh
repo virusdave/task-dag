@@ -20,6 +20,11 @@ PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
+# `validate --json` now emits its summary via `jq -nc` (compact JSON), and the
+# --json subtests (3, 9) assert on it structurally with `jq -e`. jq is a
+# de-facto dependency of these paths; require it so the checks are real.
+command -v jq >/dev/null 2>&1 || { echo "jq is required for this test"; echo "PASS=0 FAIL=1"; exit 1; }
+
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -82,7 +87,9 @@ fi
 #         (the invariant floor is grandfather-safe)
 # ---------------------------------------------------------------------------
 out=$("$TD" validate --strict --json 2>/dev/null)
-if echo "$out" | grep -q '"errors": 0' && echo "$out" | grep -q '"strict": true'; then
+# Parse structurally with jq (the summary is now emitted by `jq -nc`, i.e.
+# compact JSON with no spaces after ':'), not by grepping literal spacing.
+if echo "$out" | jq -e '.errors == 0 and .strict == true' >/dev/null 2>&1; then
     ok "3: --json reports strict:true and 0 errors on legacy-format commits"
 else
     bad "3: --json did not report strict:true / 0 errors (got: $out)"
@@ -178,10 +185,9 @@ git update-ref -d refs/heads/gh/bogus/x
 # ---------------------------------------------------------------------------
 mk_ref refs/heads/tasks/bogus/xyz "junk"
 rc=0; out=$("$TD" validate --strict --json 2>/dev/null) || rc=$?
+# Structural jq assertion (compact `jq -nc` summary), not literal-space grep.
 if [ "$rc" -eq 3 ] \
-    && echo "$out" | grep -q '"valid": false' \
-    && echo "$out" | grep -q '"strict": true' \
-    && echo "$out" | grep -qE '"errors": [1-9]'; then
+    && echo "$out" | jq -e '.valid == false and .strict == true and (.errors > 0)' >/dev/null 2>&1; then
     ok "9: --strict --json with violations emits JSON (valid:false) and exits 3"
 else
     bad "9: --strict --json with violations wrong (rc=$rc, out=$out)"
