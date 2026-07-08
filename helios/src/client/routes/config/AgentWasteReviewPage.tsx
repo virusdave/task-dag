@@ -20,6 +20,8 @@ import { Navigate, useRouteLoaderData } from 'react-router-dom'
 
 import type {
   AgentWasteBacklogResponse,
+  AgentWasteCluster,
+  AgentWasteClustersResponse,
   AgentWasteObservation,
   SessionEnvelope,
 } from '../../../shared/contracts/index.js'
@@ -30,10 +32,13 @@ import {
   ADVISORY_CATALOG_DOC_URL,
   ADVISORY_CATALOG_URL,
   buildPromoteRequest,
+  clusterOtherMembers,
   compareObservations,
   defaultPromoteFormState,
   deriveViewState,
+  describeClusterError,
   fetchAgentWasteBacklog,
+  fetchAgentWasteClusters,
   observationKey,
   promoteTextTokens,
   severityTone,
@@ -83,6 +88,31 @@ export function AgentWasteReviewPage() {
   const [fetchedAt, setFetchedAt] = useState<Date | null>(null)
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
   const cancelledRef = useRef(false)
+
+  // "Cluster similar reports" (issue #68): on-demand, display-only grouping of
+  // the pending backlog by an advanced private model. `clusters` is a snapshot
+  // taken when the operator pressed the button; `view` toggles the flat list
+  // vs. the clustered view once a snapshot exists.
+  const [clusters, setClusters] = useState<AgentWasteClustersResponse | null>(null)
+  const [clusterError, setClusterError] = useState<{ code: string; message: string } | null>(null)
+  const [clustering, setClustering] = useState(false)
+  const [viewMode, setViewMode] = useState<'flat' | 'clustered'>('flat')
+
+  const runClustering = useCallback(async () => {
+    setClustering(true)
+    setClusterError(null)
+    const result = await fetchAgentWasteClusters()
+    if (cancelledRef.current) {
+      return
+    }
+    setClustering(false)
+    if (result.ok) {
+      setClusters(result.response)
+      setViewMode('clustered')
+    } else {
+      setClusterError({ code: result.code, message: result.message })
+    }
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -163,6 +193,26 @@ export function AgentWasteReviewPage() {
           <a href={ADVISORY_CATALOG_URL} target="_blank" rel="noopener noreferrer">
             Advisory catalog ↗
           </a>
+          {view.kind === 'ready' ? (
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => void runClustering()}
+              disabled={clustering}
+              title="Group near-duplicate reports by theme with an advanced model (display-only)."
+            >
+              {clustering ? 'Clustering…' : 'Cluster similar reports'}
+            </button>
+          ) : null}
+          {clusters ? (
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setViewMode((m) => (m === 'clustered' ? 'flat' : 'clustered'))}
+            >
+              {viewMode === 'clustered' ? 'Show flat list' : 'Show clusters'}
+            </button>
+          ) : null}
           <button type="button" className="ghost-button" onClick={() => void refresh()}>
             Refresh
           </button>
@@ -217,40 +267,55 @@ export function AgentWasteReviewPage() {
         </article>
       ) : null}
 
+      {clusterError ? (
+        <article className="mini-card" role="alert" style={{ marginBottom: '0.75rem' }}>
+          <header>
+            <strong>Could not cluster reports</strong>
+          </header>
+          <p className="subtle-copy" style={{ marginTop: '0.5rem', whiteSpace: 'pre-wrap' }}>
+            {describeClusterError(clusterError.code, clusterError.message)}
+          </p>
+        </article>
+      ) : null}
+
       {view.kind === 'ready' ? (
-        <>
-          {visible.length === 0 ? (
-            <article className="mini-card">
-              <p className="subtle-copy">
-                You have dismissed all {dismissedCount} observation
-                {dismissedCount === 1 ? '' : 's'} in this session.{' '}
-                <button type="button" className="task-link-button" onClick={restoreDismissed}>
-                  Show them again
-                </button>
-              </p>
-            </article>
-          ) : (
-            <>
-              {dismissedCount > 0 ? (
-                <p className="subtle-copy" style={{ marginBottom: '0.5rem' }}>
-                  {dismissedCount} dismissed this session.{' '}
+        viewMode === 'clustered' && clusters ? (
+          <ClusteredView clusters={clusters} />
+        ) : (
+          <>
+            {visible.length === 0 ? (
+              <article className="mini-card">
+                <p className="subtle-copy">
+                  You have dismissed all {dismissedCount} observation
+                  {dismissedCount === 1 ? '' : 's'} in this session.{' '}
                   <button type="button" className="task-link-button" onClick={restoreDismissed}>
-                    Show all
+                    Show them again
                   </button>
                 </p>
-              ) : null}
-              <div className="stacked-list">
-                {visible.map((obs) => (
-                  <ObservationCard
-                    key={observationKey(obs)}
-                    obs={obs}
-                    onDismiss={() => dismissObservation(obs)}
-                  />
-                ))}
-              </div>
-            </>
-          )}
-        </>
+              </article>
+            ) : (
+              <>
+                {dismissedCount > 0 ? (
+                  <p className="subtle-copy" style={{ marginBottom: '0.5rem' }}>
+                    {dismissedCount} dismissed this session.{' '}
+                    <button type="button" className="task-link-button" onClick={restoreDismissed}>
+                      Show all
+                    </button>
+                  </p>
+                ) : null}
+                <div className="stacked-list">
+                  {visible.map((obs) => (
+                    <ObservationCard
+                      key={observationKey(obs)}
+                      obs={obs}
+                      onDismiss={() => dismissObservation(obs)}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )
       ) : null}
 
       <details style={{ marginTop: '1.5rem' }}>
@@ -289,7 +354,8 @@ function ObservationCard({
   onDismiss,
 }: {
   obs: AgentWasteObservation
-  onDismiss: () => void
+  /** Omitted in the clustered view, where dismissal against a snapshot would be confusing. */
+  onDismiss?: () => void
 }) {
   const tokens = formatTokens(obs.estimated_wasted_tokens)
   const seconds = formatSeconds(obs.estimated_wasted_seconds)
@@ -316,9 +382,11 @@ function ObservationCard({
           >
             {promoting ? 'Cancel promotion' : 'Promote…'}
           </button>
-          <button type="button" className="ghost-button" onClick={onDismiss}>
-            Dismiss
-          </button>
+          {onDismiss ? (
+            <button type="button" className="ghost-button" onClick={onDismiss}>
+              Dismiss
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -363,7 +431,7 @@ function PromoteForm({
   obs: AgentWasteObservation
   formId: string
   onDone: () => void
-  onDismiss: () => void
+  onDismiss?: () => void
 }) {
   const [state, setState] = useState<PromoteFormState>(() => defaultPromoteFormState(obs))
   const [errors, setErrors] = useState<string[]>([])
@@ -405,11 +473,13 @@ function PromoteForm({
           <a href={result.response.commitUrl} target="_blank" rel="noopener noreferrer">
             View commit ↗
           </a>
-          <button type="button" className="primary-button" onClick={onDismiss}>
-            Hide handled row
-          </button>
+          {onDismiss ? (
+            <button type="button" className="primary-button" onClick={onDismiss}>
+              Hide handled row
+            </button>
+          ) : null}
           <button type="button" className="ghost-button" onClick={onDone}>
-            Keep row visible
+            {onDismiss ? 'Keep row visible' : 'Close'}
           </button>
         </p>
       </div>
@@ -559,5 +629,89 @@ function PromoteForm({
         </button>
       </div>
     </form>
+  )
+}
+
+// Clustered view (issue #68): ranked, display-only theme clusters. Each shows
+// its representative report with a member-count pill; the remaining members
+// are collapsed behind a <details>/<summary> per helios/AGENTS.md so the
+// operator sees the answer (the ranked themes) without scrolling past detail.
+function ClusteredView({ clusters }: { clusters: AgentWasteClustersResponse }) {
+  if (clusters.clusters.length === 0) {
+    return (
+      <article className="mini-card">
+        <p className="subtle-copy">
+          The model did not group the backlog into any clusters. Switch to the flat list to review
+          the reports individually.
+        </p>
+      </article>
+    )
+  }
+  return (
+    <>
+      <p className="subtle-copy" style={{ marginBottom: '0.5rem' }}>
+        {clusters.clusters.length} cluster{clusters.clusters.length === 1 ? '' : 's'}, most
+        aggregate waste first · grouped by <code>{clusters.model}</code> (display-only)
+        {clusters.unclustered.length > 0
+          ? ` · ${clusters.unclustered.length} left ungrouped`
+          : null}
+      </p>
+      <div className="stacked-list">
+        {clusters.clusters.map((cluster, i) => (
+          <ClusterCard key={`${observationKey(cluster.primary)}-${i}`} cluster={cluster} />
+        ))}
+      </div>
+      {clusters.unclustered.length > 0 ? (
+        <details style={{ marginTop: '1rem' }}>
+          <summary className="subtle-copy">
+            {clusters.unclustered.length} ungrouped report
+            {clusters.unclustered.length === 1 ? '' : 's'}
+          </summary>
+          <div className="stacked-list" style={{ marginTop: '0.5rem' }}>
+            {clusters.unclustered.map((obs, i) => (
+              <ObservationCard key={`${observationKey(obs)}-${i}`} obs={obs} />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </>
+  )
+}
+
+function ClusterCard({ cluster }: { cluster: AgentWasteCluster }) {
+  const others = clusterOtherMembers(cluster)
+  const tokens = formatTokens(cluster.aggregateWastedTokens)
+  const seconds =
+    cluster.aggregateWastedSeconds > 0 ? formatSeconds(cluster.aggregateWastedSeconds) : null
+  return (
+    <article className="history-card">
+      <div className="history-card-topline">
+        <div>
+          <strong>{cluster.label}</strong>
+          <p className="subtle-copy">
+            aggregate {tokens ?? '0 tok'}
+            {seconds ? ` · ${seconds}` : null}
+          </p>
+        </div>
+        <Pill tone={cluster.count > 1 ? 'warning' : 'muted'}>
+          {`${cluster.count} report${cluster.count === 1 ? '' : 's'}`}
+        </Pill>
+      </div>
+      <div style={{ marginTop: '0.5rem' }}>
+        <ObservationCard obs={cluster.primary} />
+      </div>
+      {others.length > 0 ? (
+        <details style={{ marginTop: '0.5rem' }}>
+          <summary className="subtle-copy">
+            Show {others.length} other member{others.length === 1 ? '' : 's'}
+          </summary>
+          <div className="stacked-list" style={{ marginTop: '0.5rem' }}>
+            {others.map((obs, i) => (
+              <ObservationCard key={`${observationKey(obs)}-${i}`} obs={obs} />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </article>
   )
 }

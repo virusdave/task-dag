@@ -7,12 +7,15 @@
 import {
   AGENT_WASTE_SEVERITIES,
   AgentWasteBacklogResponseSchema,
+  AgentWasteClustersResponseSchema,
   AgentWasteUnavailableResponseSchema,
   PromoteAdvisoryErrorResponseSchema,
   PromoteAdvisoryRequestSchema,
   PromoteAdvisoryResponseSchema,
   estimateAdvisoryTokens,
   type AgentWasteBacklogResponse,
+  type AgentWasteCluster,
+  type AgentWasteClustersResponse,
   type AgentWasteObservation,
   type AgentWasteSourceStatus,
   type AdvisorySeverity,
@@ -290,6 +293,131 @@ export function buildPromoteRequest(
 /** Live token estimate of the advisory text (matches the server proxy). */
 export function promoteTextTokens(text: string): number {
   return estimateAdvisoryTokens(text)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Cluster similar reports (issue #68, parent virusdave/top-level#51). The
+// admin presses a button; the server sends the live backlog to an advanced
+// private Bedrock model that GROUPS near-duplicate observations, and Helios
+// ranks the clusters deterministically by real aggregate waste. The result is
+// DISPLAY-ONLY — never injected into any agent. These helpers are pure so the
+// fetch/parse/defensive-sort logic is unit-tested without a DOM.
+
+/**
+ * Structured outcome of the cluster request. Never throws for an expected
+ * server rejection (503 unconfigured / unavailable, 413 too-large, 502
+ * gateway); the UI renders `code`/`message` inline, exactly like the promote
+ * path. Only a truly unexpected shape yields `bad_response`.
+ */
+export type ClusterFetchResult =
+  | { ok: true; response: AgentWasteClustersResponse }
+  | { ok: false; code: string; message: string }
+
+/**
+ * Defensive descending sort by "likely aggregate agent waste": tokens, then
+ * seconds, then member count, then label. The server already sorts, so this
+ * only guards against a future server change or a hand-built response; it
+ * mirrors the server's compareClustersByWaste. Returns a new array.
+ */
+export function sortClustersByWaste(clusters: readonly AgentWasteCluster[]): AgentWasteCluster[] {
+  return [...clusters].sort((a, b) => {
+    if (a.aggregateWastedTokens !== b.aggregateWastedTokens) {
+      return b.aggregateWastedTokens - a.aggregateWastedTokens
+    }
+    if (a.aggregateWastedSeconds !== b.aggregateWastedSeconds) {
+      return b.aggregateWastedSeconds - a.aggregateWastedSeconds
+    }
+    if (a.count !== b.count) {
+      return b.count - a.count
+    }
+    return a.label.localeCompare(b.label)
+  })
+}
+
+/** Best-effort extraction of an {error, message} pair from a JSON error body. */
+function readErrorBody(json: unknown, fallbackStatus: number): { code: string; message: string } {
+  if (json && typeof json === 'object') {
+    const rec = json as Record<string, unknown>
+    const code = typeof rec.error === 'string' ? rec.error : `http_${fallbackStatus}`
+    const message = typeof rec.message === 'string' ? rec.message : `Request failed (${fallbackStatus})`
+    return { code, message }
+  }
+  return { code: `http_${fallbackStatus}`, message: `Request failed (${fallbackStatus})` }
+}
+
+/**
+ * POST to the cluster endpoint and parse the response. The request body is
+ * empty (the server reads the live backlog). Returns a discriminated result;
+ * expected server rejections come back as `{ok:false, code, message}` and the
+ * defensive re-sort is applied to a successful body's clusters.
+ */
+export async function fetchAgentWasteClusters(): Promise<ClusterFetchResult> {
+  let res: Response
+  try {
+    res = await fetch(buildAppPath('/api/agent-waste/clusters'), {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({}),
+    })
+  } catch (cause) {
+    return { ok: false, code: 'network_error', message: cause instanceof Error ? cause.message : 'Network error' }
+  }
+
+  let json: unknown
+  try {
+    json = await res.json()
+  } catch {
+    return { ok: false, code: 'bad_response', message: `Request failed (${res.status})` }
+  }
+
+  if (!res.ok) {
+    return { ok: false, ...readErrorBody(json, res.status) }
+  }
+
+  const parsed = AgentWasteClustersResponseSchema.safeParse(json)
+  if (!parsed.success) {
+    return { ok: false, code: 'bad_response', message: 'The server returned an unexpected cluster shape.' }
+  }
+  return {
+    ok: true,
+    response: { ...parsed.data, clusters: sortClustersByWaste(parsed.data.clusters) },
+  }
+}
+
+/**
+ * The members of a cluster OTHER than its primary, for the collapsed
+ * "expand to see the rest" list. `members` includes the primary, so we drop
+ * the first member whose identity matches the primary (by observationKey).
+ */
+export function clusterOtherMembers(cluster: AgentWasteCluster): AgentWasteObservation[] {
+  const primaryKey = observationKey(cluster.primary)
+  let removed = false
+  return cluster.members.filter((m) => {
+    if (!removed && observationKey(m) === primaryKey) {
+      removed = true
+      return false
+    }
+    return true
+  })
+}
+
+/** Human-friendly one-liner for a cluster failure `code`. */
+export function describeClusterError(code: string, message: string): string {
+  switch (code) {
+    case 'agent_waste_unavailable':
+      return `The review backlog is temporarily unavailable, so it can’t be clustered. ${message}`
+    case 'bedrock_unconfigured':
+      return `The clustering model is not configured on this server. ${message}`
+    case 'agent_waste_cluster_input_too_large':
+      return message
+    case 'bedrock_http_error':
+    case 'bedrock_transport_error':
+    case 'bedrock_unexpected_response':
+      return `The clustering model could not complete the request. ${message}`
+    default:
+      return message
+  }
 }
 
 export type PromoteSubmitResult =

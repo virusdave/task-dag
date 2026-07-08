@@ -1,19 +1,24 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type {
   AgentWasteBacklogResponse,
   AgentWasteObservation,
 } from '../../../shared/contracts/index.js'
+import type { AgentWasteCluster } from '../../../shared/contracts/index.js'
 import {
   AgentWasteBacklogUnavailableError,
   buildPromoteRequest,
+  clusterOtherMembers,
   compareObservations,
   defaultPromoteFormState,
   deriveViewState,
+  describeClusterError,
+  fetchAgentWasteClusters,
   observationKey,
   parseTriggerIds,
   severityRank,
   severityTone,
+  sortClustersByWaste,
   toAdvisorySeverity,
   type PromoteFormState,
 } from './agentWasteReviewShared.js'
@@ -203,5 +208,147 @@ describe('promote form helpers', () => {
     expect(res.ok).toBe(false)
     if (res.ok) return
     expect(res.errors.join(' ')).toMatch(/trigger/i)
+  })
+})
+
+// ── Cluster similar reports (issue #68) ─────────────────────────────────────
+
+function cluster(overrides: Partial<AgentWasteCluster>): AgentWasteCluster {
+  const primary = obs({ id: 'p' })
+  return {
+    label: 'theme',
+    primary,
+    members: [primary],
+    count: 1,
+    aggregateWastedTokens: 0,
+    aggregateWastedSeconds: 0,
+    ...overrides,
+  }
+}
+
+describe('sortClustersByWaste', () => {
+  it('orders descending by tokens, then seconds, then count, then label', () => {
+    const a = cluster({ label: 'a', aggregateWastedTokens: 100 })
+    const b = cluster({ label: 'b', aggregateWastedTokens: 50, aggregateWastedSeconds: 9 })
+    const c = cluster({ label: 'c', aggregateWastedTokens: 50, aggregateWastedSeconds: 1 })
+    const sorted = sortClustersByWaste([c, b, a])
+    expect(sorted.map((x) => x.label)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('does not mutate its input', () => {
+    const input = [cluster({ label: 'x', aggregateWastedTokens: 1 }), cluster({ label: 'y', aggregateWastedTokens: 2 })]
+    const copy = [...input]
+    sortClustersByWaste(input)
+    expect(input).toEqual(copy)
+  })
+})
+
+describe('clusterOtherMembers', () => {
+  it('drops exactly one occurrence of the primary', () => {
+    const primary = obs({ id: 'p', note: 'primary' })
+    const other = obs({ id: 'o', note: 'other' })
+    const c = cluster({ primary, members: [primary, other], count: 2 })
+    const rest = clusterOtherMembers(c)
+    expect(rest.map((m) => m.id)).toEqual(['o'])
+  })
+
+  it('returns empty for a single-member cluster', () => {
+    expect(clusterOtherMembers(cluster({}))).toEqual([])
+  })
+})
+
+describe('describeClusterError', () => {
+  it('explains the common failure codes and passes the message through', () => {
+    expect(describeClusterError('bedrock_unconfigured', 'no token')).toMatch(/not configured/i)
+    expect(describeClusterError('agent_waste_cluster_input_too_large', 'too big')).toBe('too big')
+    expect(describeClusterError('bedrock_http_error', 'HTTP 500')).toMatch(/could not complete/i)
+    expect(describeClusterError('weird', 'raw')).toBe('raw')
+  })
+})
+
+describe('fetchAgentWasteClusters', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubFetch(status: number, body: unknown): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => body,
+      })),
+    )
+  }
+
+  const okBody = {
+    source: { available: true, detail: 'ok' },
+    model: 'deepseek.v3.2',
+    clusters: [
+      {
+        label: 'small',
+        primary: obs({ id: 'a' }),
+        members: [obs({ id: 'a' })],
+        count: 1,
+        aggregateWastedTokens: 5,
+        aggregateWastedSeconds: 0,
+      },
+      {
+        label: 'big',
+        primary: obs({ id: 'b' }),
+        members: [obs({ id: 'b' })],
+        count: 1,
+        aggregateWastedTokens: 500,
+        aggregateWastedSeconds: 0,
+      },
+    ],
+    unclustered: [],
+  }
+
+  it('parses a 200 body and defensively re-sorts clusters by waste', async () => {
+    stubFetch(200, okBody)
+    const res = await fetchAgentWasteClusters()
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.response.model).toBe('deepseek.v3.2')
+    expect(res.response.clusters.map((c) => c.label)).toEqual(['big', 'small'])
+  })
+
+  it('returns the structured error on a 413 too-large body', async () => {
+    stubFetch(413, {
+      error: 'agent_waste_cluster_input_too_large',
+      message: 'too many',
+      observationCount: 201,
+      maxObservations: 200,
+    })
+    const res = await fetchAgentWasteClusters()
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.code).toBe('agent_waste_cluster_input_too_large')
+  })
+
+  it('returns the structured error on a 503 unconfigured body', async () => {
+    stubFetch(503, { error: 'bedrock_unconfigured', message: 'no token' })
+    const res = await fetchAgentWasteClusters()
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.code).toBe('bedrock_unconfigured')
+  })
+
+  it('returns bad_response when the 200 body does not match the schema', async () => {
+    stubFetch(200, { source: { available: true, detail: 'ok' }, model: 'm' })
+    const res = await fetchAgentWasteClusters()
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.code).toBe('bad_response')
+  })
+
+  it('returns network_error when fetch throws', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
+    const res = await fetchAgentWasteClusters()
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.code).toBe('network_error')
   })
 })
