@@ -22,12 +22,27 @@
 // bumped; the per-context override page is for rare exceptions.
 export const DEFAULT_STANDARD_REASONING_MODEL = 'google.gemma-3-27b-it'
 
-// The LLM use-points whose model an operator may override. v1 (C4) exposes
-// ONLY the prospective pending-purchase classifier — the only use-point wired
-// to consume the override this task. C3's hint extraction/intent calls still
-// use their hardcoded default; they will be added here when they are wired to
-// read the override (do NOT list an override row that does nothing).
-export const BEDROCK_MODEL_CONTEXT_KEYS = ['pending_purchase_classifier'] as const
+// The default for the agent-waste clusterer (issue #68, parent
+// virusdave/top-level#51). Unlike the other use-points, this one deliberately
+// defaults to a MORE ADVANCED model than DEFAULT_STANDARD_REASONING_MODEL:
+// #51's whole point is a stronger model for grouping near-duplicate reports,
+// and clustering runs only when an operator presses the button (rare), so a
+// top-tier model is fine. `deepseek.v3.2` was confirmed working on the
+// bedrock-mantle gateway (chat/completions + response_format json_object) and
+// produced correct, injection-resistant clustering during implementation,
+// where the small proven `google.gemma-3-27b-it` is not the "advanced" model
+// #51 asks for. Operator-overridable via the Bedrock model-override UI.
+export const DEFAULT_AGENT_WASTE_CLUSTERER_MODEL = 'deepseek.v3.2'
+
+// The LLM use-points whose model an operator may override. C4 exposed the
+// pending-purchase classifier; issue #68 adds the agent-waste clusterer.
+// C3's hint extraction/intent calls still use their hardcoded default; they
+// will be added here when they are wired to read the override (do NOT list an
+// override row that does nothing).
+export const BEDROCK_MODEL_CONTEXT_KEYS = [
+  'pending_purchase_classifier',
+  'agent_waste_clusterer',
+] as const
 export type BedrockModelContextKey = (typeof BEDROCK_MODEL_CONTEXT_KEYS)[number]
 
 export interface BedrockModelContextDefinition {
@@ -47,12 +62,22 @@ export const BEDROCK_MODEL_CONTEXTS: readonly BedrockModelContextDefinition[] = 
       'Decodes a distributor delivery into draft pending-purchase rows (brand/taxonomy + a proposed reuse-link candidate). Runs once per delivery; rare, so a top-tier model is fine.',
     defaultModel: DEFAULT_STANDARD_REASONING_MODEL,
   },
+  {
+    key: 'agent_waste_clusterer',
+    label: 'Agent-waste clusterer',
+    description:
+      'Groups the pending agent-waste review backlog into near-duplicate clusters on demand (the "Cluster similar reports" button). Output is display-only — never injected into agents. Runs only when an operator presses the button; defaults to an advanced model.',
+    defaultModel: DEFAULT_AGENT_WASTE_CLUSTERER_MODEL,
+  },
 ]
 
 // Free-text model-id suggestions surfaced in the config page's datalist. The
 // operator may type ANY model id the gateway accepts; this is only a
 // convenience list of ids known to be in use, not an allow-list.
-export const BEDROCK_MODEL_SUGGESTIONS: readonly string[] = [DEFAULT_STANDARD_REASONING_MODEL]
+export const BEDROCK_MODEL_SUGGESTIONS: readonly string[] = [
+  DEFAULT_STANDARD_REASONING_MODEL,
+  DEFAULT_AGENT_WASTE_CLUSTERER_MODEL,
+]
 
 export function getBedrockModelContextDefinition(
   key: BedrockModelContextKey,

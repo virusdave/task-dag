@@ -28,12 +28,42 @@ vi.mock('../auth/requireSession.js', () => ({
   }),
 }))
 
+// The cluster route resolves an operator-overridable model (DB-backed) and
+// calls the Bedrock gateway. Mock both so the route tests stay DB-/network-
+// free: getPool is a stub (resolveBedrockModel is mocked so it never queries),
+// resolveBedrockModel returns a fixed id, and callClusterModel is a spy we
+// drive per-test. ClusterModelError is kept REAL so the route's
+// `instanceof ClusterModelError` branch still works.
+const clusterMockState = vi.hoisted(() => ({ model: 'deepseek.v3.2' }))
+
+vi.mock('../db/pool.js', () => ({ getPool: () => ({}) }))
+vi.mock('../config/env.js', () => ({
+  getServerEnv: () => ({
+    bedrockMantleBaseUrl: 'https://gateway.test/v1',
+    bedrockMantleBearerToken: 'test-token',
+    llmRequestTimeoutMs: 1000,
+  }),
+}))
+vi.mock('../llm/bedrockModelConfig.js', () => ({
+  resolveBedrockModel: vi.fn(async () => clusterMockState.model),
+}))
+vi.mock('../agentWaste/clusterModel.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../agentWaste/clusterModel.js')>()
+  return { ...actual, callClusterModel: vi.fn() }
+})
+
 import { registerAgentWasteRoutes } from './agentWaste.js'
 import {
   __resetBacklogReaderForTests,
   setBacklogReader,
   type BacklogReader,
 } from '../agentWasteRepo.js'
+import { callClusterModel, ClusterModelError } from '../agentWaste/clusterModel.js'
+import type { RawClusterModelOutput } from '../agentWaste/clusterBacklog.js'
+import { resolveBedrockModel } from '../llm/bedrockModelConfig.js'
+
+const callClusterModelMock = vi.mocked(callClusterModel)
+const resolveBedrockModelMock = vi.mocked(resolveBedrockModel)
 
 let server: FastifyInstance
 
@@ -142,5 +172,130 @@ describe('POST /api/agent-waste/promote', () => {
     const body = res.json()
     expect(body.ok).toBe(false)
     expect(body.code).toBe('agent_pain_points_unavailable')
+  })
+})
+
+describe('POST /api/agent-waste/clusters', () => {
+  function readerFor(observations: Array<Record<string, unknown>>): BacklogReader {
+    return {
+      status: () => ({ available: true, detail: 'test reader' }),
+      readBacklog: async () => observations as never,
+    }
+  }
+
+  it('is admin-gated: a non-admin gets 403 and neither model nor gateway is consulted', async () => {
+    mockState.allow = false
+    setBacklogReader(readerFor([{ time: 't', kind: 'k', id: 'a' }]))
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(403)
+    expect(callClusterModelMock).not.toHaveBeenCalled()
+  })
+
+  it('degrades to a structured 503 when the backlog transport is unavailable', async () => {
+    // default reader = unavailable
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(503)
+    expect(res.json().error).toBe('agent_waste_unavailable')
+    expect(callClusterModelMock).not.toHaveBeenCalled()
+  })
+
+  it('returns empty clusters (and skips the LLM call) for an empty backlog', async () => {
+    setBacklogReader(readerFor([]))
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.clusters).toEqual([])
+    expect(body.unclustered).toEqual([])
+    expect(body.model).toBe('deepseek.v3.2')
+    expect(callClusterModelMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-empty body with 400 (server reads the live backlog)', async () => {
+    setBacklogReader(readerFor([{ time: 't', kind: 'k', id: 'a' }]))
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/agent-waste/clusters',
+      payload: { onlyRows: [1, 2] },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_request')
+    expect(callClusterModelMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses an oversized backlog with a structured 413', async () => {
+    const many = Array.from({ length: 201 }, (_, i) => ({ time: 't', kind: 'k', id: `id-${i}` }))
+    setBacklogReader(readerFor(many))
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(413)
+    const body = res.json()
+    expect(body.error).toBe('agent_waste_cluster_input_too_large')
+    expect(body.observationCount).toBe(201)
+    expect(body.maxObservations).toBe(200)
+    expect(callClusterModelMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 413 for an oversized backlog even if resolving the model would error', async () => {
+    const many = Array.from({ length: 201 }, (_, i) => ({ time: 't', kind: 'k', id: `id-${i}` }))
+    setBacklogReader(readerFor(many))
+    // Make model resolution throw; scoped + restored so it can't leak into
+    // other tests (clearAllMocks does not restore implementations).
+    const base = resolveBedrockModelMock.getMockImplementation()
+    resolveBedrockModelMock.mockImplementation(async () => {
+      throw new Error('app_settings unreachable')
+    })
+    try {
+      const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+      expect(res.statusCode).toBe(413)
+      expect(res.json().error).toBe('agent_waste_cluster_input_too_large')
+      expect(resolveBedrockModelMock).not.toHaveBeenCalled()
+    } finally {
+      if (base) resolveBedrockModelMock.mockImplementation(base)
+    }
+  })
+
+  it('clusters, ranks, and returns the 200 shape on success', async () => {
+    setBacklogReader(
+      readerFor([
+        { time: 't', kind: 'tool_footgun', id: 'a', note: 'rg -r', estimated_wasted_tokens: 10 },
+        { time: 't', kind: 'tool_footgun', id: 'b', note: 'rg -r again', estimated_wasted_tokens: 5 },
+        { time: 't', kind: 'startup', id: 'c', note: 'reread canon', estimated_wasted_tokens: 999 },
+      ]),
+    )
+    const raw: RawClusterModelOutput = {
+      clusters: [
+        { label: 'rg -r flag', primaryKey: 0, memberKeys: [0, 1] },
+        { label: 'reread canon', primaryKey: 2, memberKeys: [2] },
+      ],
+    }
+    callClusterModelMock.mockResolvedValueOnce(raw)
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.model).toBe('deepseek.v3.2')
+    // Ranked desc by aggregate tokens: singleton c (999) outranks a+b (15).
+    expect(body.clusters.map((c: { label: string }) => c.label)).toEqual(['reread canon', 'rg -r flag'])
+    expect(body.clusters[1].members.map((m: { id: string }) => m.id)).toEqual(['a', 'b'])
+    expect(body.unclustered).toEqual([])
+    expect(callClusterModelMock).toHaveBeenCalledOnce()
+  })
+
+  it('maps a missing bearer token to 503 bedrock_unconfigured', async () => {
+    setBacklogReader(readerFor([{ time: 't', kind: 'k', id: 'a' }]))
+    callClusterModelMock.mockRejectedValueOnce(
+      new ClusterModelError('bedrock_unconfigured', 'no token'),
+    )
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(503)
+    expect(res.json().error).toBe('bedrock_unconfigured')
+  })
+
+  it('maps a gateway failure to 502', async () => {
+    setBacklogReader(readerFor([{ time: 't', kind: 'k', id: 'a' }]))
+    callClusterModelMock.mockRejectedValueOnce(
+      new ClusterModelError('bedrock_http_error', 'HTTP 500'),
+    )
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(502)
+    expect(res.json().error).toBe('bedrock_http_error')
   })
 })

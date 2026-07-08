@@ -22,9 +22,17 @@ import {
   getBacklogSourceStatus,
 } from '../agentWasteRepo.js'
 import { promoteAdvisory } from '../agentWaste/promoteAdvisory.js'
+import { callClusterModel, ClusterModelError } from '../agentWaste/clusterModel.js'
+import { MAX_CLUSTER_OBSERVATIONS, rehydrateClusters } from '../agentWaste/clusterBacklog.js'
+import { getServerEnv } from '../config/env.js'
+import { getPool } from '../db/pool.js'
+import { resolveBedrockModel } from '../llm/bedrockModelConfig.js'
 import {
+  AgentWasteClustersRequestSchema,
   PromoteAdvisoryRequestSchema,
   type AgentWasteBacklogResponse,
+  type AgentWasteClusterInputTooLargeResponse,
+  type AgentWasteClustersResponse,
   type PromoteAdvisoryErrorResponse,
   type PromoteAdvisoryFailureCode,
   type PromoteAdvisoryResponse,
@@ -32,6 +40,14 @@ import {
 
 /** Body cap for the promote route — a single advisory entry is tiny. */
 const PROMOTE_BODY_LIMIT_BYTES = 64 * 1024
+
+/** Body cap for the cluster route — the request body is an empty object. */
+const CLUSTER_BODY_LIMIT_BYTES = 4 * 1024
+
+/** Map a cluster-model failure to an HTTP status (mirrors LLM route patterns). */
+function clusterModelStatus(code: ClusterModelError['code']): number {
+  return code === 'bedrock_unconfigured' ? 503 : 502
+}
 
 /** Map a structured promote failure to an HTTP status. */
 function promoteFailureStatus(code: PromoteAdvisoryFailureCode): number {
@@ -163,6 +179,104 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
       } catch (error) {
         return handleAgentWasteError(server, reply, error, 'Failed to promote agent-waste advisory')
       }
+    },
+  )
+
+  // POST /api/agent-waste/clusters - cluster the pending backlog by theme via
+  // an advanced private Bedrock model (issue #68, parent virusdave/top-level#51).
+  //
+  // DISPLAY-ONLY: the result is never injected into an agent, never
+  // auto-promoted, and (v1) never persisted. Sending observation text
+  // (including the display-only `note`) to the PRIVATE clustering model is
+  // read/analysis, not the injection the promote allowlist guards. The model
+  // only GROUPS (returns integer keys + a short label); the "likely aggregate
+  // agent waste" ranking is computed deterministically in Helios from each
+  // observation's real estimated_wasted_* numbers, never from the model.
+  server.post(
+    '/api/agent-waste/clusters',
+    { bodyLimit: CLUSTER_BODY_LIMIT_BYTES },
+    async (request, reply) => {
+      const actor = await requireSessionUser(request, reply, 'admin')
+      if (!actor) {
+        return
+      }
+
+      // Empty, strict body: the server reads the live backlog itself, so no
+      // client-supplied scope/rows can silently change what gets clustered.
+      const parsedBody = AgentWasteClustersRequestSchema.safeParse(request.body ?? {})
+      if (!parsedBody.success) {
+        return reply.status(400).send({
+          error: 'invalid_request',
+          message: parsedBody.error.issues
+            .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+            .join('; '),
+        })
+      }
+
+      let observations
+      try {
+        observations = await getBacklog()
+      } catch (error) {
+        return handleAgentWasteError(server, reply, error, 'Failed to fetch agent-waste backlog')
+      }
+
+      // Guardrail FIRST — before any model-config DB lookup: refuse (don't
+      // silently truncate) an oversized backlog so a partial clustering is
+      // never presented as complete, and so this fails deterministically even
+      // if resolving the operator model-override would error.
+      if (observations.length > MAX_CLUSTER_OBSERVATIONS) {
+        const body: AgentWasteClusterInputTooLargeResponse = {
+          error: 'agent_waste_cluster_input_too_large',
+          message:
+            `The pending backlog has ${observations.length} observations, over the ` +
+            `${MAX_CLUSTER_OBSERVATIONS}-observation single-shot clustering cap. ` +
+            'Review and dismiss/promote some rows, then cluster again.',
+          observationCount: observations.length,
+          maxObservations: MAX_CLUSTER_OBSERVATIONS,
+        }
+        return reply.status(413).send(body)
+      }
+
+      const model = await resolveBedrockModel(getPool(), 'agent_waste_clusterer')
+
+      // Empty backlog: nothing to cluster; skip the LLM call entirely.
+      if (observations.length === 0) {
+        const body: AgentWasteClustersResponse = {
+          source: getBacklogSourceStatus(),
+          model,
+          clusters: [],
+          unclustered: [],
+        }
+        return reply.send(body)
+      }
+
+      let raw
+      try {
+        raw = await callClusterModel(observations, model, { env: getServerEnv() })
+      } catch (error) {
+        if (error instanceof ClusterModelError) {
+          // Note: the ClusterModelError message never contains the prompt
+          // (which includes notes) — only transport/gateway/shape detail.
+          server.log.error(
+            { event: 'agent_waste.cluster_failed', code: error.code, model },
+            'agent-waste clustering failed',
+          )
+          return reply.status(clusterModelStatus(error.code)).send({
+            error: error.code,
+            message: error.message,
+          })
+        }
+        return handleAgentWasteError(server, reply, error, 'Failed to cluster agent-waste backlog')
+      }
+
+      const { clusters, unclustered } = rehydrateClusters(observations, raw)
+      const body: AgentWasteClustersResponse = {
+        source: getBacklogSourceStatus(),
+        model,
+        clusters,
+        unclustered,
+      }
+      return reply.send(body)
     },
   )
 }

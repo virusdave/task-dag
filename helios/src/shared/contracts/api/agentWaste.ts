@@ -288,3 +288,107 @@ export const PromoteAdvisoryErrorResponseSchema = z.object({
   message: z.string(),
 })
 export type PromoteAdvisoryErrorResponse = z.infer<typeof PromoteAdvisoryErrorResponseSchema>
+
+// ─────────────────────────────────────────────────────────────────────────
+// Cluster the pending backlog by theme (issue #68, parent virusdave/top-level#51).
+//
+// An admin presses "Cluster similar reports" and the server sends the live
+// pending backlog to an ADVANCED private Bedrock model (via bedrock-mantle)
+// that groups near-duplicate / highly-similar observations. The result is
+// DISPLAY-ONLY: it is never injected into an agent, never auto-promoted, and
+// (v1) never persisted. Sending observation text — including the display-only
+// `note` — to the *private* clustering model is read/analysis, not the
+// injection the promote allowlist guards; the output only renders in the
+// operator UI.
+//
+// The model returns only the GROUPING (which observations belong together +
+// a short human label + a representative). The "likely aggregate agent
+// waste" ranking is computed DETERMINISTICALLY in Helios from the members'
+// real `estimated_wasted_*` numbers — never taken from the model — so the
+// ordering is trustworthy and reproducible.
+
+/**
+ * Request body for POST /api/agent-waste/clusters. Empty + `.strict()`: the
+ * server reads the live backlog itself, so no client-supplied scope/rows can
+ * silently change what gets clustered.
+ */
+export const AgentWasteClustersRequestSchema = z.object({}).strict()
+export type AgentWasteClustersRequest = z.infer<typeof AgentWasteClustersRequestSchema>
+
+/**
+ * One clustered group, ready to render and already ranked server-side.
+ * `members` includes `primary` and is non-empty; `count === members.length`
+ * (enforced below). The aggregates are computed in Helios from the members'
+ * real estimates, never from the model.
+ */
+export const AgentWasteClusterSchema = z
+  .object({
+    /** Short human theme from the model (server-capped, display-only). */
+    label: z.string(),
+    /** Representative member (also present in `members`). */
+    primary: AgentWasteObservationSchema,
+    /** All members of the cluster, including `primary`. */
+    members: z.array(AgentWasteObservationSchema).min(1),
+    /** members.length. */
+    count: z.number().int().positive(),
+    /** sum(estimated_wasted_tokens over members; missing/invalid = 0). */
+    aggregateWastedTokens: z.number().nonnegative(),
+    /** sum(estimated_wasted_seconds over members; missing/invalid = 0). */
+    aggregateWastedSeconds: z.number().nonnegative(),
+  })
+  .strict()
+  .superRefine((val, ctx) => {
+    if (val.count !== val.members.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['count'],
+        message: `count (${val.count}) must equal members.length (${val.members.length})`,
+      })
+    }
+  })
+export type AgentWasteCluster = z.infer<typeof AgentWasteClusterSchema>
+
+/** 200 body for POST /api/agent-waste/clusters. */
+export const AgentWasteClustersResponseSchema = z
+  .object({
+    /** Reused backlog source status (available/detail). */
+    source: AgentWasteSourceStatusSchema,
+    /** The model id that actually ran (resolved override-then-default). */
+    model: z.string(),
+    /** Clusters, sorted descending by aggregate agent waste. */
+    clusters: z.array(AgentWasteClusterSchema),
+    /** Observations the model left ungrouped (empty array, never omitted). */
+    unclustered: z.array(AgentWasteObservationSchema),
+  })
+  .strict()
+export type AgentWasteClustersResponse = z.infer<typeof AgentWasteClustersResponseSchema>
+
+/** Structured failure codes for the cluster path. */
+export const AGENT_WASTE_CLUSTER_FAILURE_CODES = [
+  'agent_waste_unavailable',
+  'bedrock_unconfigured',
+  'agent_waste_cluster_input_too_large',
+  'bedrock_http_error',
+  'bedrock_transport_error',
+  'bedrock_unexpected_response',
+] as const
+export const AgentWasteClusterFailureCodeSchema = z.enum(AGENT_WASTE_CLUSTER_FAILURE_CODES)
+export type AgentWasteClusterFailureCode = z.infer<typeof AgentWasteClusterFailureCodeSchema>
+
+/**
+ * Structured error body when the generated model payload would be too large.
+ * The client POST body is empty, but the live backlog can, in principle,
+ * exceed the single-shot prompt budget; rather than silently clustering only
+ * the first N observations (which would misrepresent a partial result as
+ * complete), the server refuses with 413 and these counts so the UI can
+ * explain the cap.
+ */
+export const AgentWasteClusterInputTooLargeResponseSchema = z.object({
+  error: z.literal('agent_waste_cluster_input_too_large'),
+  message: z.string(),
+  observationCount: z.number().int().nonnegative(),
+  maxObservations: z.number().int().positive(),
+})
+export type AgentWasteClusterInputTooLargeResponse = z.infer<
+  typeof AgentWasteClusterInputTooLargeResponseSchema
+>
