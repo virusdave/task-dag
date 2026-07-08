@@ -213,6 +213,79 @@ export async function listMigrationApplyAttemptsForJob(
 }
 
 /**
+ * The most recent apply attempt for a migration, shaped for the admin
+ * pending-migrations list API (automation#62, leaf 5). `startedAt` /
+ * `finishedAt` are ISO strings; `jobId` / `requestedBy` are numbers (the pg
+ * pool parses bigint→number, see db/pool.ts).
+ */
+export interface LatestMigrationApplyAttempt {
+  migrationId: string
+  jobId: number | null
+  state: MigrationApplyAttemptState
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+  requestedBy: number | null
+}
+
+interface LatestAttemptRow {
+  migration_id: string
+  job_id: number | null
+  state: MigrationApplyAttemptState
+  error_message: string | null
+  started_at: Date
+  finished_at: Date | null
+  requested_by_user_id: number | null
+}
+
+/**
+ * Return the single most-recent attempt per migration id, keyed by
+ * migration_id, for the given ids. Uses `distinct on (migration_id)` ordered by
+ * `started_at desc` — served by the migration_apply_attempts_migration_id_started_idx
+ * index. Migrations with no attempt row are simply absent from the map. An empty
+ * `migrationIds` short-circuits to an empty map (no query).
+ */
+export async function getLatestMigrationApplyAttemptsByMigrationIds(
+  db: Queryable,
+  migrationIds: readonly string[],
+): Promise<Map<string, LatestMigrationApplyAttempt>> {
+  if (migrationIds.length === 0) {
+    return new Map()
+  }
+  const result = await db.query<LatestAttemptRow>(
+    `
+      select distinct on (migration_id)
+        migration_id,
+        job_id,
+        state,
+        error_message,
+        started_at,
+        finished_at,
+        requested_by_user_id
+      from migration_apply_attempts
+      where migration_id = any($1::text[])
+      -- id desc is a deterministic tie-breaker when two attempts for the same
+      -- migration share a started_at (the uuid PK gives a stable last row).
+      order by migration_id, started_at desc, id desc
+    `,
+    [migrationIds as string[]],
+  )
+  const byMigrationId = new Map<string, LatestMigrationApplyAttempt>()
+  for (const row of result.rows) {
+    byMigrationId.set(row.migration_id, {
+      migrationId: row.migration_id,
+      jobId: row.job_id,
+      state: row.state,
+      error: row.error_message,
+      startedAt: row.started_at.toISOString(),
+      finishedAt: row.finished_at === null ? null : row.finished_at.toISOString(),
+      requestedBy: row.requested_by_user_id,
+    })
+  }
+  return byMigrationId
+}
+
+/**
  * Mark any lingering `running` attempt rows for a job as `abandoned` (crash
  * recovery). Returns the number of rows transitioned.
  */

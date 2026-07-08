@@ -46,6 +46,7 @@ import { registerGadsLandingPagesRoutes } from '../routes/gadsLandingPages.js'
 import { registerInventoryProcurementRoutes } from '../routes/inventoryProcurement.js'
 import { registerHistoryRoutes } from '../routes/history.js'
 import { registerJobRoutes } from '../routes/jobs.js'
+import { registerPendingMigrationsAdminRoutes } from '../routes/pendingMigrationsAdmin.js'
 import { registerLlmRoutes } from '../routes/llm.js'
 import { registerLpEventsRoutes } from '../routes/lpEvents.js'
 import { registerMetricAnnotationsRoutes } from '../routes/metricAnnotations.js'
@@ -296,6 +297,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)
   await registerAgentWasteRoutes(server)
+  await registerPendingMigrationsAdminRoutes(server)
   await registerUsersRoutes(server)
   await registerGeoSegmentRulesRoutes(server)
   await registerMarketingSegmentsRoutes(server)

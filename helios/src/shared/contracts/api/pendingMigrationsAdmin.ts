@@ -1,0 +1,92 @@
+import { z } from 'zod'
+
+// Admin pending-migrations page API contracts (automation#62, leaf 5).
+//
+// Backs GET /api/admin/pending-migrations — the admin-only list the SPA
+// (leaf 7) renders, one row per LIVE-pending migration. See
+// docs/helios/pending-migrations-admin-apply/DESIGN.md "API contract".
+//
+// Every field is computed LIVE at request time (the sentinel/eligibility
+// checks bypass the ~30s getPendingMigrations cache), so the operator never
+// acts on a stale row. Names are `AdminPendingMigration*`-prefixed to avoid
+// colliding with the all-pages banner's `PendingMigration` (api/session.ts)
+// in the shared contracts barrel.
+
+// The lifecycle state of the most recent apply attempt for a migration.
+// Mirrors migration_apply_attempts.state (see schema/migrationApplyAttempts.sql
+// + queries/migrationApplyAttemptsQueries.ts MigrationApplyAttemptState).
+export const AdminPendingMigrationAttemptStateSchema = z.enum([
+  'running',
+  'succeeded',
+  'failed',
+  'already_applied',
+  'blocked_lock',
+  'abandoned',
+])
+export type AdminPendingMigrationAttemptState = z.infer<
+  typeof AdminPendingMigrationAttemptStateSchema
+>
+
+// How the reviewed artifact handles transactions, surfaced from the registry
+// blessing. Mirrors the server-side MigrationTransactionMode.
+export const AdminMigrationTransactionModeSchema = z.enum([
+  'transactional',
+  'nontransactional-cic',
+  'mixed',
+])
+export type AdminMigrationTransactionMode = z.infer<
+  typeof AdminMigrationTransactionModeSchema
+>
+
+// The subset of the registry blessing safe to surface to the admin UI. The
+// digest itself is intentionally NOT included (artifactDigestMatch reports the
+// live comparison result instead), so the page can't imply a match that the
+// runtime never verified.
+export const AdminPendingMigrationBlessingSchema = z.object({
+  ref: z.string(),
+  note: z.string().nullable(),
+  transactionMode: AdminMigrationTransactionModeSchema,
+})
+export type AdminPendingMigrationBlessing = z.infer<
+  typeof AdminPendingMigrationBlessingSchema
+>
+
+// The most recent apply attempt for a migration (or null if never attempted).
+export const AdminPendingMigrationAttemptSchema = z.object({
+  jobId: z.number().int().nullable(),
+  state: AdminPendingMigrationAttemptStateSchema,
+  error: z.string().nullable(),
+  startedAt: z.iso.datetime(),
+  finishedAt: z.iso.datetime().nullable(),
+  requestedBy: z.number().int().nullable(),
+})
+export type AdminPendingMigrationAttempt = z.infer<
+  typeof AdminPendingMigrationAttemptSchema
+>
+
+export const AdminPendingMigrationRowSchema = z.object({
+  migrationId: z.string(),
+  label: z.string(),
+  // Live sentinel state. Rows are only emitted for pending migrations, so this
+  // is 'pending' today; 'applied' is kept in the union for forward-compat.
+  sentinelState: z.enum(['pending', 'applied']),
+  // Apply-eligible == blessed in the registry AND the deployed artifact-closure
+  // digest still matches the blessing (the row is already live-pending, so the
+  // static resolver's verdict is the full verdict here).
+  eligible: z.boolean(),
+  // Human-readable reason a migration is not eligible, else null.
+  ineligibleReason: z.string().nullable(),
+  blessing: AdminPendingMigrationBlessingSchema.nullable(),
+  // Whether the runtime-recomputed artifact-closure digest equals the blessing
+  // digest. False whenever there is no blessing / the artifact is unresolvable.
+  artifactDigestMatch: z.boolean(),
+  lastAttempt: AdminPendingMigrationAttemptSchema.nullable(),
+})
+export type AdminPendingMigrationRow = z.infer<typeof AdminPendingMigrationRowSchema>
+
+export const AdminPendingMigrationsResponseSchema = z.object({
+  migrations: z.array(AdminPendingMigrationRowSchema),
+})
+export type AdminPendingMigrationsResponse = z.infer<
+  typeof AdminPendingMigrationsResponseSchema
+>

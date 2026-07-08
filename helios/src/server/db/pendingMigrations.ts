@@ -1552,6 +1552,44 @@ export async function isMigrationAppliedLive(
   }
 }
 
+/** A live-pending migration row (id + label), as returned by the admin API. */
+export interface LivePendingMigration {
+  readonly migrationId: string
+  readonly label: string
+}
+
+/**
+ * List every migration whose sentinel reports NOT applied, computed LIVE
+ * (cache bypassed) against `db`. Unlike {@link getPendingMigrations} this never
+ * reads or writes the ~30s module cache, so the admin pending-migrations API
+ * (automation#62, leaf 5) always reflects the real current schema — the
+ * operator must never act on a stale row. Sentinels run in parallel (they are
+ * independent information_schema / pg_indexes lookups); a throwing sentinel is
+ * treated as pending, identical to the cached batch path.
+ */
+export async function listPendingMigrationsLive(db: Queryable): Promise<LivePendingMigration[]> {
+  const results = await Promise.all(
+    SENTINELS.map(async (sentinel) => {
+      try {
+        return { sentinel, isApplied: await sentinel.check(db) }
+      } catch (error) {
+        console.warn(
+          `[pendingMigrations] live sentinel for ${sentinel.migrationId} threw; treating as pending:`,
+          error,
+        )
+        return { sentinel, isApplied: false }
+      }
+    }),
+  )
+  const pending: LivePendingMigration[] = []
+  for (const { sentinel, isApplied } of results) {
+    if (!isApplied) {
+      pending.push({ migrationId: sentinel.migrationId, label: sentinel.label })
+    }
+  }
+  return pending
+}
+
 interface CacheEntry {
   readonly pending: PendingMigration[]
   readonly checkedAt: number
