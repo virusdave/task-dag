@@ -21,6 +21,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/../.github/scripts/close-completed-issues.sh" \
         "$(dirname "$TD")/../.github/scripts/cleanup-closed-issue-task-refs.sh" \
         "$(dirname "$TD")/../.github/scripts/create-task-commit.sh" \
+        "$(dirname "$TD")/../.github/scripts/post-reopen-notice.sh" \
         "$(dirname "$TD")/../.github/scripts/materialise-child-epics.sh" \
         "$(dirname "$TD")/../.github/scripts/materialise-child-epics.test.sh" \
         "$here/ci-repair-ticket.sh" "$here/ci-tree-fix-outcome.sh" \
@@ -38,10 +39,11 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/../.github/scripts/close-completed-issues.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/cleanup-closed-issue-task-refs.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/create-task-commit.sh" \
+    && bash -n "$(dirname "$TD")/../.github/scripts/post-reopen-notice.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/materialise-child-epics.sh" || exit 1
 
 rc=0
-for t in complete-safety.sh guard-commit-message.sh guard-pre-push.sh complete-subject-style.sh complete-historical.sh local-epic-close.sh local-epic-close-partial-view.sh close-ops-epic.sh close-issue-ref-cleanup.sh reconcile-closed-issue.sh validate-closed-issue-audit.sh ingest-loop.sh comment-cmd.sh ingest-selfheal.sh cross-repo-completion-attribution.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh frontier-json.sh emitter-json.sh no-handbuilt-json.sh validate-strict.sh operator-blocked-dashboard.sh operator-blocked-dashboard-publish.sh operator-blocked-dispatch.sh transitive-block.sh claim-pid.sh claim-idempotent.sh claim-force-steal.sh reap.sh breakdown-self-claim.sh breakdown-self-continue.sh root-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-classifier.sh ci-verify-target.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh delegated-block-json.sh context-cmd.sh ../create-task-commit.sh ../../.github/scripts/materialise-child-epics.test.sh; do
+for t in complete-safety.sh guard-commit-message.sh guard-pre-push.sh complete-subject-style.sh complete-historical.sh local-epic-close.sh local-epic-close-partial-view.sh close-ops-epic.sh close-issue-ref-cleanup.sh reconcile-closed-issue.sh validate-closed-issue-audit.sh ingest-loop.sh comment-cmd.sh ingest-selfheal.sh cross-repo-completion-attribution.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh frontier-json.sh emitter-json.sh no-handbuilt-json.sh validate-strict.sh operator-blocked-dashboard.sh operator-blocked-dashboard-publish.sh operator-blocked-dispatch.sh transitive-block.sh claim-pid.sh claim-idempotent.sh claim-force-steal.sh reap.sh breakdown-self-claim.sh breakdown-self-continue.sh root-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-classifier.sh ci-verify-target.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh delegated-block-json.sh context-cmd.sh ../create-task-commit.sh ../post-reopen-notice.sh ../../.github/scripts/materialise-child-epics.test.sh; do
     echo "== $t =="
     bash "$here/$t" "$TD" || rc=1
 done

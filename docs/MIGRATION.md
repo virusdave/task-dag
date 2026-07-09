@@ -38,6 +38,16 @@ jobs:
     uses: virusdave/task-dag/.github/workflows/issue-to-task.yml@master
     permissions: { contents: write, issues: write }
     secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
+  reopen-notice:
+    # Monotonic-completion notice on REOPEN (issue #13). create-task-commit.sh
+    # is create-only (no phantom task on reopen); this upserts ONE
+    # `<!-- task-dag:status -->`-markered, non-task-creating comment saying the
+    # completed task stays done and a NEW task must be opened in-thread if more
+    # work is needed. Gated on the `reopened` action so it fires only on reopen.
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' }}
+    uses: virusdave/task-dag/.github/workflows/reopen-notice.yml@master
+    permissions: { issues: write }
+    secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
   comment-sync:
     if: ${{ github.event_name == 'issue_comment' }}
     uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@master

@@ -1,0 +1,50 @@
+name: Reopen Notice (Reusable)
+
+# Reusable workflow that posts a single monotonic-completion notice when an
+# issue is REOPENED. The caller wires its own `issues: [reopened]` event and
+# gates this job on `github.event.action == 'reopened'`; this workflow fetches
+# the canonical post-reopen-notice.sh from virusdave/task-dag and runs it
+# against the caller repo (the script is self-contained: gh only, no git refs).
+#
+# task-dag completion is MONOTONIC (issue #13, operator decision #2): reopening
+# never re-creates the completed task. create-task-commit.sh is already
+# create-only (no phantom task on reopen); this workflow adds the operator-
+# facing notice explaining that a NEW task must be opened in-thread if needed.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'task-dag ref to fetch the helper script from (branch, tag, or SHA)'
+        type: string
+        default: master
+    secrets:
+      token:
+        description: 'GitHub token for gh API access (needs issues:write)'
+        required: true
+
+permissions:
+  issues: write
+
+jobs:
+  post-reopen-notice:
+    runs-on: ubuntu-latest
+    # Serialize reopen runs for the SAME issue so two concurrent reopen events
+    # cannot race past the "already present" idempotency check and double-post.
+    # (The check itself makes a duplicate harmless; this just avoids the noise.)
+    concurrency:
+      group: reopen-notice-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Download post-reopen-notice script
+        run: |
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/post-reopen-notice.sh" \
+            -o /tmp/post-reopen-notice.sh
+          chmod +x /tmp/post-reopen-notice.sh
+
+      - name: Post monotonic-completion reopen notice
+        env:
+          GH_TOKEN: ${{ secrets.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: bash /tmp/post-reopen-notice.sh
