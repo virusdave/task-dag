@@ -144,10 +144,22 @@ floor for everything under `tasks/v1/*`:
 The read side + data-model helpers live in `scripts/task-dag.d/edges.sh`
 (`taskdag_edge_id`, `taskdag_edge_blob`, `taskdag_normalize_node`,
 `taskdag_repo_numeric_id`, `taskdag_read_edges`, and the `edges` read
-command). The direct-CAS **writer**, pruning, mailbox, reconciler, and the
-`graph --explain` resolver are separate tasks. Golden fixtures for the
+command). The direct-CAS **writer** lives in
+`scripts/task-dag.d/edges-write.sh` (`taskdag_dep_add`, `taskdag_dep_drop`,
+the FF-only CAS core `_taskdag_graph_cas`, the bounded quadratic backoff
+`taskdag_cas_ramp_ms` / `taskdag_cas_jitter_ms` / `taskdag_cas_backoff_ms`,
+and the `dep add` / `dep drop` command): adding or removing an edge is a
+direct fast-forward push to `tasks/v1/graph` (the same ref-update CAS a
+completion merge uses), retried on contention with a jittered ~1s→~10s
+quadratic backoff and **failing loud** on retry-budget exhaustion. Both
+add and drop are idempotent; `dep drop` is an honest, witnessed FF tree
+deletion (schema v1 has **no tombstones** — see above). Satisfied-edge
+**pruning** + explicit **tombstones**, the mailbox, the reconciler, and the
+`graph --explain` resolver remain separate tasks. Golden fixtures for the
 exemption + its shape invariant are in `tests/task-dag/validate-strict.sh`
-(TEST 11–14) and the model/reader is unit-tested in `tests/task-dag/edges.sh`.
+(TEST 11–14); the model/reader is unit-tested in `tests/task-dag/edges.sh`
+and the writer (backoff shape/cap/jitter/fail-loud, add/drop round-trip, and
+concurrent FF contention) in `tests/task-dag/edges-write.sh`.
 
 ### Derived facts (`done` / `satisfied`) — in-memory, ZERO per-fact refs
 
