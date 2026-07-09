@@ -26,9 +26,11 @@ live at all.
     reachability query (`is_task_completed` walks `%P`; the completion
     merge carries the task commit as a non-primary **parent**). Claims,
     frontier, blocked state, and epic identity are all **refs** under
-    `refs/heads/tasks/**`. Dependencies are **parent edges**. Completion
-    of an implementation is the completion merge's **first parent** being
-    that implementation commit.
+    `refs/heads/tasks/**`. Completion of an implementation is the completion
+    merge's **first parent** being that implementation commit. The modern
+    dependency graph is a git tree on the fixed `tasks/v1/graph` branch, still
+    consumed through git object identity and fast-forward ref updates rather
+    than an external database.
 
 ## Principle 2 — moving semantics OUT of the DAG requires operator approval
 
@@ -49,6 +51,54 @@ approval**. Requesting that approval MUST include **all** of:
 Only proceed once the operator says yes on that issue. (Do not gate this
 behind a codeword — state plainly what is being moved, why the DAG can't
 carry it, and the reversibility, per canon.)
+
+## Principle 3 — live mirrored refs are bounded
+
+Task-dag is intentionally mirrored into every worker checkout and polled by
+dispatchers. A design that creates one live ref per historical fact, edge, or
+message is therefore a scalability bug even if it is technically git-native.
+The standing invariant is:
+
+- lifecycle refs are `O(open work)` (`pending`, `frontier`, `active`,
+  `blocked`, etc.);
+- dependency edges live as blobs in the single per-repo `tasks/v1/graph` tree;
+- cross-repo completion hints live as blobs in the fixed 16 mailbox shard refs;
+- derived facts (`done`, `satisfied`, readiness, complete) are computed from
+  `master` + the graph in memory and never materialized as refs.
+
+If a new feature seems to need an unbounded namespace, first try to encode it
+as a bounded data-in-tree ref with an audited shape invariant, or derive it
+from existing durable history. Adding a genuinely unbounded live ref family is
+a format/scalability change and needs operator approval plus Oracle review.
+
+## Principle 4 — authoritative facts come from `master`, not hints
+
+The graph records obligations and supersede relationships; the mailbox records
+notifications. Neither is authority that work is done. Completion authority is
+always the destination repo's durable `master` history:
+
+- task done = the empty-tree task commit is a parent-field token reachable from
+  `master`;
+- issue done = a reachable merge carries a parsed `Closes-Epic: #N` trailer;
+- foreign done = verified in that foreign repo's local worktree / origin view,
+  never trusted from a mailbox message alone.
+
+Mailbox messages may speed up convergence, but a lost or duplicated message
+must not change the final state. The periodic backstop re-derives the same
+facts from authoritative history and folds any still-active satisfied edges.
+
+## Principle 5 — mutation happens in the owning ref by direct CAS
+
+Graph and mailbox mutations are not queued through a separate ledger and are
+not repaired with manual `git update-ref`. The owning repo updates its own
+fixed ref by direct fast-forward compare-and-set: fetch/read current tip,
+recompute the tree, push with a lease, read back, and retry contention with
+bounded jittered backoff. On retry exhaustion or indeterminate reads, fail loud
+and leave the safer retryable state.
+
+This principle is what makes thin wrappers safe: `delegate`,
+`block --downstream --on`, `supersede`, graph convergence, and legacy migration
+all call the same edge writer instead of each inventing a write path.
 
 ### The one standing, sanctioned exception: `complete-historical`
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Git-DAG Task Management CLI
-# See docs/task_dag/README.md and HOW_TASK_DAG_WORKS.md
+# See docs/INVARIANTS.md, docs/REF_LIFECYCLE.md, docs/DESIGN_PRINCIPLES.md,
+# and docs/MIGRATION.md.
 #
 # CANONICAL SOURCE (single runtime): virusdave/task-dag : scripts/task-dag
 # (+ scripts/task-dag.d/). This repo is the ONE home for the implementation
@@ -1455,9 +1456,10 @@ task-dag - Git-DAG Task Management CLI v${VERSION}
 ║  • If the tool cannot express what you need: 'task-dag block' the      ║
 ║    task, 'page-dave', and STOP. Do not improvise git surgery.          ║
 ║  • Do NOT change this tool's commit/ref format until you FULLY         ║
-║    understand docs/INVARIANTS.md (esp. Format versioning + why every   ║
-║    ref is empty-tree). Changing it needs operator approval + an        ║
-║    Oracle critical-infra review.                                       ║
+║    understand docs/INVARIANTS.md, docs/REF_LIFECYCLE.md, and           ║
+║    docs/DESIGN_PRINCIPLES.md (bounded refs, exact data-ref shapes,     ║
+║    direct-CAS writes, facts from master). Changing it needs operator   ║
+║    approval + an Oracle critical-infra review.                         ║
 ║  • Audit any repo's DAG with:  task-dag validate --strict              ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1516,8 +1518,8 @@ COMMANDS:
                            --dry-run/--json/--yes, --repo=owner/repo.
     edges                  READ the active dependency-edge set from the
                            per-repo graph index branch tasks/v1/graph
-                           (read-only plumbing; --json/--no-fetch). Writers,
-                           pruning, and reconciliation are separate commands.
+                           (read-only plumbing; --json/--no-fetch). See
+                           docs/INVARIANTS.md for edge/tombstone blob shape.
     facts                  READ derived done/satisfied facts from master's
                            completion history (in-memory, zero per-fact refs):
                            done(node) + satisfied(edge)=done(.to). Read-only
@@ -1541,7 +1543,8 @@ COMMANDS:
                            backstop once. --range <git-range>.
     migrate-legacy-edges   Backfill legacy dependency encodings (extra task
                            parents, delegated refs, explicit downstream /
-                           supersede node fields) into tasks/v1/graph.
+                           supersede node fields) into tasks/v1/graph. See
+                           docs/MIGRATION.md for rollout/rollback.
     mailbox put|list|consume
                            Cross-repo NOTIFICATION transport (bounded 16-shard
                            set tasks/v1/mailbox/00..0f). put enqueues a hint;
@@ -1551,7 +1554,7 @@ COMMANDS:
                            backstop re-derives a lost hint from master.
     supersede <node> --by <node>
                            Record that <node> is superseded/re-scoped by the
-                           --by node: mint ONE `satisfies` edge (issue #13).
+                           --by node: mint ONE \`satisfies\` edge (issue #13).
                            complete(<node>) becomes true once the --by node's
                            completion is durable on master — the automation#57
                            zombie in one command. Edge-only; --dry-run/--reason.
@@ -1559,7 +1562,7 @@ COMMANDS:
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
                            --kind=status|operator-decision, --body/--body-file.
-                           Do NOT use raw `gh issue comment`.
+                           Do NOT use raw \`gh issue comment\`.
     issue-update <sha>     Update GitHub issue with task progress
     validate               Validate DAG structure; --strict audits EVERY
                            task/gh ref (empty-tree + known namespace) and
@@ -1630,7 +1633,8 @@ OPTIONS:
     --json                 Output in JSON format (where supported)
     --help, -h             Show command help
 
-See docs/task_dag/README.md for full documentation.
+See docs/INVARIANTS.md, docs/REF_LIFECYCLE.md, docs/DESIGN_PRINCIPLES.md,
+and docs/MIGRATION.md for the durable task-dag contracts.
 EOF
 }
 

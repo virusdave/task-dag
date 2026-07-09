@@ -32,7 +32,11 @@
 This document is the single enumeration of those invariants. If you are
 about to change how any task commit or ref is shaped, this is the contract
 you must not break — and the place to update when the contract legitimately
-evolves (with review).
+evolves (with review). The higher-level design law is in
+[`DESIGN_PRINCIPLES.md`](./DESIGN_PRINCIPLES.md), the lifecycle/runbook view
+is in [`REF_LIFECYCLE.md`](./REF_LIFECYCLE.md), and the legacy migration path
+is in [`MIGRATION.md`](./MIGRATION.md) → "Legacy dependency encodings →
+bounded edge graph".
 
 ---
 
@@ -212,8 +216,11 @@ of a not-yet-prunable edge. The tombstone blob serializer + tombstone-aware
 reader masking live in `edges.sh`; the relation-aware prunability predicate +
 scan primitives (`_taskdag_edge_prunable`, `taskdag_prune_edge`,
 `taskdag_prune_satisfied`, and the `dep prune` command) live in
-`scripts/task-dag.d/edges-prune.sh`. The mailbox, the reconciler, and
-the `graph --explain` resolver remain separate tasks. Golden fixtures for the
+`scripts/task-dag.d/edges-prune.sh`. The mailbox transport lives in
+`scripts/task-dag.d/mailbox.sh`; graph convergence (push reaction, periodic
+backstop, local folds, cross-repo hints, cascade, supersede synth-completion,
+and obligation-based epic close) lives in `scripts/task-dag.d/graph-converge.sh`.
+Golden fixtures for the
 exemption + its shape invariant are in `tests/task-dag/validate-strict.sh`
 (TEST 11–15); the model/reader is unit-tested in `tests/task-dag/edges.sh`, the
 writer (backoff shape/cap/jitter/fail-loud, add/drop round-trip, and concurrent
@@ -315,7 +322,9 @@ witness trailer + env passing, cross-repo delivery, FF contention, and
 fail-loud exhaustion) is unit + integration tested in
 `tests/task-dag/mailbox.sh`. The **reconciler** that decides what a completion
 means and how to fold it (push-reaction handler + periodic backstop, local-CAS
-fold, cascade), `supersede`, and epic-close unification remain separate tasks.
+fold, cascade), `supersede`, and epic-close unification is implemented in
+`scripts/task-dag.d/graph-converge.sh`, `scripts/task-dag.d/reconcile.sh`, and
+the thin wrapper commands in `scripts/task-dag` / `scripts/task-dag.d/cross-repo.sh`.
 
 ### Derived facts (`done` / `satisfied`) — in-memory, ZERO per-fact refs
 
@@ -354,9 +363,12 @@ into behavior is the reconcile layer below.
 The **aggregation** of the raw facts into the north-star behavior lives in
 `scripts/task-dag.d/reconcile.sh` (`taskdag_node_complete`,
 `taskdag_leaf_ready`, and the read-only `reconcile` command; unit-tested in
-`tests/task-dag/reconcile.sh`). It is **read-only** and **additive** — it
-never writes a ref and does not yet drive live `frontier`/`complete`/epic-
-close behavior (that wiring is later-phase sibling tasks).
+`tests/task-dag/reconcile.sh`). The predicate layer is **read-only** and
+additive — it never writes a ref. The mutating live wiring that consumes its
+verdicts is separate and explicit: `scripts/task-dag.d/graph-converge.sh`
+folds satisfied edges, synthesizes supersede completions, cascades completion
+signals, and emits ordinary `Closes-Epic:` merges when obligation-complete
+epics are proven complete.
 
 - `complete(node)` — `true` iff an outgoing **satisfies**-edge is satisfied
   (supersede), else — if the node has **first-parent children** (an EPIC) —
@@ -379,8 +391,9 @@ close behavior (that wiring is later-phase sibling tasks).
 The push-reaction handler + periodic reconciler **backstop** (local-CAS
 fold, cross-repo hint delivery, cascade, supersede synth-completion), the
 epic **auto-close** rewiring onto these predicates, the delegate/block/
-supersede edge **wrappers**, and the `graph --explain` resolver remain
-separate reviewed sibling tasks.
+supersede edge **wrappers** are shipped reviewed sibling layers above this
+read-only predicate module. They must stay thin consumers of the predicate /
+edge-writer contracts, not duplicate fact derivation or invent new refs.
 
 ---
 

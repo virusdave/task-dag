@@ -194,6 +194,68 @@ with the job + secrets can originate a child epic, not only
 Each step is independently revertible; no force-push; canary before fleet;
 keep the old path live until the new one is green.
 
+## Legacy dependency encodings → bounded edge graph
+
+Issue #13's edge model is now the canonical dependency substrate. Historical
+encodings are still readable during rollout, but new automation should converge
+onto ordinary `tasks/v1/graph` edges:
+
+| Legacy source | Edge written by migration/wrapper | Notes |
+|---|---|---|
+| extra task parents beyond the containment first parent | `requires` from the task node to the dependency task node | The first parent remains containment/epic structure; extra parents are the old dependency encoding. |
+| `tasks/delegated/<N>/<owner>/<repo>/<peer>` refs | `requires` from the parent epic/root task node to `issue:<owner>/<repo>#<peer>` | `delegate` now dual-writes only after the legacy delegated ref is durable on origin, so reruns backfill older delegations safely. |
+| downstream blocked metadata with explicit `task:` / `issue:` nodes (`Downstream-On`, `On`, `Depends-On`, `Reason`, `Request-URL`) | `requires` from the blocked task to each explicit node | `block --downstream --on <node>` is the new precise path. Prose-only blocks are not guessed. |
+| explicit supersede/re-scope metadata or canonical nodes in old task text | `satisfies` from the superseded task to the replacing task/issue node | `supersede <node> --by <node>` is the new wrapper. |
+
+Runbook for a repo migration:
+
+1. Make sure the repo is using the current `task-dag` CLI and has no red master
+   gate unrelated to the migration.
+2. Inspect what would be backfilled:
+
+   ```sh
+   task-dag migrate-legacy-edges --dry-run --json
+   ```
+
+3. If the dry-run contains only intended canonical nodes, write the edges:
+
+   ```sh
+   task-dag migrate-legacy-edges
+   ```
+
+   The command writes through the same `dep add` direct-CAS path as live
+   commands, so it is idempotent by semantic edge-id and safe to rerun after a
+   contention failure.
+4. Validate the graph shape and reader:
+
+   ```sh
+   task-dag validate --strict
+   task-dag edges --json
+   task-dag reconcile --json
+   ```
+
+5. Leave legacy refs/history in place. The migration is additive: it does not
+   rewrite task commits, delete delegated refs, or unpark blocked tasks. Once
+   the wrappers and reconciler are deployed everywhere, legacy encodings are
+   compatibility inputs rather than the source of truth for new work.
+
+Rollback is bounded: stop reading the graph or delete/revert only
+`refs/heads/tasks/v1/graph` to the prior tip. Do **not** rewrite historical
+task commits or hand-edit lifecycle refs to undo an edge migration.
+
+Operational caveats:
+
+- Configure `taskdag.current-repo` (or ensure origin URL resolution works) so
+  node identities are canonical `owner/repo` values before migration.
+- Cross-repo convergence needs the periodic backstop to be able to verify
+  foreign completions from configured local peer worktrees
+  (`taskdag.peer-path.<owner/repo>.path` or `TASKDAG_PEER_PATH_PREFIX`). A
+  mailbox hint is never trusted as completion authority by itself.
+- Tombstones are for deliberate removal of not-yet-prunable active edges. A
+  satisfied edge should be pruned (plain deletion) by `dep prune` /
+  graph-convergence instead; no tombstone is needed because `master` carries the
+  durable completion witness.
+
 ## Transitional duplication (known, accepted)
 
 During the migration the canonical CLI exists both here and in

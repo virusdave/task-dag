@@ -16,6 +16,82 @@ orchestration lock** that closes the root/leaf double-dispatch
 | `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. The overlay ref points straight at the task commit (source of truth for "is this task blocked"). | `unblock` / `complete` / `drop`; **also** `close-completed-issues.sh` (via `cleanup-closed-issue-task-refs.sh`) for any of the closed issue's tasks — most often the epic ROOT, which is closed by the `Closes-Epic` merge and so never `complete`d — and `reconcile-closed-issue` for out-of-band (manual) closes. |
 | `tasks/blocked-meta/<sha>` | `task-dag block` | Optional **side metadata** for a parked task: a deterministic side-commit (tree == task tree, first parent == task commit) whose body records `Blocker-Kind` (`operator`/`downstream`), durable `Reason`, optional `Request-URL`, derived `Repo`/`Issue`/`Source-URL`, and `Blocked-By`/`Blocked-Host`/`Blocked-At`. Consumed by the operator-blocked #29 dashboard so it need not reparse task bodies. A blocked task with **no** meta ref (a legacy block) is still fully valid. | `unblock` / `complete` / `drop` (cleared in lockstep with the overlay ref); **also** `close-completed-issues.sh` on epic close. |
 
+## Edge-era data refs: bounded state, not task lifecycle refs
+
+The issue #13 north-star adds two data-in-tree ref kinds that sit beside the
+task lifecycle above without changing what `pending` / `frontier` / `active`
+/ `blocked` mean:
+
+- `tasks/v1/graph` — the per-repo dependency-edge index. Its latest tree is
+  the active edge set (`edges/<semantic-edge-id>.json` plus explicit
+  `tombstones/<edge-id>.json` for deliberate unsatisfied removals). It is a
+  fixed single ref per repo, never one ref per dependency.
+- `tasks/v1/mailbox/00` .. `tasks/v1/mailbox/0f` — the 16 fixed cross-repo
+  notification shards. Message blobs are short-lived hints that a completion
+  happened elsewhere; they are consumed by fold-before-delete and can always be
+  re-derived by the backstop from the source repo's `master`.
+
+These refs are the only empty-tree exceptions in the task namespace. They are
+fast-forward-only branches whose commits parent the previous data-ref tip, not
+task commits. `validate --strict` audits their exact tree shape; everything
+else under `tasks/v1/*` is still an unknown namespace error. See
+[`INVARIANTS.md`](./INVARIANTS.md) for the blob schemas and
+[`DESIGN_PRINCIPLES.md`](./DESIGN_PRINCIPLES.md) for why the bounded-ref
+invariant is load-bearing.
+
+## How dependency state now converges
+
+All dependency-style lifecycle changes reduce to the same durable edge model:
+
+- `delegate` writes the legacy delegation ref **and** a `requires` edge from
+  the parent epic/root task node to the child issue node once the legacy ref is
+  proven durable on origin.
+- `block --downstream --on <node>` still parks the task with the normal blocked
+  overlay, then writes `requires` edge(s) from that task to each explicit
+  downstream node. If the edge write fails, the task remains safely blocked;
+  rerunning the same command is idempotent and converges the missing edge.
+- `supersede <node> --by <node>` is edge-only: it writes one `satisfies` edge.
+  Once the `--by` node is durably done, graph convergence synthesizes the
+  superseded local leaf's normal completion merge (unless it is an epic or is
+  actively claimed, both fail closed).
+
+Completion is still a durable `master` fact: a task is complete when its task
+commit appears as a non-primary parent of a reachable completion merge, and an
+issue/epic is closed by a reachable `Closes-Epic: #N` merge. The fact layer
+derives `done()` from `master` in memory; it never mints per-fact refs. The
+reconciler then folds satisfied edges by direct CAS on the owning repo's graph
+ref, sends/consumes cross-repo mailbox hints, cascades newly durable
+completions, and auto-closes obligation-complete epics with the normal close
+merge shape.
+
+## Graph and mailbox writes are direct CAS with bounded backoff
+
+The graph writer and mailbox writer do not stage work through task refs or
+manual ref surgery. Each mutation is:
+
+1. sync the current data-ref tip (or prove the remote ref is absent),
+2. recompute the latest tree in a scratch index,
+3. commit that tree with the prior data-ref tip as the only parent,
+4. push with a fast-forward lease and readback confirmation, and
+5. on contention, refetch/recompute/retry with jittered quadratic backoff
+   (roughly one second up to roughly ten seconds), then fail loud if the retry
+   budget is exhausted.
+
+This makes graph/mailbox writes commutative and idempotent under normal races:
+two writers adding different edges/messages converge to the union; a failed or
+crashed consumer leaves a retryable hint or active edge rather than an
+unrecoverable partial state.
+
+## Mailbox garbage collection is delete-on-consume
+
+Mailbox messages are triggers, not facts. `mailbox consume` deletes a message
+only after the injected fold command exits successfully for that specific
+message. There is no ack ledger, `consumed_at` ref, or dedup branch. Replays are
+safe because folds are idempotent and the durable effect is visible on
+`master`; lost hints are recovered by `reconcile-backstop`, which re-derives
+foreign/local done facts from configured peer worktrees and the owning repo's
+graph.
+
 ## Non-task namespace: CI repair chains (`tasks/ci-chains/...`)
 
 `refs/heads/tasks/ci-chains/<owner>/<repo>/<branch>` is **not** a task
