@@ -3,6 +3,8 @@ import { Form, Link, useLoaderData, useNavigate, useRevalidator, useRouteLoaderD
 
 import {
   AddPendingPurchaseHintDocumentBodySchema,
+  AcceptPendingPurchaseCandidateRequestSchema,
+  AcceptPendingPurchaseCandidateResponseSchema,
   BatchPendingPurchaseFamilyOverrideRequestSchema,
   BatchPendingPurchaseFamilyOverrideResponseSchema,
   CreatePendingPurchaseHintBundleBodySchema,
@@ -11,9 +13,14 @@ import {
   PendingPurchaseHintBundleDetailResponseSchema,
   PendingPurchaseHintDocumentAddResponseSchema,
   PendingPurchaseListResponseSchema,
+  PendingPurchaseRefinementHistoryResponseSchema,
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
   QueuePendingPurchasePacketImportRequestSchema,
+  RollbackPendingPurchaseRevisionRequestSchema,
+  RollbackPendingPurchaseRevisionResponseSchema,
+  SubmitPendingPurchaseRefinementRequestSchema,
+  SubmitPendingPurchaseRefinementResponseSchema,
   UpdatePendingPurchaseRowApprovalRequestSchema,
   UpdatePendingPurchaseRowRequestSchema,
   buildHeliosModulePath,
@@ -22,7 +29,11 @@ import {
   type PendingPurchaseListResponse,
   type PendingPurchaseMarketListing,
   type PendingPurchasePacketListItem,
+  type PendingPurchasePacketRevisionSummary,
+  type PendingPurchaseRefinementHistoryResponse,
+  type PendingPurchaseRevisionRowDiff,
   type PendingPurchaseRow,
+  type PendingPurchaseRowSnapshotRef,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
@@ -198,6 +209,34 @@ function buildFamilyGroups(items: readonly PendingPurchaseRow[]): FamilyGroup[] 
     return a.familyLabel.localeCompare(b.familyLabel)
   })
 }
+
+function buildPendingPurchaseRowSnapshotRefs(items: readonly PendingPurchaseRow[]): PendingPurchaseRowSnapshotRef[] {
+  return items.map((item) => ({
+    lineageRevisionNumber: item.lineageRevisionNumber,
+    rowId: item.rowId,
+    rowLineageId: item.rowLineageId,
+    rowSnapshotSha256: item.rowSnapshotSha256,
+    version: item.version,
+  }))
+}
+
+function buildPendingPurchaseRowAnchorId(item: PendingPurchaseRow): string {
+  return `pp-row-${sanitizePendingPurchaseAnchor(item.rowLineageId ?? String(item.rowId))}`
+}
+
+function buildPendingPurchaseFamilyAnchorId(group: FamilyGroup): string {
+  const lineageKey = group.rows
+    .map((row) => row.rowLineageId)
+    .filter((lineageId): lineageId is string => lineageId !== null)
+    .sort()
+    .join('-')
+  return `pp-family-${sanitizePendingPurchaseAnchor(lineageKey || group.familyKeyString)}`
+}
+
+function sanitizePendingPurchaseAnchor(value: string): string {
+  const sanitized = value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return sanitized || 'unknown'
+}
 export function PendingPurchasesPage() {
   const data = useLoaderData() as PendingPurchaseListResponse
   const session = useRouteLoaderData('root') as SessionEnvelope
@@ -219,6 +258,12 @@ export function PendingPurchasesPage() {
   const [isApplying, setIsApplying] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
+  const [refinementFeedback, setRefinementFeedback] = useState('')
+  const [refinementHistory, setRefinementHistory] = useState<PendingPurchaseRefinementHistoryResponse | null>(null)
+  const [refinementJobStatus, setRefinementJobStatus] = useState<JobStatusResponse | null>(null)
+  const [refinementSuccessMessage, setRefinementSuccessMessage] = useState<string | null>(null)
+  const [isRefining, setIsRefining] = useState(false)
+  const [isSwitchingRevision, setIsSwitchingRevision] = useState(false)
   const [selectedRowIds, setSelectedRowIds] = useState<number[]>([])
 
   const canApprove = session.permissions.canApprove
@@ -322,6 +367,93 @@ export function PendingPurchasesPage() {
   // reviewer-corrected row regroups under the corrected family
   // immediately, matching what apply will actually write.
   const rowsByFamily = useMemo(() => buildFamilyGroups(data.items), [data.items])
+
+  const loadRefinementHistory = useCallback(async () => {
+    if (mode !== 'rows' || !data.activePacket) {
+      setRefinementHistory(null)
+      setRefinementJobStatus(null)
+      return
+    }
+    try {
+      const history = await loadJson(
+        `/api/catalog/pending-purchases/${data.activePacket.packetId}/refinement-history`,
+        PendingPurchaseRefinementHistoryResponseSchema,
+      )
+      setRefinementHistory(history)
+      const activeTurn = history.turns.find((turn) => (
+        (turn.status === 'queued' || turn.status === 'running') && turn.jobId !== null
+      ))
+      if (activeTurn?.jobId) {
+        const jobStatus = await loadJobStatus(activeTurn.jobId)
+        setRefinementJobStatus(jobStatus)
+      } else {
+        setRefinementJobStatus(null)
+      }
+    } catch (error) {
+      setRefinementHistory(null)
+      setRefinementJobStatus(null)
+      if (error instanceof Error && !error.message.includes('409')) {
+        setErrorMessage(error.message)
+      }
+    }
+  }, [data.activePacket, mode])
+
+  useEffect(() => {
+    void loadRefinementHistory()
+  }, [loadRefinementHistory])
+
+  useEffect(() => {
+    if (!refinementJobStatus || isJobTerminal(refinementJobStatus.job.status)) {
+      return
+    }
+
+    let cancelled = false
+    let timeoutId: number | undefined
+
+    const poll = async () => {
+      try {
+        const nextJobStatus = await loadJobStatus(refinementJobStatus.job.jobId)
+        if (cancelled) {
+          return
+        }
+        setRefinementJobStatus(nextJobStatus)
+        if (isJobTerminal(nextJobStatus.job.status)) {
+          await loadRefinementHistory()
+          await revalidator.revalidate()
+          setRefinementSuccessMessage(
+            nextJobStatus.job.status === 'succeeded'
+              ? `Refinement job #${nextJobStatus.job.jobId} finished. Review the candidate revision below.`
+              : `Refinement job #${nextJobStatus.job.jobId} ended as ${nextJobStatus.job.status.replaceAll('_', ' ')}. Your feedback text is still preserved above.`,
+          )
+          if (nextJobStatus.job.status !== 'succeeded') {
+            setErrorMessage(nextJobStatus.job.lastError ?? 'The packet refinement job did not succeed.')
+          }
+          return
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setErrorMessage(error instanceof Error ? error.message : 'Could not refresh the packet refinement status.')
+        }
+      }
+
+      if (!cancelled) {
+        timeoutId = window.setTimeout(() => {
+          void poll()
+        }, 1500)
+      }
+    }
+
+    timeoutId = window.setTimeout(() => {
+      void poll()
+    }, 1500)
+
+    return () => {
+      cancelled = true
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }, [loadRefinementHistory, refinementJobStatus, revalidator])
 
   async function handleImport() {
     setIsImporting(true)
@@ -522,11 +654,83 @@ export function PendingPurchasesPage() {
     }
   }
 
+  async function handleSubmitRefinement() {
+    if (!data.activePacket || !refinementHistory?.root) {
+      return
+    }
+    setIsRefining(true)
+    setRefinementSuccessMessage(null)
+    setErrorMessage(null)
+    try {
+      const body = SubmitPendingPurchaseRefinementRequestSchema.parse({
+        baseRows: buildPendingPurchaseRowSnapshotRefs(data.items),
+        expectedRootVersion: refinementHistory.root.version,
+        feedbackText: refinementFeedback,
+      })
+      const response = await mutateJson(
+        `/api/catalog/pending-purchases/${data.activePacket.packetId}/refinements`,
+        SubmitPendingPurchaseRefinementResponseSchema,
+        { body: JSON.stringify(body), method: 'POST' },
+      )
+      setRefinementSuccessMessage(`Queued refinement turn #${response.turn.turnId}. Feedback stays here until a candidate succeeds.`)
+      if (response.turn.jobId) {
+        const jobStatus = await loadJobStatus(response.turn.jobId)
+        setRefinementJobStatus(jobStatus)
+      }
+      await loadRefinementHistory()
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Could not queue the packet refinement.')
+    } finally {
+      setIsRefining(false)
+    }
+  }
+
+  async function handleSwitchRevision(
+    revision: PendingPurchasePacketRevisionSummary,
+    action: 'accept' | 'rollback',
+  ) {
+    if (!data.activePacket || !refinementHistory?.root) {
+      return
+    }
+    setIsSwitchingRevision(true)
+    setRefinementSuccessMessage(null)
+    setErrorMessage(null)
+    try {
+      const body = (action === 'accept'
+        ? AcceptPendingPurchaseCandidateRequestSchema
+        : RollbackPendingPurchaseRevisionRequestSchema).parse({
+          expectedRootVersion: refinementHistory.root.version,
+          reason: action === 'accept'
+            ? 'Reviewer accepted packet refinement candidate'
+            : 'Reviewer rolled pending-purchase packet back to a prior revision',
+        })
+      const response = await mutateJson(
+        `/api/catalog/pending-purchases/${data.activePacket.packetId}/revisions/${revision.packetId}/${action}`,
+        action === 'accept'
+          ? AcceptPendingPurchaseCandidateResponseSchema
+          : RollbackPendingPurchaseRevisionResponseSchema,
+        { body: JSON.stringify(body), method: 'POST' },
+      )
+      setRefinementSuccessMessage(
+        action === 'accept'
+          ? `Accepted candidate revision r${response.selectedRevision.revisionNumber ?? '—'} as current.`
+          : `Rolled back to revision r${response.selectedRevision.revisionNumber ?? '—'}.`,
+      )
+      await loadRefinementHistory()
+      navigate(buildPendingPurchasesHref(filters, { mode: 'rows', packetId: response.selectedRevision.packetId, page: 1 }))
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Could not switch pending-purchase revision.')
+    } finally {
+      setIsSwitchingRevision(false)
+    }
+  }
+
   function clearFeedback() {
     setApplySuccessMessage(null)
     setErrorMessage(null)
     setGenerateSuccessMessage(null)
     setImportSuccessMessage(null)
+    setRefinementSuccessMessage(null)
   }
 
   // The "Queue apply" button lives in the apply bar at the bottom of a
@@ -586,6 +790,10 @@ export function PendingPurchasesPage() {
   const rowsHref = data.activePacket
     ? buildPendingPurchasesHref(filters, { mode: 'rows', packetId: data.activePacket.packetId, page: 1 })
     : null
+  const currentRevisionPacketId = refinementHistory?.root?.currentPacketId ?? null
+  const activePacketIsCurrentRevision = !data.activePacket || currentRevisionPacketId === null
+    ? true
+    : currentRevisionPacketId === data.activePacket.packetId
 
   const totalLabel = mode === 'packets'
     ? `${data.totalCount} packet${data.totalCount === 1 ? '' : 's'}`
@@ -733,6 +941,7 @@ export function PendingPurchasesPage() {
         </p>
       ) : null}
       {importSuccessMessage ? <p className="pp-toast pp-toast-success">{importSuccessMessage}</p> : null}
+      {refinementSuccessMessage ? <p className="pp-toast pp-toast-success">{refinementSuccessMessage}</p> : null}
       {errorMessage ? <p className="pp-toast pp-toast-error">{errorMessage}</p> : null}
 
       {/*
@@ -755,12 +964,21 @@ export function PendingPurchasesPage() {
         <PendingPurchasesRowsView
           canApprove={canApprove}
           canEdit={session.permissions.canEditProposals}
+          canApplyCurrentRevision={activePacketIsCurrentRevision}
           data={data}
           isApplying={isApplying}
+          isRefining={isRefining}
+          isSwitchingRevision={isSwitchingRevision}
           onClearSelection={() => setSelectedRowIds([])}
           onQueueApply={() => void handleApplySelectedRows()}
+          onRefinementFeedbackChange={setRefinementFeedback}
+          onSubmitRefinement={() => void handleSubmitRefinement()}
+          onSwitchRevision={(revision, action) => void handleSwitchRevision(revision, action)}
           onSelectApprovedVisible={() => setSelectedRowIds(approvedVisibleRows.map((item) => item.rowId))}
           onToggleSelected={toggleSelectedRow}
+          refinementFeedback={refinementFeedback}
+          refinementHistory={refinementHistory}
+          refinementJobStatus={refinementJobStatus}
           rowsByFamily={rowsByFamily}
           approvedVisibleRowCount={approvedVisibleRows.length}
           selectedApprovedRowIds={selectedApprovedRowIds}
@@ -920,14 +1138,23 @@ function PendingPurchasesPacketsView({ data }: PendingPurchasesPacketsViewProps)
 
 interface PendingPurchasesRowsViewProps {
   approvedVisibleRowCount: number
+  canApplyCurrentRevision: boolean
   canApprove: boolean
   canEdit: boolean
   data: PendingPurchaseListResponse
   isApplying: boolean
+  isRefining: boolean
+  isSwitchingRevision: boolean
   onClearSelection: () => void
   onQueueApply: () => void
+  onRefinementFeedbackChange: (value: string) => void
   onSelectApprovedVisible: () => void
+  onSubmitRefinement: () => void
+  onSwitchRevision: (revision: PendingPurchasePacketRevisionSummary, action: 'accept' | 'rollback') => void
   onToggleSelected: (rowId: number) => void
+  refinementFeedback: string
+  refinementHistory: PendingPurchaseRefinementHistoryResponse | null
+  refinementJobStatus: JobStatusResponse | null
   rowsByFamily: FamilyGroup[]
   selectedApprovedRowIds: number[]
   selectedRowIds: number[]
@@ -935,14 +1162,23 @@ interface PendingPurchasesRowsViewProps {
 
 function PendingPurchasesRowsView({
   approvedVisibleRowCount,
+  canApplyCurrentRevision,
   canApprove,
   canEdit,
   data,
   isApplying,
+  isRefining,
+  isSwitchingRevision,
   onClearSelection,
   onQueueApply,
+  onRefinementFeedbackChange,
   onSelectApprovedVisible,
+  onSubmitRefinement,
+  onSwitchRevision,
   onToggleSelected,
+  refinementFeedback,
+  refinementHistory,
+  refinementJobStatus,
   rowsByFamily,
   selectedApprovedRowIds,
   selectedRowIds,
@@ -968,6 +1204,22 @@ function PendingPurchasesRowsView({
         ) : null}
       </div>
 
+      {activePacket ? (
+        <PendingPurchaseRefinementPanel
+          activePacketId={activePacket.packetId}
+          canEdit={canEdit}
+          feedback={refinementFeedback}
+          history={refinementHistory}
+          isRefining={isRefining}
+          isSwitchingRevision={isSwitchingRevision}
+          jobStatus={refinementJobStatus}
+          onFeedbackChange={onRefinementFeedbackChange}
+          onSubmit={onSubmitRefinement}
+          onSwitchRevision={onSwitchRevision}
+          rows={data.items}
+        />
+      ) : null}
+
       <PendingPurchasesFilterBar mode="rows" filters={filters} />
 
       {data.items.length === 0 ? (
@@ -975,7 +1227,7 @@ function PendingPurchasesRowsView({
       ) : (
         <div className="pp-rows-list stacked-list">
           {rowsByFamily.map((group) => (
-            <section key={group.familyKeyString} className="pp-rows-family-group">
+            <section key={group.familyKeyString} id={buildPendingPurchaseFamilyAnchorId(group)} className="pp-rows-family-group">
               <header className="pp-rows-family-header">
                 <div className="pp-rows-family-title">
                   <strong>{group.familyLabel}</strong>
@@ -998,14 +1250,15 @@ function PendingPurchasesRowsView({
               </header>
               <div className="stacked-list">
                 {group.rows.map((item) => (
-                  <PendingPurchaseRowCard
-                    canApprove={canApprove}
-                    canEdit={canEdit}
-                    isSelected={selectedApprovedRowIds.includes(item.rowId)}
-                    item={item}
-                    key={item.rowId}
-                    onToggleSelected={() => onToggleSelected(item.rowId)}
-                  />
+                  <div id={buildPendingPurchaseRowAnchorId(item)} key={item.rowId}>
+                    <PendingPurchaseRowCard
+                      canApprove={canApprove}
+                      canEdit={canEdit}
+                      isSelected={selectedApprovedRowIds.includes(item.rowId)}
+                      item={item}
+                      onToggleSelected={() => onToggleSelected(item.rowId)}
+                    />
+                  </div>
                 ))}
               </div>
             </section>
@@ -1028,18 +1281,245 @@ function PendingPurchasesRowsView({
             </button>
             <button
               className="primary-button"
-              disabled={isApplying || selectedApprovedRowIds.length === 0}
+              disabled={isApplying || selectedApprovedRowIds.length === 0 || !canApplyCurrentRevision}
               onClick={onQueueApply}
               type="button"
+              title={canApplyCurrentRevision ? undefined : 'Only the current packet revision can be applied.'}
             >
-              {isApplying ? 'Applying…' : 'Queue apply'}
+              {isApplying ? 'Applying…' : canApplyCurrentRevision ? 'Queue apply' : 'Current revision only'}
             </button>
           </div>
+          {!canApplyCurrentRevision ? (
+            <p className="subtle-copy" style={{ flexBasis: '100%', margin: 0 }}>
+              This packet is not the current revision. Accept or roll back to it before applying rows.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </PendingPurchaseOverrideOptionsContext.Provider>
     </PendingPurchaseDraftPriceRegistryContext.Provider>
   )
+}
+
+function PendingPurchaseRefinementPanel({
+  activePacketId,
+  canEdit,
+  feedback,
+  history,
+  isRefining,
+  isSwitchingRevision,
+  jobStatus,
+  onFeedbackChange,
+  onSubmit,
+  onSwitchRevision,
+  rows,
+}: {
+  activePacketId: number
+  canEdit: boolean
+  feedback: string
+  history: PendingPurchaseRefinementHistoryResponse | null
+  isRefining: boolean
+  isSwitchingRevision: boolean
+  jobStatus: JobStatusResponse | null
+  onFeedbackChange: (value: string) => void
+  onSubmit: () => void
+  onSwitchRevision: (revision: PendingPurchasePacketRevisionSummary, action: 'accept' | 'rollback') => void
+  rows: readonly PendingPurchaseRow[]
+}) {
+  const root = history?.root ?? null
+  const currentPacketId = root?.currentPacketId ?? null
+  const activeRevision = history?.revisions.find((revision) => revision.packetId === activePacketId) ?? null
+  const activeTurn = history?.turns.find((turn) => turn.status === 'queued' || turn.status === 'running') ?? null
+  const canSubmit = canEdit && root !== null && activePacketId === currentPacketId && feedback.trim().length > 0 && !isRefining && !activeTurn
+  const diffCount = history?.rowDiffs.length ?? 0
+  const rootVersionLabel = root ? `root v${root.version}` : 'refinement unavailable'
+
+  return (
+    <section className="pp-refinement-panel" aria-label="Packet refinement">
+      <header className="pp-refinement-header">
+        <div>
+          <strong>Refine packet with feedback</strong>
+          <p className="subtle-copy">
+            {activeRevision
+              ? `Viewing r${activeRevision.revisionNumber ?? '—'} · ${rootVersionLabel}`
+              : rootVersionLabel}
+          </p>
+        </div>
+        <div className="inline-row wrap-row pp-refinement-pills">
+          {activeRevision ? <Pill tone={revisionTone(activeRevision)}>{revisionLabel(activeRevision)}</Pill> : null}
+          {jobStatus && !isJobTerminal(jobStatus.job.status) ? (
+            <Pill tone="warning">{`refining · ${jobStatus.job.status.replaceAll('_', ' ')}`}</Pill>
+          ) : null}
+          {diffCount > 0 ? <Pill tone="warning">{`${diffCount} field diff${diffCount === 1 ? '' : 's'}`}</Pill> : null}
+        </div>
+      </header>
+
+      {root === null ? (
+        <p className="subtle-copy">This packet predates the refinement lineage schema; use the existing row overrides below.</p>
+      ) : (
+        <>
+          <label className="stack-field pp-refinement-feedback">
+            <span>Analyst feedback</span>
+            <textarea
+              disabled={!canEdit || activePacketId !== currentPacketId}
+              onChange={(event) => onFeedbackChange(event.currentTarget.value)}
+              placeholder="Tell the analyst what to correct in this packet. Example: “These Camino rows are gummies, not chocolate; keep Bronx prices unchanged.”"
+              rows={3}
+              value={feedback}
+            />
+          </label>
+          <div className="inline-row wrap-row pp-refinement-actions">
+            <button className="primary-button" disabled={!canSubmit} onClick={onSubmit} type="button">
+              {isRefining ? 'Queueing…' : activeTurn ? 'Refinement running' : 'Submit feedback'}
+            </button>
+            {jobStatus ? <Link className="ghost-button" to={`/jobs/${jobStatus.job.jobId}`}>{`Open job #${jobStatus.job.jobId}`}</Link> : null}
+            {activePacketId !== currentPacketId ? (
+              <span className="subtle-copy">Feedback targets only the current revision.</span>
+            ) : null}
+          </div>
+
+          <div className="pp-refinement-revisions" aria-label="Packet revisions">
+            {history?.revisions.map((revision) => (
+              <PendingPurchaseRevisionCard
+                activePacketId={activePacketId}
+                currentPacketId={currentPacketId}
+                isSwitchingRevision={isSwitchingRevision}
+                key={revision.packetId}
+                onSwitchRevision={onSwitchRevision}
+                revision={revision}
+              />
+            ))}
+          </div>
+
+          <PendingPurchaseDiffChips diffs={history?.rowDiffs ?? []} rows={rows} />
+
+          <details className="pp-refinement-history">
+            <summary>Turn history &amp; provenance ({history?.turns.length ?? 0})</summary>
+            {history && history.turns.length > 0 ? (
+              <ul className="timeline-list compact-list">
+                {history.turns.map((turn) => (
+                  <li key={turn.turnId}>
+                    <div className="inline-row wrap-row">
+                      <strong>{`Turn #${turn.turnId}`}</strong>
+                      <Pill tone={turn.status === 'candidate_created' ? 'success' : turn.status === 'failed' ? 'danger' : 'warning'}>
+                        {turn.status.replaceAll('_', ' ')}
+                      </Pill>
+                      {turn.candidatePacketId ? <Pill tone="muted">{`candidate #${turn.candidatePacketId}`}</Pill> : null}
+                      {turn.jobId ? <Link to={`/jobs/${turn.jobId}`}>{`job #${turn.jobId}`}</Link> : null}
+                    </div>
+                    <p className="subtle-copy">
+                      {nyLongDateTime(new Date(turn.createdAt).getTime())}
+                      {turn.requestedByUser ? ` · ${turn.requestedByUser}` : ''}
+                      {turn.model ? ` · model ${turn.model}` : ''}
+                      {turn.promptVersion ? ` · prompt ${turn.promptVersion}` : ''}
+                    </p>
+                    {turn.errorMessage ? <p className="error-text">{turn.errorMessage}</p> : null}
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="subtle-copy">No refinement turns yet.</p>}
+          </details>
+        </>
+      )}
+    </section>
+  )
+}
+
+function PendingPurchaseRevisionCard({
+  activePacketId,
+  currentPacketId,
+  isSwitchingRevision,
+  onSwitchRevision,
+  revision,
+}: {
+  activePacketId: number
+  currentPacketId: number | null
+  isSwitchingRevision: boolean
+  onSwitchRevision: (revision: PendingPurchasePacketRevisionSummary, action: 'accept' | 'rollback') => void
+  revision: PendingPurchasePacketRevisionSummary
+}) {
+  const isCurrent = revision.packetId === currentPacketId
+  const isActive = revision.packetId === activePacketId
+  const openHref = buildPendingPurchasesHref(
+    { mode: 'rows', packetId: activePacketId, page: 1, pageSize: 25 },
+    { mode: 'rows', packetId: revision.packetId, page: 1 },
+  )
+  return (
+    <article className={`pp-refinement-revision${isActive ? ' pp-refinement-revision-active' : ''}`}>
+      <div>
+        <strong>{`r${revision.revisionNumber ?? '—'}`}</strong>
+        <span className="subtle-copy"> {`packet #${revision.packetId}`}</span>
+      </div>
+      <div className="inline-row wrap-row">
+        <Pill tone={revisionTone(revision)}>{revisionLabel(revision)}</Pill>
+        {isActive ? <Pill tone="muted">viewing</Pill> : <Link to={openHref}>Open</Link>}
+      </div>
+      <p className="subtle-copy">{nyLongDateTime(new Date(revision.createdAt).getTime())}</p>
+      {revision.revisionCreatedReason ? <p className="subtle-copy">{revision.revisionCreatedReason}</p> : null}
+      <div className="inline-row wrap-row">
+        {revision.revisionStatus === 'candidate' ? (
+          <button className="primary-button" disabled={isSwitchingRevision} onClick={() => onSwitchRevision(revision, 'accept')} type="button">
+            Accept candidate
+          </button>
+        ) : null}
+        {!isCurrent && revision.revisionStatus !== 'candidate' && revision.revisionStatus !== 'failed' ? (
+          <button className="ghost-button" disabled={isSwitchingRevision} onClick={() => onSwitchRevision(revision, 'rollback')} type="button">
+            Roll back here
+          </button>
+        ) : null}
+      </div>
+    </article>
+  )
+}
+
+function PendingPurchaseDiffChips({
+  diffs,
+  rows,
+}: {
+  diffs: readonly PendingPurchaseRevisionRowDiff[]
+  rows: readonly PendingPurchaseRow[]
+}) {
+  if (diffs.length === 0) {
+    return null
+  }
+  const rowsByLineage = new Map(rows.map((row) => [row.rowLineageId, row]))
+  return (
+    <div className="pp-refinement-diffs" aria-label="Changed fields">
+      {diffs.slice(0, 24).map((diff) => {
+        const row = rowsByLineage.get(diff.rowLineageId) ?? null
+        const href = row ? `#${buildPendingPurchaseRowAnchorId(row)}` : undefined
+        const label = `${diff.field}: ${formatCompactDiffValue(diff.before)} → ${formatCompactDiffValue(diff.after)}`
+        return href ? (
+          <a className="pp-diff-chip" href={href} key={`${diff.candidateRowId}-${diff.field}`}>{label}</a>
+        ) : (
+          <span className="pp-diff-chip" key={`${diff.candidateRowId}-${diff.field}`}>{label}</span>
+        )
+      })}
+      {diffs.length > 24 ? <span className="subtle-copy">+{diffs.length - 24} more</span> : null}
+    </div>
+  )
+}
+
+function revisionTone(revision: PendingPurchasePacketRevisionSummary): 'danger' | 'muted' | 'success' | 'warning' {
+  if (revision.revisionStatus === 'current') return 'success'
+  if (revision.revisionStatus === 'candidate') return 'warning'
+  if (revision.revisionStatus === 'failed') return 'danger'
+  return 'muted'
+}
+
+function revisionLabel(revision: PendingPurchasePacketRevisionSummary): string {
+  return revision.revisionStatus === 'current'
+    ? 'current · applyable'
+    : revision.revisionStatus === 'candidate'
+      ? 'candidate · review first'
+      : revision.revisionStatus.replaceAll('_', ' ')
+}
+
+function formatCompactDiffValue(value: unknown): string {
+  if (value === null) return '—'
+  if (typeof value === 'string') return value.length > 24 ? `${value.slice(0, 21)}…` : value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return 'changed'
 }
 
 function FamilyBulkPriceControl({ rowIds }: { rowIds: readonly number[] }) {

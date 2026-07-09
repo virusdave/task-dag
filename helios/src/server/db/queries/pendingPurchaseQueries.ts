@@ -74,6 +74,9 @@ interface PendingPurchaseRowDbRow extends QueryResultRow {
   raw_row_json: JsonValue
   review_flags_json: JsonValue
   row_input_signature: string | null
+  row_lineage_id: string | null
+  lineage_revision_number: number | null
+  row_snapshot_sha256: string | null
   site_dealer_id: string | null
   site_dealer_name: string | null
   site_key: string
@@ -121,8 +124,22 @@ export async function listPendingPurchaseRows(
   pool: Pool,
   packetId: number,
 ): Promise<PendingPurchaseRow[]> {
-  const [result, catalogIndex] = await Promise.all([
-    pool.query<PendingPurchaseRowDbRow>(
+  const [hasLineageColumns, catalogIndex] = await Promise.all([
+    hasPendingPurchaseRowLineageColumns(pool),
+    loadSweedCatalogIndex(pool),
+  ])
+  const lineageSelectSql = hasLineageColumns
+    ? `
+        r.row_lineage_id,
+        r.lineage_revision_number,
+        r.row_snapshot_sha256,
+      `
+    : `
+        null::text as row_lineage_id,
+        null::integer as lineage_revision_number,
+        null::text as row_snapshot_sha256,
+      `
+  const result = await pool.query<PendingPurchaseRowDbRow>(
     `
       select
         r.id,
@@ -162,6 +179,7 @@ export async function listPendingPurchaseRows(
         r.raw_row_json,
         r.review_flags_json,
         r.row_input_signature,
+        ${lineageSelectSql}
         r.site_dealer_id,
         r.site_dealer_name,
         r.site_key,
@@ -176,11 +194,22 @@ export async function listPendingPurchaseRows(
       where r.packet_id = $1
       order by r.id asc
     `,
-      [packetId],
-    ),
-    loadSweedCatalogIndex(pool),
-  ])
+    [packetId],
+  )
   return result.rows.map((row) => mapPendingPurchaseRow(row, catalogIndex))
+}
+
+async function hasPendingPurchaseRowLineageColumns(pool: Pool): Promise<boolean> {
+  const result = await pool.query<{ column_count: string }>(
+    `
+      select count(*)::text as column_count
+      from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = 'pending_purchase_rows'
+        and column_name in ('row_lineage_id', 'lineage_revision_number', 'row_snapshot_sha256')
+    `,
+  )
+  return result.rows[0]?.column_count === '3'
 }
 
 interface PendingPurchaseEtlComparisonDbRow extends QueryResultRow {
@@ -388,6 +417,9 @@ function mapPendingPurchaseRow(
     reviewerNotes: readOptionalString(raw.reviewerNotes) ?? row.notes,
     rowId: readIntFromString(row.id),
     rowInputSignature: row.row_input_signature,
+    rowLineageId: row.row_lineage_id,
+    lineageRevisionNumber: row.lineage_revision_number,
+    rowSnapshotSha256: row.row_snapshot_sha256,
     sampleLike: typeof raw.sampleLike === 'boolean' ? raw.sampleLike : false,
     siteDealerId: readOptionalPositiveIntFromString(row.site_dealer_id),
     siteDealerName: row.site_dealer_name,
