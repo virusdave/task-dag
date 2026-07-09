@@ -19,10 +19,11 @@
 > panel→capability matrix. No per-site page ships until site scoping is
 > safe; the engine must have the LP/family join before claiming a suspect.
 >
-> Audit date: **2026-06-18** (NY). Read-only inspection of the prod
-> Tiger Cloud DB (`tsdb`) + source read of the ads pipeline. **No schema
-> change and no prod write was performed in P1** (those are P2+, gated on
-> Oracle DB review + operator approval).
+> Audit date: **2026-06-18** (NY); **re-verified unchanged on
+> 2026-07-09** (UTC/NY same business day for this audit). Read-only
+> inspection of the prod Tiger Cloud DB (`tsdb`) + source/filesystem read
+> of the ads pipeline. **No schema change and no prod write was performed
+> in P1** (those are P2+, gated on Oracle DB review + operator approval).
 
 > **Sibling reuse — do not duplicate #24.** The site-scope policy
 > (`site text null` derived via `mapGeoToGadsSite(pickGeoTarget(...))`,
@@ -79,11 +80,12 @@
 8. **The LP-funnel rollup is empty.** `gads_lp_rollup` = **0 rows**,
    `lp_events` = **0 rows** in prod. The funnel guardrail (parent §7
    panel 8) ships as an **honest empty state**, not a fabricated funnel.
-9. **The feed is a static historical window.** No `gads_ad_attempts` row
-   inserted since **2026-05-31** (~18 days before audit); all 219
-   open attempts are stale-open. (Already flagged by #51; restated here
-   because every #25 panel must render honest stale/empty states rather
-   than imply a live loop.)
+9. **The feed is a static historical window.** Re-verified 2026-07-09:
+   no `gads_ad_attempts` row has been inserted since **2026-05-31**
+   (~39 days before re-verification); all 219 open attempts are
+   stale-open. (Already flagged by #51; restated here because every #25
+   panel must render honest stale/empty states rather than imply a live
+   loop.)
 
 **Net:** the correlation engine **has** the two things it is gated on —
 the entity→final-URL/LP join and per-entity policy state — so it may
@@ -94,7 +96,7 @@ becomes a UI capability badge, never guessed data.
 
 ---
 
-## 1. Prod population audit (read-only, 2026-06-18)
+## 1. Prod population audit (read-only, 2026-06-18; re-verified 2026-07-09)
 
 | Table | Rows | Site col? | Populated? | Notes |
 |---|---|---|---|---|
@@ -135,12 +137,21 @@ becomes a UI capability badge, never guessed data.
 **Filesystem artifacts (morning bundle / L2 / L3):** owned `helios:helios`
 mode `700` under `$AUTOMATION_REPO_PATH/ads/google/outputs/` (prod
 `AUTOMATION_REPO_PATH=/var/lib/helios/automation`), **not readable by the
-audit user** (`amp-local`) — confirmed unreadable again this audit. Their
+audit user** (`amp-local`) — confirmed unreadable again on 2026-07-09
+(`namei` stops at `/var/lib/helios`; no sudo escalation used). Their
 presence is confirmed **by inference**: the 7 `run_id`s only exist
 because the morning bundle + L2 JSON were produced and
 [`recordAttemptsFromL2Output`](../../../helios/src/server/ads/adAttemptsTracker.ts)
 inserted from them. The P3/P6 endpoints run **as `helios`** and will have
 read access; no privilege escalation is needed (matches #51 §1).
+
+**Live snapshot artifact:** `GADS_SNAPSHOT_PATH` points at
+`/var/lib/gads/data/snapshots/ads-snapshot-live.jsonl`, which is readable
+to the audit user. Re-verified 2026-07-09: 268 snapshot ad rows, 268 with
+`final_url`, and **0 with non-empty `policy_topics`**. This confirms the
+topic field is structurally present in the FS snapshot schema but not
+currently populated in the live export/snapshot, and still not persisted
+into `gads_ad_attempts`.
 
 ---
 
