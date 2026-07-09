@@ -105,10 +105,23 @@ describe('buildClassifierHintFacts hint-extraction race handling', () => {
     expect(facts[0]?.fact.brand).toBe('Lil Lefty')
   })
 
-  it('fails loud (non-retryable) when all documents are terminal but yielded no facts', async () => {
+  it('degrades gracefully (returns []) when all documents are terminal but yielded no usable facts', async () => {
+    // A glossary / acronym-expansion / free-text hint the product-fact
+    // extractor cannot represent (FreshlyBakedNYC/automation#69), or an
+    // extraction that failed/skipped, must NOT abort the operator's whole
+    // packet run: generation proceeds without hint evidence.
     const db = stubDb([progressRow({ total: 1, pending: 0, failed: 1 })], [])
+    const facts = await buildClassifierHintFacts(db, 'pphint_2026-07-07_224300_accfaf')
+    expect(facts).toEqual([])
+  })
+
+  it('fails loud (non-retryable) when an attached bundle resolves to zero documents', async () => {
+    // total === 0 is a missing / fully-removed / mistyped bundle id — an
+    // operator error — not a legitimately empty-facts bundle, so it stays a
+    // hard failure rather than silently generating without the requested hint.
+    const db = stubDb([progressRow({ total: 0, pending: 0 })], [])
     const promise = buildClassifierHintFacts(db, 'pphint_2026-07-07_224300_accfaf')
-    await expect(promise).rejects.toThrow(/no extracted facts/)
+    await expect(promise).rejects.toThrow(/no documents/)
     await expect(promise).rejects.not.toBeInstanceOf(RetryableWorkerError)
   })
 })

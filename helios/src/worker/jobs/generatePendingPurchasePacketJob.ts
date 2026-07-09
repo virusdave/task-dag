@@ -1378,6 +1378,16 @@ export async function buildClassifierHintFacts(
   // max-attempts budget, so a genuinely stuck extraction dead-letters rather
   // than looping forever.
   const progress = await getPendingPurchaseHintExtractionProgress(db, hintBundleId)
+
+  // An attached bundle id that resolves to ZERO documents is an operator error
+  // (a missing / fully-removed / mistyped bundle), not a legitimately
+  // empty-facts bundle. Fail loud so it is fixed rather than silently ignored.
+  if (progress.total === 0) {
+    throw new Error(
+      `Hint bundle "${hintBundleId}" has no documents; it is missing or was fully removed. Attach a valid hint bundle or clear it before generating.`,
+    )
+  }
+
   if (progress.pending > 0) {
     throw new RetryableWorkerError(
       `Hint bundle "${hintBundleId}" still has ${progress.pending} of ${progress.total} document(s) awaiting extraction; deferring generation until extraction completes.`,
@@ -1387,14 +1397,19 @@ export async function buildClassifierHintFacts(
 
   const bundleFacts = await loadExtractedPendingPurchaseHintFactsForBundle(db, hintBundleId)
   if (bundleFacts.length === 0) {
-    // Every document reached a terminal state but none produced usable facts
-    // (extraction failed/skipped, or the stored payload no longer matches the
-    // contract). This is NOT the enqueue race — fail loud so the operator
-    // re-extracts or drops the bundle rather than silently losing the context
-    // they deliberately supplied.
-    throw new Error(
-      `Hint bundle "${hintBundleId}" has no extracted facts (documents: ${progress.total}, failed: ${progress.failed}, skipped: ${progress.skipped}). Re-run extraction or remove the bundle before generating.`,
+    // Every document reached a terminal state but none produced usable
+    // classifier facts — e.g. a glossary / acronym-expansion / free-text note
+    // the current product-fact extractor cannot represent
+    // (FreshlyBakedNYC/automation#69), or extraction failed/skipped. This is
+    // NOT the enqueue race. Rather than abort the operator's whole packet run,
+    // degrade gracefully: generate WITHOUT hint evidence and warn, so a hint
+    // that produced no usable facts can never block generation.
+    console.warn(
+      `[pending-purchase] Hint bundle "${hintBundleId}" produced no usable classifier facts ` +
+        `(documents: ${progress.total}, extracted: ${progress.extracted}, failed: ${progress.failed}, ` +
+        `skipped: ${progress.skipped}); generating without hint evidence.`,
     )
+    return []
   }
   if (bundleFacts.length > MAX_CLASSIFIER_HINT_FACTS) {
     throw new Error(
