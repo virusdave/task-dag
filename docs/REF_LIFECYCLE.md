@@ -2,8 +2,9 @@
 
 How the CLI and the issue-to-task workflows move a unit of work through
 the git-ref namespaces, including the cross-host **epic-root
-orchestration lock** that closes the root/leaf double-dispatch
-(`virusdave/task-dag#2`).
+orchestration lock** and born-claimed leaf handoff that close the
+root/leaf double-dispatch path (`virusdave/task-dag#2` and
+`virusdave/task-dag#3`).
 
 ## The namespaces
 
