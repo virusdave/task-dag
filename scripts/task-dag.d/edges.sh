@@ -10,10 +10,31 @@
 #   • the reader that parses the latest tree of the per-repo FF-only index
 #     branch refs/heads/tasks/v1/graph into the active edge set.
 #
-# The direct-CAS WRITER (dep add / drop), satisfied-edge pruning + tombstones,
-# the cross-repo mailbox, the reconciler, supersede, and the `graph --explain`
-# resolver are SEPARATE sibling tasks and are deliberately NOT implemented
-# here. Do not grow this module into them without their own reviews.
+# The direct-CAS WRITER (dep add / drop / prune) lives in edges-write.sh; the
+# satisfied-edge PRUNING + explicit TOMBSTONE *write* side lives in
+# edges-prune.sh. This module carries ONLY the data model + read side, which
+# now includes the tombstone blob serializer and tombstone-aware active-set
+# computation (the reader must know a tombstone masks an edge). The cross-repo
+# mailbox, the reconciler, supersede, and the `graph --explain` resolver are
+# SEPARATE sibling tasks and are deliberately NOT implemented here. Do not
+# grow this module into them without their own reviews.
+#
+# TOMBSTONES (schema v1, additive — issue #13 satisfied-edge-pruning sibling):
+#   A tombstone is an explicit, witnessed record that an edge was DELIBERATELY
+#   removed BEFORE it was satisfied, so a lost edge is distinguishable from an
+#   intentionally-dropped one. It is a SEPARATE blob at its OWN path
+#   `tombstones/<edge-id>.json` (never a `deleted`/`active` flag overloaded
+#   onto the edge blob), content-addressed by the SAME semantic edge-id as the
+#   edge it removes:
+#     { "schema":1, "tombstone":true,
+#       "from":<node>, "to":<node>, "relation":..., "mode":...,
+#       "origin":{ "repo-id":<n>, "witness":"<removal witness>" } }
+#   Active edge set = edges/<id>.json present AND tombstones/<id>.json ABSENT
+#   (tombstone WINS if both are present — remove-wins under the commutative
+#   union, so a racing re-add can never resurrect a tombstoned edge). A
+#   SATISFIED edge is instead PRUNED (plain FF tree deletion, no tombstone)
+#   because master's completion is the durable witness; only removal BEFORE
+#   satisfaction needs a tombstone.
 #
 # ─────────────────────────────────────────────────────────────────────
 # DATA MODEL (the durable contract the writer sibling must honour)
@@ -161,6 +182,66 @@ taskdag_edge_blob() {
           origin:{"repo-id":$repoid, witness:$witness}}'
 }
 
+# taskdag_tombstone_blob <from> <to> <relation> <mode> <repo-id> <witness>:
+# emit the canonical schema:1 TOMBSTONE blob JSON on stdout (compact, via jq).
+# Identical to an edge blob plus the discriminant `"tombstone":true`, so the
+# reader can tell a tombstone from an edge by content as well as by path. The
+# `origin.witness` is the REMOVAL witness (why/what removed the edge), not the
+# original edge's provenance. All fields are validated/canonicalized; a
+# malformed input fails loud so a corrupt tombstone can never be serialized.
+# The semantic edge-id of a tombstone is that of the edge it removes
+# (taskdag_edge_id from,to,relation,mode) — origin is excluded from the id,
+# so a re-tombstone with a different witness is idempotent on the same path.
+taskdag_tombstone_blob() {
+    local from to relation="$3" mode="$4" repo_id="$5" witness="$6"
+    from=$(taskdag_normalize_node "$1") || { echo "Error: invalid 'from' node: $1" >&2; return 1; }
+    to=$(taskdag_normalize_node "$2")   || { echo "Error: invalid 'to' node: $2" >&2; return 1; }
+    taskdag_relation_mode_ok "$relation" "$mode" || {
+        echo "Error: invalid relation/mode pair: ${relation}/${mode}" >&2
+        return 1
+    }
+    [[ "$repo_id" =~ ^[1-9][0-9]*$ ]] || { echo "Error: origin.repo-id must be a positive integer: $repo_id" >&2; return 1; }
+    [ -n "$witness" ] || { echo "Error: origin.witness must be non-empty" >&2; return 1; }
+    command -v jq >/dev/null 2>&1 || { echo "Error: jq is required to emit a tombstone blob" >&2; return 1; }
+    jq -nc \
+        --arg from "$from" --arg to "$to" \
+        --arg relation "$relation" --arg mode "$mode" \
+        --argjson repoid "$repo_id" --arg witness "$witness" \
+        '{schema:1, tombstone:true, from:$from, to:$to, relation:$relation, mode:$mode,
+          origin:{"repo-id":$repoid, witness:$witness}}'
+}
+
+# _taskdag_tombstone_edge_id <blob>: validate a STORED tombstone blob (typed
+# schema:1 structure with tombstone==true, fixed relation/mode, canonical
+# nodes at rest) and print its recomputed SEMANTIC edge-id. Returns non-zero
+# (no output) on any malformation. This is the reader's fail-closed tombstone
+# validator (mirrors the edge validation), so a corrupt tombstone can never
+# silently mask an edge.
+_taskdag_tombstone_edge_id() {
+    local blob="$1" jfrom jto jrel jmode cfrom cto
+    printf '%s' "$blob" | jq -e '
+          (type == "object")
+          and (.schema == 1) and ((.schema | type) == "number")
+          and (.tombstone == true)
+          and ((.from | type) == "string") and ((.to | type) == "string")
+          and ((.relation | type) == "string") and ((.mode | type) == "string")
+          and ((.origin | type) == "object")
+          and ((.origin["repo-id"] | type) == "number")
+          and (.origin["repo-id"] > 0)
+          and (.origin["repo-id"] == (.origin["repo-id"] | floor))
+          and ((.origin.witness | type) == "string") and ((.origin.witness | length) > 0)
+        ' >/dev/null 2>&1 || return 1
+    jfrom=$(printf '%s' "$blob" | jq -r '.from')
+    jto=$(printf '%s' "$blob" | jq -r '.to')
+    jrel=$(printf '%s' "$blob" | jq -r '.relation')
+    jmode=$(printf '%s' "$blob" | jq -r '.mode')
+    taskdag_relation_mode_ok "$jrel" "$jmode" || return 1
+    cfrom=$(taskdag_normalize_node "$jfrom") || return 1
+    cto=$(taskdag_normalize_node "$jto") || return 1
+    [ "$jfrom" = "$cfrom" ] && [ "$jto" = "$cto" ] || return 1
+    taskdag_edge_id "$cfrom" "$cto" "$jrel" "$jmode" || return 1
+}
+
 # taskdag_repo_config_key <owner/repo>: the git-config name under which a
 # repo's stable numeric id override/cache is stored. Uses the whole
 # (lowercased) owner/repo as the config SUBSECTION and a fixed `id` key —
@@ -269,15 +350,33 @@ taskdag_read_edges() {
     fi
 
     local mode type obj path base blob recomputed
-    local -a objs=()
-    # Snapshot the tree once. Only regular-file edges/<64hex>.json blobs are
-    # edges (reject non-blobs, symlinks/executables, and stray paths).
+    local -a objs=() obj_ids=()
+    local -A tomb=()
+    # Snapshot the tree once. Only regular-file edges/<64hex>.json and
+    # tombstones/<64hex>.json blobs are recognised (reject non-blobs,
+    # symlinks/executables, and stray paths). We collect edges AND tombstones
+    # in one pass and filter at emit time, so a tombstone masks its edge
+    # regardless of tree-order. Every edge blob is validated even when it is
+    # later masked by a tombstone — a tombstone must never hide corrupt graph
+    # content (fail closed).
     while read -r mode type obj path; do
         [ "$type" = blob ] || { echo "Error: ${TASKDAG_GRAPH_REF} tree entry '${path}' is a ${type}, expected a blob" >&2; return 1; }
         [ "$mode" = 100644 ] || { echo "Error: ${TASKDAG_GRAPH_REF} tree entry '${path}' has mode ${mode}, expected a regular file (100644)" >&2; return 1; }
+
+        # ── Tombstones: validate the blob, recompute its edge-id, and record
+        #    it as masking that edge. The filename edge-id MUST match.
         case "$path" in
+            tombstones/[0-9a-f]*.json)
+                base="${path#tombstones/}"; base="${base%.json}"
+                [[ "$base" =~ ^[0-9a-f]{64}$ ]] || { echo "Error: ${TASKDAG_GRAPH_REF} tombstone '${path}' has a malformed edge-id" >&2; return 1; }
+                blob=$(git cat-file blob "$obj" 2>/dev/null) || { echo "Error: could not read tombstone blob ${path}" >&2; return 1; }
+                recomputed=$(_taskdag_tombstone_edge_id "$blob") || { echo "Error: ${TASKDAG_GRAPH_REF} tombstone '${path}' is not a well-formed schema:1 tombstone blob" >&2; return 1; }
+                [ "$recomputed" = "$base" ] || { echo "Error: ${TASKDAG_GRAPH_REF} tombstone '${path}' content hashes to ${recomputed} — path/content edge-id mismatch (corrupt tombstone)" >&2; return 1; }
+                tomb["$base"]=1
+                continue
+                ;;
             edges/[0-9a-f]*.json) : ;;
-            *) echo "Error: ${TASKDAG_GRAPH_REF} tree has unexpected path '${path}' (only edges/<edge-id>.json allowed)" >&2; return 1 ;;
+            *) echo "Error: ${TASKDAG_GRAPH_REF} tree has unexpected path '${path}' (only edges/<edge-id>.json and tombstones/<edge-id>.json allowed)" >&2; return 1 ;;
         esac
         base="${path#edges/}"; base="${base%.json}"
         [[ "$base" =~ ^[0-9a-f]{64}$ ]] || { echo "Error: ${TASKDAG_GRAPH_REF} edge blob '${path}' has a malformed edge-id" >&2; return 1; }
@@ -331,7 +430,9 @@ taskdag_read_edges() {
 
         # Reserialize canonically (adds edgeId; normalizes field order + node
         # casing) so the emitted array is stable regardless of how the blob
-        # was written.
+        # was written. We stash the edge-id alongside so a tombstone found
+        # LATER in the tree (any order) can still mask this edge at emit time.
+        obj_ids+=("$base")
         objs+=("$(jq -nc \
             --arg edgeId "$base" --arg from "$cfrom" --arg to "$cto" \
             --arg relation "$jrel" --arg mode "$jmode" \
@@ -340,11 +441,21 @@ taskdag_read_edges() {
               origin:{"repo-id":$repoid, witness:$witness}}')")
     done < <(git ls-tree -r "${TASKDAG_GRAPH_REF}" 2>/dev/null)
 
+    # Filter out tombstoned edges (remove-wins): the ACTIVE set is every edge
+    # blob whose semantic id is NOT tombstoned. A tombstone with no surviving
+    # edge blob (the normal post-drop state) simply masks nothing.
+    local -a active=()
+    local i
+    for i in "${!objs[@]}"; do
+        [ -n "${tomb[${obj_ids[$i]}]:-}" ] && continue
+        active+=("${objs[$i]}")
+    done
+
     # Emit as one JSON array, sorted by edgeId for deterministic output.
-    if [ "${#objs[@]}" -eq 0 ]; then
+    if [ "${#active[@]}" -eq 0 ]; then
         printf '[]\n'
     else
-        printf '%s\n' "${objs[@]}" | jq -sc 'sort_by(.edgeId)'
+        printf '%s\n' "${active[@]}" | jq -sc 'sort_by(.edgeId)'
     fi
 }
 

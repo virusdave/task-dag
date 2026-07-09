@@ -150,10 +150,46 @@ floor for everything under `tasks/v1/*`:
   fast-forward-only and its graph commits parent only the previous graph-index
   commit (never task commits). Reading uses the **latest tree only**, not
   history.
-- **Schema v1 has no tombstones.** Active edges live only under `edges/`.
-  Satisfied-edge pruning and explicit tombstones are a **separate** reviewed
-  change (a later sibling task) and will use their own path; do not overload
-  the edge blob with `deleted`/`active` flags.
+- **Tombstones (schema v1, additive) + satisfied-edge pruning.** The tree may
+  additionally contain `tombstones/<edge-id>.json` blobs — explicit, witnessed
+  records that an edge was **deliberately removed BEFORE it was satisfied**, so
+  a lost edge is distinguishable from an intentionally-dropped one. A tombstone
+  is a **separate blob at its own path** (never a `deleted`/`active` flag
+  overloaded onto the edge blob), content-addressed by the **same** semantic
+  edge-id, with an added `"tombstone": true` discriminant and an
+  `origin.witness` that is the **removal** witness:
+  ```json
+  { "schema": 1, "tombstone": true,
+    "from": "<node>", "to": "<node>",
+    "relation": "requires" | "satisfies", "mode": "all" | "any",
+    "origin": { "repo-id": <n>, "witness": "<removal witness>" } }
+  ```
+  **Active edge set = `edges/<id>.json` present AND `tombstones/<id>.json`
+  absent** (tombstone **wins** if both are present — remove-wins under the
+  commutative union, so a racing re-add can never resurrect a tombstoned edge;
+  a tombstoned edge-id is **terminal** — `dep add` of it fails loud). A
+  **PRUNABLE** edge is instead **PRUNED** (plain FF deletion of
+  `edges/<id>.json`, **no** tombstone) because a durable completion witness on
+  `master` means re-deriving would just re-confirm the same active set.
+  Prunability is **relation-aware** (NOT simply `satisfied`/`done(to)`):
+  - a **`requires`** edge is prunable iff **`done(to)`** — the obligation is
+    permanently met;
+  - a **`satisfies`** edge is prunable iff **`done(from)`** — the DEPENDENT has
+    completed, so the supersede signal has been consumed and recorded on
+    `master`. A `satisfies` edge whose *target* is done is the **live**
+    supersede signal and must stay active until the dependent itself completes,
+    so it is **not** pruned then (the reconciler reads it to detect supersede).
+
+  `done()` is monotonic, so a pruned edge can never wrongly reappear. A plain
+  prune is **garbage-collection, not terminal** (unlike a tombstone): a
+  re-`dep add` of a plain-pruned edge-id succeeds. Note `dep add` does **not**
+  itself prune or reject a would-be-immediately-prunable edge — an edge records
+  a real dependency relationship the reconciler reads (a leaf with a satisfied
+  `requires` edge is ready-but-not-complete and must appear as an edge-source
+  node), so bounding the active set is the sole job of the explicit pruning
+  paths (`dep prune` / prunable `dep drop`), never of add. The reader validates
+  **every** edge and tombstone blob (a tombstone must never hide corrupt graph
+  content — fail closed).
 
 The read side + data-model helpers live in `scripts/task-dag.d/edges.sh`
 (`taskdag_edge_id`, `taskdag_edge_blob`, `taskdag_normalize_node`,
@@ -166,14 +202,27 @@ and the `dep add` / `dep drop` command): adding or removing an edge is a
 direct fast-forward push to `tasks/v1/graph` (the same ref-update CAS a
 completion merge uses), retried on contention with a jittered ~1s→~10s
 quadratic backoff and **failing loud** on retry-budget exhaustion. Both
-add and drop are idempotent; `dep drop` is an honest, witnessed FF tree
-deletion (schema v1 has **no tombstones** — see above). Satisfied-edge
-**pruning** + explicit **tombstones**, the reconciler, and the
-`graph --explain` resolver remain separate tasks. Golden fixtures for the
+add and drop are idempotent. `dep drop` is **prunability-aware** (relation-
+aware): it PRUNES a prunable edge (plain FF deletion — `done(to)` for a
+`requires` edge, `done(from)` for a `satisfies` edge is the durable witness on
+`master`) but writes an explicit **TOMBSTONE** (`tombstones/<edge-id>.json`,
+landed **atomically** with the edge removal in one compound FF commit) for a
+deliberate removal BEFORE the edge is prunable — never a silent tree deletion
+of a not-yet-prunable edge. The tombstone blob serializer + tombstone-aware
+reader masking live in `edges.sh`; the relation-aware prunability predicate +
+scan primitives (`_taskdag_edge_prunable`, `taskdag_prune_edge`,
+`taskdag_prune_satisfied`, and the `dep prune` command) live in
+`scripts/task-dag.d/edges-prune.sh`. The mailbox, the reconciler, and
+the `graph --explain` resolver remain separate tasks. Golden fixtures for the
 exemption + its shape invariant are in `tests/task-dag/validate-strict.sh`
-(TEST 11–15); the model/reader is unit-tested in `tests/task-dag/edges.sh`
-and the writer (backoff shape/cap/jitter/fail-loud, add/drop round-trip, and
-concurrent FF contention) in `tests/task-dag/edges-write.sh`.
+(TEST 11–15); the model/reader is unit-tested in `tests/task-dag/edges.sh`, the
+writer (backoff shape/cap/jitter/fail-loud, add/drop round-trip, and concurrent
+FF contention) in `tests/task-dag/edges-write.sh`, and pruning + tombstones
+(relation-aware prunable-edge prune, not-yet-prunable-removal tombstone,
+tombstone-survives-recompute, remove-wins masking, terminal re-add refusal vs
+plain-prune re-add allowed, add-to-done writes an active edge, fail-closed
+corruption, and `validate --strict` recognising the tombstone path)
+in `tests/task-dag/edges-prune.sh`.
 
 ### The cross-repo mailbox shards (`tasks/v1/mailbox/00..0f`)
 

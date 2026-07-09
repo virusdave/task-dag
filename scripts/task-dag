@@ -324,15 +324,18 @@ taskdag_is_graph_ref() {
 # taskdag_graph_tree_violations <commit-sha>: echo one human-readable line
 # per graph-index shape violation (nothing when well-formed). The graph
 # index tree may contain ONLY regular blobs named `edges/<64-hex>.json`
-# (the content-addressed active edge set). Any other path, a non-blob
-# entry, or a malformed edge-id filename is a violation. An empty tree
-# (zero edges) is valid. Never mutates anything; returns 0 always.
+# (the content-addressed active edge set) or `tombstones/<64-hex>.json`
+# (explicit witnessed removals — issue #13 satisfied-edge-pruning sibling).
+# Any other path, a non-blob entry, or a malformed edge-id filename is a
+# violation. An empty tree (zero edges) is valid. This checks tree SHAPE
+# only; the reader (taskdag_read_edges) is the content validator. Never
+# mutates anything; returns 0 always.
 taskdag_graph_tree_violations() {
     local sha="$1" mode type obj path
     while read -r mode type obj path; do
         [ -n "$type" ] || continue
         if [ "$type" != blob ]; then
-            echo "✗ ${TASKDAG_GRAPH_REF} tree entry '${path}' is a ${type}, expected a blob (edges/<edge-id>.json)"
+            echo "✗ ${TASKDAG_GRAPH_REF} tree entry '${path}' is a ${type}, expected a blob (edges/<edge-id>.json or tombstones/<edge-id>.json)"
             continue
         fi
         # A regular file only — reject symlinks (120000) and executables
@@ -349,8 +352,15 @@ taskdag_graph_tree_violations() {
                     echo "✗ ${TASKDAG_GRAPH_REF} edge blob '${path}' has a malformed edge-id (expected edges/<64-hex>.json)"
                 fi
                 ;;
+            tombstones/[0-9a-f]*.json)
+                # Same content-addressed edge-id shape for a tombstone.
+                local tbase="${path#tombstones/}"; tbase="${tbase%.json}"
+                if ! [[ "$tbase" =~ ^[0-9a-f]{64}$ ]]; then
+                    echo "✗ ${TASKDAG_GRAPH_REF} tombstone blob '${path}' has a malformed edge-id (expected tombstones/<64-hex>.json)"
+                fi
+                ;;
             *)
-                echo "✗ ${TASKDAG_GRAPH_REF} tree contains unexpected path '${path}' (only edges/<edge-id>.json blobs are allowed in schema v1)"
+                echo "✗ ${TASKDAG_GRAPH_REF} tree contains unexpected path '${path}' (only edges/<edge-id>.json and tombstones/<edge-id>.json blobs are allowed)"
                 ;;
         esac
     done < <(git ls-tree -r "$sha" 2>/dev/null)

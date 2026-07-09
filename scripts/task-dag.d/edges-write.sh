@@ -24,13 +24,17 @@
 #   start at 10s. If retries exhaust the attempt budget, FAIL LOUD rather
 #   than spin.
 #
-# Scope boundary (do not grow this module without the relevant sibling's own
-# review): satisfied-edge PRUNING + explicit TOMBSTONES are a SEPARATE
-# reviewed change (schema v1 has NO tombstones — see docs/INVARIANTS.md
-# "Schema v1 has no tombstones"), so `dep drop` here is an honest,
-# witnessed FF tree deletion of the edge blob, NOT a tombstone. The
-# cross-repo mailbox, the reconciler, `supersede`, and the `graph --explain`
-# resolver are also separate sibling tasks and are NOT implemented here.
+# Satisfied-edge PRUNING + explicit TOMBSTONES (issue #13 sibling) now live
+# alongside the writer: `dep drop` is satisfaction-AWARE — it PRUNES a
+# satisfied edge (plain FF deletion; master's completion is the durable
+# witness) but writes an explicit TOMBSTONE (tombstones/<edge-id>.json,
+# atomically with the edge removal) for a deliberate removal BEFORE
+# satisfaction, so a lost edge is distinguishable from an intentionally-
+# dropped one. The tombstone blob serializer + reader masking live in
+# edges.sh; the satisfied-edge scan/`dep prune` primitives live in
+# edges-prune.sh. The cross-repo mailbox, the reconciler, `supersede`, and
+# the `graph --explain` resolver are separate sibling tasks and are NOT
+# implemented here.
 #
 # Relies on the data-model + reader helpers in edges.sh (taskdag_edge_id,
 # taskdag_edge_blob, taskdag_normalize_node, taskdag_repo_numeric_id,
@@ -115,52 +119,92 @@ _taskdag_edge_blob_check() {
     taskdag_edge_id "$cfrom" "$cto" "$jrel" "$jmode" || return 1
 }
 
-# _taskdag_graph_recompute_tree <old-commit-or-empty> <op> <path> [<blobsha>]:
-# recompute the graph tree by applying ONE idempotent op to the tree of the
-# given old commit (empty ⇒ start from an empty tree). op ∈ add|remove.
+# _taskdag_graph_recompute_tree <old-commit-or-empty> <op> <path> <blobsha>
+#                               [<op> <path> <blobsha> ...]:
+# recompute the graph tree by applying ONE OR MORE idempotent ops to the tree
+# of the given old commit (empty ⇒ start from an empty tree), in a SINGLE
+# scratch index, so a compound change (e.g. add-tombstone + remove-edge) lands
+# atomically in one tree/commit — never as an observable two-step. Ops come in
+# triples; a <blobsha> is required for the *-add ops and ignored (pass "") for
+# remove. op ∈ add | tombstone-add | remove.
 # Prints the new tree object id. Uses a SCRATCH index (git mktree rejects
-# slashed paths) scoped to a subshell so GIT_INDEX_FILE never leaks. This is
-# the "recompute the new tree" step of the FF loop; because edge blobs are
-# content-addressed at edges/<edge-id>.json, applying the same op twice is a
-# no-op (idempotent) and applying ops in any order yields the same tree
-# (commutative union).
+# slashed paths) scoped to a subshell so GIT_INDEX_FILE never leaks. Because
+# blobs are content-addressed at <dir>/<edge-id>.json, applying the same op
+# twice is a no-op (idempotent) and applying ops in any order yields the same
+# tree (commutative union).
 _taskdag_graph_recompute_tree() {
-    local old="$1" op="$2" path="$3" blobsha="${4:-}"
+    local old="$1"; shift
     local gitdir idx tree
     gitdir=$(git rev-parse --git-dir) || return 1
     idx="${gitdir}/.taskdag-graph-cas.$$.index"
     rm -f "$idx"
+    # Ops MUST come in whole (op, path, blobsha) triples; a partial tuple is a
+    # caller bug — fail loud rather than silently drop an op.
+    if [ $(( $# % 3 )) -ne 0 ]; then
+        echo "Error: _taskdag_graph_recompute_tree needs ops in (op,path,blobsha) triples (got $# extra args)" >&2
+        rm -f "$idx"; return 1
+    fi
     tree=$(
         export GIT_INDEX_FILE="$idx"
         if [ -n "$old" ]; then
             git read-tree "${old}^{tree}" || exit 1
         fi
-        case "$op" in
-            add)
-                # Idempotent on the SEMANTIC path: if edges/<edge-id>.json is
-                # already present, leave the tree unchanged (a metadata-only
-                # re-add must NOT fork a new edge or churn the ref — the first
-                # writer's provenance is sticky; origin{} is not identity).
-                # But refuse a silent no-op over a CORRUPT existing edge: the
-                # authoritative writer must never report success on a path the
-                # reader would reject, so validate the stored blob first.
-                if git ls-files --cached --error-unmatch "$path" >/dev/null 2>&1; then
-                    existing=$(git cat-file blob ":${path}") || { echo "Error: could not read existing edge ${path}" >&2; exit 1; }
-                    ebase="${path#edges/}"; ebase="${ebase%.json}"
-                    recomputed=$(_taskdag_edge_blob_check "$existing") || {
-                        echo "Error: existing edge ${path} is corrupt / non-canonical; refusing to report a no-op add (fix or 'dep drop' it)" >&2; exit 1
-                    }
-                    [ "$recomputed" = "$ebase" ] || {
-                        echo "Error: existing edge ${path} content hashes to ${recomputed} (path/content mismatch); refusing to report a no-op add" >&2; exit 1
-                    }
-                    : # valid + semantically identical → idempotent no-op
-                else
-                    git update-index --add --cacheinfo "100644,${blobsha},${path}" || exit 1
-                fi
-                ;;
-            remove) git update-index --force-remove "$path" || exit 1 ;;
-            *) echo "Error: unknown graph op: $op" >&2; exit 1 ;;
-        esac
+        while [ $# -gt 0 ]; do
+            local op="$1" path="$2" blobsha="$3"; shift 3
+            case "$op" in
+                add)
+                    # Idempotent on the SEMANTIC path: if edges/<edge-id>.json
+                    # is already present, leave the tree unchanged (a
+                    # metadata-only re-add must NOT fork a new edge or churn the
+                    # ref — the first writer's provenance is sticky; origin{} is
+                    # not identity). But refuse a silent no-op over a CORRUPT
+                    # existing edge: the authoritative writer must never report
+                    # success on a path the reader would reject, so validate the
+                    # stored blob first. Also refuse to (re-)add an edge whose
+                    # id is TOMBSTONED — a deliberately-dropped edge is terminal
+                    # and must never be silently resurrected.
+                    local tpath="tombstones/${path#edges/}"
+                    if git ls-files --cached --error-unmatch "$tpath" >/dev/null 2>&1; then
+                        echo "Error: edge ${path} is TOMBSTONED (deliberately dropped); refusing to resurrect it — a new dependency must be re-established explicitly" >&2; exit 1
+                    fi
+                    if git ls-files --cached --error-unmatch "$path" >/dev/null 2>&1; then
+                        existing=$(git cat-file blob ":${path}") || { echo "Error: could not read existing edge ${path}" >&2; exit 1; }
+                        ebase="${path#edges/}"; ebase="${ebase%.json}"
+                        recomputed=$(_taskdag_edge_blob_check "$existing") || {
+                            echo "Error: existing edge ${path} is corrupt / non-canonical; refusing to report a no-op add (fix or 'dep drop' it)" >&2; exit 1
+                        }
+                        [ "$recomputed" = "$ebase" ] || {
+                            echo "Error: existing edge ${path} content hashes to ${recomputed} (path/content mismatch); refusing to report a no-op add" >&2; exit 1
+                        }
+                        : # valid + semantically identical → idempotent no-op
+                    else
+                        git update-index --add --cacheinfo "100644,${blobsha},${path}" || exit 1
+                    fi
+                    ;;
+                tombstone-add)
+                    # Sticky tombstone add (mirrors `add`): if the tombstone is
+                    # already present, leave it (idempotent on the semantic path
+                    # — a re-tombstone with a fresh removal witness must not
+                    # churn the ref), but refuse a silent no-op over a CORRUPT
+                    # existing tombstone the reader would reject.
+                    if git ls-files --cached --error-unmatch "$path" >/dev/null 2>&1; then
+                        existing=$(git cat-file blob ":${path}") || { echo "Error: could not read existing tombstone ${path}" >&2; exit 1; }
+                        tbase="${path#tombstones/}"; tbase="${tbase%.json}"
+                        recomputed=$(_taskdag_tombstone_edge_id "$existing") || {
+                            echo "Error: existing tombstone ${path} is corrupt / non-canonical; refusing to report a no-op" >&2; exit 1
+                        }
+                        [ "$recomputed" = "$tbase" ] || {
+                            echo "Error: existing tombstone ${path} content hashes to ${recomputed} (path/content mismatch); refusing to report a no-op" >&2; exit 1
+                        }
+                        : # valid + semantically identical → idempotent no-op
+                    else
+                        git update-index --add --cacheinfo "100644,${blobsha},${path}" || exit 1
+                    fi
+                    ;;
+                remove) git update-index --force-remove "$path" || exit 1 ;;
+                *) echo "Error: unknown graph op: $op" >&2; exit 1 ;;
+            esac
+        done
         git write-tree
     )
     local rc=$?
@@ -169,16 +213,23 @@ _taskdag_graph_recompute_tree() {
     printf '%s\n' "$tree"
 }
 
-# _taskdag_graph_cas <op> <path> <blobsha-or-empty> <commit-msg>:
-# the FF-only direct-CAS core shared by dep add / dep drop.
-#   op=add    -> ensure edges/<edge-id>.json (blobsha) is present
-#   op=remove -> ensure <path> is absent
+# _taskdag_graph_cas <commit-msg> <op> <path> <blobsha-or-empty>
+#                    [<op> <path> <blobsha-or-empty> ...]:
+# the FF-only direct-CAS core shared by dep add / dep drop / prune. Applies
+# one OR MORE ops in a SINGLE FF commit (see _taskdag_graph_recompute_tree),
+# so a compound change (tombstone + edge removal) is never observable as a
+# two-step "silent deletion" window.
+#   op=add           -> ensure edges/<edge-id>.json (blobsha) is present
+#   op=tombstone-add -> ensure tombstones/<edge-id>.json (blobsha) is present
+#   op=remove        -> ensure <path> is absent
 # Returns:
 #   0  applied (pushed + origin-confirmed) OR already in the desired state
 #      (idempotent no-op — nothing to push)
 #   1  failed loud (retry budget exhausted, transport error, or corruption)
+#   2  idempotent no-op (desired state already held; nothing pushed)
 _taskdag_graph_cas() {
-    local op="$1" path="$2" blobsha="$3" msg="$4"
+    local msg="$1"; shift
+    local -a ops=("$@")
     local attempt=0 old oldtree newtree newcommit push_output lease readback
 
     while :; do
@@ -200,7 +251,7 @@ _taskdag_graph_cas() {
         else
             oldtree="$EMPTY_TREE"
         fi
-        newtree=$(_taskdag_graph_recompute_tree "$old" "$op" "$path" "$blobsha") || {
+        newtree=$(_taskdag_graph_recompute_tree "$old" "${ops[@]}") || {
             echo "Error: failed to recompute ${TASKDAG_GRAPH_REF} tree" >&2; return 1
         }
 
@@ -281,6 +332,19 @@ taskdag_dep_add() {
     from=$(taskdag_normalize_node "$1") || { echo "Error: invalid 'from' node: $1" >&2; return 1; }
     to=$(taskdag_normalize_node "$2")   || { echo "Error: invalid 'to' node: $2" >&2; return 1; }
     eid=$(taskdag_edge_id "$from" "$to" "$relation" "$mode") || return 1
+
+    # NB: `dep add` deliberately does NOT prune or reject an edge whose
+    # completion witness already exists on master (a would-be-immediately-
+    # prunable edge). An edge records a real dependency RELATIONSHIP that the
+    # reconcile layer reads (e.g. a leaf with a satisfied `requires` edge is
+    # ready-but-not-complete, and must appear as an edge-source node); silently
+    # dropping it at add time would lose that membership. Bounding the active
+    # set is the sole job of the EXPLICIT pruning paths (`dep prune` /
+    # prunable `dep drop`), not of add. A concurrent prune re-deleting a just-
+    # added satisfied edge is harmless churn (completion is monotonic, prune is
+    # idempotent), not data loss. The one terminal case add DOES refuse is a
+    # TOMBSTONED edge-id (deliberate removal, remove-wins) — enforced in the CAS
+    # `add` op against the current graph tree, so a racing tombstone still wins.
     blob=$(taskdag_edge_blob "$from" "$to" "$relation" "$mode" "$repo_id" "$witness") || return 1
     blobsha=$(printf '%s' "$blob" | git hash-object -w --stdin) || { echo "Error: could not hash edge blob" >&2; return 1; }
     path="edges/${eid}.json"
@@ -298,7 +362,7 @@ Reason: ${reason}"
 
     # `|| rc=$?` (not `; rc=$?`) so a non-zero return under the CLI's `set -e`
     # is captured here instead of aborting the process (rc=2 is a valid no-op).
-    rc=0; _taskdag_graph_cas add "$path" "$blobsha" "$msg" || rc=$?
+    rc=0; _taskdag_graph_cas "$msg" add "$path" "$blobsha" || rc=$?
     case "$rc" in
         0) printf "${GREEN}✓ Added edge %s${RESET} (%s %s %s)\n" "${eid:0:12}" "$from" "$relation" "$to" ;;
         2) printf "${BLUE}• Edge %s already present${RESET} (idempotent no-op)\n" "${eid:0:12}"; return 0 ;;
@@ -306,25 +370,144 @@ Reason: ${reason}"
     esac
 }
 
-# taskdag_dep_drop <edge-id> [<reason>]: remove (idempotently) an edge from
-# this repo's graph index via the FF-only direct CAS. Schema v1 has NO
-# tombstones (see docs/INVARIANTS.md), so this is an honest, witnessed FF
-# tree deletion of edges/<edge-id>.json — not a tombstone (that is a separate
-# reviewed sibling task). Returns 0 on success (removed or already absent).
-taskdag_dep_drop() {
-    local eid="$1" reason="${2:-}" path msg rc
-    [[ "$eid" =~ ^[0-9a-f]{64}$ ]] || { echo "Error: dep drop needs a 64-hex edge-id (got: $eid)" >&2; return 1; }
-    path="edges/${eid}.json"
-    msg="Drop dependency edge ${eid:0:12}
+# _taskdag_graph_edge_tuple <eid>: read edges/<eid>.json from the LOCAL graph
+# ref tree, validate it exactly as the reader does, and print the TSV tuple
+#   <from>\t<to>\t<relation>\t<mode>\t<origin-repo-id>
+# needed to reconstruct a tombstone. Returns non-zero (no output) if the edge
+# blob is absent or corrupt. Assumes the caller synced the graph ref first.
+_taskdag_graph_edge_tuple() {
+    local eid="$1" blob recomputed
+    blob=$(git cat-file blob "${TASKDAG_GRAPH_REF}:edges/${eid}.json" 2>/dev/null) || return 1
+    recomputed=$(_taskdag_edge_blob_check "$blob") || return 1
+    [ "$recomputed" = "$eid" ] || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$(printf '%s' "$blob" | jq -r '.from')" \
+        "$(printf '%s' "$blob" | jq -r '.to')" \
+        "$(printf '%s' "$blob" | jq -r '.relation')" \
+        "$(printf '%s' "$blob" | jq -r '.mode')" \
+        "$(printf '%s' "$blob" | jq -r '.origin["repo-id"]')"
+}
 
-Edge-Id: ${eid}"
+# _taskdag_graph_has_path <path>: 0 iff <path> exists in the LOCAL graph tree.
+_taskdag_graph_has_path() {
+    git cat-file -e "${TASKDAG_GRAPH_REF}:$1" 2>/dev/null
+}
+
+# taskdag_dep_drop <edge-id> [<reason>]: remove an edge from this repo's graph
+# index (issue #13 satisfied-edge-pruning sibling). Removal is PRUNABILITY-
+# AWARE (never a silent tree deletion of a not-yet-prunable edge). Prunability
+# is relation-aware (see _taskdag_edge_prunable):
+#   • edge PRUNABLE on master        → PRUNE: plain FF deletion of
+#     edges/<edge-id>.json (master's completion is the durable witness, so no
+#     tombstone is needed). Prunable means done(TO) for a requires edge, or
+#     done(FROM) for a satisfies edge (NOT done(to) — a satisfies edge to a
+#     done target is the live supersede signal, kept until the dependent is
+#     done).
+#   • not yet prunable               → TOMBSTONE: one atomic FF commit that
+#     writes tombstones/<edge-id>.json AND removes edges/<edge-id>.json, so a
+#     deliberately-dropped edge is distinguishable from a lost one and can
+#     never be silently resurrected by a racing re-add (tombstone wins).
+#   • already tombstoned             → idempotent no-op success.
+#   • edge absent AND no tombstone   → FAIL LOUD: with only an edge-id we
+#     cannot reconstruct the tuple a tombstone needs, and a silent success
+#     would mask a lost edge.
+# Prunability is derived from master via the fact layer when available (the
+# full CLI always sources it); standalone (no fact layer) it conservatively
+# TOMBSTONES rather than prune, since pruning without a durable witness would
+# be an unwitnessed deletion.
+taskdag_dep_drop() {
+    local eid="$1" reason="${2:-}" msg rc
+    [[ "$eid" =~ ^[0-9a-f]{64}$ ]] || { echo "Error: dep drop needs a 64-hex edge-id (got: $eid)" >&2; return 1; }
+
+    local epath="edges/${eid}.json" tpath="tombstones/${eid}.json"
+
+    # Freshen the local graph ref so state routing (present? tombstoned?) is
+    # made against origin, not a stale local view. Fail closed on indeterminate
+    # transport (mirrors the reader/writer contract).
+    taskdag_sync_graph_ref || { echo "Error: could not sync ${TASKDAG_GRAPH_REF} from origin (indeterminate); refusing to route a drop against a possibly-stale view" >&2; return 1; }
+
+    # Already tombstoned → nothing to do (idempotent, terminal).
+    if _taskdag_graph_has_path "$tpath"; then
+        printf "${BLUE}• Edge %s already tombstoned${RESET} (idempotent no-op)\n" "${eid:0:12}"
+        return 0
+    fi
+
+    # Edge absent (and not tombstoned) → cannot reconstruct the tuple; fail loud.
+    if ! _taskdag_graph_has_path "$epath"; then
+        echo "Error: edge ${eid:0:12} is not present in ${TASKDAG_GRAPH_REF} (and is not tombstoned); nothing to drop — refusing to fabricate a tombstone for an unknown edge" >&2
+        return 1
+    fi
+
+    # Read the tuple we need for either path.
+    local tuple from to relation mode repoid
+    tuple=$(_taskdag_graph_edge_tuple "$eid") || { echo "Error: edge ${eid:0:12} is corrupt / non-canonical; cannot drop it safely" >&2; return 1; }
+    IFS=$'\t' read -r from to relation mode repoid <<<"$tuple"
+
+    # Route: PRUNABLE → prune; ANYTHING ELSE → tombstone. Prunability is
+    # relation-aware (see _taskdag_edge_prunable): a requires edge is prunable
+    # iff done(TO), a satisfies edge iff done(FROM) — NOT done(to), because a
+    # satisfies edge whose target is done is the LIVE supersede signal and must
+    # stay active until the DEPENDENT itself completes. Prune is the only
+    # unwitnessed action, so it requires a POSITIVE done fact on the witness
+    # node; a not-done or indeterminate (e.g. unresolvable current repo) answer,
+    # or an unavailable fact layer, conservatively TOMBSTONES — always safe (an
+    # explicit witnessed removal) and never an unwitnessed deletion. done() is
+    # monotonic, so even a stale positive is durable; the master sync below is a
+    # best-effort freshen (so a just-completed witness prunes cleanly rather
+    # than leaving a redundant tombstone), never fatal.
+    local prunable=false
+    if declare -F _taskdag_edge_prunable >/dev/null 2>&1; then
+        if declare -F taskdag_sync_master >/dev/null 2>&1; then
+            taskdag_sync_master || true
+        fi
+        _taskdag_edge_prunable "$relation" "$from" "$to" && prunable=true
+    fi
+
+    if [ "$prunable" = true ]; then
+        # PRUNE: the completion witness lives on master; a plain deletion is
+        # honest and bounded — re-deriving from master would just re-confirm it.
+        local witness
+        [ "$relation" = satisfies ] && witness="dependent ${from} done" || witness="target ${to} done"
+        msg="Prune dependency edge ${eid:0:12} (${witness})
+
+Edge-Id: ${eid}
+Relation: ${relation}
+Prune-Witness: ${witness}"
+        [ -n "$reason" ] && msg="${msg}
+Reason: ${reason}"
+        rc=0; _taskdag_graph_cas "$msg" remove "$epath" "" || rc=$?
+        case "$rc" in
+            0) printf "${GREEN}✓ Pruned edge %s${RESET} (%s)\n" "${eid:0:12}" "$witness" ;;
+            2) printf "${BLUE}• Edge %s not present${RESET} (idempotent no-op)\n" "${eid:0:12}"; return 0 ;;
+            *) return 1 ;;
+        esac
+        return 0
+    fi
+
+    # TOMBSTONE: deliberate removal BEFORE the completion witness exists. Build the tombstone
+    # blob from the edge's own tuple + a fresh removal witness (HEAD), and land
+    # it together with the edge removal in ONE atomic FF commit.
+    local witness tblob tblobsha
+    witness=$(git rev-parse --verify -q HEAD 2>/dev/null || true)
+    [ -n "$witness" ] || witness="dep-drop"
+    tblob=$(taskdag_tombstone_blob "$from" "$to" "$relation" "$mode" "$repoid" "$witness") || return 1
+    tblobsha=$(printf '%s' "$tblob" | git hash-object -w --stdin) || { echo "Error: could not hash tombstone blob" >&2; return 1; }
+    msg="Tombstone dependency edge ${eid:0:12}: ${from} ${relation} ${to}
+
+Edge-Id: ${eid}
+Tombstone: true
+From: ${from}
+To: ${to}
+Relation: ${relation}
+Mode: ${mode}
+Witness: ${witness}"
     [ -n "$reason" ] && msg="${msg}
 Reason: ${reason}"
 
-    rc=0; _taskdag_graph_cas remove "$path" "" "$msg" || rc=$?
+    rc=0; _taskdag_graph_cas "$msg" tombstone-add "$tpath" "$tblobsha" remove "$epath" "" || rc=$?
     case "$rc" in
-        0) printf "${GREEN}✓ Dropped edge %s${RESET}\n" "${eid:0:12}" ;;
-        2) printf "${BLUE}• Edge %s not present${RESET} (idempotent no-op)\n" "${eid:0:12}"; return 0 ;;
+        0) printf "${GREEN}✓ Tombstoned edge %s${RESET} (deliberate removal before satisfaction)\n" "${eid:0:12}" ;;
+        2) printf "${BLUE}• Edge %s already tombstoned${RESET} (idempotent no-op)\n" "${eid:0:12}"; return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -336,6 +519,7 @@ cmd_dep() {
     case "$sub" in
         add) _cmd_dep_add "$@" ;;
         drop) _cmd_dep_drop "$@" ;;
+        prune) _cmd_dep_prune "$@" ;;
         ""|--help|-h)
             cat <<'EOF'
 Usage:
@@ -343,6 +527,7 @@ Usage:
                    [--mode all|any] [--repo-id <n>] [--witness <id>]
                    [--reason "..."]
   task-dag dep drop <edge-id> [--reason "..."]
+  task-dag dep prune [<edge-id>] [--no-fetch]
 
 WRITE the active dependency-edge set to this repo's graph index branch
 refs/heads/tasks/v1/graph (issue #13 north-star) via a direct FF-only CAS
@@ -361,15 +546,22 @@ match the fixed pair.
 --reason   free text recorded in the graph commit message (durable history
            provenance), never in the edge blob.
 
-`dep drop` removes edges/<edge-id>.json (schema v1 has no tombstones); both
-add and drop are idempotent. On push contention the writer refetches,
-recomputes the commutative edge-set union, and re-pushes with a bounded
-quadratic backoff (~1s base + jitter ramping toward a ~10s cap); an
-exhausted retry budget fails loud. Requires jq + git.
+`dep drop` is PRUNABILITY-AWARE (relation-aware): if the edge is already
+prunable on master — done(TO) for a requires edge, done(FROM) for a satisfies
+edge — it PRUNES the edge (plain deletion of edges/<edge-id>.json — master's
+completion is the durable witness), otherwise it writes an explicit TOMBSTONE
+(tombstones/<edge-id>.json) atomically with the edge removal, so a deliberate
+removal before prunability is distinguishable from a lost edge and can never
+be silently resurrected. A tombstoned edge is terminal: `dep add` of the same
+edge-id fails loud. `dep prune` removes prunable edges (all active ones, or a
+single <edge-id>) — the bounded-set backstop. All are idempotent. On push
+contention the writer refetches, recomputes the commutative edge-set union,
+and re-pushes with a bounded quadratic backoff (~1s base + jitter ramping
+toward a ~10s cap); an exhausted retry budget fails loud. Requires jq + git.
 EOF
             return 0
             ;;
-        *) echo "Error: unknown 'dep' subcommand: $sub (expected add|drop)" >&2; return 2 ;;
+        *) echo "Error: unknown 'dep' subcommand: $sub (expected add|drop|prune)" >&2; return 2 ;;
     esac
 }
 

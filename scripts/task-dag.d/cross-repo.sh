@@ -359,7 +359,10 @@ cmd_delegate() {
     # child issue). The legacy delegated ref (above) still drives behavior;
     # the edge is the machine-readable dependency the reconciler will use.
     # Edge AFTER the legacy path so a failed edge leaves the safer legacy
-    # state; idempotent by edge-id so a re-run converges. delegate is
+    # state; idempotent by edge-id so a re-run converges — EXCEPT for an edge
+    # deliberately `dep drop`ped (tombstoned, terminal): delegate will not
+    # resurrect it (issue #13 anti-zombie-resurrection), only backfill a
+    # genuinely-absent (never-created / legacy-gap) edge. delegate is
     # inherently cross-repo, so the child issue's done() only becomes
     # derivable once the reconciler backstop delivers it (a later sibling).
     #

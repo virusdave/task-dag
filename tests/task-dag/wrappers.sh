@@ -77,6 +77,28 @@ has_edge()  { # <from> <to> <relation>
     "$TD" edges --json --no-fetch 2>/dev/null | jq -e --arg f "$1" --arg t "$2" --arg r "$3" \
         'any(.[]; .from==$f and .to==$t and .relation==$r)' >/dev/null 2>&1
 }
+# remove_edge_blob_only <edge-id>: forge a graph tree with ONLY edges/<id>.json
+# removed and NO tombstone written — i.e. the "edge was never created / lost"
+# (legacy-gap) state, distinct from a deliberate `dep drop` (which tombstones,
+# terminal). Do NOT use `dep drop` to simulate an absent edge: after the
+# tombstone feature (issue #13) drop means deliberate terminal removal, which
+# `dep add`/`delegate` must never resurrect. Refuses if a tombstone already
+# exists (that would not be a legacy gap).
+remove_edge_blob_only() { # <edge-id>
+    local eid="$1" tip idx tr nc
+    [[ "$eid" =~ ^[0-9a-f]{64}$ ]] || return 1
+    git cat-file -e "${GRAPH_REF}:edges/${eid}.json" 2>/dev/null || return 1
+    git cat-file -e "${GRAPH_REF}:tombstones/${eid}.json" 2>/dev/null && return 1
+    tip=$(git rev-parse "$GRAPH_REF") || return 1
+    idx="$ROOT/.graph-remove-${eid}.index"; rm -f "$idx"
+    GIT_INDEX_FILE="$idx" git read-tree "${tip}^{tree}" || { rm -f "$idx"; return 1; }
+    GIT_INDEX_FILE="$idx" git update-index --force-remove "edges/${eid}.json" || { rm -f "$idx"; return 1; }
+    tr=$(GIT_INDEX_FILE="$idx" git write-tree) || { rm -f "$idx"; return 1; }
+    rm -f "$idx"
+    nc=$(git commit-tree "$tr" -p "$tip" -m "test: remove edge blob only $eid") || return 1
+    git update-ref "$GRAPH_REF" "$nc" || return 1
+    git push -q origin "$GRAPH_REF"
+}
 
 FORTYc=$(printf 'c%.0s' {1..40})
 
@@ -263,11 +285,14 @@ else
     bad "D1 delegate did not mint the expected requires edge"
 fi
 
-# D2: BACKFILL — a legacy delegation that already exists must still get its
-# edge on a re-run (the early-return that skipped edge creation is removed).
-# Drop the edge, keep the legacy delegated ref, and re-run delegate.
+# D2: BACKFILL — a legacy delegation whose graph edge was NEVER created (a
+# legacy gap, pre-dating the edge feature) must still get its edge on a re-run
+# (the early-return that skipped edge creation is removed). Simulate the
+# legacy-gap state by removing ONLY edges/<id>.json with NO tombstone — do NOT
+# use `dep drop` here: after the tombstone feature (issue #13) drop means a
+# DELIBERATE terminal removal, which delegate must NOT resurrect (see D3).
 eid=$("$TD" edges --json --no-fetch 2>/dev/null | jq -r --arg f "$NEPIC" '.[] | select(.from==$f and .to=="issue:peer/repo#7") | .edgeId')
-"$TD" dep drop "$eid" >/dev/null 2>&1
+remove_edge_blob_only "$eid" >/dev/null 2>&1
 if has_edge "$NEPIC" "issue:peer/repo#7" requires; then
     bad "D2 setup: edge was not dropped"
 else
@@ -277,6 +302,20 @@ else
     else
         bad "D2 delegate did not backfill the edge on re-run"
     fi
+fi
+
+# D3: a DELIBERATE `dep drop` (which tombstones a not-yet-prunable edge — the
+# foreign child issue is never locally derivable ⇒ not prunable) is TERMINAL:
+# a later `delegate` re-run must NOT resurrect the tombstoned edge (defeats the
+# zombie-resurrection failure class, issue #13). Contrast D2's legacy gap.
+eid3=$("$TD" edges --json --no-fetch 2>/dev/null | jq -r --arg f "$NEPIC" '.[] | select(.from==$f and .to=="issue:peer/repo#7") | .edgeId')
+"$TD" dep drop "$eid3" >/dev/null 2>&1
+tombstoned_d3=no; git cat-file -e "${GRAPH_REF}:tombstones/${eid3}.json" 2>/dev/null && tombstoned_d3=yes
+"$TD" delegate --issue 100 --to "peer/repo#7" >/dev/null 2>&1
+if [ "$tombstoned_d3" = yes ] && ! has_edge "$NEPIC" "issue:peer/repo#7" requires; then
+    ok "D3 delegate does NOT resurrect a deliberately dropped (tombstoned) edge"
+else
+    bad "D3 tombstoned delegation edge was resurrected (tombstoned=$tombstoned_d3)"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"
