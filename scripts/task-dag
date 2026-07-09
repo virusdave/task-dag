@@ -1529,6 +1529,16 @@ COMMANDS:
                            not-complete + requires satisfied + unclaimed +
                            unblocked. Read-only; --json/--no-fetch/--node/
                            --ready. Never writes; live wiring is separate.
+    propagate-completion   MUTATE graph convergence for one durable completion:
+                           fold same-repo satisfied edges, synth-complete a
+                           superseded local leaf, cascade, and optionally send
+                           cross-repo mailbox hints. --node/--witness.
+    reconcile-backstop     MUTATE periodic graph convergence: consume mailbox
+                           hints, then re-derive satisfied local graph edges
+                           from master (including configured peer worktrees).
+    graph-converge         Push-reaction entry point: scan a pushed range for
+                           completion facts, propagate them, then run the
+                           backstop once. --range <git-range>.
     mailbox put|list|consume
                            Cross-repo NOTIFICATION transport (bounded 16-shard
                            set tasks/v1/mailbox/00..0f). put enqueues a hint;
@@ -7234,6 +7244,9 @@ main() {
         edges) cmd_edges "$@" ;;
         facts) cmd_facts "$@" ;;
         reconcile) cmd_reconcile "$@" ;;
+        propagate-completion) cmd_propagate_completion "$@" ;;
+        reconcile-backstop) cmd_reconcile_backstop "$@" ;;
+        graph-converge) cmd_graph_converge "$@" ;;
         dep) cmd_dep "$@" ;;
         mailbox) cmd_mailbox "$@" ;;
         supersede) cmd_supersede "$@" ;;

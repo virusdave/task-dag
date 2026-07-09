@@ -33,6 +33,9 @@ name: Task-DAG
 # shared task-dag GitHub App). Exact steps: docs/SECRETS.md.
 
 on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
   issues:
     types: [opened, reopened, edited]
   issue_comment:
@@ -107,6 +110,15 @@ jobs:
       issues: write
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}
+
+  graph-converge:
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    uses: virusdave/task-dag/.github/workflows/graph-converge.yml@master
+    permissions:
+      contents: write
+    with:
+      base_sha: ${{ github.event_name == 'push' && github.event.before || '' }}
+      head_sha: ${{ github.event_name == 'push' && github.sha || '' }}
 
   completion-aggregate:
     if: ${{ github.event_name == 'push' }}
