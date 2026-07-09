@@ -316,7 +316,46 @@ agenix infra** (same shape as the existing automation read key and the
 `helios-parser-configs` write key), **not a pending operator decision**.
 It belongs in the follow-up `top-level` task (see "Remaining work" #1).
 
-## Remaining work (proposed follow-up tasks — NOT created by this leaf)
+## Final status (2026-07 — all follow-ups shipped; #57 closed)
+
+> **What kept `#57` open, and why it is now closed.** Every acceptance
+> item of `#57` (review-queue page, admin-gated navbar entry, escalating
+> dismissable reminder, backlog wired to the real store, promote-to-advisory
+> button) shipped. The GitHub issue lingered open only because of a
+> task-dag **bookkeeping remnant**: the epic's last implementation leaf
+> `0d07aed` ("Wire Helios agent-waste backlog to the real store") had its
+> scope moved into a *separate* child epic under parent `top-level#34`
+> ([automation#60](https://github.com/FreshlyBakedNYC/automation/issues/60),
+> the explicit "re-scope of `0d07aed`"), which landed the real work on
+> `master` but linked those commits to `#60`'s leaves — never back to
+> `0d07aed`. A decomposed epic auto-closes only once **all** its leaves are
+> completed, so the unlinked-but-done `0d07aed` (plus this very operator
+> question, ingested as leaf `4cf087e`) held `#57` open. None of the
+> standard closers fit that shape (`complete` had no commit to attach;
+> `close-epic` saw no delegated children; `close-ops-epic` refuses a
+> decomposed root).
+>
+> **Resolution:** `0d07aed` was linked to its already-landed implementation
+> (`helios: wire setBacklogReader()…`, commit `92cffc4`) via the sanctioned
+> `task-dag complete-historical` recovery path (audit link commit +
+> operator page), and this operator-comment leaf was completed, which fired
+> the `Closes-Epic: #57` merge. Shipped work by owning repo:
+>
+> | # | Repo | Deliverable | Landed as |
+> |---|------|-------------|-----------|
+> | 1 | `top-level` | `agent-waste-backlog` file format + agenix read/write keys (D2/D3) | [top-level#39](https://github.com/virusdave/top-level/issues/39) (closed) |
+> | 2 | `github-worker` | backlog exporter (pull-rebase-retry) | [github-worker#4](https://github.com/Nicponskis/github-worker/issues/4) (closed) |
+> | 3 | `automation`/Helios | 2nd read-only `top-level` mirror + wire `setBacklogReader()` (re-scope of `0d07aed`) | [automation#60](https://github.com/FreshlyBakedNYC/automation/issues/60) (closed); commits `4c2598d`, `92cffc4` |
+> | 4 | `automation`/Helios | promote-to-advisory admin button | [automation#61](https://github.com/FreshlyBakedNYC/automation/issues/61) (closed) |
+> | — | `automation`/Helios | retarget mirror/reader/promote/client from `top-level` to `agent-pain-points` | [automation#64](https://github.com/FreshlyBakedNYC/automation/issues/64) (closed) |
+>
+> The task-creation gap that had stranded these follow-ups was itself fixed
+> canonically in the tooling — [task-dag#6](https://github.com/virusdave/task-dag/issues/6)
+> (closed). Item 5 below (in-Helios LLM draft-assist) remains a separately
+> tracked enhancement under parent `top-level#34`, not an acceptance item of
+> `#57`.
+
+## Remaining work (historical — now shipped; see "Final status" above)
 
 This comment was handled by a single frontier-leaf worker, which may not
 `breakdown` the epic (canon: `rules/WORKFLOW.md`). The decomposition below
@@ -375,5 +414,8 @@ routine infra provisioning, needing **no further operator input**:
 > Note: because the parent epic `top-level#34` lives in `top-level` (which
 > already has a working materialise workflow), the four child epics are **not**
 > blocked on that migration — they can be materialised today from a `top-level`
-> `master` commit carrying the trailers. Until they exist, leaf `0d07aed`
-> stays parked `--downstream` (not operator-blocked) awaiting #1/#2 above.
+> `master` commit carrying the trailers.
+>
+> **Update (2026-07):** those child epics were created and completed (see the
+> "Final status" table above); leaf `0d07aed` is no longer parked — its work
+> is linked and `#57` is closed.
