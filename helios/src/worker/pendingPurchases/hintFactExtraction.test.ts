@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   PendingPurchaseHintExtractedFactsSchema,
@@ -9,6 +9,17 @@ import {
   inferHintIntentFromKind,
   tryParseSweedPurchaseOrderJson,
 } from './hintFactExtraction.js'
+
+// Mutable env the mocked getWorkerEnv returns; reset before each LLM test.
+const mockEnv = {
+  bedrockMantleBaseUrl: 'https://gateway.test/v1',
+  bedrockMantleBearerToken: 'token-test' as string | null,
+  llmRequestTimeoutMs: 120_000,
+}
+
+vi.mock('../config/env.js', () => ({
+  getWorkerEnv: () => mockEnv,
+}))
 
 // A representative Sweed `store.purchase.order.get` position.
 function sweedPosition(index: number) {
@@ -295,5 +306,179 @@ describe('PendingPurchaseHintFactSchema contract guards', () => {
         citation: { ...baseFact.citation, lineStart: 3, lineEnd: null },
       }),
     ).toThrow()
+  })
+})
+
+describe('extractPendingPurchaseHintFacts — LLM glossary extraction', () => {
+  beforeEach(() => {
+    mockEnv.bedrockMantleBearerToken = 'token-test'
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  // The orchestrator makes two LLM calls: intent classification (user payload
+  // has {documentKind, hintDocument}) then fact extraction (user payload has
+  // {numberedLines}). Route each to the right canned response by payload shape.
+  function stubExtractionFetch(
+    extractionBody: unknown,
+    intent: string = 'free_text_description',
+  ) {
+    const fetchMock = vi.fn(async (_url: unknown, init: { body: string }) => {
+      const request = JSON.parse(init.body) as { messages: Array<{ content: string }> }
+      const userPayload = JSON.parse(request.messages[1]?.content ?? '{}') as Record<string, unknown>
+      const responseBody = 'numberedLines' in userPayload ? extractionBody : { intent }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify(responseBody) } }] }),
+        { headers: { 'content-type': 'application/json' }, status: 200 },
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('persists a glossary-only doc as extracted with cited glossary evidence and zero product facts', async () => {
+    stubExtractionFetch({
+      facts: [],
+      glossary: [
+        { term: 'PR', expansion: 'Preroll', note: 'vendor abbreviation', lineStart: 1, lineEnd: 1 },
+        {
+          term: 'METRC',
+          expansion: 'Marijuana Enforcement Tracking Reporting Compliance',
+          note: null,
+          lineStart: 2,
+          lineEnd: 2,
+        },
+      ],
+      warnings: [],
+    })
+
+    const outcome = await extractPendingPurchaseHintFacts({
+      hintDocumentId: 'pphdoc_2026-06-21_000000_111111',
+      kind: 'operator_note',
+      rawText: 'PR = Preroll\nMETRC = Marijuana Enforcement Tracking Reporting Compliance',
+    })
+
+    expect(outcome.extractionStatus).toBe('extracted')
+    expect(outcome.extractionError).toBeNull()
+    const facts = outcome.extractedFacts!
+    expect(facts.extractor).toBe('llm')
+    // A glossary-only document carries evidence, not zero (it is no longer lost).
+    expect(facts.facts).toHaveLength(0)
+    expect(facts.glossaryEntries).toHaveLength(2)
+
+    const [pr, metrc] = facts.glossaryEntries
+    expect(pr!.factId).toBe('f1')
+    expect(pr!.term).toBe('PR')
+    expect(pr!.expansion).toBe('Preroll')
+    expect(pr!.note).toBe('vendor abbreviation')
+    // Snippet is derived SERVER-SIDE from the cited source lines.
+    expect(pr!.citation.snippet).toBe('PR = Preroll')
+    expect(pr!.citation.lineStart).toBe(1)
+    expect(pr!.citation.lineEnd).toBe(1)
+    expect(metrc!.factId).toBe('f2')
+    expect(metrc!.expansion).toBe('Marijuana Enforcement Tracking Reporting Compliance')
+
+    // Round-trips through the persisted contract.
+    expect(() => PendingPurchaseHintExtractedFactsSchema.parse(facts)).not.toThrow()
+  })
+
+  it('drops glossary entries with a missing or out-of-range citation', async () => {
+    stubExtractionFetch({
+      facts: [],
+      glossary: [
+        { term: 'PR', expansion: 'Preroll', note: null, lineStart: 1, lineEnd: 1 },
+        // Out-of-range line (the doc has a single line) → dropped, not invented.
+        { term: 'FL', expansion: 'Flower', note: null, lineStart: 99, lineEnd: 99 },
+        // No citation at all → dropped.
+        { term: 'GG', expansion: 'Gorilla Glue', note: null, lineStart: null, lineEnd: null },
+      ],
+      warnings: [],
+    })
+
+    const outcome = await extractPendingPurchaseHintFacts({
+      hintDocumentId: 'pphdoc_2026-06-21_000000_222222',
+      kind: 'operator_note',
+      rawText: 'PR = Preroll',
+    })
+
+    expect(outcome.extractionStatus).toBe('extracted')
+    const facts = outcome.extractedFacts!
+    expect(facts.glossaryEntries).toHaveLength(1)
+    expect(facts.glossaryEntries[0]!.term).toBe('PR')
+    expect(facts.warnings.join(' ')).toMatch(/glossary entry\(ies\) dropped for missing\/out-of-range/i)
+  })
+
+  it('drops a glossary entry that lacks a term or an expansion', async () => {
+    stubExtractionFetch({
+      facts: [],
+      glossary: [
+        // Blank expansion normalizes to null → dropped (no inferred expansion).
+        { term: 'PR', expansion: '', note: null, lineStart: 1, lineEnd: 1 },
+        // Blank term → dropped.
+        { term: '', expansion: 'Flower', note: null, lineStart: 1, lineEnd: 1 },
+      ],
+      warnings: [],
+    })
+
+    const outcome = await extractPendingPurchaseHintFacts({
+      hintDocumentId: 'pphdoc_2026-06-21_000000_444444',
+      kind: 'operator_note',
+      rawText: 'PR = Preroll',
+    })
+
+    expect(outcome.extractionStatus).toBe('extracted')
+    expect(outcome.extractedFacts!.glossaryEntries).toHaveLength(0)
+    expect(outcome.extractedFacts!.facts).toHaveLength(0)
+    expect(outcome.extractedFacts!.warnings.join(' ')).toMatch(/missing term\/expansion/i)
+  })
+
+  it('extracts a mixed product + glossary doc sharing one fN id namespace', async () => {
+    stubExtractionFetch(
+      {
+        facts: [{ itemName: 'Blue Dream Preroll', quantity: 24, quantityBasis: 'ordered_units', lineStart: 2, lineEnd: 2 }],
+        glossary: [{ term: 'PR', expansion: 'Preroll', note: null, lineStart: 1, lineEnd: 1 }],
+        warnings: [],
+      },
+      'canonical_sku_list',
+    )
+
+    const outcome = await extractPendingPurchaseHintFacts({
+      hintDocumentId: 'pphdoc_2026-06-21_000000_333333',
+      kind: 'distributor_menu',
+      rawText: 'PR = Preroll\nBlue Dream PR x24',
+    })
+
+    expect(outcome.extractionStatus).toBe('extracted')
+    const facts = outcome.extractedFacts!
+    expect(facts.facts).toHaveLength(1)
+    expect(facts.facts[0]!.factId).toBe('f1')
+    expect(facts.facts[0]!.itemName).toBe('Blue Dream Preroll')
+    expect(facts.glossaryEntries).toHaveLength(1)
+    // Glossary ids CONTINUE the product-fact namespace so a cited id is unique.
+    expect(facts.glossaryEntries[0]!.factId).toBe('f2')
+    expect(facts.glossaryEntries[0]!.citation.snippet).toBe('PR = Preroll')
+
+    // The unique-across-both-namespaces contract invariant holds.
+    expect(() => PendingPurchaseHintExtractedFactsSchema.parse(facts)).not.toThrow()
+  })
+
+  it('extracts an empty glossary when the doc defines no abbreviations', async () => {
+    stubExtractionFetch({
+      facts: [{ itemName: 'Blue Dream 3.5g', lineStart: 1, lineEnd: 1 }],
+      glossary: [],
+      warnings: [],
+    })
+
+    const outcome = await extractPendingPurchaseHintFacts({
+      hintDocumentId: 'pphdoc_2026-06-21_000000_555555',
+      kind: 'distributor_menu',
+      rawText: 'Blue Dream 3.5g',
+    })
+
+    expect(outcome.extractionStatus).toBe('extracted')
+    expect(outcome.extractedFacts!.facts).toHaveLength(1)
+    expect(outcome.extractedFacts!.glossaryEntries).toEqual([])
   })
 })
