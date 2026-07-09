@@ -1430,6 +1430,11 @@ COMMANDS:
                            per-repo graph index branch tasks/v1/graph
                            (read-only plumbing; --json/--no-fetch). Writers,
                            pruning, and reconciliation are separate commands.
+    facts                  READ derived done/satisfied facts from master's
+                           completion history (in-memory, zero per-fact refs):
+                           done(node) + satisfied(edge)=done(.to). Read-only
+                           plumbing; --json/--no-fetch/--node. Readiness,
+                           closure, and supersede are separate commands.
     comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
@@ -7058,6 +7063,7 @@ main() {
         drop) cmd_drop "$@" ;;
         reconcile-closed-issue) cmd_reconcile_closed_issue "$@" ;;
         edges) cmd_edges "$@" ;;
+        facts) cmd_facts "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;

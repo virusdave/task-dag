@@ -149,6 +149,38 @@ command). The direct-CAS **writer**, pruning, mailbox, reconciler, and the
 exemption + its shape invariant are in `tests/task-dag/validate-strict.sh`
 (TEST 11–14) and the model/reader is unit-tested in `tests/task-dag/edges.sh`.
 
+### Derived facts (`done` / `satisfied`) — in-memory, ZERO per-fact refs
+
+The two primitive facts the dependency graph reasons over are **derived**
+from `master`'s completion history and cached **in memory** for the life of
+one process — **never** one-ref-per-fact (this is what keeps the live
+mirrored ref count `O(open work)`, not `O(total history)`):
+
+- `done(node)` is authoritative from **this repo's** master history and is
+  **scoped to the current repo** (a node's identity is `owner/repo` +
+  object-id, and local history is authoritative only for the current repo):
+  a `task:<cur-repo>@<sha>` is done ⟺ `<sha>` appears as a parent-field
+  token of a commit reachable from the master tip **and** is an empty-tree
+  task commit (mirrors the tool's authoritative `task_is_completed_at_commit`
+  semantics, with an empty-tree guard so an implementation SHA — a first
+  parent — is never mistaken for a completed task); an `issue:<cur-repo>#<N>`
+  is done ⟺ a merge reachable from the tip carries a `Closes-Epic: #<N>`
+  **trailer** (parsed as a git trailer, so body prose cannot forge it). A
+  **foreign** node (repo ≠ current) is not locally derivable ⇒ not done here
+  (the cross-repo hint/backstop siblings carry those).
+- `satisfied(edge) = done(edge.to)` for **both** relations. The
+  `requires`=all (readiness) vs `satisfies`=any (supersede) **propagation**
+  is the reconciler sibling's job — the fact layer emits only the edge-local
+  boolean.
+
+The cache is keyed on the **resolved tip OID**, so a fetch / `complete` /
+HEAD move in the same process transparently re-derives (idempotent +
+monotonic). This layer lives in `scripts/task-dag.d/facts.sh`
+(`taskdag_load_facts`, `taskdag_node_done`, `taskdag_edges_with_facts`, and
+the read-only `facts` command); it is unit-tested in
+`tests/task-dag/facts.sh`. It computes **raw facts only** — leaf readiness,
+epic closure, and supersede propagation are separate reviewed tasks.
+
 ---
 
 ## Per-kind commit shapes (the deeper contract)
