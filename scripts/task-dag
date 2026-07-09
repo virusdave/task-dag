@@ -1539,6 +1539,9 @@ COMMANDS:
     graph-converge         Push-reaction entry point: scan a pushed range for
                            completion facts, propagate them, then run the
                            backstop once. --range <git-range>.
+    migrate-legacy-edges   Backfill legacy dependency encodings (extra task
+                           parents, delegated refs, explicit downstream /
+                           supersede node fields) into tasks/v1/graph.
     mailbox put|list|consume
                            Cross-repo NOTIFICATION transport (bounded 16-shard
                            set tasks/v1/mailbox/00..0f). put enqueues a hint;
@@ -7247,6 +7250,7 @@ main() {
         propagate-completion) cmd_propagate_completion "$@" ;;
         reconcile-backstop) cmd_reconcile_backstop "$@" ;;
         graph-converge) cmd_graph_converge "$@" ;;
+        migrate-legacy-edges) cmd_migrate_legacy_edges "$@" ;;
         dep) cmd_dep "$@" ;;
         mailbox) cmd_mailbox "$@" ;;
         supersede) cmd_supersede "$@" ;;

@@ -224,6 +224,15 @@ plain-prune re-add allowed, add-to-done writes an active edge, fail-closed
 corruption, and `validate --strict` recognising the tombstone path)
 in `tests/task-dag/edges-prune.sh`.
 
+`task-dag migrate-legacy-edges` is the one-time/idempotent compatibility
+bridge from historical encodings into this graph: it reads legacy extra task
+parents, `tasks/delegated/*` refs, and explicit canonical node fields in
+downstream/supersede metadata, then writes ordinary edges through `dep add`.
+It does **not** mutate legacy refs or task history. Rollback for a bad
+migration is therefore bounded and clean: stop reading the graph, or delete /
+revert only `refs/heads/tasks/v1/graph`; never rewrite task commits to undo a
+legacy-edge migration.
+
 ### The cross-repo mailbox shards (`tasks/v1/mailbox/00..0f`)
 
 Cross-repo notification delivery (issue #13 Phase 3) uses a **bounded** set
