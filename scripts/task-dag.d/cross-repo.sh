@@ -302,49 +302,85 @@ cmd_delegate() {
     fi
     rm -f "$body_file" "$updated_body_file"
 
-    # Idempotency: existing delegated ref → nothing to do.
-    if git rev-parse --verify "$delegated_ref" >/dev/null 2>&1; then
-        _xrepo_log "delegate already present: ${delegated_ref}"
-        return 0
-    fi
+    # Idempotency: ensure the legacy delegated ref is durable ON ORIGIN (origin
+    # is authoritative — legacy close-epic gates on it), then ALWAYS fall
+    # through to the dual-write edge below so an existing legacy delegation
+    # still backfills the graph edge on a re-run (`dep add` is idempotent by
+    # edge-id). Origin-first ordering means a prior run that created the local
+    # ref but failed to push it is repaired here (the local-only branch pushes
+    # it) instead of silently writing the edge against a non-durable legacy
+    # state.
     if git ls-remote origin "$delegated_ref" | grep -q .; then
-        # Fetch and reuse the remote one.
+        # Origin has it — adopt locally (a no-op if already equal).
         git fetch origin "$delegated_ref":"$delegated_ref" >/dev/null 2>&1
         _xrepo_log "delegate already present on origin: ${delegated_ref}"
-        return 0
+    elif git rev-parse --verify "$delegated_ref" >/dev/null 2>&1; then
+        # Local-only ref (a prior push failed): make it durable on origin now.
+        git push origin "$delegated_ref"
+        _xrepo_log "delegate: pushed pre-existing local delegated ref ${delegated_ref}"
+    else
+        # Create empty-tree delegated metadata commit parented to current epic.
+        local empty_tree
+        empty_tree="$(_xrepo_empty_tree)"
+
+        local msg_file
+        msg_file="$(mktemp)"
+        {
+            printf 'kind: delegated\n'
+            printf 'role: system\n'
+            printf 'intent: delegated-child\n'
+            printf '\n'
+            printf 'issue:\n'
+            printf '  repo: %s\n' "$top_repo"
+            printf '  number: %s\n' "$top_issue"
+            printf '\n'
+            printf 'delegated:\n'
+            printf '  repo: %s/%s\n' "$XREPO_OWNER" "$XREPO_REPO"
+            printf '  number: %s\n' "$XREPO_ISSUE"
+            if [ -n "$note" ]; then
+                printf '  note: %s\n' "$note"
+            fi
+        } > "$msg_file"
+
+        local delegation_sha
+        delegation_sha="$(git commit-tree "$empty_tree" -p "$epic_sha" -F "$msg_file")"
+        rm -f "$msg_file"
+
+        git update-ref "$delegated_ref" "$delegation_sha"
+        git push origin "$delegated_ref"
+        _xrepo_log "created delegated task ${delegation_sha}"
+        _xrepo_log "pushed ${delegated_ref}"
     fi
 
-    # Create empty-tree delegated metadata commit parented to current epic.
-    local empty_tree
-    empty_tree="$(_xrepo_empty_tree)"
-
-    local msg_file
-    msg_file="$(mktemp)"
-    {
-        printf 'kind: delegated\n'
-        printf 'role: system\n'
-        printf 'intent: delegated-child\n'
-        printf '\n'
-        printf 'issue:\n'
-        printf '  repo: %s\n' "$top_repo"
-        printf '  number: %s\n' "$top_issue"
-        printf '\n'
-        printf 'delegated:\n'
-        printf '  repo: %s/%s\n' "$XREPO_OWNER" "$XREPO_REPO"
-        printf '  number: %s\n' "$XREPO_ISSUE"
-        if [ -n "$note" ]; then
-            printf '  note: %s\n' "$note"
+    # DUAL-WRITE (issue #13 north-star): a delegation is a `requires` edge —
+    # the parent epic REQUIRES the delegated child issue to complete. Mint it
+    # in this repo's graph index tasks/v1/graph (from = the epic task-root
+    # commit, which the reconcile predicate treats as the EPIC node; to = the
+    # child issue). The legacy delegated ref (above) still drives behavior;
+    # the edge is the machine-readable dependency the reconciler will use.
+    # Edge AFTER the legacy path so a failed edge leaves the safer legacy
+    # state; idempotent by edge-id so a re-run converges. delegate is
+    # inherently cross-repo, so the child issue's done() only becomes
+    # derivable once the reconciler backstop delivers it (a later sibling).
+    #
+    # FAIL CLOSED: only write the edge once the legacy delegated ref is proven
+    # durable on origin. Otherwise a failed legacy push would leave a durable
+    # edge asserting a delegation that legacy close-epic cannot see — a
+    # second-source-of-truth split. A re-run converges (origin-first branch
+    # above adopts/pushes the ref, then the edge is written).
+    if ! git ls-remote --exit-code origin "$delegated_ref" >/dev/null 2>&1; then
+        _xrepo_log "WARNING: legacy delegated ref is not durable on origin (push may have failed); skipping the dependency edge write — re-run 'task-dag delegate' to converge"
+        return 5
+    fi
+    if declare -F _cmd_dep_add >/dev/null 2>&1; then
+        local from_node="task:${top_repo}@${epic_sha}"
+        local to_node="issue:${XREPO_OWNER}/${XREPO_REPO}#${XREPO_ISSUE}"
+        if ! _cmd_dep_add --from "$from_node" --to "$to_node" --relation requires \
+                --reason "delegate: ${top_repo}#${top_issue} requires child ${XREPO_OWNER}/${XREPO_REPO}#${XREPO_ISSUE}"; then
+            _xrepo_log "WARNING: legacy delegation recorded, but the dependency edge write failed; re-run 'task-dag delegate' to converge (idempotent)"
+            return 5
         fi
-    } > "$msg_file"
-
-    local delegation_sha
-    delegation_sha="$(git commit-tree "$empty_tree" -p "$epic_sha" -F "$msg_file")"
-    rm -f "$msg_file"
-
-    git update-ref "$delegated_ref" "$delegation_sha"
-    git push origin "$delegated_ref"
-    _xrepo_log "created delegated task ${delegation_sha}"
-    _xrepo_log "pushed ${delegated_ref}"
+    fi
 }
 
 # Helper: parse ONE legacy python-rendered `delegated_to:` YAML block body

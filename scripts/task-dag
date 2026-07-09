@@ -1526,6 +1526,12 @@ COMMANDS:
                            deletes (ordered) via an injected --fold-cmd. A
                            message is a trigger, not a fact — the reconciler
                            backstop re-derives a lost hint from master.
+    supersede <node> --by <node>
+                           Record that <node> is superseded/re-scoped by the
+                           --by node: mint ONE `satisfies` edge (issue #13).
+                           complete(<node>) becomes true once the --by node's
+                           completion is durable on master — the automation#57
+                           zombie in one command. Edge-only; --dry-run/--reason.
     comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
@@ -6190,10 +6196,15 @@ emit_operator_blocked_dispatch() {
 cmd_block() {
     local task_sha="" reason="" request_url="" kind=""
     local kind_set=false reason_set=false request_url_set=false
+    local on_nodes=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reason=*) reason="${1#*=}"; reason_set=true; shift ;;
             --request-url=*) request_url="${1#*=}"; request_url_set=true; shift ;;
+            --on)
+                [ $# -ge 2 ] || { echo "Error: --on requires a <node> value" >&2; return 1; }
+                on_nodes+=("$2"); shift 2 ;;
+            --on=*) on_nodes+=("${1#*=}"); shift ;;
             --operator)
                 if [ "$kind_set" = true ] && [ "$kind" != "operator" ]; then
                     echo "Error: --operator and --downstream are mutually exclusive" >&2; return 1; fi
@@ -6204,7 +6215,8 @@ cmd_block() {
                 kind="downstream"; kind_set=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag block <sha> [--operator|--downstream] [--reason="..."] [--request-url=URL]
+Usage: task-dag block <sha> [--operator|--downstream] [--reason="..."]
+                            [--request-url=URL] [--on <node> ...]
 
 Mark a task BLOCKED. It stays in the DAG and is listable (task-dag
 blocked), but workers will NOT pick it up. Use this when a task is
@@ -6220,6 +6232,20 @@ Durable metadata (recorded at refs/heads/tasks/blocked-meta/<sha>):
   --reason="..."     why it is parked (shown on the dashboard)
   --request-url=URL  link to the exact comment/decision the operator needs
 
+Downstream dependency edge (issue #13 north-star; --on implies
+--downstream, and is rejected with --operator):
+  --on <node>        the task REQUIRES <node> to complete before it is
+                     ready — DUAL-WRITE: in addition to the legacy blocked
+                     overlay, mint a \`requires\` edge (from=this task,
+                     to=<node>) in this repo's graph index tasks/v1/graph,
+                     so the dependency is machine-readable. Repeatable for
+                     several downstream deps (requires = ALL). Nodes are full
+                     canonical addresses: task:<owner>/<repo>@<hex> or
+                     issue:<owner>/<repo>#<N>. (Automatic auto-revive of the
+                     block when every --on edge is satisfied is the separate
+                     reconciler-backstop sibling task; today the block stays
+                     manual — 'task-dag unblock <sha>' clears it.)
+
 The blocked overlay ref (refs/heads/tasks/blocked/<sha>) is unchanged;
 the metadata is additive side data and is cleared by unblock/complete/
 drop. Re-running block updates the metadata idempotently (preserving the
@@ -6234,6 +6260,25 @@ EOF
     done
     [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
     task_sha=$(resolve_sha "$task_sha") || return 1
+
+    # --on <node> is a DOWNSTREAM-dependency block: it implies --downstream and
+    # conflicts with --operator. Validate the edge prerequisites UP FRONT (a
+    # bad node or an unresolvable current repo must never leave a block parked
+    # with no edge to auto-revive it later): normalize every --on node and
+    # resolve this repo (the edge's FROM repo) before we touch any ref.
+    local edge_from_repo="" cnode_on=()
+    if [ "${#on_nodes[@]}" -gt 0 ]; then
+        if [ "$kind_set" = true ] && [ "$kind" = "operator" ]; then
+            echo "Error: --on (a downstream dependency) is incompatible with --operator" >&2; return 1; fi
+        kind="downstream"; kind_set=true
+        edge_from_repo=$(taskdag_current_repo 2>/dev/null || true)
+        [ -n "$edge_from_repo" ] || { echo "Error: --on needs this repo's canonical owner/repo to mint the edge; set TASKDAG_CURRENT_REPO or 'git config taskdag.current-repo owner/repo'" >&2; return 1; }
+        local on n
+        for on in "${on_nodes[@]}"; do
+            n=$(taskdag_normalize_node "$on") || { echo "Error: invalid --on node: $on (use task:<owner>/<repo>@<hex> or issue:<owner>/<repo>#<N>)" >&2; return 1; }
+            cnode_on+=("$n")
+        done
+    fi
 
     local blocked_ref meta_ref
     blocked_ref=$(blocked_ref_for "$task_sha")
@@ -6326,6 +6371,26 @@ EOF
         [ -n "$reason" ] && echo "  Reason: $reason"
         [ -n "$request_url" ] && echo "  Request: $request_url"
         emit_operator_blocked_dispatch block "$(git rev-parse --short "$task_sha")"
+
+        # DUAL-WRITE (issue #13): with --on, ALSO mint a `requires` edge from
+        # this task to each downstream node in the per-repo graph index. The
+        # legacy blocked overlay (pushed above) still drives behavior; the
+        # edge is the machine-readable dependency the reconciler will later
+        # use to auto-revive. Edges come AFTER the authoritative block push so
+        # a failed edge leaves the safer state (task parked). Each edge is
+        # idempotent by edge-id, so a rerun of the SAME command converges.
+        if [ "${#cnode_on[@]}" -gt 0 ]; then
+            local from_node="task:${edge_from_repo}@${task_sha}" on erc=0
+            for on in "${cnode_on[@]}"; do
+                _cmd_dep_add --from "$from_node" --to "$on" --relation requires \
+                    --reason "block --downstream: $(git rev-parse --short "$task_sha") awaits ${on}" || erc=$?
+            done
+            if [ "$erc" -ne 0 ]; then
+                printf "${RED}✗ Task is BLOCKED, but a downstream dependency edge write failed.${RESET}\n" >&2
+                echo "  Re-run the same 'task-dag block ... --on ...' to converge the edge (idempotent)." >&2
+                return 5
+            fi
+        fi
         return 0
     fi
 
@@ -7161,6 +7226,7 @@ main() {
         reconcile) cmd_reconcile "$@" ;;
         dep) cmd_dep "$@" ;;
         mailbox) cmd_mailbox "$@" ;;
+        supersede) cmd_supersede "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;

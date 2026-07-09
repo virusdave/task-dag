@@ -444,3 +444,108 @@ _cmd_dep_drop() {
     [ -n "$eid" ] || { echo "Error: dep drop requires an <edge-id>" >&2; return 2; }
     taskdag_dep_drop "$eid" "$reason"
 }
+
+# taskdag_wrapper_owner_repo <normalized-node>: extract the canonical
+# owner/repo of a node (task:<owner>/<repo>@… | issue:<owner>/<repo>#…).
+# Shared by the thin edge WRAPPERS (supersede / delegate / block --downstream)
+# to enforce that the edge's FROM node belongs to THIS repo — the graph index
+# branch is per-repo and _cmd_dep_add stamps origin.repo-id from the FROM
+# node's repo, so a foreign-FROM edge would be misfiled + never derivable.
+taskdag_wrapper_owner_repo() {
+    local n="${1#*:}"; n="${n%%@*}"; n="${n%%#*}"; printf '%s' "$n"
+}
+
+# Command: supersede — thin wrapper minting ONE `satisfies` edge (issue #13
+# north-star). `supersede <node> --by <byNode>` records that <node> is
+# fulfilled by <byNode>'s completion: complete(<node>) short-circuits true
+# once done(<byNode>) is a durable fact on master (the reconcile predicate,
+# @5). This is the #57 miss reduced to one command — no manual
+# complete-historical, no zombie. Edge-only (Phase 4 first step): it writes
+# NO legacy ref; the automatic synth-completion for a satisfied `satisfies`
+# edge is the separate reconciler-backstop sibling task.
+cmd_supersede() {
+    local node="" by="" reason="" dry_run=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --by)
+                [ $# -ge 2 ] || { echo "Error: --by requires a value" >&2; return 2; }
+                by="$2"; shift 2 ;;
+            --by=*) by="${1#*=}"; shift ;;
+            --reason)
+                [ $# -ge 2 ] || { echo "Error: --reason requires a value" >&2; return 2; }
+                reason="$2"; shift 2 ;;
+            --reason=*) reason="${1#*=}"; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --help|-h)
+                cat <<'EOF'
+Usage:
+  task-dag supersede <node> --by <node> [--reason "..."] [--dry-run]
+
+Record that <node> is SUPERSEDED / re-scoped by <node-after-'--by'>: mint a
+single `satisfies` edge (from=<node>, to=<--by node>) in this repo's graph
+index branch refs/heads/tasks/v1/graph (issue #13 north-star), via the same
+direct FF-only CAS `dep add` uses. Once the --by node's completion is a
+durable fact on master, complete(<node>) becomes true (the supersede
+short-circuit in the reconcile predicate) — the automation#57 zombie reduced
+to one command.
+
+Nodes are FULL canonical addresses (same grammar as `dep add`):
+  task:<owner>/<repo>@<40|64-hex>     issue:<owner>/<repo>#<N>
+The FROM <node> must belong to THIS repo (the graph index is per-repo). The
+--by node may be same- or cross-repo (a cross-repo `to` is satisfied once the
+reconciler backstop delivers/derives its completion — a later sibling task).
+
+Edge-only: this writes NO legacy ref. `--dry-run` prints the edge it WOULD
+mint (with its stable semantic edge-id) and writes nothing. Idempotent by
+edge-id (a re-run is a no-op). --reason is recorded in the graph commit.
+EOF
+                return 0 ;;
+            -*) echo "Error: unknown option to 'supersede': $1" >&2; return 2 ;;
+            *) [ -z "$node" ] || { echo "Error: supersede takes a single <node> (got extra: $1)" >&2; return 2; }
+               node="$1"; shift ;;
+        esac
+    done
+    [ -n "$node" ] || { echo "Error: supersede requires a <node> (the superseded node)" >&2; return 2; }
+    [ -n "$by" ]   || { echo "Error: supersede requires --by <node> (what fulfils it)" >&2; return 2; }
+
+    local cnode cby
+    cnode=$(taskdag_normalize_node "$node") || { echo "Error: invalid <node>: $node (use task:<owner>/<repo>@<hex> or issue:<owner>/<repo>#<N>)" >&2; return 2; }
+    cby=$(taskdag_normalize_node "$by")     || { echo "Error: invalid --by node: $by (use task:<owner>/<repo>@<hex> or issue:<owner>/<repo>#<N>)" >&2; return 2; }
+    if [ "$cnode" = "$cby" ]; then
+        echo "Error: a node cannot supersede itself (<node> == --by): $cnode" >&2; return 2
+    fi
+
+    # The graph index is per-repo and origin.repo-id is stamped from the FROM
+    # node's repo, so refuse a foreign-FROM supersede (run it in the repo that
+    # owns <node>). FAIL CLOSED when the current repo cannot be resolved — a
+    # supersede whose FROM ownership cannot be proven must never be written
+    # (and the same precondition gates --dry-run so it validates the real
+    # write's contract).
+    local cur from_or
+    from_or=$(taskdag_wrapper_owner_repo "$cnode")
+    cur=$(taskdag_current_repo) || {
+        echo "Error: supersede cannot determine the current repo to validate FROM ownership; set TASKDAG_CURRENT_REPO or 'git config taskdag.current-repo owner/repo'" >&2
+        return 2
+    }
+    if [ "$from_or" != "$cur" ]; then
+        echo "Error: supersede must run in the repo that owns <node> (${from_or}); current repo is ${cur}. The graph index is per-repo." >&2
+        return 2
+    fi
+
+    if [ "$dry_run" = true ]; then
+        local eid
+        eid=$(taskdag_edge_id "$cnode" "$cby" satisfies any) || return 1
+        printf "${BLUE}• [dry-run] would mint satisfies edge %s${RESET}\n" "${eid:0:12}"
+        printf "    from:     %s\n" "$cnode"
+        printf "    to:       %s\n" "$cby"
+        printf "    relation: satisfies (mode any)\n"
+        printf "    edge-id:  %s\n" "$eid"
+        [ -n "$reason" ] && printf "    reason:   %s\n" "$reason"
+        printf "  (no ref written)\n"
+        return 0
+    fi
+
+    local reason_args=()
+    [ -n "$reason" ] && reason_args=(--reason "$reason")
+    _cmd_dep_add --from "$cnode" --to "$cby" --relation satisfies "${reason_args[@]}"
+}
