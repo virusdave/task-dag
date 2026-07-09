@@ -14,9 +14,11 @@
 #
 #   complete(node):
 #     if ANY outgoing satisfies-edge is satisfied: return true   # supersede
-#     if node has first-parent children (an EPIC):
-#         return  every requires-edge satisfied
-#             AND every child subtree complete()                 # obligations
+#     if node is an EPIC (first-parent children, or Type: epic with outgoing
+#                        requires-edges):
+#         return obligations non-empty
+#            AND every requires-edge satisfied
+#            AND every child subtree complete()                  # obligations
 #     else (a LEAF / issue / foreign node):
 #         return done(node)                                      # authoritative
 #
@@ -24,15 +26,16 @@
 #     satisfied  AND (for a current-repo task node) unclaimed AND unblocked.
 #
 # A node is classified EPIC vs LEAF by CONTAINMENT (does it have first-parent
-# children?) BEFORE the raw done() fact is trusted, and this ordering is
-# load-bearing: the fact layer derives done() from ANY parent-field token
-# reachable from master, and an epic root is its children's FIRST-parent
-# token — so a decomposed epic false-positives as done() the instant any one
-# child completes. Completeness of an epic is therefore always derived from
-# its obligations (exactly like the legacy epic_subtree_complete), never from
-# done(); done() stays authoritative only for a leaf (which appears solely as
-# the 2nd parent of its own completion merge) and an issue (Closes-Epic). A
-# LEAF's outgoing requires-edges gate READINESS, not completeness.
+# children?) and explicit Type: epic roots BEFORE the raw done() fact is
+# trusted, and this ordering is load-bearing: the fact layer derives done()
+# from ANY parent-field token reachable from master, and an epic root is its
+# children's FIRST-parent token — so a decomposed epic false-positives as
+# done() the instant any one child completes. Completeness of an epic is
+# therefore always derived from its obligations (exactly like the legacy
+# epic_subtree_complete), never from done(); done() stays authoritative only
+# for a leaf (which appears solely as the 2nd parent of its own completion
+# merge) and an issue (Closes-Epic). A LEAF's outgoing requires-edges gate
+# READINESS, not completeness.
 #
 # Semantics locked by the operator on issue #13: requires = ALL (a plain AND
 # — OR-deps are out of scope), satisfies = ANY (supersede). A requires-edge
@@ -45,14 +48,9 @@
 # bounded by the decomposition depth.
 #
 # READ-ONLY / ADDITIVE. This module computes predicates and reports them; it
-# NEVER writes a ref and does NOT (yet) drive live `frontier`/`complete`/
-# epic-close behavior — that wiring is later-phase sibling tasks. Scope
-# boundary (do not grow this module without the relevant sibling's own
-# review): the push-reaction handler + periodic reconciler BACKSTOP
-# (local-CAS fold, cross-repo hint delivery, cascade, synth-completion for
-# supersede), the epic AUTO-CLOSE rewiring onto this predicate, the delegate/
-# block/supersede edge WRAPPERS, and the `graph --explain` resolver are all
-# separate sibling tasks and are NOT implemented here.
+# NEVER writes a ref. Mutating graph convergence and epic close emission live
+# in sibling modules and call this predicate layer instead of re-implementing
+# its semantics.
 #
 # Relies on: facts.sh (taskdag_node_done, taskdag_edges_with_facts,
 # taskdag_current_repo, taskdag_sync_master), edges.sh (taskdag_normalize_node),
@@ -89,7 +87,9 @@ taskdag_recon_build_child_map() {
     while IFS="$us" read -r commit tree subject parents; do
         [ -n "$commit" ] || continue
         [ "$tree" = "$EMPTY_TREE" ] || continue           # task commits only
-        case "$subject" in Claim:*|Blocked-Meta:*) continue ;; esac
+        case "$subject" in
+            Claim:*|Blocked-Meta:*|kind:\ delegated*|kind:\ completion*) continue ;;
+        esac
         first="${parents%% *}"                            # first parent only
         [ -n "$first" ] || continue                       # a rootless commit
         TASKDAG_RECON_FP_CHILDREN["$first"]+="$commit"$'\n'
@@ -176,6 +176,23 @@ taskdag_recon_requires_satisfied() {
         >/dev/null 2>&1
 }
 
+# taskdag_recon_has_requires <normalized-node>: rc 0 iff the node has at
+# least one outgoing requires-edge. Used to keep childless Type: epic roots
+# from vacuously completing while still allowing a requires-only delegated
+# epic to close once its edge is satisfied.
+taskdag_recon_has_requires() {
+    printf '%s' "$TASKDAG_RECON_EDGES_JSON" | jq -e --arg n "$1" \
+        'any(.[]; .from == $n and .relation == "requires")' \
+        >/dev/null 2>&1
+}
+
+# taskdag_recon_task_type <sha>: print the lowercase Type: field from a task
+# commit, if present. Missing Type is a normal legacy/task case.
+taskdag_recon_task_type() {
+    git log -1 --format='%B' "$1" 2>/dev/null \
+        | awk -F':[[:space:]]*' 'tolower($1) == "type" { print tolower($2); exit }'
+}
+
 # taskdag_node_complete <node>: the north-star complete() predicate.
 #   rc 0 -> complete   rc 1 -> not complete   rc 2 -> error (bad node / setup)
 # Assumes taskdag_recon_prepare has run this invocation.
@@ -188,26 +205,40 @@ taskdag_node_complete() {
     #     (valid for both leaves and epics; the supersede short-circuit).
     taskdag_recon_has_satisfying_edge "$node" && return 0
 
-    # (2) classify by CONTAINMENT: a node with first-parent children is an
-    #     EPIC; otherwise a LEAF (a childless task, an issue, or a foreign
-    #     node). This MUST come before trusting the raw done() fact: the
-    #     fact layer derives done() from ANY parent-field token reachable
-    #     from master, and an epic root is its children's FIRST-parent token,
-    #     so a decomposed epic FALSE-POSITIVES as done() the moment any child
-    #     is completed. Completeness of an epic is therefore derived from its
+    # (2) classify by CONTAINMENT and explicit epic type. A node with
+    #     first-parent children is an EPIC; a childless Type: epic task with
+    #     outgoing requires-edges is also an EPIC whose obligations are those
+    #     edges. A childless Type: epic task with no requires-edges has EMPTY
+    #     obligations and is not complete. Ordinary childless tasks remain
+    #     LEAF nodes: their requires-edges gate readiness, not completeness.
+    #
+    #     This MUST come before trusting the raw done() fact: the fact layer
+    #     derives done() from ANY parent-field token reachable from master,
+    #     and an epic root is its children's FIRST-parent token, so a
+    #     decomposed epic FALSE-POSITIVES as done() the moment any child is
+    #     completed. Completeness of an epic is therefore derived from its
     #     obligations, exactly like the legacy epic_subtree_complete — never
     #     from done(). done() stays authoritative only for a leaf (which
     #     appears solely as the 2nd parent of its own completion merge) and
     #     for an issue (Closes-Epic).
-    local sha children="" resolve_rc=0
+    local sha children="" resolve_rc=0 task_type="" has_requires=false is_epic=false
     sha=$(taskdag_recon_resolve_task_node "$node") || resolve_rc=$?
     if [ "$resolve_rc" -eq 2 ]; then
         echo "Error: current-repo task node not resolvable locally (missing or not an empty-tree task commit): $node — fetch task refs or check the local view" >&2
         return 2
     fi
-    [ "$resolve_rc" -eq 0 ] && children="${TASKDAG_RECON_FP_CHILDREN[$sha]:-}"
+    if [ "$resolve_rc" -eq 0 ]; then
+        children="${TASKDAG_RECON_FP_CHILDREN[$sha]:-}"
+        task_type="$(taskdag_recon_task_type "$sha")"
+        taskdag_recon_has_requires "$node" && has_requires=true || has_requires=false
+        if [ -n "$children" ] || { [ "$task_type" = epic ] && [ "$has_requires" = true ]; }; then
+            is_epic=true
+        elif [ "$task_type" = epic ]; then
+            return 1
+        fi
+    fi
 
-    if [ -z "$children" ]; then
+    if [ "$is_epic" = false ]; then
         # LEAF / issue / foreign node — the durable done() fact is
         # authoritative. `|| rc=$?` (not `; rc=$?`) so a non-zero return
         # under the CLI's `set -e` is captured, not an abort. A leaf's
@@ -219,9 +250,10 @@ taskdag_node_complete() {
     fi
 
     # EPIC — obligations = its containment children ∪ its outgoing
-    # requires-edges. Complete iff every requires-edge is satisfied (mode =
-    # all) AND every child subtree is complete. Obligations are non-empty
-    # (the node has children), so a decomposed epic never vacuously closes.
+    # requires-edges. Complete iff obligations are non-empty, every
+    # requires-edge is satisfied (mode = all), and every child subtree is
+    # complete. The empty-obligations Type: epic case returned incomplete
+    # above, so a root can never vacuously close.
     taskdag_recon_requires_satisfied "$node" || return 1
     local child rc
     while IFS= read -r child; do
@@ -261,6 +293,7 @@ taskdag_leaf_ready() {
     sha=$(taskdag_recon_resolve_task_node "$node") || resolve_rc=$?
     [ "$resolve_rc" -eq 2 ] && return 2
     if [ "$resolve_rc" -eq 0 ]; then
+        [ "$(taskdag_recon_task_type "$sha")" = epic ] && return 1
         is_task_blocked "$sha" && return 1
         blocked_structural_ancestor "$sha" >/dev/null 2>&1 && return 1
         short=$(git rev-parse --short "$sha" 2>/dev/null || true)

@@ -171,6 +171,37 @@ complete_is no "A8 epic incomplete while a requires-edge is unsatisfied" "$NE"
 close_issue "$E" 7
 complete_is yes "A9 epic complete once children done AND requires satisfied" "$NE"
 
+# A10-A12: a childless Type: epic can be completed by outgoing requires-edge
+# obligations, but only when the obligations are NON-empty and satisfied. A
+# childless ordinary leaf with the same satisfied requires-edge is still not
+# complete; requires gates readiness for leaves, not completeness.
+EO=$(mk_task "Task: empty epic
+Type: epic")
+NEO="task:$REPO@$EO"
+complete_is no "A10 childless epic with empty obligations is incomplete" "$NEO"
+ER=$(mk_task "Task: requires-only epic
+Type: epic")
+NER="task:$REPO@$ER"
+add_edge "$NER" "issue:$REPO#8" requires
+complete_is no "A11 requires-only epic incomplete while edge unsatisfied" "$NER"
+close_issue "$ER" 8
+complete_is yes "A12 requires-only epic complete once edge satisfied" "$NER"
+LT=$(mk_task "Task: requires-only leaf
+Type: task")
+NLT="task:$REPO@$LT"
+add_edge "$NLT" "issue:$REPO#8" requires
+complete_is no "A13 satisfied requires-edge does NOT complete a Type: task leaf" "$NLT"
+
+# A14: legacy delegated metadata is a side fact, not a structural child. The
+# machine-readable requires-edge carries the delegation obligation; counting
+# the legacy empty-tree metadata commit as a first-parent child would leave the
+# epic permanently incomplete after its edge is satisfied.
+LEG=$(git commit-tree "$EMPTY_TREE" -p "$ER" -m "kind: delegated
+role: system
+intent: delegated-child")
+git update-ref "refs/heads/tasks/delegated/8/peer/repo/1" "$LEG"
+complete_is yes "A14 legacy delegated metadata does not count as a child obligation" "$NER"
+
 # ===========================================================================
 # Part B — supersede (satisfies=any) short-circuit.
 # ===========================================================================

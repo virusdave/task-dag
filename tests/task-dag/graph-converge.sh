@@ -45,6 +45,26 @@ Status: completed")
     printf '%s\n' "$merge"
 }
 
+publish_pending_epic() { # <repo-dir> <issue> <epic-sha>
+    local dir="$1" issue="$2" epic="$3"
+    git -C "$dir" update-ref "refs/heads/tasks/pending/$issue" "$epic"
+    git -C "$dir" push -q origin "refs/heads/tasks/pending/$issue" >/dev/null
+}
+
+has_close_merge() { # <repo-dir> <issue> <epic-sha>
+    local dir="$1" issue="$2" epic="$3" tip mc parents
+    tip=$(git -C "$dir" rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
+        || git -C "$dir" rev-parse --verify -q refs/heads/master^{commit}) || return 1
+    while read -r mc parents; do
+        [ -n "$mc" ] || continue
+        case " $parents " in *" $epic "*) ;; *) continue ;; esac
+        git -C "$dir" log -1 --format='%B' "$mc" \
+            | git interpret-trailers --parse 2>/dev/null \
+            | grep -qE "^Closes-Epic:[[:space:]]*#?${issue}([^0-9]|\$)" && return 0
+    done < <(git -C "$dir" log "$tip" --merges --format='%H %P' 2>/dev/null)
+    return 1
+}
+
 edge_id() { ( cd "$1" && "$TD" dep add --from "$2" --to "$3" --relation "$4" --repo-id 101 --witness w >/dev/null && "$TD" dep add --from "$2" --to "$3" --relation "$4" --repo-id 101 --witness w >/dev/null 2>&1 || true && "$TD" edges --json --no-fetch | jq -r --arg f "$2" --arg t "$3" --arg r "$4" '.[] | select(.from==$f and .to==$t and .relation==$r) | .edgeId' ); }
 edge_absent() { ! git -C "$1" cat-file -e "refs/heads/tasks/v1/graph:edges/$2.json" 2>/dev/null; }
 
@@ -109,6 +129,54 @@ if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/nu
     ok "C3 lost-hint backstop re-derives foreign completion and folds edge"
 else
     bad "C3 lost-hint backstop failed to fold foreign satisfied edge"
+fi
+
+# ── D. epic auto-close over local child obligations ───────────────────────
+EP=$(mk_task "$ROOT/same" "Task: local child epic
+
+Issue: #88
+Type: epic")
+publish_pending_epic "$ROOT/same" 88 "$EP"
+CH=$(mk_task "$ROOT/same" "Task: child
+Type: leaf" "$EP")
+WCH=$(complete_task "$ROOT/same" "$CH")
+if ( cd "$ROOT/same" && "$TD" graph-converge --range "$WCH^..$WCH" --no-fetch >/dev/null 2>&1 ) \
+    && has_close_merge "$ROOT/same" 88 "$EP"; then
+    ok "D1 graph-converge auto-closes an epic whose child obligations are complete"
+else
+    bad "D1 graph-converge did not close child-complete epic"
+fi
+
+# ── E. epic auto-close over cross-repo requires obligations ───────────────
+EPX=$(mk_task "$ROOT/dst" "Task: cross-repo requires epic
+
+Issue: #89
+Type: epic")
+publish_pending_epic "$ROOT/dst" 89 "$EPX"
+XS=$(mk_task "$ROOT/src" "Task: cross source")
+NXS="task:owner/src@$XS"; NEX="task:owner/dst@$EPX"
+WX=$(complete_task "$ROOT/src" "$XS")
+EX=$(edge_id "$ROOT/dst" "$NEX" "$NXS" requires)
+( cd "$ROOT/dst" && git config "taskdag.peer-path.owner/src.path" "$ROOT/src" )
+if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
+    && has_close_merge "$ROOT/dst" 89 "$EPX" \
+    && edge_absent "$ROOT/dst" "$EX"; then
+    ok "E1 reconcile-backstop auto-closes a requires-only cross-repo epic before folding the edge"
+else
+    bad "E1 reconcile-backstop did not close the cross-repo requires-only epic"
+fi
+
+# ── F. empty-obligations epic never auto-closes ────────────────────────────
+EPE=$(mk_task "$ROOT/dst" "Task: empty epic
+
+Issue: #90
+Type: epic")
+publish_pending_epic "$ROOT/dst" 90 "$EPE"
+if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
+    && ! has_close_merge "$ROOT/dst" 90 "$EPE"; then
+    ok "F1 empty-obligations epic does not auto-close"
+else
+    bad "F1 empty-obligations epic was incorrectly closed"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"

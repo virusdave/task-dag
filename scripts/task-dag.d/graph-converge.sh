@@ -66,6 +66,98 @@ taskdag_node_done_in_worktree() {
     esac
 }
 
+taskdag_pending_root_for_task_sha() {
+    local task_sha="$1" node="$task_sha" issue="" up="" rc=0
+    while :; do
+        issue=$(task_is_pending_root "$node" 2>/dev/null) || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            printf '%s\t%s\n' "$issue" "$node"
+            return 0
+        fi
+        [ "$rc" -eq 3 ] && return 2
+        rc=0
+        up=$(get_first_parent "$node" 2>/dev/null || true)
+        [ -n "$up" ] || return 1
+        is_task_commit "$up" || return 1
+        node="$up"
+    done
+}
+
+taskdag_emit_origin_epic_close() {
+    local issue="$1" root_sha="$2" do_fetch="${3:-true}"
+    _xrepo_ensure_git_identity
+
+    if [ "$do_fetch" != false ]; then
+        git fetch --quiet --no-tags origin '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1 \
+            || { echo "Error: could not sync origin/master before auto-closing epic #${issue}" >&2; return 1; }
+    fi
+
+    if epic_already_closed_on "$issue" "$root_sha" "HEAD"; then
+        return 0
+    fi
+    if git rev-parse --verify -q origin/master >/dev/null 2>&1 \
+        && epic_already_closed_on "$issue" "$root_sha" "origin/master"; then
+        return 0
+    fi
+
+    local base tree msg close_sha readback
+    base=$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
+        || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \
+        || git rev-parse --verify -q HEAD^{commit}) \
+        || { echo "Error: cannot resolve master tip before auto-closing epic #${issue}" >&2; return 1; }
+    tree=$(git rev-parse "${base}^{tree}") || return 1
+    msg="Close epic #${issue} (obligations satisfied)
+
+All task-dag obligations for this epic are satisfied.
+
+Closes-Epic: #${issue}"
+    close_sha=$(printf '%s' "$msg" | git commit-tree "$tree" -p "$base" -p "$root_sha") || return 1
+    git push origin "--force-with-lease=refs/heads/master:${base}" \
+        "${close_sha}:refs/heads/master" >/dev/null \
+        || { echo "Error: failed to push auto-close commit for epic #${issue}" >&2; return 1; }
+    readback=$(git ls-remote origin refs/heads/master 2>/dev/null | awk '{print $1}')
+    [ "$readback" = "$close_sha" ] \
+        || { echo "Error: auto-close push for epic #${issue} was not confirmed" >&2; return 1; }
+    git update-ref refs/remotes/origin/master "$close_sha" 2>/dev/null || true
+    git update-ref refs/heads/master "$close_sha" 2>/dev/null || true
+    TASKDAG_FACTS_TIP_OID=""
+    printf "${GREEN}✓ Auto-closed epic #%s with %s${RESET}\n" "$issue" "$(git rev-parse --short "$close_sha")" >&2
+    printf '%s\n' "$close_sha"
+}
+
+# taskdag_auto_close_epic_for_task <task-sha> <do-fetch> [satisfied-edge-id]
+# Evaluate the pending root containing <task-sha> with the reconcile
+# obligations predicate and emit a normal Closes-Epic merge if it is complete.
+# When called from a requires-edge fold, the edge is still active but may be a
+# foreign target facts.sh cannot derive; the optional edge id is marked
+# satisfied in memory after graph-converge has verified the target.
+taskdag_auto_close_epic_for_task() {
+    local task_sha="$1" do_fetch="${2:-true}" satisfied_eid="${3:-}"
+    local found issue root_sha cur node prep=() rc=0 close_sha=""
+    found=$(taskdag_pending_root_for_task_sha "$task_sha" 2>/dev/null) || rc=$?
+    [ "$rc" -eq 2 ] && return 1
+    [ -n "$found" ] || return 0
+    IFS=$'\t' read -r issue root_sha <<< "$found"
+    cur=$(taskdag_current_repo) || return 1
+    node="task:${cur}@${root_sha}"
+
+    [ "$do_fetch" = false ] && prep+=(--no-fetch)
+    taskdag_recon_prepare "${prep[@]}" || return 1
+    if [ -n "$satisfied_eid" ]; then
+        TASKDAG_RECON_EDGES_JSON=$(printf '%s' "$TASKDAG_RECON_EDGES_JSON" \
+            | jq --arg eid "$satisfied_eid" \
+                'map(if .edgeId == $eid then (. + {satisfied:true}) else . end)') \
+            || return 1
+    fi
+
+    taskdag_node_complete "$node" || rc=$?
+    [ "$rc" -eq 2 ] && return 1
+    [ "$rc" -eq 0 ] || return 0
+    close_sha=$(taskdag_emit_origin_epic_close "$issue" "$root_sha" "$do_fetch") || return 1
+    [ -n "$close_sha" ] && printf '%s\t%s\n' "issue:${cur}#${issue}" "$close_sha"
+    return 0
+}
+
 # taskdag_verify_completed_node <node> [witness]: verify a completion fact from
 # authoritative master history. Current-repo nodes use facts.sh. Foreign nodes
 # require an explicit local peer worktree configured by
@@ -192,6 +284,13 @@ taskdag_propagate_one_node() {
         fi
         case "$relation" in
             requires)
+                # If this satisfied requires-edge completes an epic, close it
+                # BEFORE folding the edge away. A requires-only epic would
+                # otherwise lose its last non-empty obligation and never emit
+                # the durable Closes-Epic fact. If close emission is due but
+                # fails, leave the edge in place so a later backstop can retry.
+                out=$(taskdag_auto_close_epic_for_task "${from##*@}" "$do_fetch" "$eid") || { rc=1; continue; }
+                [ -n "$out" ] && printf '%s\n' "$out"
                 taskdag_graph_prune_edge_with_witness "$eid" "$relation" "$from" "$to" "$node" "$witness" "$mid" || rc=1
                 # If the dependent was already durable-done, cascade from it;
                 # readiness alone is not completion and does not cascade.
@@ -253,7 +352,7 @@ EOF
     done
     [ -n "$node" ] || { echo "Error: propagate-completion requires --node" >&2; return 2; }
     [ -n "$witness" ] || { echo "Error: propagate-completion requires --witness" >&2; return 2; }
-    local seen=$'\n' n w next rc=0 idx=0
+    local seen=$'\n' n w cn cw next rc=0 idx=0
     local -a q_nodes=() q_witnesses=()
     q_nodes+=("$(taskdag_normalize_node "$node")")
     q_witnesses+=("$witness")
@@ -266,12 +365,22 @@ EOF
         [ -n "$n" ] || continue
         case "$seen" in *$'\n'"$n"$'\n'*) continue ;; esac
         seen+="$n"$'\n'
+        case "$n" in
+            task:*)
+                next=$(taskdag_auto_close_epic_for_task "${n##*@}" "$do_fetch") || return $?
+                while IFS=$'\t' read -r cn cw; do
+                    [ -n "$cn" ] || continue
+                    q_nodes+=("$cn")
+                    q_witnesses+=("$cw")
+                done <<< "$next"
+                ;;
+        esac
         next=$(taskdag_propagate_one_node "$n" "$w" "$mid" "$do_fetch") || rc=$?
         [ "$rc" -eq 0 ] || return "$rc"
-        while IFS=$'\t' read -r n w; do
-            [ -n "$n" ] || continue
-            q_nodes+=("$n")
-            q_witnesses+=("$w")
+        while IFS=$'\t' read -r cn cw; do
+            [ -n "$cn" ] || continue
+            q_nodes+=("$cn")
+            q_witnesses+=("$cw")
         done <<< "$next"
     done
 }
