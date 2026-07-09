@@ -68,7 +68,8 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/delegated/<N>/<owner>/<repo>/<peer>` | cross-repo delegation edge | `delegate` |
    | `tasks/completions/<N>/…/<sha>` | recorded downstream completion | `ingest-completion` |
    | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write` |
-   | `tasks/v1/graph` | dependency-edge index branch — the ONE ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
+   | `tasks/v1/graph` | dependency-edge index branch — a data-in-tree ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
+   | `tasks/v1/mailbox/00`..`0f` | cross-repo notification mailbox — 16 fixed data-in-tree shard branches, exempt from the empty-tree floor (see below) | the mailbox writer (issue #13) |
    | `gh/issues/<N>` | GitHub-side epic mapping | `create-task-commit.sh` |
    | `gh/comments/<N>/<id>` | comment provenance (kept so a comment is never re-ingested) | `ingest-comment` |
    | `gh/child-epics/<N>/<owner>/<repo>` | materialised child-epic provenance (default slot, one child per (parent, peer repo)) | cross-repo materialisation |
@@ -88,12 +89,25 @@ gate.
 
 ---
 
-## The dependency-graph index (`tasks/v1/graph`) — the ONE empty-tree exception
+## The data-in-tree task refs (`tasks/v1/graph`, `tasks/v1/mailbox/*`) — the empty-tree exceptions
+
+There are exactly two ref KINDS whose tree **is** their data (and so is
+legitimately non-empty): the dependency-graph index `tasks/v1/graph`
+(below) and the 16 cross-repo mailbox shards `tasks/v1/mailbox/00..0f`
+(further below, "The cross-repo mailbox shards"). Both are deliberate,
+operator-approved (issue #13 Phase 0) exceptions to invariant-floor rule #1,
+because storing data in-tree under a **fixed, bounded** ref set is exactly
+what keeps the live mirrored **ref count bounded** (`O(open work)` /
+`O(in-flight signals)`, never `O(total history)`). Each is an exact-ref
+exemption with its own shape invariant, not a blanket loosening of the floor
+under `tasks/v1/*`.
+
+### The dependency-graph index (`tasks/v1/graph`)
 
 The north-star dependency graph (issue #13) stores its **active edge set**
 as an ordinary per-repo git branch, `refs/heads/tasks/v1/graph`, whose
-**latest tree IS the edge set**. This is the single, deliberate,
-operator-approved (issue #13 Phase 0) exception to invariant-floor rule #1
+**latest tree IS the edge set**. This is one of the two deliberate,
+operator-approved (issue #13 Phase 0) exceptions to invariant-floor rule #1
 (empty tree): the graph index is data-in-tree by design, because that is
 exactly what keeps the live mirrored **ref count bounded** — one ref per
 repo instead of one ref per edge.
@@ -154,12 +168,96 @@ completion merge uses), retried on contention with a jittered ~1s→~10s
 quadratic backoff and **failing loud** on retry-budget exhaustion. Both
 add and drop are idempotent; `dep drop` is an honest, witnessed FF tree
 deletion (schema v1 has **no tombstones** — see above). Satisfied-edge
-**pruning** + explicit **tombstones**, the mailbox, the reconciler, and the
+**pruning** + explicit **tombstones**, the reconciler, and the
 `graph --explain` resolver remain separate tasks. Golden fixtures for the
 exemption + its shape invariant are in `tests/task-dag/validate-strict.sh`
-(TEST 11–14); the model/reader is unit-tested in `tests/task-dag/edges.sh`
+(TEST 11–15); the model/reader is unit-tested in `tests/task-dag/edges.sh`
 and the writer (backoff shape/cap/jitter/fail-loud, add/drop round-trip, and
 concurrent FF contention) in `tests/task-dag/edges-write.sh`.
+
+### The cross-repo mailbox shards (`tasks/v1/mailbox/00..0f`)
+
+Cross-repo notification delivery (issue #13 Phase 3) uses a **bounded** set
+of exactly **16 fixed shard branches** `refs/heads/tasks/v1/mailbox/00` ..
+`/0f`. A message — a HINT that a node completed, so a repo holding an edge
+pointing at it should fold in the effect — is stored as a blob **in** a
+shard's tree (`msg/<message-id>.json`), so the live mirrored ref count is
+`O(1)=16` regardless of in-flight message count (the second data-in-tree
+exception). A message is a **trigger, not a fact**: a lost message is
+re-derived from the other repo's `master` by the periodic reconciler
+backstop (a separate sibling task).
+
+It is a **new ref KIND with its own invariant**, not a loosening of the
+floor for everything under `tasks/v1/*`:
+
+- **Exact-ref exemption.** Only the 16 refs matching
+  `refs/heads/tasks/v1/mailbox/0[0-9a-f]` are recognised. `validate --strict`
+  special-cases exactly these (`taskdag_is_mailbox_ref` in `scripts/task-dag`);
+  a hand-crafted `tasks/v1/mailbox/10` or `tasks/v1/mailbox/0g` still fails
+  the unknown-namespace check. We deliberately do **not** add `v1` to
+  `TASKDAG_KNOWN_TASK_NS`.
+- **Replacement invariant (audited).** A shard ref must be a **commit** whose
+  tree contains **only** regular blobs named `msg/<message-id>.json`, where
+  `<message-id>` is a lowercase 64-hex sha256. Any other path, a non-blob
+  entry, or a malformed message-id filename is a `validate --strict` error
+  (`taskdag_mailbox_tree_violations`). An empty tree (zero messages) is valid
+  — that is the state a shard is left in after its last message is consumed
+  (shards are created **lazily** on first put and never branch-deleted, so
+  the ref count only ever *shrinks by tree*, never by dropping to fewer than
+  the shards that have been touched, and never grows past 16).
+- **message-id = CONTENT hash of `(kind, node, witness, dest)`.** The id is
+  the full sha256 of that NUL-delimited canonical tuple. `witness` **and**
+  `dest` are part of identity, so a NEW witnessed completion cannot be
+  absorbed by an older in-flight same-node message (and then wrongly deleted),
+  and mis-addressed delivery is caught. `origin` (repo-id + repo) is provenance
+  and is **excluded** from the id — but unlike an edge, a same-id message with
+  **different** content is a **fail-loud** conflict (short-lived trigger
+  state; a same-id/different-content collision means something is wrong), not
+  first-writer-wins. The shard is the first nibble of the id, `%02x` → `00..0f`.
+- **Message blob schema (schema:1):**
+  ```json
+  { "schema": 1, "kind": "completion",
+    "node": "task:<owner>/<repo>@<sha>" | "issue:<owner>/<repo>#<N>",
+    "witness": "<40|64-hex source-completion sha / message-id>",
+    "dest": "<owner>/<repo>",
+    "origin": { "repo-id": <stable numeric repo id>, "repo": "<owner>/<repo>" } }
+  ```
+  `<owner>/<repo>` is case-folded to lowercase; `witness` is a lowercase 40-
+  or 64-hex string (a git sha1 / sha256), tight so it cannot inject a commit
+  trailer; for a `completion` message the completed node lives in the origin
+  repo (`node`'s repo == `origin.repo`).
+- **Bounded + FF-only.** There are **no** per-message refs; each shard is
+  fast-forward-only and its commits parent only the previous shard commit.
+  Reading uses the **latest tree only**, not history. Enqueue/consume are the
+  same direct FF-only CAS the graph writer uses (fetch shard tip → recompute
+  the shard tree → FF push + lease + readback → jittered ~1s→~10s quadratic
+  backoff → fail loud on exhaustion); the shard tree is a commutative
+  idempotent union, so contention converges.
+- **Ordered fold-then-delete (no ack ledger).** `mailbox consume` runs an
+  **injected** fold command per message and deletes that message **only after
+  the fold exits 0** (durably folded). This is per-message fold-before-delete
+  ordering (NOT FIFO). There is **no** `consumed_at` / ack / dedup ledger;
+  correctness rides on the fold being **idempotent** (delivery is
+  **at-least-once**) + the backstop re-deriving a lost hint. The fold's
+  effect commit stamps the triggering witness into its trailer
+  (`taskdag_mailbox_witness_trailer` → `Mailbox-Witness:` +
+  `Mailbox-Message-Id:`) so durable `master` history carries provenance.
+
+The mailbox transport lives in `scripts/task-dag.d/mailbox.sh`
+(`taskdag_mailbox_message_id`, `taskdag_mailbox_blob`, `taskdag_mailbox_read`,
+`taskdag_mailbox_put`, `taskdag_mailbox_consume`, the FF-only CAS core
+`_taskdag_mailbox_cas`, the witness-trailer helper, and the `mailbox
+put|list|consume` command); the shape invariant helpers
+(`taskdag_is_mailbox_ref`, `taskdag_mailbox_tree_violations`) live in
+`scripts/task-dag`. Golden fixtures for the exemption + its shape invariant
+are in `tests/task-dag/validate-strict.sh` (TEST 16–21); the transport
+(message-id/shard derivation, idempotent + conflict-fail-loud put, put/list
+round-trip, target-repo guard, bounded refs, ordered fold-then-delete,
+witness trailer + env passing, cross-repo delivery, FF contention, and
+fail-loud exhaustion) is unit + integration tested in
+`tests/task-dag/mailbox.sh`. The **reconciler** that decides what a completion
+means and how to fold it (push-reaction handler + periodic backstop, local-CAS
+fold, cascade), `supersede`, and epic-close unification remain separate tasks.
 
 ### Derived facts (`done` / `satisfied`) — in-memory, ZERO per-fact refs
 

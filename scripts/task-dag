@@ -357,6 +357,76 @@ taskdag_graph_tree_violations() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────
+# The cross-repo mailbox shards (issue #13 north-star, Phase 3).
+#
+# `refs/heads/tasks/v1/mailbox/00` .. `/0f` are the SECOND data-in-tree task
+# ref kind (after the graph index): exactly 16 fixed shard branches whose
+# trees carry cross-repo notification messages as `msg/<message-id>.json`
+# blobs. This keeps the live mirrored ref count O(1)=16 regardless of
+# in-flight message count (the bounded-ref invariant) — a message costs a
+# tree blob, not a ref. Like the graph index they are EXEMPT from the
+# empty-tree floor but have their OWN shape invariant, and ONLY these exact
+# 16 refs are recognised: a hand-crafted `tasks/v1/mailbox/10` or
+# `tasks/v1/mailbox/0g` still fails the namespace check. We deliberately do
+# NOT add `v1` to TASKDAG_KNOWN_TASK_NS. Operator-approved bounded-ref
+# namespace (issue #13 Phase 0); see docs/INVARIANTS.md § "The cross-repo
+# mailbox shards".
+TASKDAG_MAILBOX_REF_GLOB="refs/heads/tasks/v1/mailbox"
+
+# taskdag_is_mailbox_ref <ref>: true iff <ref> is EXACTLY one of the 16 fixed
+# mailbox shard branches (00..0f), in either the fully-qualified or short
+# (`tasks/v1/mailbox/0f`) form.
+taskdag_is_mailbox_ref() {
+    case "$1" in
+        refs/heads/tasks/v1/mailbox/0[0-9a-f]|tasks/v1/mailbox/0[0-9a-f]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# taskdag_mailbox_tree_violations <commit-sha> <full-refname>: echo one
+# human-readable line per mailbox-shard shape violation (nothing when
+# well-formed). A shard tree may contain ONLY regular blobs named
+# `msg/<64-hex>.json` (the content-addressed in-flight message set), AND each
+# message MUST live in the shard its id derives to (the first hex nibble,
+# formatted %02x → 00..0f); a mis-sharded blob is corruption. Any other path,
+# a non-blob entry, a malformed message-id filename, or a wrong-shard blob is
+# a violation. An empty tree (zero messages) is valid. Never mutates anything;
+# returns 0 always.
+taskdag_mailbox_tree_violations() {
+    local sha="$1" ref="$2" mode type obj path shard
+    shard="${ref##*/}"
+    while read -r mode type obj path; do
+        [ -n "$type" ] || continue
+        if [ "$type" != blob ]; then
+            echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} shard tree entry '${path}' is a ${type}, expected a blob (msg/<message-id>.json)"
+            continue
+        fi
+        if [ "$mode" != 100644 ]; then
+            echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} shard tree entry '${path}' has mode ${mode}, expected a regular file (100644)"
+            continue
+        fi
+        case "$path" in
+            msg/[0-9a-f]*.json)
+                local base="${path#msg/}"; base="${base%.json}"
+                if ! [[ "$base" =~ ^[0-9a-f]{64}$ ]]; then
+                    echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} message blob '${path}' has a malformed message-id (expected msg/<64-hex>.json)"
+                    continue
+                fi
+                local want_shard
+                want_shard=$(printf '%02x' "$((16#${base:0:1}))")
+                if [ "$want_shard" != "$shard" ]; then
+                    echo "✗ ${ref} message ${base} is in shard ${shard} but derives to shard ${want_shard} (mis-sharded blob is corruption)"
+                fi
+                ;;
+            *)
+                echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} shard tree contains unexpected path '${path}' (only msg/<message-id>.json blobs are allowed in schema v1)"
+                ;;
+        esac
+    done < <(git ls-tree -r "$sha" 2>/dev/null)
+    return 0
+}
+
 # taskdag_ref_violations <objectname> <full-refname>
 # Echoes one human-readable line per invariant violation (nothing when the
 # ref is well-formed). Never mutates anything. Returns 0 always; the caller
@@ -379,6 +449,14 @@ taskdag_ref_violations() {
     # under tasks/v1/* is recognised, so `tasks/v1/junk` still fails below.
     if taskdag_is_graph_ref "$ref"; then
         taskdag_graph_tree_violations "$sha"
+        return 0
+    fi
+    # The cross-repo mailbox shards are the other data-in-tree exception: a
+    # commit (checked above) whose tree obeys the mailbox shape (only
+    # msg/<message-id>.json blobs). Only the 16 exact 00..0f refs match, so
+    # tasks/v1/mailbox/junk still falls through to the unknown-namespace check.
+    if taskdag_is_mailbox_ref "$ref"; then
+        taskdag_mailbox_tree_violations "$sha" "$ref"
         return 0
     fi
     tree=$(git rev-parse "${sha}^{tree}" 2>/dev/null) || return 0   # vanished → skip
@@ -1441,6 +1519,13 @@ COMMANDS:
                            not-complete + requires satisfied + unclaimed +
                            unblocked. Read-only; --json/--no-fetch/--node/
                            --ready. Never writes; live wiring is separate.
+    mailbox put|list|consume
+                           Cross-repo NOTIFICATION transport (bounded 16-shard
+                           set tasks/v1/mailbox/00..0f). put enqueues a hint;
+                           list reads in-flight messages; consume folds-then-
+                           deletes (ordered) via an injected --fold-cmd. A
+                           message is a trigger, not a fact — the reconciler
+                           backstop re-derives a lost hint from master.
     comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
@@ -5401,11 +5486,14 @@ EOF
     fi
     
     # Check 1: All task commits have empty tree.
-    # The dependency-graph index branch (tasks/v1/graph) is the ONE exempt
-    # ref — its tree IS the active edge set (see TASKDAG_GRAPH_REF); its
-    # shape is audited by the --strict floor (Check 3), not here.
+    # The data-in-tree refs (the dependency-graph index tasks/v1/graph and the
+    # 16 cross-repo mailbox shards tasks/v1/mailbox/00..0f) are the exempt
+    # refs — their trees ARE their data (the active edge set / in-flight
+    # message set); their shape is audited by the --strict floor (Check 3),
+    # not here.
     while read -r sha ref; do
         taskdag_is_graph_ref "$ref" && continue
+        taskdag_is_mailbox_ref "$ref" && continue
         local tree
         tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
         if [ "$tree" != "$EMPTY_TREE" ]; then
@@ -7072,6 +7160,7 @@ main() {
         facts) cmd_facts "$@" ;;
         reconcile) cmd_reconcile "$@" ;;
         dep) cmd_dep "$@" ;;
+        mailbox) cmd_mailbox "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;

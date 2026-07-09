@@ -313,6 +313,123 @@ else
 fi
 git update-ref -d refs/heads/tasks/v1/graph
 
+# ---------------------------------------------------------------------------
+# TEST 16: the cross-repo mailbox shards tasks/v1/mailbox/00..0f are the
+#          SECOND data-in-tree ref kind exempt from the empty-tree floor. A
+#          shard commit whose tree is a well-formed message set (only
+#          msg/<64-hex>.json blobs) MUST PASS --strict AND non-strict, even
+#          though its tree is non-empty. Golden fixture for the ref kind
+#          (docs/INVARIANTS.md § "The cross-repo mailbox shards").
+# ---------------------------------------------------------------------------
+mk_mailbox_ref() {  # <shard> then "<blobsha> <path>" stdin lines
+    local shard="$1" idx bsha pth tree commit
+    idx="$ROOT/.mailbox.index"; rm -f "$idx"
+    while read -r bsha pth; do
+        [ -n "$bsha" ] || continue
+        GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$bsha,$pth"
+    done
+    tree=$(GIT_INDEX_FILE="$idx" git write-tree)
+    rm -f "$idx"
+    commit=$(git commit-tree "$tree" -m "mailbox shard $shard")
+    git update-ref "refs/heads/tasks/v1/mailbox/$shard" "$commit"
+}
+msg_id=$(printf 'b%.0s' {1..64})   # a syntactically valid 64-hex message-id
+msg_blob=$(git hash-object -w --stdin <<EOF
+{"schema":1,"kind":"completion","node":"task:o/r@$(printf '1%.0s' {1..40})","witness":"$(printf '2%.0s' {1..40})","dest":"o/r","origin":{"repo-id":42,"repo":"o/r"}}
+EOF
+)
+# msg_id is all 'b': its first nibble is 'b', so it MUST live in shard 0b.
+printf '%s msg/%s.json\n' "$msg_blob" "$msg_id" | mk_mailbox_ref 0b
+if "$TD" validate --strict >/dev/null 2>&1; then
+    ok "16: non-empty tasks/v1/mailbox/0b message shard passes validate --strict"
+else
+    bad "16: well-formed tasks/v1/mailbox/0b unexpectedly failed validate --strict"
+fi
+if "$TD" validate >/dev/null 2>&1; then
+    ok "16b: non-empty mailbox shard passes default (non-strict) validate"
+else
+    bad "16b: mailbox shard tripped the non-strict empty-tree check"
+fi
+# A message placed in the WRONG shard (its id derives to 0b, not 0a) is
+# corruption and MUST fail --strict (the fixed-shard-mapping invariant).
+printf '%s msg/%s.json\n' "$msg_blob" "$msg_id" | mk_mailbox_ref 0a
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "derives to shard 0b"; then
+    ok "16c: a mis-sharded message (in 0a, derives to 0b) fails validate --strict"
+else
+    bad "16c: mis-sharded mailbox message not rejected (rc=$rc, out=$out)"
+fi
+git update-ref -d refs/heads/tasks/v1/mailbox/0a
+git update-ref -d refs/heads/tasks/v1/mailbox/0b
+
+# ---------------------------------------------------------------------------
+# TEST 17: an EMPTY-TREE mailbox shard (zero in-flight messages, the state a
+#          shard is left in after its last message is consumed) is valid.
+# ---------------------------------------------------------------------------
+empty_commit=$(git commit-tree "$EMPTY_TREE" -m "empty mailbox shard")
+git update-ref refs/heads/tasks/v1/mailbox/00 "$empty_commit"
+if "$TD" validate --strict >/dev/null 2>&1; then
+    ok "17: empty-tree mailbox shard passes validate --strict"
+else
+    bad "17: empty-tree mailbox shard unexpectedly failed validate --strict"
+fi
+git update-ref -d refs/heads/tasks/v1/mailbox/00
+
+# ---------------------------------------------------------------------------
+# TEST 18: a mailbox shard tree with a NON-msg/ path FAILS --strict (the
+#          shard shape invariant is not a blanket "skip all checks").
+# ---------------------------------------------------------------------------
+printf '%s README.txt\n' "$junk_blob" | mk_mailbox_ref 0a
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "unexpected path"; then
+    ok "18: mailbox shard with a non-msg/ path fails validate --strict"
+else
+    bad "18: malformed mailbox shard tree not rejected (rc=$rc, out=$out)"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 19: a mailbox blob with a MALFORMED message-id filename FAILS --strict.
+# ---------------------------------------------------------------------------
+printf '%s msg/abcdef.json\n' "$msg_blob" | mk_mailbox_ref 0a
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "malformed message-id"; then
+    ok "19: mailbox shard with a malformed message-id filename fails validate --strict"
+else
+    bad "19: malformed message-id filename not rejected (rc=$rc, out=$out)"
+fi
+git update-ref -d refs/heads/tasks/v1/mailbox/0a
+
+# ---------------------------------------------------------------------------
+# TEST 20: the exemption is EXACT-REF (00..0f), not a tasks/v1/mailbox/*
+#          opening — a shard OUTSIDE the fixed 16-set (e.g. `10`, `0g`) is
+#          still an UNKNOWN tasks/v1/* namespace and FAILS --strict.
+# ---------------------------------------------------------------------------
+mk_ref refs/heads/tasks/v1/mailbox/10 "out-of-range mailbox shard"
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "UNKNOWN tasks namespace 'v1'"; then
+    ok "20: an out-of-range mailbox shard (10) still fails (exemption is exact-ref)"
+else
+    bad "20: tasks/v1/mailbox/10 was not rejected (rc=$rc, out=$out)"
+fi
+git update-ref -d refs/heads/tasks/v1/mailbox/10
+
+# ---------------------------------------------------------------------------
+# TEST 21: a msg/<id>.json blob with a NON-regular mode (executable 100755)
+#          FAILS --strict — the "regular blobs only" invariant on shards.
+# ---------------------------------------------------------------------------
+idx="$ROOT/.mailbox.index"; rm -f "$idx"
+GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100755,$msg_blob,msg/$msg_id.json"
+exec_tree=$(GIT_INDEX_FILE="$idx" git write-tree); rm -f "$idx"
+exec_commit=$(git commit-tree "$exec_tree" -m "exec-mode mailbox shard")
+git update-ref refs/heads/tasks/v1/mailbox/0b "$exec_commit"
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "expected a regular file"; then
+    ok "21: non-regular-file (100755) message blob fails validate --strict"
+else
+    bad "21: non-regular-file message blob not rejected (rc=$rc, out=$out)"
+fi
+git update-ref -d refs/heads/tasks/v1/mailbox/0b
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
