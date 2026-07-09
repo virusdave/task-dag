@@ -305,6 +305,25 @@ export const PendingPurchaseHintBundleFactSchema = z.object({
 })
 export type PendingPurchaseHintBundleFact = z.infer<typeof PendingPurchaseHintBundleFactSchema>
 
+// One glossary/acronym-expansion entry flattened with its owning-document
+// context, for C4. Mirrors PendingPurchaseHintBundleFact but carries a cited
+// glossary `entry` instead of a product `fact`, keeping the two evidence kinds
+// on separate read surfaces (the loader that flattens facts never conflates
+// them with glossary rows).
+export const PendingPurchaseHintBundleGlossaryEntrySchema = z.object({
+  hintBundleId: z.string().min(1),
+  hintDocumentId: z.string().min(1),
+  kind: PendingPurchaseHintDocumentKindSchema,
+  sourceLabel: z.string().nullable(),
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  intent: PendingPurchaseHintIntentSchema,
+  extractor: PendingPurchaseHintExtractorSchema,
+  entry: PendingPurchaseHintGlossaryEntrySchema,
+})
+export type PendingPurchaseHintBundleGlossaryEntry = z.infer<
+  typeof PendingPurchaseHintBundleGlossaryEntrySchema
+>
+
 // ── re-extract route ──────────────────────────────────────────────────
 
 // POST .../hint-bundles/:hintBundleId/extract — operator triggers a fresh

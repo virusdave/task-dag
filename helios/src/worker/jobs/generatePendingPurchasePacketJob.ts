@@ -34,6 +34,7 @@ import { withTransaction } from '../../server/db/tx.js'
 import {
   getPendingPurchaseHintExtractionProgress,
   loadExtractedPendingPurchaseHintFactsForBundle,
+  loadExtractedPendingPurchaseHintGlossaryForBundle,
 } from '../../server/db/queries/pendingPurchaseHintQueries.js'
 import {
   persistPendingPurchasePacket,
@@ -44,6 +45,7 @@ import {
   isPendingPurchaseClassifierAvailable,
   type ClassifierAllowedTaxonomy,
   type ClassifierCatalogCandidate,
+  type ClassifierGlossaryEntry,
   type ClassifierHintFact,
   type ClassifierRowInput,
   type ClassifierSweedSuggestion,
@@ -775,6 +777,7 @@ interface PendingPurchaseClassifierProvenance {
   reconcilerVersion: string | null
   hintBundleId: string | null
   hintFactCount: number
+  glossaryEntryCount: number
   catalogCandidateCount: number
   classifierCalls: number
   rowCount: number
@@ -889,6 +892,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
     reconcilerVersion: null,
     hintBundleId,
     hintFactCount: 0,
+    glossaryEntryCount: 0,
     catalogCandidateCount: 0,
     classifierCalls: 0,
     rowCount: 0,
@@ -917,7 +921,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
   )
 
   // ── Phase B: hint facts + allowed taxonomy ──────────────────────────────
-  const hintFacts = await buildClassifierHintFacts(db, hintBundleId)
+  const { hintFacts, glossaryEntries } = await buildClassifierHintFacts(db, hintBundleId)
   const allowedTaxonomy = await loadPendingPurchaseAllowedTaxonomy(stateDealerId)
 
   // ── Phase C: catalog candidate pool ─────────────────────────────────────
@@ -946,6 +950,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       rows: chunk.map((ctx) => ctx.classifierRow),
       catalogCandidates: selectClassifierCandidatesForChunk(chunk, candidatePool),
       hintFacts,
+      glossaryEntries,
       allowedTaxonomy,
     })
 
@@ -1011,6 +1016,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       reconcilerVersion: reconcileResult.reconcilerVersion,
       hintBundleId,
       hintFactCount: hintFacts.length,
+      glossaryEntryCount: glossaryEntries.length,
       catalogCandidateCount: candidatePool.size,
       classifierCalls,
       rowCount: rows.length,
@@ -1362,12 +1368,23 @@ function describeClassifierEvent(chunk: readonly PendingPurchaseGroupContext[]):
   return `${site} — ${distributorLabel} delivery, ${chunk.length} unresolved line${chunk.length === 1 ? '' : 's'}.`
 }
 
+/**
+ * Hint evidence for one classifier call, split by kind: product `hintFacts`
+ * and interpretation-only `glossaryEntries` (cited acronym/abbreviation
+ * expansions). Both are inert, cited, and untrusted; the classifier presents
+ * them on separate fields so the prompt can describe their distinct roles.
+ */
+export interface ClassifierHintEvidence {
+  readonly hintFacts: ClassifierHintFact[]
+  readonly glossaryEntries: ClassifierGlossaryEntry[]
+}
+
 export async function buildClassifierHintFacts(
   db: Queryable,
   hintBundleId: string | null,
-): Promise<ClassifierHintFact[]> {
+): Promise<ClassifierHintEvidence> {
   if (hintBundleId === null) {
-    return []
+    return { hintFacts: [], glossaryEntries: [] }
   }
 
   // Close the enqueue race: the generate job is frequently queued by the same
@@ -1395,35 +1412,52 @@ export async function buildClassifierHintFacts(
     )
   }
 
-  const bundleFacts = await loadExtractedPendingPurchaseHintFactsForBundle(db, hintBundleId)
-  if (bundleFacts.length === 0) {
+  const [bundleFacts, bundleGlossary] = await Promise.all([
+    loadExtractedPendingPurchaseHintFactsForBundle(db, hintBundleId),
+    loadExtractedPendingPurchaseHintGlossaryForBundle(db, hintBundleId),
+  ])
+  if (bundleFacts.length === 0 && bundleGlossary.length === 0) {
     // Every document reached a terminal state but none produced usable
-    // classifier facts — e.g. a glossary / acronym-expansion / free-text note
-    // the current product-fact extractor cannot represent
-    // (FreshlyBakedNYC/automation#69), or extraction failed/skipped. This is
-    // NOT the enqueue race. Rather than abort the operator's whole packet run,
-    // degrade gracefully: generate WITHOUT hint evidence and warn, so a hint
-    // that produced no usable facts can never block generation.
+    // classifier evidence — neither a product fact NOR a glossary/acronym
+    // expansion (FreshlyBakedNYC/automation#69) — or extraction failed/skipped.
+    // This is NOT the enqueue race. Rather than abort the operator's whole
+    // packet run, degrade gracefully: generate WITHOUT hint evidence and warn,
+    // so a hint that produced nothing usable can never block generation.
     console.warn(
-      `[pending-purchase] Hint bundle "${hintBundleId}" produced no usable classifier facts ` +
+      `[pending-purchase] Hint bundle "${hintBundleId}" produced no usable classifier evidence ` +
         `(documents: ${progress.total}, extracted: ${progress.extracted}, failed: ${progress.failed}, ` +
         `skipped: ${progress.skipped}); generating without hint evidence.`,
     )
-    return []
+    return { hintFacts: [], glossaryEntries: [] }
   }
   if (bundleFacts.length > MAX_CLASSIFIER_HINT_FACTS) {
     throw new Error(
       `Hint bundle "${hintBundleId}" has ${bundleFacts.length} facts (limit ${MAX_CLASSIFIER_HINT_FACTS}). Trim the bundle.`,
     )
   }
-  return bundleFacts.map((bundleFact) => ({
-    citedId: `${bundleFact.hintDocumentId}#${bundleFact.fact.factId}`,
-    hintDocumentId: bundleFact.hintDocumentId,
-    factId: bundleFact.fact.factId,
-    kind: bundleFact.kind,
-    intent: bundleFact.intent,
-    fact: bundleFact.fact,
-  }))
+  if (bundleGlossary.length > MAX_CLASSIFIER_HINT_FACTS) {
+    throw new Error(
+      `Hint bundle "${hintBundleId}" has ${bundleGlossary.length} glossary entries (limit ${MAX_CLASSIFIER_HINT_FACTS}). Trim the bundle.`,
+    )
+  }
+  return {
+    hintFacts: bundleFacts.map((bundleFact) => ({
+      citedId: `${bundleFact.hintDocumentId}#${bundleFact.fact.factId}`,
+      hintDocumentId: bundleFact.hintDocumentId,
+      factId: bundleFact.fact.factId,
+      kind: bundleFact.kind,
+      intent: bundleFact.intent,
+      fact: bundleFact.fact,
+    })),
+    glossaryEntries: bundleGlossary.map((bundleEntry) => ({
+      citedId: `${bundleEntry.hintDocumentId}#${bundleEntry.entry.factId}`,
+      hintDocumentId: bundleEntry.hintDocumentId,
+      factId: bundleEntry.entry.factId,
+      term: bundleEntry.entry.term,
+      expansion: bundleEntry.entry.expansion,
+      note: bundleEntry.entry.note,
+    })),
+  }
 }
 
 /**

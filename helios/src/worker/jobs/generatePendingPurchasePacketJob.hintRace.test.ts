@@ -72,6 +72,43 @@ function validFactsDocumentRow() {
   }
 }
 
+// A glossary-only extracted document (issue #69): zero product facts, one
+// cited acronym expansion. The product-fact loader flattens nothing from it;
+// the glossary loader flattens the METRC expansion.
+function glossaryOnlyDocumentRow() {
+  return {
+    hint_document_id: 'pphdoc_2026-07-07_224306_b08cbb',
+    bundle_public_id: 'pphint_2026-07-07_224300_accfaf',
+    kind: 'operator_note',
+    source_label: null,
+    content_sha256: 'a'.repeat(64),
+    extracted_facts: {
+      schemaVersion: 2,
+      intent: 'free_text_description',
+      extractor: 'llm',
+      model: 'mistral.mistral-large-3-675b-instruct',
+      facts: [],
+      glossaryEntries: [
+        {
+          factId: 'f1',
+          term: 'METRC',
+          expansion: 'Marijuana Enforcement Tracking Reporting Compliance',
+          note: null,
+          citation: {
+            page: null,
+            lineStart: 1,
+            lineEnd: 1,
+            row: null,
+            jsonPointer: null,
+            snippet: 'METRC = Marijuana Enforcement Tracking Reporting Compliance',
+          },
+        },
+      ],
+      warnings: [],
+    },
+  }
+}
+
 // Route queries by SQL shape: the status roll-up (count(*) filter ...) vs the
 // facts-load select. Cast through unknown to satisfy the full pg QueryResult
 // shape without a first-party `any` (banned by the pre-commit gate).
@@ -85,9 +122,9 @@ function stubDb(progress: unknown[], facts: unknown[]): Queryable {
 }
 
 describe('buildClassifierHintFacts hint-extraction race handling', () => {
-  it('returns [] when no bundle is attached', async () => {
-    const facts = await buildClassifierHintFacts(stubDb([], []), null)
-    expect(facts).toEqual([])
+  it('returns empty evidence when no bundle is attached', async () => {
+    const evidence = await buildClassifierHintFacts(stubDb([], []), null)
+    expect(evidence).toEqual({ hintFacts: [], glossaryEntries: [] })
   })
 
   it('defers (RetryableWorkerError) while any document is still extracting', async () => {
@@ -99,20 +136,41 @@ describe('buildClassifierHintFacts hint-extraction race handling', () => {
 
   it('returns the flattened facts once extraction is complete', async () => {
     const db = stubDb([progressRow({ total: 1, pending: 0, extracted: 1 })], [validFactsDocumentRow()])
-    const facts = await buildClassifierHintFacts(db, 'pphint_2026-07-07_224300_accfaf')
-    expect(facts).toHaveLength(1)
-    expect(facts[0]?.citedId).toBe('pphdoc_2026-07-07_224306_b08cbb#f1')
-    expect(facts[0]?.fact.brand).toBe('Lil Lefty')
+    const { hintFacts, glossaryEntries } = await buildClassifierHintFacts(
+      db,
+      'pphint_2026-07-07_224300_accfaf',
+    )
+    expect(hintFacts).toHaveLength(1)
+    expect(hintFacts[0]?.citedId).toBe('pphdoc_2026-07-07_224306_b08cbb#f1')
+    expect(hintFacts[0]?.fact.brand).toBe('Lil Lefty')
+    expect(glossaryEntries).toEqual([])
   })
 
-  it('degrades gracefully (returns []) when all documents are terminal but yielded no usable facts', async () => {
-    // A glossary / acronym-expansion / free-text hint the product-fact
-    // extractor cannot represent (FreshlyBakedNYC/automation#69), or an
-    // extraction that failed/skipped, must NOT abort the operator's whole
-    // packet run: generation proceeds without hint evidence.
+  it('flattens glossary entries and feeds them even when there are no product facts', async () => {
+    // The exact issue #69 shape: a glossary-only hint document (no product
+    // facts). It must NOT degrade to no-evidence — the glossary is fed to C4.
+    const db = stubDb(
+      [progressRow({ total: 1, pending: 0, extracted: 1 })],
+      [glossaryOnlyDocumentRow()],
+    )
+    const { hintFacts, glossaryEntries } = await buildClassifierHintFacts(
+      db,
+      'pphint_2026-07-07_224300_accfaf',
+    )
+    expect(hintFacts).toEqual([])
+    expect(glossaryEntries).toHaveLength(1)
+    expect(glossaryEntries[0]?.citedId).toBe('pphdoc_2026-07-07_224306_b08cbb#f1')
+    expect(glossaryEntries[0]?.term).toBe('METRC')
+    expect(glossaryEntries[0]?.expansion).toMatch(/Enforcement/)
+  })
+
+  it('degrades gracefully (returns empty evidence) when all documents are terminal but yielded nothing usable', async () => {
+    // A hint the extractor could not represent at all, or an extraction that
+    // failed/skipped, must NOT abort the operator's whole packet run:
+    // generation proceeds without hint evidence.
     const db = stubDb([progressRow({ total: 1, pending: 0, failed: 1 })], [])
-    const facts = await buildClassifierHintFacts(db, 'pphint_2026-07-07_224300_accfaf')
-    expect(facts).toEqual([])
+    const evidence = await buildClassifierHintFacts(db, 'pphint_2026-07-07_224300_accfaf')
+    expect(evidence).toEqual({ hintFacts: [], glossaryEntries: [] })
   })
 
   it('fails loud (non-retryable) when an attached bundle resolves to zero documents', async () => {

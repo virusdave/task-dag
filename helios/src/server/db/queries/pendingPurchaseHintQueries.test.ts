@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { Queryable } from '../pool.js'
-import { loadExtractedPendingPurchaseHintFactsForBundle } from './pendingPurchaseHintQueries.js'
+import {
+  loadExtractedPendingPurchaseHintFactsForBundle,
+  loadExtractedPendingPurchaseHintGlossaryForBundle,
+} from './pendingPurchaseHintQueries.js'
 
 // The loader parses every stored `extracted_facts` JSONB blob with the current
 // contract. It must keep flattening PRE-EXISTING v1 rows even after the
@@ -102,6 +105,39 @@ describe('loadExtractedPendingPurchaseHintFactsForBundle', () => {
       docRow('pphdoc_2026-06-21_000004_ab12d0', v1Facts),
     ])
     const result = await loadExtractedPendingPurchaseHintFactsForBundle(db, 'pphbndl_demo')
+    expect(result).toHaveLength(1)
+    expect(warn).toHaveBeenCalledOnce()
+  })
+})
+
+describe('loadExtractedPendingPurchaseHintGlossaryForBundle', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('flattens glossary entries from a v2 row with the cited-id context', async () => {
+    const db = fakeDb([docRow('pphdoc_2026-06-21_000002_ab12ce', v2Facts)])
+    const result = await loadExtractedPendingPurchaseHintGlossaryForBundle(db, 'pphbndl_demo')
+    expect(result).toHaveLength(1)
+    expect(result[0]?.entry.factId).toBe('f2')
+    expect(result[0]?.entry.term).toBe('FL')
+    expect(result[0]?.entry.expansion).toBe('Flower')
+    expect(result[0]?.hintDocumentId).toBe('pphdoc_2026-06-21_000002_ab12ce')
+  })
+
+  it('returns [] for a stored v1 row (no glossaryEntries key)', async () => {
+    const db = fakeDb([docRow('pphdoc_2026-06-21_000001_ab12cd', v1Facts)])
+    const result = await loadExtractedPendingPurchaseHintGlossaryForBundle(db, 'pphbndl_demo')
+    expect(result).toEqual([])
+  })
+
+  it('skips (does not throw) a row whose payload fails the contract', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDb([
+      docRow('pphdoc_2026-06-21_000003_ab12cf', { schemaVersion: 99, garbage: true }),
+      docRow('pphdoc_2026-06-21_000004_ab12d0', v2Facts),
+    ])
+    const result = await loadExtractedPendingPurchaseHintGlossaryForBundle(db, 'pphbndl_demo')
     expect(result).toHaveLength(1)
     expect(warn).toHaveBeenCalledOnce()
   })

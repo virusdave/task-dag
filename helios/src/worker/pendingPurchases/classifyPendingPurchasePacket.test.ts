@@ -4,6 +4,7 @@ import type { Queryable } from '../../server/db/pool.js'
 import {
   classifyPendingPurchasePacketWithLlm,
   PendingPurchaseClassifierError,
+  type ClassifierGlossaryEntry,
   type ClassifierHintFact,
   type ClassifierRowInput,
   type ClassifyPendingPurchasePacketInput,
@@ -28,6 +29,7 @@ const emptyDb = {
 } as unknown as Queryable
 
 const VALID_CITED_ID = 'pphdoc_2026-06-21_000001_ab12cd#f1'
+const VALID_GLOSSARY_CITED_ID = 'pphdoc_2026-06-21_000001_ab12cd#f2'
 
 function hintFact(): ClassifierHintFact {
   return {
@@ -37,6 +39,17 @@ function hintFact(): ClassifierHintFact {
     kind: 'distributor_menu',
     intent: 'canonical_sku_list',
     fact: { itemName: 'Pink Runtz 3.5g' },
+  }
+}
+
+function glossaryEntry(): ClassifierGlossaryEntry {
+  return {
+    citedId: VALID_GLOSSARY_CITED_ID,
+    hintDocumentId: 'pphdoc_2026-06-21_000001_ab12cd',
+    factId: 'f2',
+    term: 'PNK',
+    expansion: 'Pink Runtz',
+    note: null,
   }
 }
 
@@ -74,6 +87,7 @@ function buildInput(overrides: Partial<ClassifyPendingPurchasePacketInput> = {})
       },
     ],
     hintFacts: [hintFact()],
+    glossaryEntries: [],
     allowedTaxonomy: { categories: ['Flower'], subcategories: ['Packaged Eighth'] },
     ...overrides,
   }
@@ -157,7 +171,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
 
     expect(result.schemaVersion).toBe(1)
     expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toMatch(/event-level/)
+    expect(result.promptVersion).toMatch(/glossary-evidence/)
     expect(result.drafts).toHaveLength(1)
     const draft = result.drafts[0]!
     // Distributor identity comes from the INPUT, never the model echo.
@@ -361,6 +375,141 @@ describe('classifyPendingPurchasePacketWithLlm — input guards', () => {
     stubFetch(modelResponse({ drafts: [modelDraft()] }))
     const input = buildInput({ rows: [rowInput({ rowKey: 'dup' }), rowInput({ rowKey: 'dup', distributorProductId: 'dp-2' })] })
     await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(/Duplicate input rowKey/)
+  })
+})
+
+describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)', () => {
+  it('accepts a draft that cites a glossary entry to decode an abbreviated name', async () => {
+    // The model decodes "…-PNK" via the glossary "PNK -> Pink Runtz" and cites
+    // the glossary id; reuse still rests on a live-catalog candidate.
+    stubFetch(
+      modelResponse({
+        drafts: [
+          modelDraft({
+            citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            reuseEvidence: {
+              source: 'live-catalog-search',
+              rationale: 'Glossary expands PNK to Pink Runtz, matching the live eighth.',
+              citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            },
+          }),
+        ],
+      }),
+    )
+
+    const result = await classifyPendingPurchasePacketWithLlm(
+      buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+    )
+    expect(result.drafts).toHaveLength(1)
+    expect(result.drafts[0]!.citedHintIds).toContain(VALID_GLOSSARY_CITED_ID)
+  })
+
+  it('puts glossaryEntries into the user data payload (not the system prompt)', async () => {
+    const fetchMock = stubFetch(
+      modelResponse({
+        drafts: [
+          modelDraft({
+            citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            reuseEvidence: {
+              source: 'live-catalog-search',
+              rationale: 'x',
+              citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            },
+          }),
+        ],
+      }),
+    )
+    await classifyPendingPurchasePacketWithLlm(
+      buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+    )
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    const [system, user] = body.messages as Array<{ role: string; content: string }>
+    // The system prompt describes glossaryEntries but never contains the
+    // untrusted expansion text; that travels only in the user data turn.
+    expect(system.content).toMatch(/glossaryEntries/)
+    expect(system.content).not.toContain('Pink Runtz')
+    const payload = JSON.parse(user.content)
+    expect(payload.glossaryEntries).toEqual([
+      { citedId: VALID_GLOSSARY_CITED_ID, term: 'PNK', expansion: 'Pink Runtz', note: null },
+    ])
+  })
+
+  it('rejects a fabricated glossary cited id', async () => {
+    const ghostGlossaryId = 'pphdoc_2026-06-21_000001_ab12cd#f9'
+    stubFetch(
+      modelResponse({
+        drafts: [
+          modelDraft({
+            citedHintIds: [ghostGlossaryId],
+            reuseEvidence: { source: 'model-inference', rationale: 'x', citedHintIds: [] },
+          }),
+        ],
+      }),
+    )
+    await expect(
+      classifyPendingPurchasePacketWithLlm(
+        buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+      ),
+    ).rejects.toThrow(/was not provided/)
+  })
+
+  it('does NOT let a glossary-only citation prop up a sibling-po reuse claim', async () => {
+    // Candidate 7001 is a live-catalog candidate. Claiming sibling-po while
+    // citing ONLY glossary evidence must fail: a glossary explains a name, it
+    // does not attest the product appeared on a prior PO.
+    stubFetch(
+      modelResponse({
+        drafts: [
+          modelDraft({
+            citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            reuseEvidence: {
+              source: 'sibling-po',
+              rationale: 'x',
+              citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            },
+          }),
+        ],
+      }),
+    )
+    await expect(
+      classifyPendingPurchasePacketWithLlm(
+        buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+      ),
+    ).rejects.toThrow(/only glossary evidence/)
+  })
+
+  it('does not widen reuse eligibility: a glossary cannot introduce a non-offered candidate', async () => {
+    // 999999 is neither a catalog candidate, the current link, nor a Sweed
+    // suggestion. A cited glossary entry must not make it reusable.
+    stubFetch(
+      modelResponse({
+        drafts: [
+          modelDraft({
+            reuseProductIdCandidate: 999999,
+            citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            reuseEvidence: {
+              source: 'model-inference',
+              rationale: 'x',
+              citedHintIds: [VALID_GLOSSARY_CITED_ID],
+            },
+          }),
+        ],
+      }),
+    )
+    await expect(
+      classifyPendingPurchasePacketWithLlm(
+        buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+      ),
+    ).rejects.toThrow(/not offered as a candidate/)
+  })
+
+  it('rejects a glossary citedId that collides with a hint-fact citedId', async () => {
+    // Same "<doc>#<factId>" would resolve to two different pieces of evidence.
+    const colliding: ClassifierGlossaryEntry = { ...glossaryEntry(), citedId: VALID_CITED_ID, factId: 'f1' }
+    stubFetch(modelResponse({ drafts: [modelDraft()] }))
+    await expect(
+      classifyPendingPurchasePacketWithLlm(buildInput({ glossaryEntries: [colliding] })),
+    ).rejects.toThrow(/Duplicate hint citedId/)
   })
 })
 

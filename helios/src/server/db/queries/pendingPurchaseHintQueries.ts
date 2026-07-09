@@ -12,6 +12,7 @@
 import type {
   PendingPurchaseHintBundleDetail,
   PendingPurchaseHintBundleFact,
+  PendingPurchaseHintBundleGlossaryEntry,
   PendingPurchaseHintBundleRecord,
   PendingPurchaseHintBundleStatus,
   PendingPurchaseHintDocumentKind,
@@ -623,6 +624,63 @@ export async function loadExtractedPendingPurchaseHintFactsForBundle(
         intent: parsed.data.intent,
         extractor: parsed.data.extractor,
         fact,
+      })
+    }
+  }
+  return flattened
+}
+
+/**
+ * Flatten every successfully-extracted glossary / acronym-expansion entry
+ * across an active bundle's documents, attaching the owning-document context
+ * each citation needs. This is a SEPARATE read surface from
+ * loadExtractedPendingPurchaseHintFactsForBundle: glossary entries are cited,
+ * inert INTERPRETATION evidence (e.g. "PR = Preroll", "METRC = …") the C4
+ * classifier uses to decode abbreviated line-item names, never product facts.
+ * Same skip-on-contract-mismatch posture: a v1 payload (no glossaryEntries)
+ * and any row failing the current contract simply contribute nothing.
+ */
+export async function loadExtractedPendingPurchaseHintGlossaryForBundle(
+  db: Queryable,
+  hintBundleId: string,
+): Promise<PendingPurchaseHintBundleGlossaryEntry[]> {
+  const result = await db.query<HintFactDocumentRow>(
+    `
+      select
+        d.hint_document_id, b.hint_bundle_id as bundle_public_id, d.kind,
+        d.source_label, d.content_sha256, d.extracted_facts
+      from pending_purchase_hint_documents d
+      join pending_purchase_hint_bundles b on b.id = d.bundle_id
+      where b.hint_bundle_id = $1
+        and d.extraction_status = 'extracted'
+        and d.extracted_facts is not null
+      order by d.created_at asc, d.id asc
+    `,
+    [hintBundleId],
+  )
+
+  const flattened: PendingPurchaseHintBundleGlossaryEntry[] = []
+  for (const row of result.rows) {
+    const parsed = PendingPurchaseHintExtractedFactsSchema.safeParse(row.extracted_facts)
+    if (!parsed.success) {
+      // A stored payload that no longer matches the contract is a defect to
+      // surface (re-extract), not silent garbage to feed the classifier.
+      console.warn(
+        `[hintFacts] document ${row.hint_document_id} has extracted_facts that fail the current contract; skipping (glossary).`,
+      )
+      continue
+    }
+    for (const entry of parsed.data.glossaryEntries) {
+      flattened.push({
+        hintBundleId: row.bundle_public_id,
+        hintDocumentId: row.hint_document_id,
+        // The DB kind check constrains this to the document-kind enum.
+        kind: row.kind as PendingPurchaseHintDocumentKind,
+        sourceLabel: row.source_label,
+        contentSha256: row.content_sha256,
+        intent: parsed.data.intent,
+        extractor: parsed.data.extractor,
+        entry,
       })
     }
   }
