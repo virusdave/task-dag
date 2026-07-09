@@ -35,7 +35,9 @@ import {
   getPendingPurchaseHintExtractionProgress,
   loadExtractedPendingPurchaseHintFactsForBundle,
   loadExtractedPendingPurchaseHintGlossaryForBundle,
+  loadPendingPurchaseHintOperatorNotesForBundle,
 } from '../../server/db/queries/pendingPurchaseHintQueries.js'
+import { getHintDocumentStore } from '../../server/pendingPurchases/pendingPurchaseHintStore.js'
 import {
   persistPendingPurchasePacket,
   type PendingPurchasePacket,
@@ -47,6 +49,7 @@ import {
   type ClassifierCatalogCandidate,
   type ClassifierGlossaryEntry,
   type ClassifierHintFact,
+  type ClassifierOperatorGuidance,
   type ClassifierRowInput,
   type ClassifierSweedSuggestion,
 } from '../pendingPurchases/classifyPendingPurchasePacket.js'
@@ -921,7 +924,10 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
   )
 
   // ── Phase B: hint facts + allowed taxonomy ──────────────────────────────
-  const { hintFacts, glossaryEntries } = await buildClassifierHintFacts(db, hintBundleId)
+  const { hintFacts, glossaryEntries, operatorGuidance } = await buildClassifierHintFacts(
+    db,
+    hintBundleId,
+  )
   const allowedTaxonomy = await loadPendingPurchaseAllowedTaxonomy(stateDealerId)
 
   // ── Phase C: catalog candidate pool ─────────────────────────────────────
@@ -951,6 +957,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       catalogCandidates: selectClassifierCandidatesForChunk(chunk, candidatePool),
       hintFacts,
       glossaryEntries,
+      operatorGuidance,
       allowedTaxonomy,
     })
 
@@ -1371,12 +1378,16 @@ function describeClassifierEvent(chunk: readonly PendingPurchaseGroupContext[]):
 /**
  * Hint evidence for one classifier call, split by kind: product `hintFacts`
  * and interpretation-only `glossaryEntries` (cited acronym/abbreviation
- * expansions). Both are inert, cited, and untrusted; the classifier presents
- * them on separate fields so the prompt can describe their distinct roles.
+ * expansions) — both inert, cited, and UNTRUSTED — plus `operatorGuidance`, the
+ * verbatim text of `operator_note` documents. Operator notes are authored only
+ * by the authenticated operator, so unlike facts/glossary they are TRUSTED
+ * guidance the classifier may follow; the classifier presents each on a
+ * separate field so the prompt can describe their distinct trust roles.
  */
 export interface ClassifierHintEvidence {
   readonly hintFacts: ClassifierHintFact[]
   readonly glossaryEntries: ClassifierGlossaryEntry[]
+  readonly operatorGuidance: ClassifierOperatorGuidance[]
 }
 
 export async function buildClassifierHintFacts(
@@ -1384,7 +1395,7 @@ export async function buildClassifierHintFacts(
   hintBundleId: string | null,
 ): Promise<ClassifierHintEvidence> {
   if (hintBundleId === null) {
-    return { hintFacts: [], glossaryEntries: [] }
+    return { hintFacts: [], glossaryEntries: [], operatorGuidance: [] }
   }
 
   // Close the enqueue race: the generate job is frequently queued by the same
@@ -1412,23 +1423,44 @@ export async function buildClassifierHintFacts(
     )
   }
 
-  const [bundleFacts, bundleGlossary] = await Promise.all([
+  const [bundleFacts, bundleGlossary, operatorNotePointers] = await Promise.all([
     loadExtractedPendingPurchaseHintFactsForBundle(db, hintBundleId),
     loadExtractedPendingPurchaseHintGlossaryForBundle(db, hintBundleId),
+    loadPendingPurchaseHintOperatorNotesForBundle(db, hintBundleId),
   ])
-  if (bundleFacts.length === 0 && bundleGlossary.length === 0) {
+
+  // Read the verbatim text of every operator note. An operator note is TRUSTED
+  // guidance that must reach C4 even when C3 extracted 0 facts / 0 glossary from
+  // it (the #69 failure: free-text notes like "MZ is Moony Zooties, an existing
+  // brand" extracted to nothing and were dropped). A blob read / integrity
+  // failure is fatal — generating without the operator's guidance would silently
+  // recreate the incident — so let it propagate rather than degrade.
+  const store = getHintDocumentStore()
+  const operatorGuidance: ClassifierOperatorGuidance[] = await Promise.all(
+    operatorNotePointers.map(async (note) => {
+      const blob = await store.read(note.pointer)
+      return {
+        hintDocumentId: note.hintDocumentId,
+        sourceLabel: note.sourceLabel,
+        text: blob.text,
+      }
+    }),
+  )
+
+  if (bundleFacts.length === 0 && bundleGlossary.length === 0 && operatorGuidance.length === 0) {
     // Every document reached a terminal state but none produced usable
-    // classifier evidence — neither a product fact NOR a glossary/acronym
-    // expansion (FreshlyBakedNYC/automation#69) — or extraction failed/skipped.
-    // This is NOT the enqueue race. Rather than abort the operator's whole
-    // packet run, degrade gracefully: generate WITHOUT hint evidence and warn,
-    // so a hint that produced nothing usable can never block generation.
+    // classifier evidence — no product fact, no glossary/acronym expansion
+    // (FreshlyBakedNYC/automation#69), AND no operator note — or extraction
+    // failed/skipped. This is NOT the enqueue race. Rather than abort the
+    // operator's whole packet run, degrade gracefully: generate WITHOUT hint
+    // evidence and warn, so a hint that produced nothing usable can never block
+    // generation.
     console.warn(
       `[pending-purchase] Hint bundle "${hintBundleId}" produced no usable classifier evidence ` +
         `(documents: ${progress.total}, extracted: ${progress.extracted}, failed: ${progress.failed}, ` +
         `skipped: ${progress.skipped}); generating without hint evidence.`,
     )
-    return { hintFacts: [], glossaryEntries: [] }
+    return { hintFacts: [], glossaryEntries: [], operatorGuidance: [] }
   }
   if (bundleFacts.length > MAX_CLASSIFIER_HINT_FACTS) {
     throw new Error(
@@ -1457,6 +1489,7 @@ export async function buildClassifierHintFacts(
       expansion: bundleEntry.entry.expansion,
       note: bundleEntry.entry.note,
     })),
+    operatorGuidance,
   }
 }
 

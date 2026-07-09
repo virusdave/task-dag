@@ -4,6 +4,7 @@ import type { Queryable } from '../pool.js'
 import {
   loadExtractedPendingPurchaseHintFactsForBundle,
   loadExtractedPendingPurchaseHintGlossaryForBundle,
+  loadPendingPurchaseHintOperatorNotesForBundle,
 } from './pendingPurchaseHintQueries.js'
 
 // The loader parses every stored `extracted_facts` JSONB blob with the current
@@ -140,5 +141,56 @@ describe('loadExtractedPendingPurchaseHintGlossaryForBundle', () => {
     const result = await loadExtractedPendingPurchaseHintGlossaryForBundle(db, 'pphbndl_demo')
     expect(result).toHaveLength(1)
     expect(warn).toHaveBeenCalledOnce()
+  })
+})
+
+describe('loadPendingPurchaseHintOperatorNotesForBundle', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function operatorNotePointerRow(overrides: Record<string, unknown> = {}) {
+    return {
+      hint_document_id: 'pphdoc_2026-07-09_013737_186fed',
+      source_label: 'operator note',
+      content_sha256: '18'.padEnd(64, '6'),
+      storage_backend: 'fs',
+      storage_uri: 'fs://pending-purchase-hints/18/6f/186fed.txt',
+      byte_size: '395',
+      ...overrides,
+    }
+  }
+
+  it('maps each row to a labelled blob pointer (coercing byte_size to a number)', async () => {
+    const db = fakeDb([operatorNotePointerRow()])
+    const result = await loadPendingPurchaseHintOperatorNotesForBundle(db, 'pphbndl_demo')
+    expect(result).toEqual([
+      {
+        hintDocumentId: 'pphdoc_2026-07-09_013737_186fed',
+        sourceLabel: 'operator note',
+        pointer: {
+          contentSha256: '18'.padEnd(64, '6'),
+          storageBackend: 'fs',
+          storageUri: 'fs://pending-purchase-hints/18/6f/186fed.txt',
+          byteSize: 395,
+        },
+      },
+    ])
+    expect(typeof result[0]?.pointer.byteSize).toBe('number')
+  })
+
+  it("scopes the query to kind = 'operator_note' (external hints stay untrusted)", async () => {
+    const query = vi.fn(async () => ({ rows: [] }) as never)
+    const db = { query } as unknown as Queryable
+    await loadPendingPurchaseHintOperatorNotesForBundle(db, 'pphbndl_demo')
+    const sql = query.mock.calls[0]![0] as string
+    expect(sql).toMatch(/kind = 'operator_note'/)
+    expect(query.mock.calls[0]![1]).toEqual(['pphbndl_demo'])
+  })
+
+  it('returns [] when the bundle has no operator notes', async () => {
+    const db = fakeDb([])
+    const result = await loadPendingPurchaseHintOperatorNotesForBundle(db, 'pphbndl_demo')
+    expect(result).toEqual([])
   })
 })

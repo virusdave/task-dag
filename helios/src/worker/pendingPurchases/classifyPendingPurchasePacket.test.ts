@@ -6,6 +6,7 @@ import {
   PendingPurchaseClassifierError,
   type ClassifierGlossaryEntry,
   type ClassifierHintFact,
+  type ClassifierOperatorGuidance,
   type ClassifierRowInput,
   type ClassifyPendingPurchasePacketInput,
 } from './classifyPendingPurchasePacket.js'
@@ -88,7 +89,19 @@ function buildInput(overrides: Partial<ClassifyPendingPurchasePacketInput> = {})
     ],
     hintFacts: [hintFact()],
     glossaryEntries: [],
+    operatorGuidance: [],
     allowedTaxonomy: { categories: ['Flower'], subcategories: ['Packaged Eighth'] },
+    ...overrides,
+  }
+}
+
+function operatorGuidance(overrides: Partial<ClassifierOperatorGuidance> = {}): ClassifierOperatorGuidance {
+  return {
+    hintDocumentId: 'pphdoc_2026-07-09_000003_ff00aa',
+    sourceLabel: 'operator note',
+    // Deliberately uses brand text NOT present in the system prompt, so the
+    // "verbatim text stays out of the system prompt" assertion is meaningful.
+    text: 'ZX is Zephyr Labs, an existing brand. There should be no new brands created here.',
     ...overrides,
   }
 }
@@ -171,7 +184,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
 
     expect(result.schemaVersion).toBe(1)
     expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toMatch(/glossary-evidence/)
+    expect(result.promptVersion).toMatch(/operator-guidance/)
     expect(result.drafts).toHaveLength(1)
     const draft = result.drafts[0]!
     // Distributor identity comes from the INPUT, never the model echo.
@@ -432,6 +445,54 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
     expect(payload.glossaryEntries).toEqual([
       { citedId: VALID_GLOSSARY_CITED_ID, term: 'PNK', expansion: 'Pink Runtz', note: null },
     ])
+  })
+
+  it('puts operatorGuidance verbatim in the user data payload (not the system prompt)', async () => {
+    const fetchMock = stubFetch(modelResponse({ drafts: [modelDraft()] }))
+    await classifyPendingPurchasePacketWithLlm(buildInput({ operatorGuidance: [operatorGuidance()] }))
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    const [system, user] = body.messages as Array<{ role: string; content: string }>
+    // The system prompt DESCRIBES operatorGuidance and its trust role, but the
+    // verbatim operator text travels only in the user data turn.
+    expect(system.content).toMatch(/operatorGuidance/)
+    expect(system.content).not.toContain('Zephyr Labs')
+    const payload = JSON.parse(user.content)
+    expect(payload.operatorGuidance).toEqual([
+      {
+        hintDocumentId: 'pphdoc_2026-07-09_000003_ff00aa',
+        sourceLabel: 'operator note',
+        text: 'ZX is Zephyr Labs, an existing brand. There should be no new brands created here.',
+      },
+    ])
+  })
+
+  it('system prompt marks operatorGuidance TRUSTED but hintFacts/glossary UNTRUSTED', async () => {
+    const fetchMock = stubFetch(modelResponse({ drafts: [modelDraft()] }))
+    await classifyPendingPurchasePacketWithLlm(buildInput({ operatorGuidance: [operatorGuidance()] }))
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    const [system] = body.messages as Array<{ role: string; content: string }>
+    expect(system.content).toMatch(/operatorGuidance.*trusted/i)
+    expect(system.content).toMatch(/hintFacts.*UNTRUSTED|UNTRUSTED DATA/)
+    // The existing-but-no-candidate guard steering the model to needs-review.
+    expect(system.content).toMatch(/needs-review/)
+  })
+
+  it('rejects operator guidance that exceeds the total-char budget (fail loud, no truncation)', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft()] }))
+    const huge = operatorGuidance({ text: 'x'.repeat(40_001) })
+    await expect(
+      classifyPendingPurchasePacketWithLlm(buildInput({ operatorGuidance: [huge] })),
+    ).rejects.toThrow(/operator guidance is \d+ chars/)
+  })
+
+  it('rejects too many operator notes', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft()] }))
+    const many = Array.from({ length: 51 }, (_unused, i) =>
+      operatorGuidance({ hintDocumentId: `pphdoc_2026-07-09_0000${String(i).padStart(2, '0')}_ff00aa`, text: 'ok' }),
+    )
+    await expect(
+      classifyPendingPurchasePacketWithLlm(buildInput({ operatorGuidance: many })),
+    ).rejects.toThrow(/operator notes \(limit/)
   })
 
   it('rejects a fabricated glossary cited id', async () => {

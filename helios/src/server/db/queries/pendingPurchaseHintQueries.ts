@@ -631,6 +631,65 @@ export async function loadExtractedPendingPurchaseHintFactsForBundle(
 }
 
 /**
+ * The out-of-band blob pointer for one `operator_note` document, plus the
+ * public id / source label the classifier needs to label the guidance. Unlike
+ * facts/glossary this carries a pointer, not extracted text: an operator note
+ * is TRUSTED operator guidance fed to C4 VERBATIM, so it must survive even when
+ * C3 extraction produced no structured facts (the #69 failure mode).
+ */
+export interface PendingPurchaseHintOperatorNotePointer {
+  readonly hintDocumentId: string
+  readonly sourceLabel: string | null
+  readonly pointer: HintDocumentPointer
+}
+
+/**
+ * Fetch the blob pointers for every `operator_note`-kind document in a bundle,
+ * ordered oldest-first. Only `operator_note` is authored by the authenticated
+ * operator via the admin hint UI, so only this kind is elevated to trusted
+ * verbatim guidance for C4; `distributor_menu` / `sibling_purchase_order` /
+ * `other` are pasted external material and stay untrusted (structured facts
+ * only). Extraction status is intentionally NOT filtered: an operator note
+ * whose C3 pass produced 0 facts / 0 glossary (or failed/skipped) must still
+ * reach the classifier as guidance.
+ */
+export async function loadPendingPurchaseHintOperatorNotesForBundle(
+  db: Queryable,
+  hintBundleId: string,
+): Promise<PendingPurchaseHintOperatorNotePointer[]> {
+  const result = await db.query<{
+    hint_document_id: string
+    source_label: string | null
+    content_sha256: string
+    storage_backend: string
+    storage_uri: string
+    byte_size: string | number
+  }>(
+    `
+      select
+        d.hint_document_id, d.source_label,
+        d.content_sha256, d.storage_backend, d.storage_uri, d.byte_size
+      from pending_purchase_hint_documents d
+      join pending_purchase_hint_bundles b on b.id = d.bundle_id
+      where b.hint_bundle_id = $1
+        and d.kind = 'operator_note'
+      order by d.created_at asc, d.id asc
+    `,
+    [hintBundleId],
+  )
+  return result.rows.map((row) => ({
+    hintDocumentId: row.hint_document_id,
+    sourceLabel: row.source_label,
+    pointer: {
+      contentSha256: row.content_sha256,
+      storageBackend: row.storage_backend as 'fs' | 's3',
+      storageUri: row.storage_uri,
+      byteSize: typeof row.byte_size === 'number' ? row.byte_size : Number.parseInt(row.byte_size, 10),
+    },
+  }))
+}
+
+/**
  * Flatten every successfully-extracted glossary / acronym-expansion entry
  * across an active bundle's documents, attaching the owning-document context
  * each citation needs. This is a SEPARATE read surface from
