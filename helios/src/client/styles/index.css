@@ -10554,6 +10554,89 @@ span.metric-chart-legend-item {
   margin-bottom: 6px;
 }
 
+/* ---------- P6 enrichment panels: L3 feedback + LP reaction ---------- */
+
+.gads-ev-enrichment {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gads-ev-enrichment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.gads-ev-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.gads-ev-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gads-ev-panel-head h4 {
+  margin: 0 0 2px;
+  font-size: 0.98rem;
+  color: #1d2940;
+}
+
+.gads-ev-mini-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+}
+
+.gads-ev-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: #667085;
+}
+
+.gads-ev-facts span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #f4f7fb;
+}
+
+.gads-ev-proposals,
+.gads-ev-bullets {
+  margin-top: 2px;
+}
+
+.gads-ev-proposal {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-top: 1px solid #e7ebf2;
+}
+
+.gads-ev-proposal p {
+  margin: 0;
+}
+
+.gads-ev-bullets {
+  padding-left: 18px;
+  color: #344054;
+}
+
+.gads-ev-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #344054;
+}
+
 @media (max-width: 640px) {
   .gads-ev-hero {
     flex-direction: column;
@@ -10569,6 +10652,14 @@ span.metric-chart-legend-item {
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .gads-ev-enrichment-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .gads-ev-panel-head {
+    flex-direction: column;
   }
 }
 

@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import {
+  GadsEnrichmentResponseSchema,
   GadsEvolutionResponseSchema,
   type GadsActionOutcomeRow,
   type GadsActionType,
+  type GadsEnrichmentResponse,
   type GadsEvolutionResponse,
   type GadsHotspot,
+  type GadsL3Section,
+  type GadsLpSection,
   type GadsOutcome,
 } from '../../../shared/contracts/index.js'
 import { gadsScopeLabel, type GadsScope } from '../../../shared/domain/gadsSites.js'
@@ -24,12 +28,14 @@ import { nyMonthDaySlash, nyShortDateTime } from '../../app/nyTime.js'
 // virusdave/top-level#24, Helios child FreshlyBakedNYC/automation#51.
 //
 // Render order (parent EPIC_PLAN §6, panels 1-4 — the L3 feedback-adoption
-// and LP-evolver reaction panels 5-6 are phase P6 and arrive separately):
+// and LP-evolver reaction panels 5-6 are appended from the P6 enrichment
+// endpoint):
 //   1. Freshness / stale-loop status strip + honest empty state
 //   2. Learning heartbeat (hero): outcome-weighted action yield + sparkline
 //   3. Loop-health KPI strip
 //   4. Action / outcome matrix (with operator flags)
 //   5. Hotspots — where Helios keeps failing
+//   6. L3 feedback-adoption + landing-page reaction enrichment
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 86_400_000
@@ -94,6 +100,21 @@ function fmtHours(v: number | null): string {
   return `${(v / 24).toFixed(1)} d`
 }
 
+function fmtDateTime(iso: string | null): string {
+  if (!iso) return 'n/a'
+  const ms = Date.parse(iso)
+  if (!Number.isFinite(ms)) return 'n/a'
+  return nyShortDateTime(ms)
+}
+
+function fmtHash(hash: string | null): string {
+  return hash ? `${hash.slice(0, 12)}…` : 'n/a'
+}
+
+function labelFromSlug(v: string): string {
+  return v.replace(/_/g, ' ')
+}
+
 function fmtAgo(iso: string | null): string {
   if (!iso) return 'never'
   const ms = Date.now() - Date.parse(iso)
@@ -120,6 +141,9 @@ export function GAdsEvolutionTab({ scope }: { scope: GadsScope }): JSX.Element {
   const [data, setData] = useState<GadsEvolutionResponse | null>(null)
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
+  const [enrichment, setEnrichment] = useState<GadsEnrichmentResponse | null>(null)
+  const [enrichmentLoading, setEnrichmentLoading] = useState<boolean>(true)
+  const [enrichmentError, setEnrichmentError] = useState<string | null>(null)
 
   const { fromMs, toMs } = useMemo(() => {
     const to = Date.now()
@@ -151,6 +175,30 @@ export function GAdsEvolutionTab({ scope }: { scope: GadsScope }): JSX.Element {
       cancelled = true
     }
   }, [scope, fromMs, toMs])
+
+  useEffect(() => {
+    let cancelled = false
+    const params = new URLSearchParams()
+    params.set('site', scope)
+    setEnrichmentLoading(true)
+    setEnrichmentError(null)
+    loadJson(`/api/gads/enrichment?${params.toString()}`, GadsEnrichmentResponseSchema)
+      .then((r) => {
+        if (!cancelled) setEnrichment(r)
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setEnrichment(null)
+          setEnrichmentError(e instanceof Error ? e.message : String(e))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setEnrichmentLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [scope])
 
   const hasAttempts = data !== null && data.heartbeat.proposed > 0
 
@@ -221,11 +269,15 @@ export function GAdsEvolutionTab({ scope }: { scope: GadsScope }): JSX.Element {
           <LoopHealthStrip data={data} />
           <ActionOutcomeMatrix data={data} />
           <Hotspots data={data} scope={scope} />
-          <p className="subtle-copy">
-            L3 feedback-adoption and landing-page reaction panels arrive with phase P6.
-          </p>
         </>
       )}
+
+      <EnrichmentPanels
+        data={enrichment}
+        loading={enrichmentLoading}
+        error={enrichmentError}
+        scope={scope}
+      />
     </section>
   )
 }
@@ -560,6 +612,221 @@ function hotspotLabel(h: GadsHotspot): string {
   if (h.adGroupName) parts.push(h.adGroupName)
   parts.push(`ad ${h.adId}`)
   return parts.join(' · ')
+}
+
+// ---------------------------------------------------------------------------
+// 6. L3 feedback-adoption + LP-evolver reaction enrichment
+// ---------------------------------------------------------------------------
+
+function EnrichmentPanels({
+  data,
+  loading,
+  error,
+  scope,
+}: {
+  data: GadsEnrichmentResponse | null
+  loading: boolean
+  error: string | null
+  scope: GadsScope
+}): JSX.Element {
+  return (
+    <div className="gads-ev-enrichment">
+      <h3 className="gads-lp-section-title">L3 + landing-page reaction</h3>
+      {loading && <p className="subtle-copy">Loading enrichment…</p>}
+      {error && <p className="gads-lp-error">Could not load GAds enrichment: {error}</p>}
+      {data && !loading && (
+        <div className="gads-ev-enrichment-grid">
+          <L3FeedbackPanel l3={data.l3} scope={scope} generatedAt={data.generatedAt} />
+          <LpReactionPanel lp={data.lp} scope={scope} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function L3FeedbackPanel({
+  l3,
+  scope,
+  generatedAt,
+}: {
+  l3: GadsL3Section
+  scope: GadsScope
+  generatedAt: string
+}): JSX.Element {
+  const latest = l3.latest
+  return (
+    <section className="gads-ev-panel">
+      <div className="gads-ev-panel-head">
+        <div>
+          <h4>L3 feedback-adoption</h4>
+          <p className="subtle-copy">Global prompt/rule meta-analysis; not site ad lift.</p>
+        </div>
+        <span className="gads-lp-badge">Updated {fmtAgo(generatedAt)}</span>
+      </div>
+      <div className="gads-lp-status">
+        <span className="gads-lp-badge">
+          {l3.available ? `${fmtInt(l3.evaluationsIndexed)} L3 evaluations indexed` : 'No L3 evaluations found'}
+        </span>
+        {l3.evaluationParseErrors > 0 && (
+          <span className="gads-lp-badge is-warn">
+            {fmtInt(l3.evaluationParseErrors)} parse errors skipped
+          </span>
+        )}
+        {l3.visibility === 'redacted' && (
+          <span className="gads-lp-badge is-warn">
+            Free text redacted on {gadsScopeLabel(scope)} view
+          </span>
+        )}
+      </div>
+      <div className="gads-lp-kpi-strip gads-ev-mini-kpis">
+        <Kpi
+          label="Latest L3 run"
+          value={latest ? fmtDateTime(latest.generatedAt) : 'n/a'}
+          pending={!latest}
+          hint={latest?.evaluationId}
+        />
+        <Kpi
+          label="Prompt / rule updates"
+          value={latest ? `${fmtInt(latest.promptUpdateCount)} / ${fmtInt(latest.ruleUpdateCount)}` : 'n/a'}
+          pending={!latest}
+        />
+        <Kpi
+          label="Addenda sha"
+          value={fmtHash(l3.addenda.sha256)}
+          pending={!l3.addenda.exists}
+          hint={l3.addenda.generatedByEvaluationId ?? undefined}
+        />
+        <Kpi
+          label="Later L2 consumed"
+          value={consumptionLabel(l3.consumption.status)}
+          pending={l3.consumption.status === 'unknown'}
+          hint={l3.consumption.newestL2RunAt ? `newest ${fmtDateTime(l3.consumption.newestL2RunAt)}` : undefined}
+        />
+      </div>
+      <div className="gads-ev-facts">
+        <span>Addenda generated {fmtDateTime(l3.addenda.generatedAt)}</span>
+        <span>Modified {fmtDateTime(l3.addenda.modifiedAt)}</span>
+        <span>L2 refs {l3.addenda.l2RunsReferencedCount ?? 'n/a'}</span>
+        {latest && latest.requiresHumanApproval && <span>Human approval required</span>}
+      </div>
+      {l3.visibility === 'full' && latest && latest.topProposals.length > 0 && (
+        <div className="gads-ev-proposals">
+          <div className="gads-lp-section-title">
+            Top L3 proposals
+            {latest.topProposalsTruncated && <span className="subtle-copy"> · truncated</span>}
+          </div>
+          {latest.topProposals.map((p, i) => (
+            <div key={`${p.updateType}-${p.component}-${i}`} className="gads-ev-proposal">
+              <strong>{labelFromSlug(p.updateType)} · {p.component}</strong>
+              <span className="subtle-copy">Confidence {fmtPct(p.confidence)}</span>
+              <p>{p.rationale}</p>
+              <p className="subtle-copy">{p.expectedImpact}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {l3.visibility === 'full' && l3.addenda.topBullets.length > 0 && (
+        <ul className="gads-ev-bullets">
+          {l3.addenda.topBullets.map((b) => <li key={b}>{b}</li>)}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function LpReactionPanel({ lp, scope }: { lp: GadsLpSection; scope: GadsScope }): JSX.Element {
+  return (
+    <section className="gads-ev-panel">
+      <div className="gads-ev-panel-head">
+        <div>
+          <h4>Landing-page evolver reaction</h4>
+          <p className="subtle-copy">Scoped landingpage_ad_outcomes summary for {gadsScopeLabel(scope)}.</p>
+        </div>
+        {lp.singleIngest && <span className="gads-lp-badge is-warn">single historical ingest</span>}
+      </div>
+      <div className="gads-lp-kpi-strip gads-ev-mini-kpis">
+        <Kpi label="Outcome rows" value={fmtInt(lp.totalRows)} pending={!lp.available} />
+        <Kpi label="Observed / pending" value={`${fmtInt(lp.observedRows)} / ${fmtInt(lp.pendingRows)}`} />
+        <Kpi label="Avg confidence" value={fmtPct(lp.avgConfidence)} pending={lp.avgConfidence === null} />
+        <Kpi
+          label="Last outcome"
+          value={fmtDateTime(lp.lastOutcomeObservedAt)}
+          pending={lp.lastOutcomeObservedAt === null}
+        />
+      </div>
+      <div className="gads-ev-facts">
+        <span>First row {fmtDateTime(lp.firstCreatedAt)}</span>
+        <span>Last row {fmtDateTime(lp.lastCreatedAt)}</span>
+        {scope === 'all' && <span>Includes unknown-scope rows if present</span>}
+      </div>
+      {!lp.available ? (
+        <p className="subtle-copy">No landing-page ad-outcome rows exist for this scope yet.</p>
+      ) : (
+        <>
+          <div className="gads-lp-table-scroll">
+            <table className="gads-lp-table">
+              <thead>
+                <tr>
+                  <th>Signal → action → outcome</th>
+                  <th className="num">Rows</th>
+                  <th className="num">Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lp.byGroup.map((g) => (
+                  <tr key={`${g.signalType}|${g.plannedAction}|${g.outcomeStatus}`}>
+                    <td>
+                      {labelFromSlug(g.signalType)} → {labelFromSlug(g.plannedAction)} → {labelFromSlug(g.outcomeStatus)}
+                    </td>
+                    <td className="num">{fmtInt(g.count)}</td>
+                    <td className="num">{fmtPct(g.avgConfidence)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {lp.byGroupTruncated && <p className="subtle-copy">Signal/action groups truncated.</p>}
+          <details className="gads-ev-details">
+            <summary>Top landing pages</summary>
+            <div className="gads-lp-table-scroll">
+              <table className="gads-lp-table">
+                <thead>
+                  <tr>
+                    <th>Landing page key</th>
+                    <th className="num">Rows</th>
+                    <th className="num">Observed</th>
+                    <th className="num">Pending</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lp.topLandingPages.map((p) => (
+                    <tr key={p.landingPageKey}>
+                      <td>{p.landingPageKey}</td>
+                      <td className="num">{fmtInt(p.count)}</td>
+                      <td className="num">{fmtInt(p.observed)}</td>
+                      <td className="num">{fmtInt(p.pending)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {lp.topLandingPagesTruncated && <p className="subtle-copy">Landing pages truncated.</p>}
+          </details>
+        </>
+      )}
+    </section>
+  )
+}
+
+function consumptionLabel(status: GadsL3Section['consumption']['status']): string {
+  switch (status) {
+    case 'likely_consumed':
+      return 'likely'
+    case 'not_yet_consumed':
+      return 'not yet'
+    case 'unknown':
+      return 'unknown'
+  }
 }
 
 // ---------------------------------------------------------------------------
