@@ -99,6 +99,20 @@ extract_field() {
     echo "$message" | grep "^${field}:" | sed "s/^${field}: *//" | head -1 || true
 }
 
+# Helper: true only for the exact human GitHub comment task dialect used by
+# issue-comment ingestion. These tasks are created specifically to wake the
+# DAG up when an operator replies under a parked/blocked work item, so they
+# must remain dispatchable even if their structural parent is blocked. Keep
+# this fail-closed: ordinary task children, bot/system messages, and malformed
+# messages still inherit structural blocks.
+is_human_comment_task() {
+    local sha="$1" msg
+    msg=$(parse_commit_metadata "$sha" 2>/dev/null) || return 1
+    [ "$(extract_field "$msg" "kind")" = "message" ] &&
+    [ "$(extract_field "$msg" "role")" = "human" ] &&
+    [ "$(extract_field "$msg" "intent")" = "comment" ]
+}
+
 # Helper: get task title (first line minus "Task: " prefix)
 get_task_title() {
     local sha="$1"
@@ -1646,9 +1660,11 @@ EOF
 # `tasks/active/<short>` ref are filtered out — they are in-flight on
 # some other agent. Pass `--no-fetch` to suppress the network round-trip
 # (offline use) and `--include-claimed` to override the active-ref filter.
-# Blocked tasks (tasks/blocked overlay), tasks whose structural ancestor
-# is blocked (transitive block), and tasks with unmet dependencies are
-# never pickable and are always excluded.
+# Blocked tasks (tasks/blocked overlay) and tasks with unmet dependencies
+# are never pickable and are always excluded. Tasks whose structural
+# ancestor is blocked (transitive block) are also excluded, except for the
+# exact human-comment task dialect: operator comments under a blocked node
+# are the wake-up signal that lets a worker reassess or unblock that node.
 cmd_frontier() {
     local json=false
     local issue_filter=""
@@ -1705,7 +1721,7 @@ cmd_frontier() {
         # task parked awaiting operator feedback — must withhold every
         # subtask decomposed under it; otherwise the dispatcher spawns
         # no-op workers on children of a blocked node.
-        if blocked_structural_ancestor "$sha" >/dev/null; then
+        if blocked_structural_ancestor "$sha" >/dev/null && ! is_human_comment_task "$sha"; then
             continue
         fi
 
@@ -1902,11 +1918,13 @@ EOF
     # Defense-in-depth (transitive): refuse a task whose structural
     # (breakdown) ancestor is blocked, mirroring the frontier filter. A
     # worker could target a child of a blocked parent directly; claiming
-    # it would put work the operator parked back in flight.
+    # it would put work the operator parked back in flight. The one narrow
+    # exception is an exact human-comment task, which is the operator's
+    # wake-up signal for the blocked node.
     if [ "$do_force" = false ]; then
         local blocking_ancestor
         blocking_ancestor=$(blocked_structural_ancestor "$task_sha" || true)
-        if [ -n "$blocking_ancestor" ]; then
+        if [ -n "$blocking_ancestor" ] && ! is_human_comment_task "$task_sha"; then
             local blocking_short
             blocking_short=$(git rev-parse --short "$blocking_ancestor" 2>/dev/null || echo "$blocking_ancestor")
             if [ "$json" = true ]; then
@@ -3211,7 +3229,13 @@ cmd_deps() {
             echo "{\"dependencies\": [], \"allMet\": true, \"blockedAncestor\": $blocked_ancestor_json}"
         else
             echo "No dependencies"
-            [ -n "$blocking_ancestor" ] && printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (task not pickable until unblocked)\n" "$(git rev-parse --short "$blocking_ancestor")"
+            if [ -n "$blocking_ancestor" ]; then
+                if is_human_comment_task "$sha"; then
+                    printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (human comment remains claimable)\n" "$(git rev-parse --short "$blocking_ancestor")"
+                else
+                    printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (task not pickable until unblocked)\n" "$(git rev-parse --short "$blocking_ancestor")"
+                fi
+            fi
         fi
         return 0
     fi
@@ -3259,7 +3283,11 @@ JSON
         echo "  \"blockedAncestor\": $blocked_ancestor_json"
         echo "}"
     elif [ -n "$blocking_ancestor" ]; then
-        printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (task not pickable until unblocked)\n" "$(git rev-parse --short "$blocking_ancestor")"
+        if is_human_comment_task "$sha"; then
+            printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (human comment remains claimable)\n" "$(git rev-parse --short "$blocking_ancestor")"
+        else
+            printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (task not pickable until unblocked)\n" "$(git rev-parse --short "$blocking_ancestor")"
+        fi
     fi
     
     if [ "$check_complete" = true ] && [ "$all_met" = false ]; then

@@ -81,6 +81,41 @@ frontier_has() {  # <short-sha> [extra frontier args…]
   grep -q "$sha" <<<"$out"
 }
 
+# Same as frontier_has, but without --issue. Comment/message task commits use
+# YAML-ish `issue.number`, not the regular `Issue:` trailer, so the current
+# issue filter intentionally does not match them.
+frontier_has_any() {  # <short-sha> [extra frontier args…]
+  local sha="$1"; shift
+  local out
+  out=$("$TD" frontier "$@" 2>/dev/null)
+  grep -q "$sha" <<<"$out"
+}
+
+mk_message_task() {  # <parent-sha> <role> <intent> <body>
+  local parent="$1" role="$2" intent="$3" body="$4" msg sha short
+  msg="kind: message
+role: $role
+intent: $intent
+
+issue:
+  number: 999
+
+github:
+  comment_id: $RANDOM
+  actor: tester
+  url: https://github.com/test/test/issues/999#issuecomment-$RANDOM
+
+message_id: msg_$RANDOM
+
+body: |
+  $body"
+  sha=$(git commit-tree "$EMPTY_TREE" -p "$parent" -m "$msg")
+  short=$(git rev-parse --short "$sha")
+  git update-ref "refs/heads/tasks/frontier/$short" "$sha"
+  git push -q origin "refs/heads/tasks/frontier/$short:refs/heads/tasks/frontier/$short" 2>/dev/null
+  printf '%s\n' "$short"
+}
+
 # Build: EPIC -> PARENT -> CHILD (CHILD's first parent is PARENT).
 PSHORT=$(mk_child "$EPIC" "parent awaiting operator")
 [ -n "$PSHORT" ] || { echo "could not create PARENT"; echo "PASS=0 FAIL=1"; exit 1; }
@@ -189,6 +224,64 @@ if frontier_has "$CSHORT"; then
   bad "6: grandchild listed while EPIC (grandparent) is blocked"
 else
   ok "6: grandchild withheld while EPIC (grandparent) is blocked"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 7: exact human comment tasks are the narrow exception. An operator
+# reply under a blocked structural ancestor must stay frontier-visible and
+# claimable so a worker can reassess/unblock the parked node.
+# ---------------------------------------------------------------------------
+cd "$ROOT/wc"
+HSHORT=$(mk_message_task "$PARENT" "human" "comment" "operator supplied the requested decision")
+git clone -q "$ROOT/origin.git" "$ROOT/worker5" 2>/dev/null
+cd "$ROOT/worker5"
+if frontier_has_any "$HSHORT"; then
+  ok "7: exact human comment under a blocked ancestor remains on frontier"
+else
+  bad "7: exact human comment under a blocked ancestor was suppressed"
+fi
+out=$("$TD" claim "$HSHORT" --json 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && [ "$(git ls-remote origin "refs/heads/tasks/active/$HSHORT" | wc -l)" -eq 1 ]; then
+  ok "7: exact human comment under a blocked ancestor is claimable"
+else
+  bad "7: exact human comment was not claimable (rc=$rc): $out"
+fi
+
+# TEST 8: directly blocked human comments remain hard-excluded. The exception
+# applies only to structural-ancestor blocking, never to tasks/blocked/<sha>.
+cd "$ROOT/wc"
+DSHORT=$(mk_message_task "$PARENT" "human" "comment" "this comment is directly parked")
+"$TD" block "$DSHORT" --reason="park the comment itself" >/dev/null 2>&1
+git clone -q "$ROOT/origin.git" "$ROOT/worker6" 2>/dev/null
+cd "$ROOT/worker6"
+if frontier_has_any "$DSHORT"; then
+  bad "8: directly blocked human comment leaked onto frontier"
+else
+  ok "8: directly blocked human comment is not on frontier"
+fi
+out=$("$TD" claim "$DSHORT" --json 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && echo "$out" | grep -qi '"blocked"'; then
+  ok "8: claim refuses a directly blocked human comment"
+else
+  bad "8: claim did not refuse directly blocked human comment (rc=$rc): $out"
+fi
+
+# TEST 9: the exception is fail-closed. Non-human/bot messages under a blocked
+# ancestor still inherit the structural block and cannot be claimed.
+cd "$ROOT/wc"
+BSHORT=$(mk_message_task "$PARENT" "bot" "comment" "automated status ping")
+git clone -q "$ROOT/origin.git" "$ROOT/worker7" 2>/dev/null
+cd "$ROOT/worker7"
+if frontier_has_any "$BSHORT"; then
+  bad "9: bot comment under a blocked ancestor leaked onto frontier"
+else
+  ok "9: bot comment under a blocked ancestor remains suppressed"
+fi
+out=$("$TD" claim "$BSHORT" --json 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && echo "$out" | grep -qi "ancestor-blocked"; then
+  ok "9: claim refuses a bot comment under a blocked ancestor"
+else
+  bad "9: claim did not refuse bot comment under blocked ancestor (rc=$rc): $out"
 fi
 
 echo "-----"
