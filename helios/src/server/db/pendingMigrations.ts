@@ -1489,6 +1489,51 @@ const SENTINELS: MigrationSentinel[] = [
       'feature cannot apply its own bootstrap).',
     check: (db) => tableExists(db, 'migration_apply_attempts'),
   },
+  {
+    // Issue #70 schema-only foundation for turn-based packet refinement. This
+    // sentinel checks the durable root/turn tables plus representative packet
+    // and row lineage fields and invariant indexes; later behavior leaves must
+    // add their own sentinels if they require additional schema.
+    migrationId: '102_pending_purchase_refinement_lineage',
+    label:
+      'pending_purchase_packet_roots + pending_purchase_refinement_turns and ' +
+      'packet/row lineage columns — schema-only foundation for issue #70\'s ' +
+      'turn-based pending-purchase packet refinement workflow. Adds current/' +
+      'candidate revision metadata, stable row_lineage_id fields, row snapshot ' +
+      'hash/provenance columns, and one-active-refinement-per-root indexes; no ' +
+      'LLM/UI/apply behavior is enabled by this migration.',
+    check: async (db) => {
+      const [
+        hasRoots,
+        hasTurns,
+        hasPacketRoot,
+        hasPacketStatus,
+        hasRowLineage,
+        hasRowSnapshot,
+        hasCurrentIndex,
+        hasActiveTurnIndex,
+      ] = await Promise.all([
+        tableExists(db, 'pending_purchase_packet_roots'),
+        tableExists(db, 'pending_purchase_refinement_turns'),
+        columnExists(db, 'pending_purchase_packets', 'packet_root_id'),
+        columnExists(db, 'pending_purchase_packets', 'revision_status'),
+        columnExists(db, 'pending_purchase_rows', 'row_lineage_id'),
+        columnExists(db, 'pending_purchase_rows', 'row_snapshot_sha256'),
+        indexExists(db, 'pending_purchase_packets_one_current_per_root_idx'),
+        indexExists(db, 'pending_purchase_refinement_turns_one_active_idx'),
+      ])
+      return (
+        hasRoots &&
+        hasTurns &&
+        hasPacketRoot &&
+        hasPacketStatus &&
+        hasRowLineage &&
+        hasRowSnapshot &&
+        hasCurrentIndex &&
+        hasActiveTurnIndex
+      )
+    },
+  },
   // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and
   // 101_migration_flow_smoketest_drop were a throwaway create+drop PAIR used to
   // exercise the admin "Apply Now" psql apply flow end-to-end for the first

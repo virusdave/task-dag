@@ -38,6 +38,105 @@ export const PendingPurchaseApplyRequestStatusSchema = z.enum([
 ])
 export type PendingPurchaseApplyRequestStatus = z.infer<typeof PendingPurchaseApplyRequestStatusSchema>
 
+export const PendingPurchasePacketRootStatusSchema = z.enum(['active', 'superseded', 'archived'])
+export type PendingPurchasePacketRootStatus = z.infer<typeof PendingPurchasePacketRootStatusSchema>
+
+export const PendingPurchasePacketRevisionStatusSchema = z.enum([
+  'current',
+  'candidate',
+  'superseded',
+  'failed',
+])
+export type PendingPurchasePacketRevisionStatus = z.infer<
+  typeof PendingPurchasePacketRevisionStatusSchema
+>
+
+export const PendingPurchaseRefinementTurnStatusSchema = z.enum([
+  'queued',
+  'running',
+  'candidate_created',
+  'failed',
+  'cancelled',
+])
+export type PendingPurchaseRefinementTurnStatus = z.infer<
+  typeof PendingPurchaseRefinementTurnStatusSchema
+>
+
+export const PendingPurchasePacketRootSummarySchema = z.object({
+  currentPacketId: z.number().int().positive().nullable(),
+  currentRevisionNumber: z.number().int().positive().nullable(),
+  packetRootId: z.number().int().positive(),
+  rootKey: z.string().min(1),
+  rootStatus: PendingPurchasePacketRootStatusSchema,
+  updatedAt: z.iso.datetime(),
+  version: z.number().int().positive(),
+})
+export type PendingPurchasePacketRootSummary = z.infer<
+  typeof PendingPurchasePacketRootSummarySchema
+>
+
+export const PendingPurchasePacketRevisionSummarySchema = z.object({
+  acceptedAt: z.iso.datetime().nullable(),
+  acceptedByUser: z.string().nullable(),
+  createdAt: z.iso.datetime(),
+  isApplyable: z.boolean(),
+  packetId: z.number().int().positive(),
+  packetRootId: z.number().int().positive().nullable(),
+  packetTitle: z.string().min(1),
+  parentPacketId: z.number().int().positive().nullable(),
+  revisionCreatedReason: z.string().nullable(),
+  revisionNumber: z.number().int().positive().nullable(),
+  revisionStatus: PendingPurchasePacketRevisionStatusSchema,
+  sourceRefinementTurnId: z.number().int().positive().nullable(),
+  updatedAt: z.iso.datetime(),
+})
+export type PendingPurchasePacketRevisionSummary = z.infer<
+  typeof PendingPurchasePacketRevisionSummarySchema
+>
+
+export const PendingPurchaseRowSnapshotRefSchema = z.object({
+  lineageRevisionNumber: z.number().int().positive().nullable(),
+  rowId: z.number().int().positive(),
+  rowLineageId: z.string().min(1).nullable(),
+  rowSnapshotSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  version: z.number().int().positive(),
+})
+export type PendingPurchaseRowSnapshotRef = z.infer<typeof PendingPurchaseRowSnapshotRefSchema>
+
+export const PendingPurchaseRefinementTurnSummarySchema = z.object({
+  candidatePacketId: z.number().int().positive().nullable(),
+  createdAt: z.iso.datetime(),
+  errorMessage: z.string().nullable(),
+  feedbackSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  finishedAt: z.iso.datetime().nullable(),
+  jobId: z.number().int().positive().nullable(),
+  model: z.string().nullable(),
+  packetRootId: z.number().int().positive(),
+  promptVersion: z.string().nullable(),
+  requestedByUser: z.string().nullable(),
+  rowSnapshotSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  startedAt: z.iso.datetime().nullable(),
+  status: PendingPurchaseRefinementTurnStatusSchema,
+  targetPacketId: z.number().int().positive(),
+  targetRevisionNumber: z.number().int().positive(),
+  targetRootVersion: z.number().int().positive(),
+  turnId: z.number().int().positive(),
+  updatedAt: z.iso.datetime(),
+})
+export type PendingPurchaseRefinementTurnSummary = z.infer<
+  typeof PendingPurchaseRefinementTurnSummarySchema
+>
+
+export const PendingPurchaseRevisionRowDiffSchema = z.object({
+  after: JsonValueSchema,
+  before: JsonValueSchema,
+  candidateRowId: z.number().int().positive(),
+  field: z.string().min(1),
+  parentRowId: z.number().int().positive(),
+  rowLineageId: z.string().min(1),
+})
+export type PendingPurchaseRevisionRowDiff = z.infer<typeof PendingPurchaseRevisionRowDiffSchema>
+
 export const PendingPurchasePacketSummarySchema = z.object({
   createdAt: z.iso.datetime(),
   generatedAt: z.iso.datetime(),

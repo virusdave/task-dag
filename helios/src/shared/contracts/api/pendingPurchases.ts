@@ -5,11 +5,16 @@ import {
   PendingPurchaseApplyRequestStatusSchema,
   PendingPurchaseApplyRequestSummarySchema,
   PendingPurchaseEtlDetailRowSchema,
+  PendingPurchasePacketRevisionSummarySchema,
+  PendingPurchasePacketRootSummarySchema,
   PendingPurchasePacketListItemSchema,
   PendingPurchasePacketSourceSchema,
   PendingPurchasePacketStatusSchema,
   PendingPurchasePacketSummarySchema,
   PendingPurchaseMappingStatusSchema,
+  PendingPurchaseRefinementTurnSummarySchema,
+  PendingPurchaseRevisionRowDiffSchema,
+  PendingPurchaseRowSnapshotRefSchema,
   PendingPurchaseRowApplyStatusSchema,
   PendingPurchaseRowSchema,
 } from '../domain/pendingPurchases.js'
@@ -46,6 +51,78 @@ export const PendingPurchaseEtlDetailsResponseSchema = z.object({
 export type PendingPurchaseEtlDetailsResponse = z.infer<
   typeof PendingPurchaseEtlDetailsResponseSchema
 >
+
+export const PendingPurchasePacketRouteParamsSchema = z.object({
+  packetId: z.coerce.number().int().positive(),
+})
+export type PendingPurchasePacketRouteParams = z.infer<typeof PendingPurchasePacketRouteParamsSchema>
+
+export const PendingPurchaseRefinementTurnRouteParamsSchema = z.object({
+  turnId: z.coerce.number().int().positive(),
+})
+export type PendingPurchaseRefinementTurnRouteParams = z.infer<
+  typeof PendingPurchaseRefinementTurnRouteParamsSchema
+>
+
+export const SubmitPendingPurchaseRefinementRequestSchema = z.object({
+  baseRows: z.array(PendingPurchaseRowSnapshotRefSchema).min(1).max(500),
+  expectedRootVersion: z.number().int().positive(),
+  feedbackText: z.string().trim().min(1).max(20000),
+})
+export type SubmitPendingPurchaseRefinementRequest = z.infer<
+  typeof SubmitPendingPurchaseRefinementRequestSchema
+>
+
+export const SubmitPendingPurchaseRefinementResponseSchema = z.object({
+  turn: PendingPurchaseRefinementTurnSummarySchema,
+})
+export type SubmitPendingPurchaseRefinementResponse = z.infer<
+  typeof SubmitPendingPurchaseRefinementResponseSchema
+>
+
+export const PendingPurchaseRefinementHistoryResponseSchema = z.object({
+  currentRevision: PendingPurchasePacketRevisionSummarySchema.nullable(),
+  rowDiffs: z.array(PendingPurchaseRevisionRowDiffSchema),
+  root: PendingPurchasePacketRootSummarySchema.nullable(),
+  revisions: z.array(PendingPurchasePacketRevisionSummarySchema),
+  turns: z.array(PendingPurchaseRefinementTurnSummarySchema),
+})
+export type PendingPurchaseRefinementHistoryResponse = z.infer<
+  typeof PendingPurchaseRefinementHistoryResponseSchema
+>
+
+export const SwitchPendingPurchaseRevisionRequestSchema = z.object({
+  expectedRootVersion: z.number().int().positive(),
+  reason: z.string().trim().max(500).nullable().optional(),
+})
+export type SwitchPendingPurchaseRevisionRequest = z.infer<
+  typeof SwitchPendingPurchaseRevisionRequestSchema
+>
+
+export const SwitchPendingPurchaseRevisionResponseSchema = z.object({
+  previousCurrentRevision: PendingPurchasePacketRevisionSummarySchema.nullable(),
+  root: PendingPurchasePacketRootSummarySchema,
+  selectedRevision: PendingPurchasePacketRevisionSummarySchema,
+})
+export type SwitchPendingPurchaseRevisionResponse = z.infer<
+  typeof SwitchPendingPurchaseRevisionResponseSchema
+>
+
+// Explicit aliases for the two revision-switching actions. Both carry the same
+// optimistic root-version guard, but routes/audit copy should keep the operator
+// intent distinct: accepting a candidate makes a newly generated revision
+// current; rollback switches back to an earlier safe revision.
+export const AcceptPendingPurchaseCandidateRequestSchema = SwitchPendingPurchaseRevisionRequestSchema
+export type AcceptPendingPurchaseCandidateRequest = SwitchPendingPurchaseRevisionRequest
+
+export const AcceptPendingPurchaseCandidateResponseSchema = SwitchPendingPurchaseRevisionResponseSchema
+export type AcceptPendingPurchaseCandidateResponse = SwitchPendingPurchaseRevisionResponse
+
+export const RollbackPendingPurchaseRevisionRequestSchema = SwitchPendingPurchaseRevisionRequestSchema
+export type RollbackPendingPurchaseRevisionRequest = SwitchPendingPurchaseRevisionRequest
+
+export const RollbackPendingPurchaseRevisionResponseSchema = SwitchPendingPurchaseRevisionResponseSchema
+export type RollbackPendingPurchaseRevisionResponse = SwitchPendingPurchaseRevisionResponse
 
 const PendingPurchaseListModeSchema = z.enum(['packets', 'rows'])
 export type PendingPurchaseListMode = z.infer<typeof PendingPurchaseListModeSchema>
