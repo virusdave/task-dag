@@ -72,6 +72,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   // Hint-fact extraction (C3): Postgres + optional Mantle/Bedrock only; it
   // must NOT occupy the Sweed session pool.
   'catalog.pending_purchases.extract_hint_facts': { pool: 'system', requiresSweedSession: false },
+  'catalog.pending_purchases.refine': { pool: 'system', requiresSweedSession: false },
   'catalog.review.rerun_row': { pool: 'system', requiresSweedSession: false },
   'config.workers.litalerts_refresh.variant': { pool: 'system', requiresSweedSession: false },
   'config.workers.litalerts_retailer_backfill': { pool: 'system', requiresSweedSession: false },

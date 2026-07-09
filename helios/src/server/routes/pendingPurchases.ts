@@ -9,6 +9,8 @@ import {
   BatchPendingPurchaseFamilyOverrideRequestSchema,
   type BatchPendingPurchaseFamilyOverrideResponse,
   BatchPendingPurchaseFamilyOverrideResponseSchema,
+  AcceptPendingPurchaseCandidateRequestSchema,
+  AcceptPendingPurchaseCandidateResponseSchema,
   AddPendingPurchaseHintDocumentBodySchema,
   type EditedStructuredFields,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
@@ -25,6 +27,12 @@ import {
   PendingPurchaseHintDocumentRouteParamsSchema,
   TriggerPendingPurchaseHintExtractionBodySchema,
   TriggerPendingPurchaseHintExtractionResponseSchema,
+  PendingPurchasePacketRouteParamsSchema,
+  PendingPurchaseRefinementHistoryResponseSchema,
+  RollbackPendingPurchaseRevisionRequestSchema,
+  RollbackPendingPurchaseRevisionResponseSchema,
+  SubmitPendingPurchaseRefinementRequestSchema,
+  SubmitPendingPurchaseRefinementResponseSchema,
   UpdatePendingPurchaseHintBundleBodySchema,
   PendingPurchaseListQuerySchema,
   PendingPurchaseListResponseSchema,
@@ -50,6 +58,17 @@ import {
   listPendingPurchasePacketListPage,
   listPendingPurchaseRows,
 } from '../db/queries/pendingPurchaseQueries.js'
+import {
+  assertBaseRowsMatchSnapshot,
+  assertPendingPurchasePacketApplyable,
+  attachJobToPendingPurchaseRefinementTurn,
+  createPendingPurchaseRefinementTurn,
+  isPendingPurchaseRefinementSchemaAvailable,
+  listPendingPurchaseRefinementHistory,
+  loadPendingPurchaseRefinementSnapshot,
+  PendingPurchaseRefinementConflictError,
+  switchPendingPurchaseCurrentRevision,
+} from '../db/queries/pendingPurchaseRefinementQueries.js'
 import {
   addPendingPurchaseHintDocument,
   createPendingPurchaseHintBundle,
@@ -206,6 +225,203 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       return reply.status(404).send({ error: 'Pending-purchase packet not found.' })
     }
     return reply.send(PendingPurchaseEtlDetailsResponseSchema.parse({ packet, rows }))
+  })
+
+  server.get('/api/catalog/pending-purchases/:packetId/refinement-history', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) {
+      return
+    }
+    const params = PendingPurchasePacketRouteParamsSchema.parse(request.params)
+    const db = getPool()
+    if (!(await isPendingPurchaseRefinementSchemaAvailable(db))) {
+      return reply.status(409).send({ error: 'Pending-purchase refinement schema migration is not applied yet.' })
+    }
+    const history = await listPendingPurchaseRefinementHistory(db, params.packetId)
+    return reply.send(PendingPurchaseRefinementHistoryResponseSchema.parse(history))
+  })
+
+  server.post('/api/catalog/pending-purchases/:packetId/refinements', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const params = PendingPurchasePacketRouteParamsSchema.parse(request.params)
+    const body = SubmitPendingPurchaseRefinementRequestSchema.parse(request.body ?? {})
+    const requestId = randomUUID()
+
+    try {
+      const mutation = await withTransaction(async (db) => {
+        if (!(await isPendingPurchaseRefinementSchemaAvailable(db))) {
+          throw new PendingPurchaseRefinementConflictError('Pending-purchase refinement schema migration is not applied yet.')
+        }
+        const snapshot = await loadPendingPurchaseRefinementSnapshot(db, params.packetId)
+        if (!snapshot) {
+          throw new PendingPurchaseRefinementConflictError('Pending-purchase packet not found.')
+        }
+        if (snapshot.root.version !== body.expectedRootVersion) {
+          throw new PendingPurchaseRefinementConflictError('This packet changed since the refinement form loaded. Refresh and try again.')
+        }
+        assertBaseRowsMatchSnapshot(snapshot.rowRefs, body.baseRows)
+        const turn = await createPendingPurchaseRefinementTurn(db, {
+          expectedRootVersion: body.expectedRootVersion,
+          feedbackText: body.feedbackText,
+          packetId: params.packetId,
+          packetRootId: snapshot.root.packetRootId,
+          requestedByUserId: user.id,
+          rowSnapshot: snapshot.rowSnapshot,
+          rowSnapshotSha256: snapshot.rowSnapshotSha256,
+          targetRevisionNumber: snapshot.targetRevisionNumber,
+        })
+        const scope = buildPendingPurchasePacketScope(params.packetId)
+        const jobId = await enqueueJob(db, {
+          concurrencyKey: `catalog.pending_purchases.refine:${snapshot.root.packetRootId}`,
+          dedupeKey: `catalog.pending_purchases.refine:${turn.turnId}`,
+          jobType: 'catalog.pending_purchases.refine',
+          module: 'catalog',
+          payload: {
+            refinementTurnId: turn.turnId,
+            requestedByUserId: user.id,
+          },
+          priority: JOB_PRIORITY_LIVE_REQUESTED,
+          requestedByUserId: user.id,
+          scope,
+        })
+        await attachJobToPendingPurchaseRefinementTurn(db, turn.turnId, jobId)
+        const auditEventId = await appendAuditEvent(db, {
+          actorType: 'user',
+          actorUserId: user.id,
+          entityId: String(turn.turnId),
+          entityType: 'pending_purchase_refinement_turn',
+          eventType: 'pending_purchase.refinement.submitted',
+          module: 'catalog',
+          payload: {
+            feedbackSha256: turn.feedbackSha256,
+            packetId: params.packetId,
+            packetRootId: snapshot.root.packetRootId,
+            queuedJobId: jobId,
+            rowSnapshotSha256: snapshot.rowSnapshotSha256,
+            summary: `Queued pending-purchase packet refinement for ${snapshot.packetTitle}.`,
+            targetRevisionNumber: snapshot.targetRevisionNumber,
+            turnId: turn.turnId,
+          },
+          requestId,
+          scope,
+          undoPayload: null,
+        })
+        return { auditEventId, jobId, turn: { ...turn, jobId } }
+      })
+      return reply.send(SubmitPendingPurchaseRefinementResponseSchema.parse({ turn: mutation.turn }))
+    } catch (error) {
+      if (error instanceof PendingPurchaseRefinementConflictError) {
+        return reply.status(conflictStatusForPendingPurchaseRefinement(error)).send({ error: error.message })
+      }
+      throw error
+    }
+  })
+
+  server.post('/api/catalog/pending-purchases/:packetId/revisions/:selectedPacketId/accept', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const params = z.object({
+      packetId: z.coerce.number().int().positive(),
+      selectedPacketId: z.coerce.number().int().positive(),
+    }).parse(request.params)
+    const body = AcceptPendingPurchaseCandidateRequestSchema.parse(request.body ?? {})
+    const requestId = randomUUID()
+    try {
+      const result = await withTransaction(async (db) => {
+        if (!(await isPendingPurchaseRefinementSchemaAvailable(db))) {
+          throw new PendingPurchaseRefinementConflictError('Pending-purchase refinement schema migration is not applied yet.')
+        }
+        const switched = await switchPendingPurchaseCurrentRevision(db, {
+          expectedRootVersion: body.expectedRootVersion,
+          packetId: params.packetId,
+          reason: body.reason ?? null,
+          selectedPacketId: params.selectedPacketId,
+          userId: user.id,
+        })
+        await appendAuditEvent(db, {
+          actorType: 'user',
+          actorUserId: user.id,
+          entityId: String(params.selectedPacketId),
+          entityType: 'pending_purchase_packet',
+          eventType: 'pending_purchase.revision.accepted',
+          module: 'catalog',
+          payload: {
+            packetRootId: switched.root.packetRootId,
+            previousCurrentPacketId: switched.previousCurrentRevision?.packetId ?? null,
+            requestedReason: body.reason ?? null,
+            selectedPacketId: params.selectedPacketId,
+            summary: `Accepted pending-purchase packet revision #${params.selectedPacketId}.`,
+          },
+          requestId,
+          scope: buildPendingPurchasePacketScope(params.selectedPacketId),
+          undoPayload: null,
+        })
+        return switched
+      })
+      return reply.send(AcceptPendingPurchaseCandidateResponseSchema.parse(result))
+    } catch (error) {
+      if (error instanceof PendingPurchaseRefinementConflictError) {
+        return reply.status(conflictStatusForPendingPurchaseRefinement(error)).send({ error: error.message })
+      }
+      throw error
+    }
+  })
+
+  server.post('/api/catalog/pending-purchases/:packetId/revisions/:selectedPacketId/rollback', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const params = z.object({
+      packetId: z.coerce.number().int().positive(),
+      selectedPacketId: z.coerce.number().int().positive(),
+    }).parse(request.params)
+    const body = RollbackPendingPurchaseRevisionRequestSchema.parse(request.body ?? {})
+    const requestId = randomUUID()
+    try {
+      const result = await withTransaction(async (db) => {
+        if (!(await isPendingPurchaseRefinementSchemaAvailable(db))) {
+          throw new PendingPurchaseRefinementConflictError('Pending-purchase refinement schema migration is not applied yet.')
+        }
+        const switched = await switchPendingPurchaseCurrentRevision(db, {
+          expectedRootVersion: body.expectedRootVersion,
+          packetId: params.packetId,
+          reason: body.reason ?? null,
+          selectedPacketId: params.selectedPacketId,
+          userId: user.id,
+        })
+        await appendAuditEvent(db, {
+          actorType: 'user',
+          actorUserId: user.id,
+          entityId: String(params.selectedPacketId),
+          entityType: 'pending_purchase_packet',
+          eventType: 'pending_purchase.revision.rolled_back',
+          module: 'catalog',
+          payload: {
+            packetRootId: switched.root.packetRootId,
+            previousCurrentPacketId: switched.previousCurrentRevision?.packetId ?? null,
+            requestedReason: body.reason ?? null,
+            selectedPacketId: params.selectedPacketId,
+            summary: `Rolled pending-purchase packet back to revision #${params.selectedPacketId}.`,
+          },
+          requestId,
+          scope: buildPendingPurchasePacketScope(params.selectedPacketId),
+          undoPayload: null,
+        })
+        return switched
+      })
+      return reply.send(RollbackPendingPurchaseRevisionResponseSchema.parse(result))
+    } catch (error) {
+      if (error instanceof PendingPurchaseRefinementConflictError) {
+        return reply.status(conflictStatusForPendingPurchaseRefinement(error)).send({ error: error.message })
+      }
+      throw error
+    }
   })
 
   server.post('/api/catalog/pending-purchases/import', async (request, reply) => {
@@ -608,9 +824,12 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const requestId = randomUUID()
     const uniqueRowIds = [...new Set(body.rowIds)].sort((left, right) => left - right)
 
-    const mutationResult = await withTransaction(async (db) => {
-      const rowsResult = await db.query<PendingPurchaseApplySelectionRow>(
-        `
+    try {
+      const mutationResult = await withTransaction(async (db) => {
+        await assertPendingPurchasePacketApplyable(db, body.packetId)
+
+        const rowsResult = await db.query<PendingPurchaseApplySelectionRow>(
+          `
           select
             id,
             packet_id,
@@ -623,30 +842,30 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           order by id asc
           for update
         `,
-        [body.packetId, uniqueRowIds],
-      )
+          [body.packetId, uniqueRowIds],
+        )
 
-      if (rowsResult.rows.length !== uniqueRowIds.length) {
-        throw new Error('One or more pending-purchase rows were not found in the selected packet.')
-      }
+        if (rowsResult.rows.length !== uniqueRowIds.length) {
+          throw new Error('One or more pending-purchase rows were not found in the selected packet.')
+        }
 
-      const invalidApprovalRow = rowsResult.rows.find((row) => row.approval_status !== 'approved')
-      if (invalidApprovalRow) {
-        throw new Error(`Pending-purchase row ${invalidApprovalRow.id} is not approved for apply.`)
-      }
+        const invalidApprovalRow = rowsResult.rows.find((row) => row.approval_status !== 'approved')
+        if (invalidApprovalRow) {
+          throw new Error(`Pending-purchase row ${invalidApprovalRow.id} is not approved for apply.`)
+        }
 
-      const busyRow = rowsResult.rows.find((row) => row.last_apply_status === 'queued' || row.last_apply_status === 'running')
-      if (busyRow) {
-        throw new Error(`Pending-purchase row ${busyRow.id} is already queued for apply.`)
-      }
+        const busyRow = rowsResult.rows.find((row) => row.last_apply_status === 'queued' || row.last_apply_status === 'running')
+        if (busyRow) {
+          throw new Error(`Pending-purchase row ${busyRow.id} is already queued for apply.`)
+        }
 
-      const alreadyAppliedRow = rowsResult.rows.find((row) => row.last_apply_status === 'applied')
-      if (alreadyAppliedRow) {
-        throw new Error(`Pending-purchase row ${alreadyAppliedRow.id} has already been applied. Return it to pending review before reapplying.`)
-      }
+        const alreadyAppliedRow = rowsResult.rows.find((row) => row.last_apply_status === 'applied')
+        if (alreadyAppliedRow) {
+          throw new Error(`Pending-purchase row ${alreadyAppliedRow.id} has already been applied. Return it to pending review before reapplying.`)
+        }
 
-      const applyRequestResult = await db.query<PendingPurchaseApplyRequestInsertRow>(
-        `
+        const applyRequestResult = await db.query<PendingPurchaseApplyRequestInsertRow>(
+          `
           insert into pending_purchase_apply_requests (
             packet_id,
             requested_by_user_id,
@@ -658,37 +877,37 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           values ($1, $2, $3, 'queued', $4, $5::jsonb)
           returning id
         `,
-        [body.packetId, user.id, body.reason ?? null, uniqueRowIds.length, JSON.stringify(uniqueRowIds)],
-      )
+          [body.packetId, user.id, body.reason ?? null, uniqueRowIds.length, JSON.stringify(uniqueRowIds)],
+        )
 
-      const pendingPurchaseApplyRequestId = applyRequestResult.rows[0].id
-      const scope = buildPendingPurchasePacketScope(body.packetId)
-      const jobId = await enqueueJob(db, {
-        concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
-        jobType: 'catalog.pending_purchases.apply',
-        module: 'catalog',
-        payload: {
-          pendingPurchaseApplyRequestId,
+        const pendingPurchaseApplyRequestId = applyRequestResult.rows[0].id
+        const scope = buildPendingPurchasePacketScope(body.packetId)
+        const jobId = await enqueueJob(db, {
+          concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+          jobType: 'catalog.pending_purchases.apply',
+          module: 'catalog',
+          payload: {
+            pendingPurchaseApplyRequestId,
+            requestedByUserId: user.id,
+            enqueueMarketRefreshForCreatedProducts: body.enqueueMarketRefreshForCreatedProducts,
+          },
+          priority: JOB_PRIORITY_LIVE_REQUESTED,
           requestedByUserId: user.id,
-          enqueueMarketRefreshForCreatedProducts: body.enqueueMarketRefreshForCreatedProducts,
-        },
-        priority: JOB_PRIORITY_LIVE_REQUESTED,
-        requestedByUserId: user.id,
-        scope,
-      })
+          scope,
+        })
 
-      await db.query(
-        `
+        await db.query(
+          `
           update pending_purchase_apply_requests
           set job_id = $2,
               updated_at = now()
           where id = $1
         `,
-        [pendingPurchaseApplyRequestId, jobId],
-      )
+          [pendingPurchaseApplyRequestId, jobId],
+        )
 
-      await db.query(
-        `
+        await db.query(
+          `
           update pending_purchase_rows
           set last_apply_request_id = $2,
               last_apply_status = 'queued',
@@ -698,40 +917,46 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
               updated_at = now()
           where id = any($1::bigint[])
         `,
-        [uniqueRowIds, pendingPurchaseApplyRequestId],
-      )
+          [uniqueRowIds, pendingPurchaseApplyRequestId],
+        )
 
-      const auditEventId = await appendAuditEvent(db, {
-        actorType: 'user',
-        actorUserId: user.id,
-        entityId: String(pendingPurchaseApplyRequestId),
-        entityType: 'pending_purchase_apply_request',
-        eventType: 'pending_purchase.apply.requested',
-        module: 'catalog',
-        payload: {
-          packetId: body.packetId,
-          pendingPurchaseApplyRequestId,
-          queuedJobId: jobId,
-          requestedReason: body.reason ?? null,
-          rowIds: uniqueRowIds,
-          selectedRowCount: uniqueRowIds.length,
-          summary: buildQueuedPendingPurchaseApplySummary(uniqueRowIds.length),
-        },
-        requestId,
-        scope,
-        undoPayload: null,
+        const auditEventId = await appendAuditEvent(db, {
+          actorType: 'user',
+          actorUserId: user.id,
+          entityId: String(pendingPurchaseApplyRequestId),
+          entityType: 'pending_purchase_apply_request',
+          eventType: 'pending_purchase.apply.requested',
+          module: 'catalog',
+          payload: {
+            packetId: body.packetId,
+            pendingPurchaseApplyRequestId,
+            queuedJobId: jobId,
+            requestedReason: body.reason ?? null,
+            rowIds: uniqueRowIds,
+            selectedRowCount: uniqueRowIds.length,
+            summary: buildQueuedPendingPurchaseApplySummary(uniqueRowIds.length),
+          },
+          requestId,
+          scope,
+          undoPayload: null,
+        })
+
+        return { auditEventId, jobId }
       })
 
-      return { auditEventId, jobId }
-    })
-
-    return reply.send(
-      MutationAcceptedResponseSchema.parse({
-        auditEventId: mutationResult.auditEventId,
-        jobId: mutationResult.jobId,
-        requestId,
-      }),
-    )
+      return reply.send(
+        MutationAcceptedResponseSchema.parse({
+          auditEventId: mutationResult.auditEventId,
+          jobId: mutationResult.jobId,
+          requestId,
+        }),
+      )
+    } catch (error) {
+      if (error instanceof PendingPurchaseRefinementConflictError) {
+        return reply.status(conflictStatusForPendingPurchaseRefinement(error)).send({ error: error.message })
+      }
+      throw error
+    }
   })
 
   // Family-level (bulk) structured override. Lets a reviewer mass-fix a
@@ -1198,6 +1423,10 @@ function assertPendingPurchaseRowVersion(row: PendingPurchaseRowLockRow, expecte
 
 function buildPendingPurchasePacketScope(packetId: number): { entityId: string; entityType: 'pending_purchase_packet' } {
   return { entityId: String(packetId), entityType: 'pending_purchase_packet' }
+}
+
+function conflictStatusForPendingPurchaseRefinement(error: PendingPurchaseRefinementConflictError): 404 | 409 {
+  return error.message.includes('not found') ? 404 : 409
 }
 
 function buildQueuedPendingPurchaseApplySummary(selectedRowCount: number): string {

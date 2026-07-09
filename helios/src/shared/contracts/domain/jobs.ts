@@ -26,6 +26,7 @@ export const JobTypeSchema = z.enum([
   'catalog.pending_purchases.apply',
   'catalog.pending_purchases.import_json',
   'catalog.pending_purchases.extract_hint_facts',
+  'catalog.pending_purchases.refine',
   'proposal.import.review_json',
   'proposal.generate.description_batch',
   'proposal.generate.pricing_batch',
@@ -296,6 +297,12 @@ export const CatalogPendingPurchasesApplyJobPayloadSchema = z.object({
   enqueueMarketRefreshForCreatedProducts: z.boolean().default(false),
 })
 export type CatalogPendingPurchasesApplyJobPayload = z.infer<typeof CatalogPendingPurchasesApplyJobPayloadSchema>
+
+export const CatalogPendingPurchasesRefineJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  refinementTurnId: z.number().int().positive(),
+})
+export type CatalogPendingPurchasesRefineJobPayload = z.infer<typeof CatalogPendingPurchasesRefineJobPayloadSchema>
 
 const ProposalBatchGenerationTriggerSchema = z.enum(['debug_promote', 'ui_generate'])
 

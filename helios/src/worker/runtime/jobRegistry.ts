@@ -4,6 +4,7 @@ import {
   CatalogPendingPurchasesGenerateJobPayloadSchema,
   CatalogPendingPurchasesImportJobPayloadSchema,
   CatalogPendingPurchasesExtractHintFactsJobPayloadSchema,
+  CatalogPendingPurchasesRefineJobPayloadSchema,
   CatalogReviewRerunRowJobPayloadSchema,
   CatalogSyncDiscoverOrphanGroupsJobPayloadSchema,
   CatalogSyncFullSummaryJobPayloadSchema,
@@ -62,6 +63,7 @@ import { runCatalogPendingPurchasesGenerateJob } from '../jobs/generatePendingPu
 import { runCatalogReviewRerunRowJob } from '../jobs/catalogReviewRerunRowJob.js'
 import { runCatalogPendingPurchasesImportJob } from '../jobs/importPendingPurchasePacketJob.js'
 import { runCatalogPendingPurchasesExtractHintFactsJob } from '../jobs/extractPendingPurchaseHintFactsJob.js'
+import { runCatalogPendingPurchasesRefineJob } from '../jobs/refinePendingPurchasePacketJob.js'
 import { runConfigWorkersCatalogRefreshJob } from '../jobs/configWorkersCatalogRefreshJob.js'
 import { runConfigWorkersEdibleThcClampJob } from '../jobs/configWorkersEdibleThcClampJob.js'
 import { runConfigWorkersSweedOrdersRawJsonDrainJob } from '../jobs/configWorkersSweedOrdersRawJsonDrainJob.js'
@@ -140,6 +142,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runCatalogPendingPurchasesExtractHintFactsJob(
       context,
       CatalogPendingPurchasesExtractHintFactsJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'catalog.pending_purchases.refine': async (context) => {
+    await runCatalogPendingPurchasesRefineJob(
+      context,
+      CatalogPendingPurchasesRefineJobPayloadSchema.parse(context.payload),
     )
   },
   'catalog.sync.full_summary': async (context) => {
