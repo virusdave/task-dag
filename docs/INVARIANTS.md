@@ -190,8 +190,41 @@ HEAD move in the same process transparently re-derives (idempotent +
 monotonic). This layer lives in `scripts/task-dag.d/facts.sh`
 (`taskdag_load_facts`, `taskdag_node_done`, `taskdag_edges_with_facts`, and
 the read-only `facts` command); it is unit-tested in
-`tests/task-dag/facts.sh`. It computes **raw facts only** — leaf readiness,
-epic closure, and supersede propagation are separate reviewed tasks.
+`tests/task-dag/facts.sh`. It computes **raw facts only** — the aggregation
+into behavior is the reconcile layer below.
+
+### Reconcile predicates (`complete()` / leaf-readiness) — read-only
+
+The **aggregation** of the raw facts into the north-star behavior lives in
+`scripts/task-dag.d/reconcile.sh` (`taskdag_node_complete`,
+`taskdag_leaf_ready`, and the read-only `reconcile` command; unit-tested in
+`tests/task-dag/reconcile.sh`). It is **read-only** and **additive** — it
+never writes a ref and does not yet drive live `frontier`/`complete`/epic-
+close behavior (that wiring is later-phase sibling tasks).
+
+- `complete(node)` — `true` iff an outgoing **satisfies**-edge is satisfied
+  (supersede), else — if the node has **first-parent children** (an EPIC) —
+  every outgoing **requires**-edge is satisfied (mode = all) AND every child
+  subtree is `complete()`; else (a LEAF / issue / foreign node) `done(node)`.
+- `leaf-readiness(node)` — `NOT complete(node)` AND every outgoing
+  **requires**-edge satisfied AND (for a current-repo task node) unclaimed
+  AND unblocked. A LEAF's requires-edges gate **readiness**, never its own
+  completeness.
+- **Load-bearing ordering:** a node is classified EPIC vs LEAF by
+  **containment** *before* the raw `done()` fact is trusted. `done()` is
+  derived from **any** parent-field token reachable from `master`, and an
+  epic root is its children's **first-parent** token, so a decomposed epic
+  would false-positive as `done()` the instant any child completes.
+  Completeness of an epic is therefore always derived from its obligations
+  (exactly like the legacy `epic_subtree_complete`), never from `done()`;
+  `done()` stays authoritative only for a leaf (which appears solely as the
+  2nd parent of its own completion merge) and an issue (`Closes-Epic`).
+
+The push-reaction handler + periodic reconciler **backstop** (local-CAS
+fold, cross-repo hint delivery, cascade, supersede synth-completion), the
+epic **auto-close** rewiring onto these predicates, the delegate/block/
+supersede edge **wrappers**, and the `graph --explain` resolver remain
+separate reviewed sibling tasks.
 
 ---
 

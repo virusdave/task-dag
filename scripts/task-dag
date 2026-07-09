@@ -1435,6 +1435,12 @@ COMMANDS:
                            done(node) + satisfied(edge)=done(.to). Read-only
                            plumbing; --json/--no-fetch/--node. Readiness,
                            closure, and supersede are separate commands.
+    reconcile              READ the aggregated complete()/leaf-readiness
+                           verdicts over the edge graph (issue #13): complete
+                           = done OR superseded OR (obligations met); ready =
+                           not-complete + requires satisfied + unclaimed +
+                           unblocked. Read-only; --json/--no-fetch/--node/
+                           --ready. Never writes; live wiring is separate.
     comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
@@ -7064,6 +7070,7 @@ main() {
         reconcile-closed-issue) cmd_reconcile_closed_issue "$@" ;;
         edges) cmd_edges "$@" ;;
         facts) cmd_facts "$@" ;;
+        reconcile) cmd_reconcile "$@" ;;
         dep) cmd_dep "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
