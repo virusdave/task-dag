@@ -191,23 +191,101 @@ export const PendingPurchaseHintFactSchema = z
   })
 export type PendingPurchaseHintFact = z.infer<typeof PendingPurchaseHintFactSchema>
 
+// Bounds for glossary/term-expansion evidence. A hint document sometimes
+// explains HOW to read a delivery rather than listing products — e.g. "PR =
+// Preroll; FL = Flower; METRC = Marijuana Enforcement Tracking Reporting
+// Compliance". None of that is a product fact, so it can never live on
+// PendingPurchaseHintFactSchema; it is modeled as a SEPARATE kind of cited,
+// inert evidence. These bounds keep a hostile/verbose paste from bloating the
+// JSONB blob or the downstream LLM prompt.
+const GLOSSARY_TERM_MAX_LENGTH = 120
+const GLOSSARY_EXPANSION_MAX_LENGTH = 300
+const GLOSSARY_NOTE_MAX_LENGTH = 500
+export const PENDING_PURCHASE_HINT_MAX_GLOSSARY_ENTRIES = 500
+
+// One inert, CITED glossary / term-expansion entry: an abbreviation or term
+// mapped to its literal expansion, both quoted from the source document. This
+// is DATA, never an instruction — `note` is an optional inert clarification
+// (e.g. "vendor-specific abbreviation"), NOT guidance the classifier must
+// follow. `factId` shares the same `fN` namespace as product facts so a
+// downstream cited id ("<hintDocumentId>#<factId>") is uniform across every
+// evidence kind; ids are unique across facts AND glossary entries within a
+// document (enforced on PendingPurchaseHintExtractedFactsSchema).
+export const PendingPurchaseHintGlossaryEntrySchema = z
+  .object({
+    factId: z.string().regex(/^f[1-9][0-9]*$/),
+    // The abbreviation/term exactly as printed in the source, e.g. "PR",
+    // "FL", "METRC".
+    term: z.string().trim().min(1).max(GLOSSARY_TERM_MAX_LENGTH),
+    // Its literal expansion as the document states it, e.g. "Preroll".
+    expansion: z.string().trim().min(1).max(GLOSSARY_EXPANSION_MAX_LENGTH),
+    // Optional inert clarification. Never an instruction to the classifier.
+    note: BoundedNullableString(GLOSSARY_NOTE_MAX_LENGTH),
+    citation: PendingPurchaseHintFactCitationSchema,
+  })
+  .strict()
+export type PendingPurchaseHintGlossaryEntry = z.infer<
+  typeof PendingPurchaseHintGlossaryEntrySchema
+>
+
 // The full `extracted_facts` JSONB payload persisted on a document row.
-// `schemaVersion` lets C4/C5/C6 (and any later v2) detect the shape.
+// `schemaVersion` lets C4/C5/C6 (and any later version) detect the shape.
 // `warnings` are inert extractor notes (e.g. "table columns ambiguous"); C4
-// must NOT treat them as evidence — only cited `facts` are evidence.
-export const PENDING_PURCHASE_HINT_FACTS_SCHEMA_VERSION = 1 as const
+// must NOT treat them as evidence — only cited `facts`/`glossaryEntries` are
+// evidence.
+//
+// v2 adds `glossaryEntries` (cited term/acronym expansions). The parser stays
+// BACK-COMPATIBLE: stored v1 rows (schemaVersion=1, no `glossaryEntries` key)
+// still parse — `schemaVersion` accepts 1 or 2 and `glossaryEntries` defaults
+// to []. extracted_facts stays JSONB, so no DB migration is needed; the app
+// contract absorbs both shapes.
+export const PENDING_PURCHASE_HINT_FACTS_SCHEMA_VERSION = 2 as const
 
 export const PendingPurchaseHintExtractedFactsSchema = z
   .object({
-    schemaVersion: z.literal(PENDING_PURCHASE_HINT_FACTS_SCHEMA_VERSION),
+    // Accept every version this parser understands so a stored v1 payload is
+    // never rejected (and silently dropped by the loader). New writes stamp
+    // the current version; reads transparently upgrade older ones.
+    schemaVersion: z.union([z.literal(1), z.literal(PENDING_PURCHASE_HINT_FACTS_SCHEMA_VERSION)]),
     intent: PendingPurchaseHintIntentSchema,
     extractor: PendingPurchaseHintExtractorSchema,
     // Bedrock model id when extractor='llm'; null for the deterministic path.
     model: z.string().trim().min(1).max(200).nullable(),
     facts: z.array(PendingPurchaseHintFactSchema).max(5000),
+    // Cited term/acronym expansions. Absent in v1 payloads → defaults to [].
+    glossaryEntries: z
+      .array(PendingPurchaseHintGlossaryEntrySchema)
+      .max(PENDING_PURCHASE_HINT_MAX_GLOSSARY_ENTRIES)
+      .default([]),
     warnings: z.array(z.string().trim().min(1).max(500)).max(50),
   })
   .strict()
+  .superRefine((payload, ctx) => {
+    // Product facts and glossary entries share one `fN` id namespace so a
+    // downstream cited id ("<hintDocumentId>#<factId>") is unambiguous. A
+    // collision would make a citation point at two different pieces of
+    // evidence, so reject it here rather than letting C4 resolve it wrong.
+    const seen = new Set<string>()
+    const duplicates = new Set<string>()
+    for (const fact of payload.facts) {
+      if (seen.has(fact.factId)) {
+        duplicates.add(fact.factId)
+      }
+      seen.add(fact.factId)
+    }
+    for (const entry of payload.glossaryEntries) {
+      if (seen.has(entry.factId)) {
+        duplicates.add(entry.factId)
+      }
+      seen.add(entry.factId)
+    }
+    if (duplicates.size > 0) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `factId must be unique across facts and glossaryEntries; duplicated: ${[...duplicates].sort().join(', ')}.`,
+      })
+    }
+  })
 export type PendingPurchaseHintExtractedFacts = z.infer<
   typeof PendingPurchaseHintExtractedFactsSchema
 >

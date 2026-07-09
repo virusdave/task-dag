@@ -1,0 +1,108 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import type { Queryable } from '../pool.js'
+import { loadExtractedPendingPurchaseHintFactsForBundle } from './pendingPurchaseHintQueries.js'
+
+// The loader parses every stored `extracted_facts` JSONB blob with the current
+// contract. It must keep flattening PRE-EXISTING v1 rows even after the
+// contract advanced to v2 — otherwise a version bump would silently drop every
+// hint already extracted before the bump. This test feeds the loader raw rows
+// (as they come back from JSONB) through a fake Queryable so no DB is needed.
+
+function citation(snippet: string) {
+  return { page: null, lineStart: 1, lineEnd: 1, row: null, jsonPointer: null, snippet }
+}
+
+function productFact(factId: string, itemName: string) {
+  return {
+    factId,
+    itemName,
+    sku: null,
+    vendorProductCode: null,
+    brand: null,
+    strain: null,
+    prevalence: null,
+    category: null,
+    subcategory: null,
+    size: null,
+    packCount: null,
+    wholesalePrice: null,
+    wholesalePriceBasis: null,
+    quantity: null,
+    quantityBasis: null,
+    citation: citation(itemName),
+  }
+}
+
+// A stored v1 payload: no `glossaryEntries` key at all (as it was persisted
+// before v2 existed).
+const v1Facts = {
+  schemaVersion: 1,
+  intent: 'canonical_sku_list',
+  extractor: 'llm',
+  model: 'anthropic.claude',
+  facts: [productFact('f1', 'Blue Dream Preroll')],
+  warnings: [],
+}
+
+// A stored v2 payload: product facts PLUS cited glossary evidence.
+const v2Facts = {
+  schemaVersion: 2,
+  intent: 'free_text_description',
+  extractor: 'llm',
+  model: 'anthropic.claude',
+  facts: [productFact('f1', 'Sunset Sherbet Flower')],
+  glossaryEntries: [
+    { factId: 'f2', term: 'FL', expansion: 'Flower', note: null, citation: citation('FL = Flower') },
+  ],
+  warnings: [],
+}
+
+function fakeDb(rows: Array<Record<string, unknown>>): Queryable {
+  return {
+    query: vi.fn(async () => ({ rows }) as never),
+  }
+}
+
+function docRow(hintDocumentId: string, extractedFacts: unknown) {
+  return {
+    hint_document_id: hintDocumentId,
+    bundle_public_id: 'pphbndl_demo',
+    kind: 'distributor_menu',
+    source_label: null,
+    content_sha256: 'a'.repeat(64),
+    extracted_facts: extractedFacts,
+  }
+}
+
+describe('loadExtractedPendingPurchaseHintFactsForBundle', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('flattens facts from a stored v1 row after the contract advanced to v2', async () => {
+    const db = fakeDb([docRow('pphdoc_2026-06-21_000001_ab12cd', v1Facts)])
+    const result = await loadExtractedPendingPurchaseHintFactsForBundle(db, 'pphbndl_demo')
+    expect(result).toHaveLength(1)
+    expect(result[0]?.fact.factId).toBe('f1')
+    expect(result[0]?.fact.itemName).toBe('Blue Dream Preroll')
+  })
+
+  it('flattens product facts from a v2 row (glossary evidence is a separate surface)', async () => {
+    const db = fakeDb([docRow('pphdoc_2026-06-21_000002_ab12ce', v2Facts)])
+    const result = await loadExtractedPendingPurchaseHintFactsForBundle(db, 'pphbndl_demo')
+    expect(result).toHaveLength(1)
+    expect(result[0]?.fact.factId).toBe('f1')
+  })
+
+  it('skips (does not throw) a row whose payload fails the contract', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const db = fakeDb([
+      docRow('pphdoc_2026-06-21_000003_ab12cf', { schemaVersion: 99, garbage: true }),
+      docRow('pphdoc_2026-06-21_000004_ab12d0', v1Facts),
+    ])
+    const result = await loadExtractedPendingPurchaseHintFactsForBundle(db, 'pphbndl_demo')
+    expect(result).toHaveLength(1)
+    expect(warn).toHaveBeenCalledOnce()
+  })
+})
