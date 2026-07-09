@@ -68,6 +68,7 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/delegated/<N>/<owner>/<repo>/<peer>` | cross-repo delegation edge | `delegate` |
    | `tasks/completions/<N>/…/<sha>` | recorded downstream completion | `ingest-completion` |
    | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write` |
+   | `tasks/v1/graph` | dependency-edge index branch — the ONE ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
    | `gh/issues/<N>` | GitHub-side epic mapping | `create-task-commit.sh` |
    | `gh/comments/<N>/<id>` | comment provenance (kept so a comment is never re-ingested) | `ingest-comment` |
    | `gh/child-epics/<N>/<owner>/<repo>` | materialised child-epic provenance (default slot, one child per (parent, peer repo)) | cross-repo materialisation |
@@ -84,6 +85,69 @@ refs in a single `for-each-ref` and skips any ref whose object vanished
 mid-walk (concurrent `claim`/`complete`/`drop`), so it never flaps under
 fleet churn. A flapping gate trains the fleet to ignore it — worse than no
 gate.
+
+---
+
+## The dependency-graph index (`tasks/v1/graph`) — the ONE empty-tree exception
+
+The north-star dependency graph (issue #13) stores its **active edge set**
+as an ordinary per-repo git branch, `refs/heads/tasks/v1/graph`, whose
+**latest tree IS the edge set**. This is the single, deliberate,
+operator-approved (issue #13 Phase 0) exception to invariant-floor rule #1
+(empty tree): the graph index is data-in-tree by design, because that is
+exactly what keeps the live mirrored **ref count bounded** — one ref per
+repo instead of one ref per edge.
+
+It is a **new ref KIND with its own invariant**, not a loosening of the
+floor for everything under `tasks/v1/*`:
+
+- **Exact-ref exemption.** Only `refs/heads/tasks/v1/graph` is recognised.
+  `validate --strict` special-cases exactly this ref (`taskdag_is_graph_ref`
+  in `scripts/task-dag`); a hand-crafted `tasks/v1/anything-else` still fails
+  the unknown-namespace check. We deliberately do **not** add `v1` to
+  `TASKDAG_KNOWN_TASK_NS`.
+- **Replacement invariant (audited).** The graph ref must be a **commit**
+  whose tree contains **only** regular blobs named `edges/<edge-id>.json`,
+  where `<edge-id>` is a lowercase 64-hex sha256. Any other path, a non-blob
+  entry, or a malformed edge-id filename is a `validate --strict` error
+  (`taskdag_graph_tree_violations`). An empty tree (zero edges) is valid.
+- **edge-id = SEMANTIC hash, not the blob hash.** `edge-id` is the full
+  sha256 of the NUL-delimited canonical tuple `(from, to, relation, mode)`
+  only. `origin` (repo-id + witness) is provenance and is **excluded** from
+  the id, so a re-add or a metadata-only edit is idempotent (same path) while
+  a same-path **non-identical** semantic write is detectable — the reader
+  recomputes the id from the blob content and rejects any path/content
+  mismatch.
+- **Edge blob schema (schema:1):**
+  ```json
+  { "schema": 1,
+    "from": "task:<owner>/<repo>@<sha>",  "to": "issue:<owner>/<repo>#<N>",
+    "relation": "requires" | "satisfies", "mode": "all" | "any",
+    "origin": { "repo-id": <stable numeric repo id>, "witness": "<sha/msg-id>" } }
+  ```
+  Node addressing is `task:<owner>/<repo>@<40|64-hex>` and
+  `issue:<owner>/<repo>#<N>`; `<owner>/<repo>` is case-folded to lowercase
+  for canonical identity. Relation/mode pairs are fixed: `requires`⇒`all`,
+  `satisfies`⇒`any` (OR-deps out of scope). Direction: `from` is the node
+  making the assertion (`from requires to` / `from satisfies to`).
+  `origin.repo-id` is the **stable numeric** GitHub repository id (survives a
+  rename/move), never `owner/name`.
+- **Bounded + FF-only.** There are **no** per-edge refs; the branch is
+  fast-forward-only and its graph commits parent only the previous graph-index
+  commit (never task commits). Reading uses the **latest tree only**, not
+  history.
+- **Schema v1 has no tombstones.** Active edges live only under `edges/`.
+  Satisfied-edge pruning and explicit tombstones are a **separate** reviewed
+  change (a later sibling task) and will use their own path; do not overload
+  the edge blob with `deleted`/`active` flags.
+
+The read side + data-model helpers live in `scripts/task-dag.d/edges.sh`
+(`taskdag_edge_id`, `taskdag_edge_blob`, `taskdag_normalize_node`,
+`taskdag_repo_numeric_id`, `taskdag_read_edges`, and the `edges` read
+command). The direct-CAS **writer**, pruning, mailbox, reconciler, and the
+`graph --explain` resolver are separate tasks. Golden fixtures for the
+exemption + its shape invariant are in `tests/task-dag/validate-strict.sh`
+(TEST 11–14) and the model/reader is unit-tested in `tests/task-dag/edges.sh`.
 
 ---
 

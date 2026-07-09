@@ -213,6 +213,106 @@ else
 fi
 git update-ref -d refs/heads/gh/child-epic-slots/42/o/r/bad-tree
 
+# ---------------------------------------------------------------------------
+# TEST 11: the dependency-graph index branch tasks/v1/graph is the ONE ref
+#          exempt from the empty-tree floor. A commit whose tree is a
+#          well-formed edge set (only edges/<64-hex>.json blobs) MUST PASS
+#          --strict, even though its tree is non-empty. This is the golden
+#          fixture for the new ref kind (docs/INVARIANTS.md §
+#          "The dependency-graph index"). It must land BEFORE the writer
+#          sibling starts minting the ref (INVARIANTS.md ordering rule).
+# ---------------------------------------------------------------------------
+# git mktree rejects slashed paths, so build the (nested) graph tree via a
+# scratch index — this is how a real edge writer would stage edges/<id>.json.
+mk_graph_ref() {  # <path>=<blobsha> pairs via "<blobsha> <path>" stdin lines
+    local idx bsha pth tree commit
+    idx="$ROOT/.graph.index"; rm -f "$idx"   # fresh path (an empty file is not a valid index)
+    while read -r bsha pth; do
+        [ -n "$bsha" ] || continue
+        GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$bsha,$pth"
+    done
+    tree=$(GIT_INDEX_FILE="$idx" git write-tree)
+    rm -f "$idx"
+    commit=$(git commit-tree "$tree" -m "graph index")
+    git update-ref refs/heads/tasks/v1/graph "$commit"
+}
+edge_id=$(printf 'a%.0s' {1..64})   # a syntactically valid 64-hex edge-id
+edge_blob=$(git hash-object -w --stdin <<EOF
+{"schema":1,"from":"task:o/r@$(printf '1%.0s' {1..40})","to":"issue:o/r#1","relation":"requires","mode":"all","origin":{"repo-id":42,"witness":"w"}}
+EOF
+)
+printf '%s edges/%s.json\n' "$edge_blob" "$edge_id" | mk_graph_ref
+if "$TD" validate --strict >/dev/null 2>&1; then
+    ok "11: non-empty tasks/v1/graph edge-index passes validate --strict"
+else
+    bad "11: well-formed tasks/v1/graph unexpectedly failed validate --strict"
+fi
+# and non-strict validate (Check 1 empty-tree loop) must also exempt it
+if "$TD" validate >/dev/null 2>&1; then
+    ok "11b: non-empty tasks/v1/graph passes default (non-strict) validate"
+else
+    bad "11b: tasks/v1/graph tripped the non-strict empty-tree check"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 12: a graph index tree containing a NON-edges/ path FAILS --strict
+#          (the graph-index shape invariant that replaces the empty-tree rule
+#          for this ref — it is NOT a blanket "skip all checks" exemption).
+# ---------------------------------------------------------------------------
+junk_blob=$(git hash-object -w --stdin <<<'junk')
+printf '%s README.txt\n' "$junk_blob" | mk_graph_ref
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "unexpected path"; then
+    ok "12: graph index with a non-edges/ path fails validate --strict"
+else
+    bad "12: malformed graph index tree not rejected (rc=$rc, out=$out)"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 13: a graph index blob with a MALFORMED edge-id filename FAILS --strict
+# ---------------------------------------------------------------------------
+# A hex-prefixed but wrong-length name (hits the malformed-edge-id branch,
+# not the unexpected-path one, which is exercised separately in TEST 12).
+printf '%s edges/abcdef.json\n' "$edge_blob" | mk_graph_ref
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "malformed edge-id"; then
+    ok "13: graph index with a malformed edge-id filename fails validate --strict"
+else
+    bad "13: malformed edge-id filename not rejected (rc=$rc, out=$out)"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 14: the exemption is EXACT-REF, not a tasks/v1/* namespace opening —
+#          a hand-crafted tasks/v1/junk still FAILS the namespace check.
+# ---------------------------------------------------------------------------
+git update-ref -d refs/heads/tasks/v1/graph
+mk_ref refs/heads/tasks/v1/junk "hand-crafted v1 junk"
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "UNKNOWN tasks namespace 'v1'"; then
+    ok "14: a non-graph tasks/v1/* ref still fails (exemption is exact-ref)"
+else
+    bad "14: tasks/v1/junk was not rejected (rc=$rc, out=$out)"
+fi
+git update-ref -d refs/heads/tasks/v1/junk
+
+# ---------------------------------------------------------------------------
+# TEST 15: an edges/<id>.json blob with a NON-regular mode (executable 100755
+#          or symlink 120000 — both reported by git as type 'blob') FAILS
+#          --strict. The invariant is "regular blobs only".
+# ---------------------------------------------------------------------------
+idx="$ROOT/.graph.index"; rm -f "$idx"
+GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100755,$edge_blob,edges/$edge_id.json"
+exec_tree=$(GIT_INDEX_FILE="$idx" git write-tree); rm -f "$idx"
+exec_commit=$(git commit-tree "$exec_tree" -m "exec-mode graph index")
+git update-ref refs/heads/tasks/v1/graph "$exec_commit"
+rc=0; out=$("$TD" validate --strict 2>&1) || rc=$?
+if [ "$rc" -eq 3 ] && echo "$out" | grep -q "expected a regular file"; then
+    ok "15: non-regular-file (100755) edge blob fails validate --strict"
+else
+    bad "15: non-regular-file edge blob not rejected (rc=$rc, out=$out)"
+fi
+git update-ref -d refs/heads/tasks/v1/graph
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

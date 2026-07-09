@@ -297,6 +297,66 @@ list_task_refs() {
 TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated completions ci-chains"
 TASKDAG_KNOWN_GH_NS="issues comments child-epics child-epic-slots"
 
+# ─────────────────────────────────────────────────────────────────────
+# The dependency-graph index branch (issue #13 north-star, Phase 2).
+#
+# `refs/heads/tasks/v1/graph` is the ONE task-namespace ref that is NOT an
+# empty-tree commit: its latest tree IS the active dependency-edge set, a
+# content-addressed collection of blobs at `edges/<edge-id>.json`. It is a
+# NEW ref KIND with its OWN invariant (a commit whose tree contains only
+# `edges/<64-hex>.json` blobs), NOT a loosening of the empty-tree floor for
+# everything under `tasks/v1/*`. We deliberately do NOT add `v1` to
+# TASKDAG_KNOWN_TASK_NS — that would legitimise arbitrary `tasks/v1/*` hand
+# surgery. Only this EXACT ref is recognised; a hand-crafted `tasks/v1/junk`
+# still fails the namespace check. Operator-approved bounded-ref namespace
+# (issue #13 Phase 0); see docs/INVARIANTS.md § "The dependency-graph index".
+TASKDAG_GRAPH_REF="refs/heads/tasks/v1/graph"
+
+# taskdag_is_graph_ref <ref>: true iff <ref> is EXACTLY the graph index
+# branch, in either the fully-qualified or short (`tasks/v1/graph`) form.
+taskdag_is_graph_ref() {
+    case "$1" in
+        refs/heads/tasks/v1/graph|tasks/v1/graph) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# taskdag_graph_tree_violations <commit-sha>: echo one human-readable line
+# per graph-index shape violation (nothing when well-formed). The graph
+# index tree may contain ONLY regular blobs named `edges/<64-hex>.json`
+# (the content-addressed active edge set). Any other path, a non-blob
+# entry, or a malformed edge-id filename is a violation. An empty tree
+# (zero edges) is valid. Never mutates anything; returns 0 always.
+taskdag_graph_tree_violations() {
+    local sha="$1" mode type obj path
+    while read -r mode type obj path; do
+        [ -n "$type" ] || continue
+        if [ "$type" != blob ]; then
+            echo "✗ ${TASKDAG_GRAPH_REF} tree entry '${path}' is a ${type}, expected a blob (edges/<edge-id>.json)"
+            continue
+        fi
+        # A regular file only — reject symlinks (120000) and executables
+        # (100755), which git also reports as type 'blob'.
+        if [ "$mode" != 100644 ]; then
+            echo "✗ ${TASKDAG_GRAPH_REF} tree entry '${path}' has mode ${mode}, expected a regular file (100644)"
+            continue
+        fi
+        case "$path" in
+            edges/[0-9a-f]*.json)
+                # Assert the exact edge-id shape: edges/<64 lowercase hex>.json
+                local base="${path#edges/}"; base="${base%.json}"
+                if ! [[ "$base" =~ ^[0-9a-f]{64}$ ]]; then
+                    echo "✗ ${TASKDAG_GRAPH_REF} edge blob '${path}' has a malformed edge-id (expected edges/<64-hex>.json)"
+                fi
+                ;;
+            *)
+                echo "✗ ${TASKDAG_GRAPH_REF} tree contains unexpected path '${path}' (only edges/<edge-id>.json blobs are allowed in schema v1)"
+                ;;
+        esac
+    done < <(git ls-tree -r "$sha" 2>/dev/null)
+    return 0
+}
+
 # taskdag_ref_violations <objectname> <full-refname>
 # Echoes one human-readable line per invariant violation (nothing when the
 # ref is well-formed). Never mutates anything. Returns 0 always; the caller
@@ -309,6 +369,16 @@ taskdag_ref_violations() {
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || return 0   # vanished → skip
     if [ "$objtype" != commit ]; then
         echo "✗ ${ref} → ${sha} is a ${objtype}, expected an (empty-tree) commit"
+        return 0
+    fi
+    # The dependency-graph index branch is the ONE known exception to the
+    # empty-tree floor: its tree IS the active edge set (see the
+    # TASKDAG_GRAPH_REF block above). It is EXEMPT from the empty-tree rule
+    # but must still be a commit (checked above) whose tree obeys the
+    # graph-index shape (only edges/<edge-id>.json blobs). Nothing else
+    # under tasks/v1/* is recognised, so `tasks/v1/junk` still fails below.
+    if taskdag_is_graph_ref "$ref"; then
+        taskdag_graph_tree_violations "$sha"
         return 0
     fi
     tree=$(git rev-parse "${sha}^{tree}" 2>/dev/null) || return 0   # vanished → skip
@@ -1356,6 +1426,10 @@ COMMANDS:
                            refs of tasks whose GitHub issue is CONFIRMED
                            CLOSED (fail-safe: never acts under uncertainty).
                            --dry-run/--json/--yes, --repo=owner/repo.
+    edges                  READ the active dependency-edge set from the
+                           per-repo graph index branch tasks/v1/graph
+                           (read-only plumbing; --json/--no-fetch). Writers,
+                           pruning, and reconciliation are separate commands.
     comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
@@ -5315,8 +5389,12 @@ EOF
         printf "${BOLD}Validating task DAG structure...${RESET}\n\n"
     fi
     
-    # Check 1: All task commits have empty tree
+    # Check 1: All task commits have empty tree.
+    # The dependency-graph index branch (tasks/v1/graph) is the ONE exempt
+    # ref — its tree IS the active edge set (see TASKDAG_GRAPH_REF); its
+    # shape is audited by the --strict floor (Check 3), not here.
     while read -r sha ref; do
+        taskdag_is_graph_ref "$ref" && continue
         local tree
         tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
         if [ "$tree" != "$EMPTY_TREE" ]; then
@@ -6979,6 +7057,7 @@ main() {
         blocked) cmd_blocked "$@" ;;
         drop) cmd_drop "$@" ;;
         reconcile-closed-issue) cmd_reconcile_closed_issue "$@" ;;
+        edges) cmd_edges "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;
