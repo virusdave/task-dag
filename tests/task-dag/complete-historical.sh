@@ -198,15 +198,48 @@ echo "$MSG8" | grep -q "Historical-Commit: $HSHA" && ok "trailers: Historical-Co
 git push -q origin HEAD:master
 
 # ---------------------------------------------------------------------------
-# TEST 9: HEAD ahead of origin/master (unpushed prior link) is refused, no page
+# TEST 9: HEAD ahead of origin/master (unpushed local work) is refused, no page
 # ---------------------------------------------------------------------------
-T9a=$(mk_task "t9a ahead-setup"); mk_history t9a
-"$TD" complete-historical "$T9a" --commit="$HSHA" >/dev/null 2>&1   # advances HEAD, NOT pushed
+mk_history t9
 T9b=$(mk_task "t9b ahead-victim")
+echo local-ahead > local-ahead.txt; git add local-ahead.txt; git commit -qm "local ahead work"
 P0=$(page_count)
 out=$("$TD" complete-historical "$T9b" --commit="$HSHA" 2>&1); rc=$?
 if [ $rc -eq 2 ] && echo "$out" | grep -qi "AHEAD of origin/master"; then ok "authority: HEAD-ahead refused (rc=2)"; else bad "authority: HEAD-ahead rc=$rc: $out"; fi
 if [ "$(page_count)" -eq "$P0" ]; then ok "authority: HEAD-ahead refusal sent no page"; else bad "authority: HEAD-ahead unexpectedly paged"; fi
+
+# ---------------------------------------------------------------------------
+# TEST 10: a final historical leaf publishes its local epic-close before cleanup
+# ---------------------------------------------------------------------------
+git init -q --bare "$ROOT/origin-close.git"
+git clone -q "$ROOT/origin-close.git" "$ROOT/wc-close"
+cd "$ROOT/wc-close"
+echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
+EMPTY_TREE_CLOSE=$(git mktree </dev/null)
+EPIC_CLOSE=$(git commit-tree "$EMPTY_TREE_CLOSE" -p HEAD -m "Task: Historical close epic
+
+Issue: #5252
+URL: https://github.com/test/test/issues/5252
+Author: tester
+Status: pending
+Type: epic")
+git update-ref refs/heads/gh/issues/5252 "$EPIC_CLOSE"
+git update-ref refs/heads/tasks/pending/5252 "$EPIC_CLOSE"
+git push -q origin refs/heads/gh/issues/5252 refs/heads/tasks/pending/5252
+printf '[{"title":"historical final leaf","type":"leaf"}]' > "$ROOT/spec-close.json"
+"$TD" claim-root 5252 --force >/dev/null 2>&1
+CLOSE_LEAF=$("$TD" breakdown "$EPIC_CLOSE" --spec-file="$ROOT/spec-close.json" --force --json 2>/dev/null \
+  | grep -oE '"shortSha":"[0-9a-f]+"' | head -1 | cut -d'"' -f4)
+echo historical-close > historical-close.txt; git add historical-close.txt; git commit -qm "historical close work"
+CLOSE_HIST=$(git rev-parse HEAD)
+git push -q origin HEAD:master
+out=$("$TD" complete-historical "$CLOSE_LEAF" --commit="$CLOSE_HIST" 2>&1); rc=$?
+git fetch -q origin master
+if [ $rc -eq 0 ] && git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$'; then
+  ok "historical final leaf publishes the Closes-Epic commit before returning"
+else
+  bad "historical final leaf did not publish close merge (rc=$rc out=$out)"
+fi
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

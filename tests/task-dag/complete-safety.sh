@@ -114,6 +114,32 @@ if [ -n "$T3" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# TEST 3b: if publishing the completion races/fails, scheduling refs stay live
+# ---------------------------------------------------------------------------
+T3B=$(mk_task "t3b publish race keeps refs")
+if [ -n "$T3B" ]; then
+  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$T3B" >/dev/null 2>&1
+  git clone -q "$ROOT/origin.git" "$ROOT/concurrent"
+  ( cd "$ROOT/concurrent" \
+      && echo concurrent > concurrent.txt \
+      && git add concurrent.txt \
+      && git commit -qm "concurrent master advance" \
+      && git push -q origin HEAD:master )
+  echo work3b > impl3b.txt; git add impl3b.txt; git commit -qm "impl t3b"
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T3B" 2>&1)
+  rc=$?
+  a=$(git ls-remote origin "refs/heads/tasks/active/$T3B" | wc -l)
+  f=$(git ls-remote origin "refs/heads/tasks/frontier/$T3B" | wc -l)
+  if [ "$rc" -eq 3 ] && [ "$a" -eq 1 ] && [ "$f" -eq 0 ] && echo "$out" | grep -qi "left intact"; then
+    ok "C2b: publish failure leaves the owned active claim intact"
+  else
+    bad "C2b: expected rc=3 and intact active claim (rc=$rc active=$a frontier=$f out=$out)"
+  fi
+  git fetch -q origin master
+  git reset --hard -q origin/master
+fi
+
+# ---------------------------------------------------------------------------
 # TEST 4 (B): detached HEAD completion works
 # ---------------------------------------------------------------------------
 T4=$(mk_task "t4 detached")
@@ -129,6 +155,8 @@ if [ -n "$T4" ]; then
     bad "B: detached-HEAD complete failed (rc=$rc)"
   fi
   git checkout -q master 2>/dev/null || true
+  git fetch -q origin master
+  git reset --hard -q origin/master
 fi
 
 # ---------------------------------------------------------------------------
@@ -175,6 +203,7 @@ _is_real_impl() {
 # ---------------------------------------------------------------------------
 git checkout -q master 2>/dev/null || true
 git push -q origin HEAD:master 2>/dev/null      # origin/master == HEAD
+BATCH_BASE=$(git rev-parse HEAD)
 S_LEAF=$(mk_task "issue7 server leaf")
 C_LEAF=$(mk_task "issue7 client leaf")
 if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
@@ -224,8 +253,7 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
   # DAG-native shape: the ONLY merges in the range are the two completion
   # merges, and every merge's 2nd parent is a leaf TASK commit (semantics
   # live in parentage). The first-parent spine is otherwise linear.
-  BASE=$(git rev-parse origin/master)
-  merges=$(git rev-list --min-parents=2 "$BASE..HEAD")
+  merges=$(git rev-list --min-parents=2 "$BATCH_BASE..HEAD")
   nmerges=$(printf '%s\n' "$merges" | grep -c .)
   bad2parent=0
   for m in $merges; do
@@ -239,7 +267,7 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
   fi
 
   # NO message-encoded provenance: Impl-Commit trailer must not appear
-  if git log "$BASE..HEAD" --format='%B' | grep -q '^Impl-Commit:'; then
+  if git log "$BATCH_BASE..HEAD" --format='%B' | grep -q '^Impl-Commit:'; then
     bad "7: an Impl-Commit message trailer leaked into history"
   else
     ok "7: no Impl-Commit trailer — impl↔task link stays in the DAG"

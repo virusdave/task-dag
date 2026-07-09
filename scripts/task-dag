@@ -4457,6 +4457,25 @@ Related: $issue_url"
     printf '%s' "$m"
 }
 
+# Publish the local completion tip before deleting any remote scheduling refs.
+# The durable completion fact is master parentage; frontier/active/blocked refs
+# are only the dispatch surface. If a worker dies after ref cleanup but before
+# its later manual `git push origin HEAD:master`, downstream tasks can be
+# permanently hidden behind a dependency that is neither completed nor
+# claimable. Therefore normal cleanup first proves the completion tip is on
+# origin/master. A non-fast-forward/race is safe: keep the scheduling refs live
+# and ask the worker to sync/retry rather than losing the task.
+publish_head_to_master_before_cleanup() {
+    local commit_sha="$1" short_sha="$2"
+    if git push origin "$commit_sha:refs/heads/master" >/dev/null 2>&1; then
+        echo "Published completion tip $(git rev-parse --short "$commit_sha") to origin/master before task-ref cleanup"
+        return 0
+    fi
+    echo "Error: could not publish completion tip $(git rev-parse --short "$commit_sha") to origin/master before cleaning refs for $short_sha." >&2
+    echo "Task scheduling refs were left intact; fetch/rebase, rerun complete, and do not delete refs manually." >&2
+    return 3
+}
+
 # Command: complete - mark task as complete
 cmd_complete() {
     local task_sha=""
@@ -4510,8 +4529,9 @@ Safety: 'complete' advances HEAD with 'git update-ref' CAS (never
 'git reset --hard'), so uncommitted work is preserved; the batch form only
 rewrites commits proven unpushed against a freshly-fetched origin/master;
 it refuses to complete a task another live worker has claimed; and it
-removes remote task refs with --force-with-lease so it can never clobber a
-concurrent worker's claim.
+publishes the completion tip to origin/master before it removes remote task
+refs with --force-with-lease, so it can never clobber a concurrent worker's
+claim or hide an unpublished completion behind deleted scheduling refs.
 EOF
                 return 0
                 ;;
@@ -4753,6 +4773,25 @@ EOF
     advance_head_to_completion "$completion_base" "$new_commit" || return 1
 
     echo "Created completion commit: $new_commit"
+
+    # Auto-close the parent epic when this completion finishes it.
+    #
+    # We do NOT close the GitHub issue directly here. The old direct REST
+    # PATCH-to-closed (a) bypassed the `Closes-Epic:` trailer gate that
+    # close-completed-issues.yml enforces (the gate that exists precisely
+    # so an ordinary `complete` attach-merge does NOT prematurely close an
+    # in-progress epic — see the #7 incident), and (b) required a
+    # GITHUB_TOKEN that worker agents don't carry, so it almost never
+    # fired. Instead, maybe_emit_local_epic_close appends the canonical
+    # additive Closes-Epic commit to local HEAD for a purely-local,
+    # fully-complete epic; publishing before cleanup below lets the server
+    # workflow close the issue and clean the refs. Epics with cross-repo
+    # delegated children still close via `close-epic`.
+    maybe_emit_local_epic_close "$task_sha"
+
+    if [ "$no_cleanup" = false ]; then
+        publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "$short_sha" || return $?
+    fi
     
     # Clean up dispatch refs (frontier/active/blocked/blocked-meta) with
     # the same CAS discipline used by complete-historical. Sets
@@ -4788,21 +4827,6 @@ EOF
             printf "${YELLOW}⚠ Could not post completion comment to issue #$issue_num (continuing; completion itself succeeded)${RESET}\n" >&2
         fi
     fi
-    
-    # Auto-close the parent epic when this completion finishes it.
-    #
-    # We do NOT close the GitHub issue directly here. The old direct REST
-    # PATCH-to-closed (a) bypassed the `Closes-Epic:` trailer gate that
-    # close-completed-issues.yml enforces (the gate that exists precisely
-    # so an ordinary `complete` attach-merge does NOT prematurely close an
-    # in-progress epic — see the #7 incident), and (b) required a
-    # GITHUB_TOKEN that worker agents don't carry, so it almost never
-    # fired. Instead, maybe_emit_local_epic_close appends the canonical
-    # additive Closes-Epic commit to local HEAD for a purely-local,
-    # fully-complete epic; the worker's `git push origin HEAD:master` then
-    # lets the server workflow close the issue and clean the refs. Epics
-    # with cross-repo delegated children still close via `close-epic`.
-    maybe_emit_local_epic_close "$task_sha"
 
     return 0
 }
@@ -4987,6 +5011,10 @@ cmd_complete_batch() {
     done
     if [ "$done_count" -eq "$n" ]; then
         echo "All ${n} leaves already completed on HEAD; running ref cleanup only (idempotent rerun)."
+        for (( i=0; i<n; i++ )); do maybe_emit_local_epic_close "${task_shas[i]}"; done
+        if [ "$no_cleanup" = false ]; then
+            publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "batch" || return $?
+        fi
         local rc=0
         for (( i=0; i<n; i++ )); do
             cleanup_completed_task_refs "${task_shas[i]}" "${short_shas[i]}" "${verified_active[i]}" "$old_head" "$no_cleanup" || rc=$?
@@ -4995,7 +5023,6 @@ cmd_complete_batch() {
             fi
         done
         [ "$rc" -eq 0 ] || return "$rc"
-        for (( i=0; i<n; i++ )); do maybe_emit_local_epic_close "${task_shas[i]}"; done
         return 0
     elif [ "$done_count" -gt 0 ]; then
         echo "Error: ${done_count}/${n} of these leaves are already completed on HEAD (partial state)." >&2
@@ -5124,6 +5151,11 @@ cmd_complete_batch() {
     printf "${GREEN}✓ Grafted %d completion merge(s) onto their impls; rewrote local unpushed commits.${RESET}\n" "$n"
     printf "  Old tip %s saved at %s (also recoverable via 'git reflog').\n" "${old_head:0:12}" "$backup_ref"
 
+    for (( i=0; i<n; i++ )); do maybe_emit_local_epic_close "${task_shas[i]}"; done
+    if [ "$no_cleanup" = false ]; then
+        publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "batch" || return $?
+    fi
+
     # ── per-leaf ref cleanup (each CAS-leased to its own claim) ──────
     local rc=0
     for (( i=0; i<n; i++ )); do
@@ -5139,14 +5171,9 @@ cmd_complete_batch() {
         return "$rc"
     fi
 
-    # ── best-effort completion comments, then epic auto-close ────────
+    # ── best-effort completion comments ──────────────────────────────
     for (( i=0; i<n; i++ )); do
         post_completion_comment "${task_shas[i]}" "${merge_for[i]}"
-    done
-    # Idempotent: only the call made once the whole subtree is complete
-    # appends the Closes-Epic commit; per distinct epic it fires once.
-    for (( i=0; i<n; i++ )); do
-        maybe_emit_local_epic_close "${task_shas[i]}"
     done
     return 0
 }
@@ -5185,7 +5212,7 @@ page_retroactive_link() {
 
     local msg="RETROACTIVE ADMIN LINK (NOT normal task completion). Repo ${repo:-unknown}: historical commit ${hist_short} was linked after-the-fact to task ${short_sha} \"${task_title}\""
     [ -n "$issue_num" ] && msg="${msg} on issue #${issue_num}"
-    msg="${msg}. The link commit ${link_commit:0:12} is LOCAL until the worker pushes HEAD:master. Historical commit: ${hist_link}."
+    msg="${msg}. The link commit ${link_commit:0:12} was published to origin/master before task-ref cleanup. Historical commit: ${hist_link}."
     [ -n "$issue_url" ] && msg="${msg} Issue: ${issue_url}."
 
     # Flags BEFORE the message (ntfy stops parsing flags after the first
@@ -5234,7 +5261,8 @@ How it works:
   Creates an empty (no file change) link commit on top of CURRENT HEAD
   with the task as its 2nd parent (so the DAG marks the task done) and a
   Historical-Commit: <sha> trailer recording the real work. master history
-  is preserved; you then 'git push origin HEAD:master' to publish it.
+  is preserved; the link is published to origin/master before task refs are
+  cleaned so a recovery link cannot be stranded locally after ref deletion.
 
 Required:
   <task-sha>        the pending task to mark done
@@ -5416,6 +5444,13 @@ Related: $issue_url"
     # history and any dirty worktree; no master rewrite.
     advance_head_to_completion "$head_sha" "$new_commit" || return 1
 
+    # If this link finished a purely-local epic, append the Closes-Epic
+    # commit before publishing and before task-ref cleanup. No completion or
+    # close fact may remain local-only after scheduling refs are deleted.
+    maybe_emit_local_epic_close "$task_sha"
+
+    publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "$short_sha" || return $?
+
     # Clean dispatch refs with the same CAS discipline as complete.
     cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "$new_commit" false || return $?
 
@@ -5435,7 +5470,7 @@ Related: $issue_url"
     echo "" >&2
     echo "   task:               $short_sha  ($task_title)" >&2
     echo "   historical commit:  $hist_short  ($hist_sha)" >&2
-    echo "   link commit:        $(git rev-parse --short "$new_commit")  (push HEAD:master to publish)" >&2
+    echo "   link commit:        $(git rev-parse --short "$new_commit")  (published to origin/master before ref cleanup)" >&2
     [ -n "$issue_url" ] && echo "   issue:              $issue_url" >&2
     echo "════════════════════════════════════════════════════════════════════" >&2
     printf '%b' "${RESET}" >&2
@@ -5445,10 +5480,6 @@ Related: $issue_url"
     # Audit page to the operator (priority 2). Fail-soft.
     page_retroactive_link "$task_sha" "$short_sha" "$hist_sha" "$hist_short" \
         "$new_commit" "$issue_num" "$issue_url" "$task_title"
-
-    # If this link finished a purely-local epic, append the Closes-Epic
-    # commit so the worker's push closes the issue (same as complete).
-    maybe_emit_local_epic_close "$task_sha"
 
     return 0
 }
