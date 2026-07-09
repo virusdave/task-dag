@@ -3282,7 +3282,7 @@ cmd_context() {
 
 # Command: breakdown - create task breakdown from spec
 cmd_breakdown() {
-    local parent_sha="" spec_file="" stdin_json=false dry_run=false force=false json=false
+    local parent_sha="" spec_file="" stdin_json=false dry_run=false force=false json=false claim_first=false
 
     # Claimer identity for any child marked "claim": true in the spec. A
     # self-claimed child is created already-claimed by THIS worker (its
@@ -3304,10 +3304,11 @@ cmd_breakdown() {
             --dry-run) dry_run=true; shift ;;
             --force) force=true; shift ;;
             --json) json=true; shift ;;
+            --claim-first) claim_first=true; shift ;;
             --help|-h)
                 cat <<'EOF'
 Usage: task-dag breakdown <parent-sha> [--spec-file=PATH | --stdin-json]
-                         [--dry-run] [--force] [--json]
+                         [--dry-run] [--force] [--json] [--claim-first]
 
 Create subtasks (children) of <parent-sha> from a JSON spec, publishing a
 tasks/frontier/<short> ref for each so the frontier/claim/complete flow can
@@ -3319,6 +3320,17 @@ CONSUMES that lock (deletes tasks/root-active/<issue>) in the SAME atomic
 push that publishes the leaves, so two hosts can't decompose one issue and
 no root worker can keep acting once leaves exist. --force does NOT bypass
 this lock (it only permits a second breakdown despite existing children).
+
+If <parent-sha> is a NON-root task you currently hold a claim on
+(tasks/active/<short> owned by your TASK_DAG_CLAIMER identity), breakdown
+CONSUMES that active claim in the SAME atomic push that publishes the
+children — exactly mirroring root-lock consumption. This lets a worker that
+self-continued into a claimed child and then decides to decompose it hand
+off cleanly: the parent stops being a claimed leaf the instant its children
+exist, so a post-agent claim sweep can't block the (now structural) parent
+and transitively stall its children. A FOREIGN active claim on the parent
+makes breakdown REFUSE (re-`claim --force` first only if that holder is
+dead); an indeterminate origin read also refuses (fail closed).
 
 The DAG is encoded in the git parents of each child commit:
   * first parent  = <parent-sha>            (the breakdown/epic parent)
@@ -3365,7 +3377,18 @@ Options:
   --force           proceed even if <parent-sha> already has live child
                     task refs (otherwise breakdown refuses, to avoid
                     accidentally double-decomposing an epic)
-  --json            machine-readable output
+  --json            machine-readable output (each task carries its sha,
+                    shortSha, claimed flag, and published ref so a caller
+                    can switch to a born-claimed child deterministically)
+  --claim-first     born-claim EXACTLY the topologically-first child that has
+                    no unmet dependency (the first entry whose dependencies
+                    are all empty or already-completed external commits), so
+                    a decomposing worker can continue straight into it in the
+                    same session. Mutually exclusive with a per-child "claim"
+                    in the spec (use one or the other, unambiguously). If NO
+                    child is dependency-ready, breakdown ERRORS before any
+                    mutation — a breakdown with nothing to continue into is a
+                    genuine dependency block, not a silent no-op.
 
 Commits are created locally first and published with a single atomic,
 create-only `git push`; if the push fails nothing is left on origin.
@@ -3519,6 +3542,49 @@ EOF
         out_lines[i]="[${types[i]}] ${titles[i]}${deps_str}${claim_disp}"
     done
 
+    # ── --claim-first: born-claim the topologically-first ready child ─
+    # A decomposing worker uses this to continue straight into the first
+    # child with no unmet dependency, in the SAME session, instead of
+    # stopping after the breakdown (the self-continue-after-breakdown
+    # contract). It is mutually exclusive with a per-child "claim":true in the
+    # spec (one unambiguous claim source), and it ERRORS *before any mutation*
+    # if no child is dependency-ready — a breakdown with nothing to continue
+    # into is a genuine dependency block, not a silent no-op. Readiness is
+    # evaluated from the dependency PLAN (children don't exist yet): a sibling
+    # dependency (idx:) is never satisfied at birth; an external (sha:)
+    # dependency counts only if that commit is already a completed task.
+    if [ "$claim_first" = true ]; then
+        local ci any_spec_claim=false
+        for (( ci=0; ci<count; ci++ )); do
+            [ "${claims[ci]}" = true ] && any_spec_claim=true
+        done
+        if [ "$any_spec_claim" = true ]; then
+            echo "Error: --claim-first is mutually exclusive with a per-child claim flag" >&2
+            echo "       set in the spec. Use exactly one claim source." >&2
+            return 1
+        fi
+        local first_ready=-1
+        for (( ci=0; ci<count; ci++ )); do
+            local ready=true token
+            for token in ${dep_plans[ci]}; do
+                case "$token" in
+                    idx:*) ready=false; break ;;
+                    sha:*) is_task_completed "${token#sha:}" || { ready=false; break; } ;;
+                esac
+            done
+            if [ "$ready" = true ]; then first_ready=$ci; break; fi
+        done
+        if [ "$first_ready" -lt 0 ]; then
+            echo "Error: --claim-first found no dependency-ready child to claim (every child" >&2
+            echo "       depends on a sibling or an uncompleted task). Author a breakdown with" >&2
+            echo "       at least one ready leaf, or treat this as a genuine dependency block." >&2
+            return 1
+        fi
+        claims[first_ready]=true
+        # out_lines were built in pass 2 with the pre-claim-first flags.
+        out_lines[first_ready]="${out_lines[first_ready]} (claimed by ${claimer})"
+    fi
+
     # ── epic-root orchestration lock (issue #2) ─────────────────────
     # If <parent> is the pending epic ROOT, decomposing it is the
     # orchestration step that the cross-host root lock protects. Require
@@ -3528,6 +3594,9 @@ EOF
     # "implement the root". --force does NOT bypass this (force only ever
     # meant "allow a second breakdown despite existing children").
     local is_root_breakdown=false root_issue="" root_active_ref="" root_claim_sha=""
+    # Non-root recursive breakdown: the parent's OWNED active claim (if any),
+    # consumed in the same atomic push as the children (§1e / issue #53).
+    local parent_active_ref="" parent_active_sha=""
     if [ "$dry_run" = false ]; then
         # Determine whether <parent> is the pending epic root, FAILING
         # CLOSED on an indeterminate origin lookup: if we cannot tell, we
@@ -3641,6 +3710,76 @@ EOF
                 echo "       Re-run 'task-dag claim-root ${root_issue} --force' to take it over (only if that holder is dead)." >&2
                 return 1
             fi
+        fi
+    fi
+
+    # ── recursive (non-root) breakdown: verify + consume the parent's OWNED
+    #    active claim (§1e / issue #53) ────────────────────────────────
+    # A worker that self-continued into a claimed child and now decomposes it
+    # must not exit still owning tasks/active/<parent-short>: the post-agent
+    # claim sweep would block that (now structural) parent and transitively
+    # stall its children. So if the parent carries an active claim OWNED by us,
+    # we consume it in the SAME atomic push that publishes the children (below),
+    # exactly mirroring root-lock consumption. FAIL CLOSED on an indeterminate
+    # origin read; REFUSE a foreign claim (never silently strand/steal it).
+    if [ "$dry_run" = false ] && [ "$is_root_breakdown" = false ]; then
+        local parent_short2; parent_short2=$(git rev-parse --short "$parent_sha")
+        local pa_ref="refs/heads/tasks/active/$parent_short2"
+        local pa_sha="" pa_rc=0
+        pa_sha=$(remote_ref_sha_checked "$pa_ref") || pa_rc=$?
+        if [ "$pa_rc" = 3 ]; then
+            echo "Error: cannot read tasks/active/$parent_short2 on origin (indeterminate" >&2
+            echo "       transport/auth error). Refusing to decompose without knowing whether" >&2
+            echo "       this parent carries a claim to consume. Retry when origin is reachable." >&2
+            return 4
+        fi
+        if [ -n "$pa_sha" ]; then
+            # Positively confirm WE own the claim before consuming it (mirror
+            # the root block): fetch the claim commit and check its identity.
+            local patmp="refs/task-dag-tmp/breakdown-active/$parent_short2"
+            git update-ref -d "$patmp" 2>/dev/null || true
+            if ! git fetch --quiet --no-tags origin "+$pa_ref:$patmp" 2>/dev/null; then
+                echo "Error: cannot read the active claim on ${parent_sha:0:12} (origin" >&2
+                echo "       unreachable) — refusing to decompose. Retry when online." >&2
+                return 4
+            fi
+            local pa_fetched; pa_fetched=$(git rev-parse --verify -q "$patmp" 2>/dev/null || true)
+            if [ -z "$pa_fetched" ] || [ "$pa_fetched" != "$pa_sha" ]; then
+                git update-ref -d "$patmp" 2>/dev/null || true
+                echo "Error: the active claim on ${parent_sha:0:12} changed while verifying" >&2
+                echo "       ownership — retry." >&2
+                return 2
+            fi
+            local pmsg ptask pclaimer phost pfirst me_c me_h
+            pmsg=$(parse_commit_metadata "$patmp" 2>/dev/null || true)
+            ptask=$(extract_field "$pmsg" "Task-Commit" 2>/dev/null || true)
+            pclaimer=$(extract_field "$pmsg" "Claimer" 2>/dev/null || true)
+            phost=$(extract_field "$pmsg" "Claimer-Host" 2>/dev/null || true)
+            pfirst=$(get_first_parent "$patmp" 2>/dev/null || true)
+            git update-ref -d "$patmp" 2>/dev/null || true
+            me_c="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+            me_h="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+            # Guard short-sha collision / malformed claim: it must reference
+            # THIS parent (by Task-Commit or by first parent).
+            if [ "$ptask" != "$parent_sha" ] && [ "$pfirst" != "$parent_sha" ]; then
+                echo "Error: tasks/active/$parent_short2 does not reference ${parent_sha:0:12}" >&2
+                echo "       (short-sha collision or malformed claim) — refusing to decompose." >&2
+                return 1
+            fi
+            if [ -z "$pclaimer" ] || [ -z "$phost" ]; then
+                echo "Error: the active claim on ${parent_sha:0:12} is malformed (missing owner" >&2
+                echo "       fields) — refusing to decompose. Re-claim it and retry." >&2
+                return 1
+            fi
+            if [ "$pclaimer" != "$me_c" ] || [ "$phost" != "$me_h" ]; then
+                echo "Error: ${parent_sha:0:12} is claimed by ${pclaimer}@${phost}, not you" >&2
+                echo "       (${me_c}@${me_h}). Refusing to decompose (would strand a foreign" >&2
+                echo "       claim). Re-run 'task-dag claim ${parent_short2} --force' only if that" >&2
+                echo "       holder is dead." >&2
+                return 1
+            fi
+            parent_active_ref="$pa_ref"
+            parent_active_sha="$pa_sha"
         fi
     fi
 
@@ -3771,6 +3910,18 @@ EOF
         refspecs+=(":$root_active_ref")          # consume the lock
     fi
 
+    # ── for a NON-root recursive breakdown of a parent we hold a claim on,
+    #    CONSUME that active claim in the SAME atomic push (§1e). The lease at
+    #    the exact claim SHA is the cross-host mutex: the children can only
+    #    appear if our claim is still there, and it disappears the instant they
+    #    exist — so the (now structural) parent is never left as a claimed leaf
+    #    the post-agent sweep could block. If the claim was stolen/released
+    #    meanwhile, the lease fails and NOTHING is created.
+    if [ -n "$parent_active_ref" ]; then
+        lease_args+=("--force-with-lease=$parent_active_ref:$parent_active_sha")
+        refspecs+=(":$parent_active_ref")        # consume the parent's claim
+    fi
+
     # ── publish all frontier refs to origin atomically, create-only ──
     local push_output push_rc=0
     push_output=$(git push --atomic "${lease_args[@]}" origin "${refspecs[@]}" 2>&1) || push_rc=$?
@@ -3799,17 +3950,28 @@ EOF
     if [ "$is_root_breakdown" = true ]; then
         git update-ref -d "$root_active_ref" 2>/dev/null || true
     fi
+    # Drop the now-consumed local parent active claim (non-root recursion).
+    if [ -n "$parent_active_ref" ]; then
+        git update-ref -d "$parent_active_ref" 2>/dev/null || true
+    fi
 
     # ── report ───────────────────────────────────────────────────────
     if [ "$json" = true ]; then
         local k task_objs=()
         for (( k=0; k<count; k++ )); do
-            local k_claimed=false
-            [ -n "${claim_commits[k]}" ] && k_claimed=true
+            local k_claimed=false k_short k_ref
+            k_short=$(git rev-parse --short "${created_shas[k]}")
+            if [ -n "${claim_commits[k]}" ]; then
+                k_claimed=true
+                k_ref="tasks/active/$k_short"
+            else
+                k_ref="tasks/frontier/$k_short"
+            fi
             task_objs+=("$(jq -nc --arg sha "${created_shas[k]}" \
-                --arg short "$(git rev-parse --short "${created_shas[k]}")" \
+                --arg short "$k_short" \
                 --argjson claimed "$k_claimed" \
-                '{sha:$sha,shortSha:$short,claimed:$claimed}')")
+                --arg ref "$k_ref" \
+                '{sha:$sha,shortSha:$short,claimed:$claimed,ref:$ref}')")
         done
         # Slurp the per-task objects into the tasks array so the whole
         # result is emitted by jq (compact, authored key order) rather than

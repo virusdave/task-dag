@@ -12,7 +12,7 @@ orchestration lock** that closes the root/leaf double-dispatch
 | `tasks/pending/<N>` | issue-to-task workflow on issue open/edit/reopen (`create-task-commit.sh`) | **Epic root / identity** for issue `#N`. The durable identity used by closure (`close-epic` / `close-completed-issues.sh`), cross-repo delegation, and comment-ingest ancestry. It is an *identity*, **not** a lock. | Intentionally **kept** for the issue's life; deleted by `close-completed-issues.sh` when the epic closes. |
 | `tasks/root-active/<N>` | `task-dag claim-root <N>` | The cross-host **orchestration lock** on the epic root: "this host is decomposing issue `#N`." Atomic CAS, keyed by issue number, recording Claimer / Claimer-Host / Claimer-PID / Claimed-At, exactly like a leaf claim. | `task-dag breakdown` (which **consumes** it when it publishes the leaves), `release-root`, or `close-completed-issues.sh`. |
 | `tasks/frontier/<short>` | `task-dag breakdown` (run by an agent that holds the root lock) | A claimable **implementation leaf**. One per child task, published up front. | `task-dag claim` (renamed to `active`) or `complete`/`drop`; **also** `reconcile-closed-issue` (frontier-first) for a confirmed-CLOSED issue's tasks. |
-| `tasks/active/<short>` | `task-dag claim` | The cross-host distributed lock on a leaf: this leaf is in flight. The claim commit records Claimer / Claimer-Host / Claimer-PID / Claimed-At. | `complete` (lands the task) or `release` (back to `frontier`). |
+| `tasks/active/<short>` | `task-dag claim` (or `breakdown ... "claim": true` / `breakdown --claim-first`, born-claimed) | The cross-host distributed lock on a leaf: this leaf is in flight. The claim commit records Claimer / Claimer-Host / Claimer-PID / Claimed-At. | `complete` (lands the task), `release` (back to `frontier`), or `task-dag breakdown <this-task>` which **consumes** our own claim when we recursively decompose the claimed task (mirrors root-lock consumption — see "Recursive breakdown consumes the parent's claim" below). |
 | `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. The overlay ref points straight at the task commit (source of truth for "is this task blocked"). | `unblock` / `complete` / `drop`; **also** `close-completed-issues.sh` (via `cleanup-closed-issue-task-refs.sh`) for any of the closed issue's tasks — most often the epic ROOT, which is closed by the `Closes-Epic` merge and so never `complete`d — and `reconcile-closed-issue` for out-of-band (manual) closes. |
 | `tasks/blocked-meta/<sha>` | `task-dag block` | Optional **side metadata** for a parked task: a deterministic side-commit (tree == task tree, first parent == task commit) whose body records `Blocker-Kind` (`operator`/`downstream`), durable `Reason`, optional `Request-URL`, derived `Repo`/`Issue`/`Source-URL`, and `Blocked-By`/`Blocked-Host`/`Blocked-At`. Consumed by the operator-blocked #29 dashboard so it need not reparse task bodies. A blocked task with **no** meta ref (a legacy block) is still fully valid. | `unblock` / `complete` / `drop` (cleared in lockstep with the overlay ref); **also** `close-completed-issues.sh` on epic close. |
 
@@ -117,6 +117,38 @@ handed back with `release` (active -> frontier) if the worker decides not
 to do it. `breakdown --json` reports `"claimed": true|false` per child.
 Because `breakdown` itself now consumes the root lock (above), even a
 born-claimed decomposition happens under the single cross-host root CAS.
+
+### Recursive breakdown consumes the parent's claim (`virusdave/top-level#53`)
+
+The self-continue-after-breakdown contract lets a worker that decomposed a
+root, born-claimed a child, and continued into it *recursively decompose
+that claimed child* in the same session. When `breakdown <parent>` is run
+on a **non-root** parent that carries a `tasks/active/<short>` claim
+**owned by the caller** (`TASK_DAG_CLAIMER` / `_HOST` match), it **consumes
+that active claim in the same atomic create-only push** that publishes the
+grandchildren — exactly mirroring how a root breakdown consumes
+`tasks/root-active/<N>`. The `--force-with-lease` at the exact claim SHA is
+the cross-host mutex: the grandchildren appear only if our claim is still
+there, and it disappears the instant they exist.
+
+This closes a real stall: without it the parent's claim would survive the
+decomposition, and the dispatcher's post-agent "sweep owned claims" pass
+would block-first-release that now-**structural** parent, transitively
+making its grandchildren unpickable. A **foreign** active claim on the
+parent makes `breakdown` **refuse** (re-`claim --force` only if that holder
+is dead); an indeterminate origin read also refuses (fail closed). A parent
+with no active claim (an ordinary frontier leaf or a completed task)
+decomposes unchanged — nothing to consume.
+
+To continue straight into the first ready child without hand-marking the
+spec, `breakdown --claim-first` born-claims **exactly** the
+topologically-first dependency-ready child (the first entry whose deps are
+all empty or already-completed external commits); it is mutually exclusive
+with a per-child `"claim": true`, and **errors before any mutation** if no
+child is dependency-ready (a breakdown with nothing to continue into is a
+genuine dependency block, not a silent no-op). `breakdown --json` now also
+reports each child's published `ref` so a caller can switch to the
+born-claimed child deterministically.
 
 ### Completing several sibling leaves in one worktree (`virusdave/task-dag#7`)
 
