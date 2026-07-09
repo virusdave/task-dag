@@ -4,6 +4,7 @@ import type { Queryable } from '../pool.js'
 import {
   assertBaseRowsMatchSnapshot,
   assertPendingPurchasePacketApplyable,
+  createDeterministicPendingPurchaseCandidateRevision,
   hashJsonForPendingPurchaseRefinement,
   PendingPurchaseRefinementConflictError,
 } from './pendingPurchaseRefinementQueries.js'
@@ -80,6 +81,41 @@ describe('assertPendingPurchasePacketApplyable', () => {
   })
 })
 
+describe('createDeterministicPendingPurchaseCandidateRevision', () => {
+  it('materializes a candidate revision by copying existing row lineages without making it current/applyable', async () => {
+    const db = fakeCandidateCreationDb()
+
+    await expect(createDeterministicPendingPurchaseCandidateRevision(db, 9001)).resolves.toEqual({
+      candidatePacketId: 101,
+      revisionNumber: 2,
+    })
+
+    const insertPacket = db.calls.find((call) => /insert into pending_purchase_packets/i.test(call.text))
+    expect(insertPacket?.text).toMatch(/'candidate'/)
+    expect(insertPacket?.text).toMatch(/false,\s*id,\s*\$1/s)
+    expect(insertPacket?.text).toMatch(/'superseded'/)
+    const insertRows = db.calls.find((call) => /insert into pending_purchase_rows/i.test(call.text))
+    expect(insertRows?.text).toMatch(/row_lineage_id,\s*id,\s*packet_id,\s*\$2/s)
+    expect(insertRows?.text).toMatch(/lineage_revision_number \+ 1/)
+    expect(insertRows?.text).toMatch(/'pending'/)
+    expect(insertRows?.text).toMatch(/'not_requested'/)
+    expect(db.calls.some((call) => /set status = 'candidate_created'/i.test(call.text))).toBe(true)
+  })
+
+  it('marks stale turns failed without inserting a candidate or overwriting feedback', async () => {
+    const db = fakeCandidateCreationDb({ turnSnapshotSha256: 'c'.repeat(64) })
+
+    await expect(createDeterministicPendingPurchaseCandidateRevision(db, 9001)).rejects.toBeInstanceOf(
+      PendingPurchaseRefinementConflictError,
+    )
+
+    expect(db.calls.some((call) => /insert into pending_purchase_packets/i.test(call.text))).toBe(false)
+    const failedUpdate = db.calls.find((call) => /set status = 'failed'/i.test(call.text))
+    expect(failedUpdate?.text).not.toMatch(/feedback_text/)
+    expect(failedUpdate?.params).toEqual([9001, 'Target packet snapshot is stale.'])
+  })
+})
+
 function fakeGateDb(row: Record<string, unknown>, hasSchema = true): Queryable {
   let calls = 0
   return {
@@ -102,4 +138,99 @@ function fakeGateDb(row: Record<string, unknown>, hasSchema = true): Queryable {
       return { command: 'SELECT', rowCount: 1, oid: 0, fields: [], rows: [row] }
     },
   }
+}
+
+interface RecordedQuery {
+  params: unknown[] | undefined
+  text: string
+}
+
+function fakeCandidateCreationDb(options: { turnSnapshotSha256?: string } = {}) {
+  const snapshotRow = {
+    actionType: 'create',
+    approvalStatus: 'approved',
+    catalogAction: 'create_product',
+    distributorProductId: 'dist-1',
+    distributorProductName: 'Pink Runtz 3.5g',
+    effectivePrimaryImageUrl: null,
+    effectiveProposedDescription: 'Pink Runtz flower',
+    effectiveProposedPrice: '32.00',
+    editedStructuredFields: {},
+    lastApplyStatus: 'not_requested',
+    lineageRevisionNumber: 1,
+    mappingStatus: 'needs_catalog_create',
+    rawProvenance: { source: 'test' },
+    refinementProvenance: {},
+    reviewFlags: [],
+    rowId: 501,
+    rowLineageId: 'pprline_501',
+    siteKey: 'bronx',
+    targetBrand: 'Runtz',
+    targetGroupName: 'Pink Runtz',
+    targetVariantName: 'Pink Runtz 3.5g',
+    version: 3,
+  }
+  const expectedSnapshotSha256 = hashJsonForPendingPurchaseRefinement({
+    packetId: 100,
+    revisionNumber: 1,
+    rows: [snapshotRow],
+  })
+  const turnSnapshotSha256 = options.turnSnapshotSha256 ?? expectedSnapshotSha256
+  const calls: RecordedQuery[] = []
+  const db = {
+    calls,
+    async query(text: string, params?: unknown[]) {
+      calls.push({ text, params })
+      if (/from pending_purchase_refinement_turns\s+where id = \$1\s+for update/is.test(text)) {
+        return resultRows([{ candidate_packet_id: null, id: 9001, packet_root_id: 77, row_snapshot_sha256: turnSnapshotSha256, status: 'queued', target_packet_id: 100, target_revision_number: 1, target_root_version: 4 }])
+      }
+      if (/from pending_purchase_packets p\s+join pending_purchase_packet_roots r/is.test(text)) {
+        return resultRows([{ current_packet_id: 100, current_revision_number: 1, packet_root_id: 77, packet_title: 'Bronx packet r1', revision_number: 1, revision_status: 'current', root_key: 'pprroot_100', root_status: 'active', root_updated_at: new Date('2026-07-09T15:00:00.000Z'), root_version: 4 }])
+      }
+      if (/from pending_purchase_rows r\s+where r\.packet_id = \$1/is.test(text)) {
+        return resultRows([
+          {
+            action_type: 'create',
+            approval_status: 'approved',
+            catalog_action: 'create_product',
+            distributor_product_id: 'dist-1',
+            distributor_product_name: 'Pink Runtz 3.5g',
+            effective_primary_image_url: null,
+            effective_proposed_description: 'Pink Runtz flower',
+            effective_proposed_price: '32.00',
+            edited_structured_fields: {},
+            last_apply_status: 'not_requested',
+            lineage_revision_number: 1,
+            mapping_status: 'needs_catalog_create',
+            raw_row_json: snapshotRow.rawProvenance,
+            refinement_provenance_json: {},
+            review_flags_json: [],
+            row_id: 501,
+            row_lineage_id: 'pprline_501',
+            row_snapshot_sha256: expectedSnapshotSha256,
+            site_key: 'bronx',
+            target_brand: 'Runtz',
+            target_group_name: 'Pink Runtz',
+            target_variant_name: 'Pink Runtz 3.5g',
+            version: 3,
+          },
+        ])
+      }
+      if (/array_agg\(coalesce\(row_lineage_id, ''\)/i.test(text)) {
+        return resultRows([{ lineages: ['pprline_501'] }])
+      }
+      if (/insert into pending_purchase_packets/i.test(text)) {
+        return resultRows([{ id: 101, revision_number: 2 }], 'INSERT')
+      }
+      if (/insert into pending_purchase_rows/i.test(text)) {
+        return { command: 'INSERT', fields: [], oid: 0, rowCount: 1, rows: [] }
+      }
+      return { command: 'UPDATE', fields: [], oid: 0, rowCount: 1, rows: [] }
+    },
+  }
+  return db as unknown as import('pg').PoolClient & { calls: RecordedQuery[] }
+}
+
+function resultRows(rows: Record<string, unknown>[], command = 'SELECT') {
+  return { command, fields: [], oid: 0, rowCount: rows.length, rows }
 }
