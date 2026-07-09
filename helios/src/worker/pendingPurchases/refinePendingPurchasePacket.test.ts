@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Queryable } from '../../server/db/pool.js'
 import {
+  loadOptionalRefinementEvidence,
   PendingPurchaseRefinementError,
   refinePendingPurchasePacketWithLlm,
   type PendingPurchaseRefinementContextItem,
@@ -139,6 +140,19 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
     expect(result.model).toBe('google.gemma-3-27b-it')
     expect(result.promptVersion).toMatch(/strict-patches/)
     expect(result.patches).toEqual([patch()])
+  })
+
+  it('adds bounded optional evidence to the prompt without authorizing new product ids', async () => {
+    const fetchMock = stubFetch(modelResponse({ patches: [patch()] }))
+    await refinePendingPurchasePacketWithLlm(buildInput({ db: evidenceDb() }))
+
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    const userPayload = JSON.parse((body.messages as Array<{ role: string; content: string }>)[1]!.content)
+    const contextIds = userPayload.contextItems.map((item: { contextId: string }) => item.contextId)
+    expect(contextIds).toContain('prior-outcome:pprline_1:91')
+    expect(contextIds).toContain('current-link:pprline_1:7001')
+    expect(contextIds).toContain('litalerts-market:pprline_1:501')
+    expect(userPayload.rows[0].productIdCandidates).toEqual([7001, 7002])
   })
 
   it('keeps malicious feedback and untrusted context out of the system prompt', async () => {
@@ -312,3 +326,106 @@ describe('refinePendingPurchasePacketWithLlm — input guards', () => {
     ).rejects.toThrow(/feedback is \d+ chars/)
   })
 })
+
+describe('loadOptionalRefinementEvidence', () => {
+  it('emits explicit context-unavailable notes when optional evidence is missing', async () => {
+    const evidence = await loadOptionalRefinementEvidence(emptyDb, [row()])
+
+    expect(evidence.map((item) => item.contextId)).toEqual([
+      'context-unavailable:prior-outcomes',
+      'context-unavailable:current-link',
+      'context-unavailable:litalerts-market',
+    ])
+  })
+
+  it('degrades to an unavailable note when an optional provider query fails', async () => {
+    const failingDb = {
+      async query(queryText: string) {
+        if (queryText.includes('pending_purchase_rows')) {
+          throw new Error('relation missing')
+        }
+        return { rows: [] }
+      },
+    } as unknown as Queryable
+
+    const evidence = await loadOptionalRefinementEvidence(failingDb, [row()])
+
+    expect(evidence[0]).toMatchObject({
+      contextId: 'context-unavailable:prior-outcomes',
+      data: { provider: 'prior-outcomes', status: 'context-unavailable' },
+    })
+  })
+})
+
+function evidenceDb(): Queryable {
+  return {
+    async query(queryText: string) {
+      if (queryText.includes('pending_purchase_rows')) {
+        return resultRows([
+          {
+            approval_status: 'approved',
+            distributor_product_id: 'dist-1',
+            distributor_product_name: 'PNK RNTZ 3.5G',
+            effective_primary_image_url: 'https://images.test/pink-runtz.jpg',
+            effective_proposed_description: 'Prior sanctioned description.',
+            effective_proposed_price: '45.00',
+            expected_category: 'Flower',
+            expected_subcategory: 'Packaged Eighth',
+            last_apply_status: 'applied',
+            packet_id: 7,
+            row_id: 91,
+            row_lineage_id: 'pprline_prior',
+            source_row_lineage_id: 'pprline_1',
+            target_brand: 'Runtz',
+            target_group_name: 'Pink Runtz',
+            target_variant_name: '3.5g',
+            updated_at: new Date('2026-07-08T15:00:00Z'),
+          },
+        ])
+      }
+      if (queryText.includes('catalog_market_matches')) {
+        return resultRows([
+          {
+            brand_norm: 'runtz',
+            category_norm: 'flower',
+            confidence_at_verdict: '0.900',
+            fuzzy_sku_id: 301,
+            listing_name: 'Pink Runtz 3.5g',
+            listing_url: 'https://retailer.test/pink-runtz',
+            match_id: 501,
+            normal_price: '50.00',
+            sale_price: '45.00',
+            source_captured_at: new Date('2026-07-08T14:00:00Z'),
+            source_row_lineage_id: 'pprline_1',
+            strain_norm: 'pink runtz',
+            subcategory_norm: 'eighth',
+            verdict: 'exact',
+          },
+        ])
+      }
+      if (queryText.includes('catalog_group_products')) {
+        return resultRows([
+          {
+            brand_name: 'Runtz',
+            catalog_group_id: 201,
+            category_name: 'Flower',
+            group_name: 'Pink Runtz',
+            product_id: 7001,
+            product_name: 'Pink Runtz 3.5g',
+            product_price: '45.00',
+            product_size_name: '3.5g',
+            product_tab: '3.5g',
+            source_row_lineage_id: 'pprline_1',
+            strain_name: 'Pink Runtz',
+            subcategory_name: 'Packaged Eighth',
+          },
+        ])
+      }
+      return resultRows([])
+    },
+  } as unknown as Queryable
+}
+
+function resultRows(rows: readonly Record<string, unknown>[]) {
+  return { command: 'SELECT', rowCount: rows.length, oid: 0, fields: [], rows }
+}
