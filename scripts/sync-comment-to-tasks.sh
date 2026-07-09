@@ -50,10 +50,17 @@ download_task_dag_cli() {
     TASK_DAG_CLI_DIR="$(mktemp -d)"
     base="https://raw.githubusercontent.com/${TASK_DAG_REPO}/${TASK_DAG_REF}/scripts"
     mkdir -p "$TASK_DAG_CLI_DIR/task-dag.d"
-    curl -fsSL "$base/task-dag"                    -o "$TASK_DAG_CLI_DIR/task-dag"                || return 1
-    curl -fsSL "$base/task-dag.d/cross-repo.sh"    -o "$TASK_DAG_CLI_DIR/task-dag.d/cross-repo.sh" || return 1
+    # Retry on transient failures. raw.githubusercontent.com rate-limits
+    # (HTTP 429) when the fleet is busy; a single un-retried 429 here used to
+    # make comment ingestion fail closed and silently DROP an operator comment
+    # (create-only, never requeued — see virusdave/top-level#54). --retry +
+    # --retry-all-errors makes curl back off and retry the 429/5xx/transport
+    # errors instead of giving up on the first one.
+    local retry=(--retry 5 --retry-delay 2 --retry-all-errors)
+    curl "${retry[@]}" -fsSL "$base/task-dag"                    -o "$TASK_DAG_CLI_DIR/task-dag"                || return 1
+    curl "${retry[@]}" -fsSL "$base/task-dag.d/cross-repo.sh"    -o "$TASK_DAG_CLI_DIR/task-dag.d/cross-repo.sh" || return 1
     # phase-gates.conf is optional config; its absence must not fail the run.
-    curl -fsSL "$base/task-dag.d/phase-gates.conf" -o "$TASK_DAG_CLI_DIR/task-dag.d/phase-gates.conf" 2>/dev/null || true
+    curl "${retry[@]}" -fsSL "$base/task-dag.d/phase-gates.conf" -o "$TASK_DAG_CLI_DIR/task-dag.d/phase-gates.conf" 2>/dev/null || true
     chmod +x "$TASK_DAG_CLI_DIR/task-dag" || return 1
     # Sanity-check it loaded its modules and exposes ingest-comment.
     "$TASK_DAG_CLI_DIR/task-dag" help 2>&1 | grep -q '^[[:space:]]*ingest-comment' || return 1

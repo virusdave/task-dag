@@ -75,7 +75,7 @@ jobs:
 
       - name: Download aggregator script
         run: |
-          curl -fsSL \
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
             "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/aggregate-cross-repo-completions.sh" \
             -o /tmp/aggregate-cross-repo-completions.sh
           chmod 0755 /tmp/aggregate-cross-repo-completions.sh

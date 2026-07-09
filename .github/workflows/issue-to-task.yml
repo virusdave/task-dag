@@ -40,7 +40,7 @@ jobs:
 
       - name: Download create-task-commit script
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/create-task-commit.sh" \
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/create-task-commit.sh" \
             -o /tmp/create-task-commit.sh
           chmod +x /tmp/create-task-commit.sh
 

@@ -104,7 +104,7 @@ jobs:
 
       - name: Download task-dag scripts
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-comment-to-tasks.sh" \
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-comment-to-tasks.sh" \
             -o /tmp/sync-comment-to-tasks.sh
           chmod +x /tmp/sync-comment-to-tasks.sh
 

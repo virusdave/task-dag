@@ -87,7 +87,7 @@ jobs:
 
       - name: Download materialise-child-epics script
         run: |
-          curl -fsSL \
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
             "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/materialise-child-epics.sh" \
             -o /tmp/materialise-child-epics.sh
           chmod 0755 /tmp/materialise-child-epics.sh

@@ -90,9 +90,14 @@ enrich_block_at_birth_meta() {
         dir="$(mktemp -d)"
         local base="https://raw.githubusercontent.com/${TASK_DAG_REPO}/${TASK_DAG_REF}/scripts"
         mkdir -p "$dir/task-dag.d"
-        curl -fsSL "$base/task-dag"                    -o "$dir/task-dag"                 || { rm -rf "$dir"; return 1; }
-        curl -fsSL "$base/task-dag.d/cross-repo.sh"    -o "$dir/task-dag.d/cross-repo.sh" || { rm -rf "$dir"; return 1; }
-        curl -fsSL "$base/task-dag.d/phase-gates.conf" -o "$dir/task-dag.d/phase-gates.conf" 2>/dev/null || true
+        # Retry on transient raw.githubusercontent.com failures (esp. HTTP 429
+        # rate-limits when the fleet is busy) so a single 429 does not make
+        # issue-to-task give up — mirrors the fix in sync-comment-to-tasks.sh
+        # (see virusdave/top-level#54).
+        local retry=(--retry 5 --retry-delay 2 --retry-all-errors)
+        curl "${retry[@]}" -fsSL "$base/task-dag"                    -o "$dir/task-dag"                 || { rm -rf "$dir"; return 1; }
+        curl "${retry[@]}" -fsSL "$base/task-dag.d/cross-repo.sh"    -o "$dir/task-dag.d/cross-repo.sh" || { rm -rf "$dir"; return 1; }
+        curl "${retry[@]}" -fsSL "$base/task-dag.d/phase-gates.conf" -o "$dir/task-dag.d/phase-gates.conf" 2>/dev/null || true
         chmod +x "$dir/task-dag" || { rm -rf "$dir"; return 1; }
         cli="$dir/task-dag"
     fi

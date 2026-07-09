@@ -49,11 +49,11 @@ jobs:
         env:
           REF: ${{ inputs.ref }}
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/close-completed-issues.sh" \
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/close-completed-issues.sh" \
             -o /tmp/close-completed-issues.sh
           # Companion cleaner for blocked/frontier overlay refs of a closed
           # issue (invoked by close-completed-issues.sh via CLEANUP_REFS_SCRIPT).
-          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/cleanup-closed-issue-task-refs.sh" \
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/cleanup-closed-issue-task-refs.sh" \
             -o /tmp/cleanup-closed-issue-task-refs.sh
           chmod +x /tmp/close-completed-issues.sh /tmp/cleanup-closed-issue-task-refs.sh
 

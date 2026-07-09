@@ -37,7 +37,7 @@ jobs:
 
       - name: Download task-dag scripts
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-tasks-to-github.sh" \
+          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-tasks-to-github.sh" \
             -o /tmp/sync-tasks-to-github.sh
           chmod +x /tmp/sync-tasks-to-github.sh
 
