@@ -21,9 +21,11 @@ import { userHasAnyMetricGrant, userHasMetricGrant } from '../../../shared/domai
 import {
   GADS_DEFAULT_SUBPAGE,
   GADS_IMPLEMENTED_SUBPAGES,
+  GADS_METRIC_SCOPE_BY_TAB_ID,
   GADS_RESERVED_SUBPAGES,
   gadsSubPageLabel,
-  requiredGadsGrants,
+  type GadsMetricScope,
+  type GadsMetricTabId,
   type GadsScope,
   type GadsSubPage,
 } from '../../../shared/domain/gadsSites.js'
@@ -220,13 +222,12 @@ export type MetricsTabId =
 
 const DEFAULT_TAB_ID: MetricsTabId = 'essentials'
 
-// GAds tabs are per-site. Map each tab id to its lp_events scope so a
-// single GAdsLandingPagesTab component serves all three. Keep in sync
-// with the METRICS_TABS gads entries below and requiredGadsGrants().
-const GADS_TAB_SCOPES: Partial<Record<MetricsTabId, GadsScope>> = {
-  'gads-bronx': 'bronx',
-  'gads-midtown': 'midtown',
-  'gads-all': 'all',
+// GAds tabs are per-site. The typed registry maps each tab id to the route
+// scope and ANY-of grant set so `gads-all` stays a true superset everywhere.
+function gadsMetricScopeForTab(tabId: MetricsTabId): GadsMetricScope | null {
+  return (
+    (GADS_METRIC_SCOPE_BY_TAB_ID as Partial<Record<GadsMetricTabId | MetricsTabId, GadsMetricScope>>)[tabId] ?? null
+  )
 }
 
 interface MetricsTab {
@@ -539,7 +540,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
   // iteration) are reserved in shared/domain/gadsSites.ts.
   {
     id: 'gads-bronx',
-    label: 'GAds · Bronx',
+    label: GADS_METRIC_SCOPE_BY_TAB_ID['gads-bronx'].label,
     description:
       'Google Ads landing-page analytics for Bronx: assignment-cohort funnel (assigned → impressed → redirected → converted) and per-variant observed performance over the unified landing engine. Confidential.',
     defaultAgg: 'date',
@@ -548,11 +549,11 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showStackControl: false,
     include: () => false,
     grant: 'gads-bronx',
-    grantAnyOf: requiredGadsGrants('bronx'),
+    grantAnyOf: GADS_METRIC_SCOPE_BY_TAB_ID['gads-bronx'].grants,
   },
   {
     id: 'gads-midtown',
-    label: 'GAds · Midtown',
+    label: GADS_METRIC_SCOPE_BY_TAB_ID['gads-midtown'].label,
     description:
       'Google Ads landing-page analytics for Midtown: assignment-cohort funnel (assigned → impressed → redirected → converted) and per-variant observed performance over the unified landing engine. Confidential.',
     defaultAgg: 'date',
@@ -561,11 +562,11 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showStackControl: false,
     include: () => false,
     grant: 'gads-midtown',
-    grantAnyOf: requiredGadsGrants('midtown'),
+    grantAnyOf: GADS_METRIC_SCOPE_BY_TAB_ID['gads-midtown'].grants,
   },
   {
     id: 'gads-all',
-    label: 'GAds · All sites',
+    label: GADS_METRIC_SCOPE_BY_TAB_ID['gads-all'].label,
     description:
       'Google Ads landing-page analytics across all sites: assignment-cohort funnel and per-variant observed performance over the unified landing engine. Confidential.',
     defaultAgg: 'date',
@@ -574,7 +575,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showStackControl: false,
     include: () => false,
     grant: 'gads-all',
-    grantAnyOf: requiredGadsGrants('all'),
+    grantAnyOf: GADS_METRIC_SCOPE_BY_TAB_ID['gads-all'].grants,
   },
 ]
 
@@ -936,6 +937,8 @@ export function MetricsLayoutPage() {
   // a user landing on /metrics/staff sees the staff-restricted
   // page until they're granted 'staff' too.
   const pageGrant = activeTab.grant
+  const pageGrants = activeTab.grantAnyOf ?? [pageGrant]
+  const activeGadsScope = gadsMetricScopeForTab(activeTab.id)
   const isAdmin = user?.role === 'admin'
   return (
     <MetricsDefaultsProvider
@@ -944,7 +947,11 @@ export function MetricsLayoutPage() {
       initialUpdatedAt={loadedDefaults.updatedAt}
       isAdmin={isAdmin}
     >
-    <MetricsAccessGate anyOf={[pageGrant]} surfaceLabel={activeTab.label}>
+    <MetricsAccessGate
+      anyOf={pageGrants}
+      surfaceLabel={activeTab.label}
+      showGrantHint={!activeGadsScope}
+    >
       <TimeAxisProvider initial={initialWindow}>
         <section className="metrics-dashboard">
           <header className="page-header metrics-dashboard-header">
@@ -973,13 +980,13 @@ export function MetricsLayoutPage() {
             other tabs has no equivalent same-day-summary contract). */}
         {activeTab.id === 'essentials' ? <EssentialsDailySummaryBanner /> : null}
 
-        {GADS_TAB_SCOPES[activeTab.id] ? (
+        {activeGadsScope ? (
           // GAds per-site landing-page analytics. Owns its full UI, fed
           // by one /api/gads/landing-pages fetch. The tab id encodes the
           // site scope; the :subpage segment selects the sub-page (V1
           // implements only "landing-pages"; reserved slugs render a
           // coming-soon panel, unknown slugs a not-found note).
-          <GAdsTabRouter tabId={activeTab.id} scope={GADS_TAB_SCOPES[activeTab.id]!} subpage={subpage} />
+          <GAdsTabRouter tabId={activeTab.id} scope={activeGadsScope.scope} subpage={subpage} />
         ) : activeTab.id === 'catalog' ? (
           // Catalog analytics has its own filter bar + scatter grid and does
           // not share the time-series toolbar (sites / agg / stack / range).
@@ -1636,7 +1643,7 @@ function MetricsTabsNav({
           // GAds tabs carry a sub-page segment (V1: landing-pages) so
           // the canonical confidential URL is /metrics/gads-<site>/
           // landing-pages. Other tabs use the bare /metrics/:tabId form.
-          to={GADS_TAB_SCOPES[t.id] ? `/metrics/${t.id}/${GADS_DEFAULT_SUBPAGE}` : `/metrics/${t.id}`}
+          to={gadsMetricScopeForTab(t.id)?.path ?? `/metrics/${t.id}`}
           // Inactive tabs get the ghost-button look; the active tab gets
           // an emphasized class. We can't trust NavLink's own active
           // state because the bare `/metrics` URL doesn't carry a tabId

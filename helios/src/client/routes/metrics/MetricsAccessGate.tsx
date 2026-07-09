@@ -23,12 +23,15 @@ export interface MetricsAccessGateProps {
   readonly anyOf: ReadonlyArray<MetricGrantKey>
   /** Optional override for the denial header. */
   readonly surfaceLabel?: string
+  /** Hide concrete grant keys for confidential surfaces. */
+  readonly showGrantHint?: boolean
   readonly children: ReactNode
 }
 
 export function MetricsAccessGate({
   anyOf,
   surfaceLabel,
+  showGrantHint = true,
   children,
 }: MetricsAccessGateProps) {
   const session = useRouteLoaderData('root') as SessionEnvelope | undefined
@@ -36,17 +39,26 @@ export function MetricsAccessGate({
   if (userHasAnyMetricGrant(user, anyOf)) {
     return <>{children}</>
   }
-  return <MetricsAccessDenied anyOf={anyOf} surfaceLabel={surfaceLabel} hasUser={!!user} />
+  return (
+    <MetricsAccessDenied
+      anyOf={anyOf}
+      surfaceLabel={surfaceLabel}
+      hasUser={!!user}
+      showGrantHint={showGrantHint}
+    />
+  )
 }
 
 function MetricsAccessDenied({
   anyOf,
   surfaceLabel,
   hasUser,
+  showGrantHint,
 }: {
   readonly anyOf: ReadonlyArray<MetricGrantKey>
   readonly surfaceLabel?: string
   readonly hasUser: boolean
+  readonly showGrantHint: boolean
 }) {
   return (
     <section className="metrics-dashboard">
@@ -61,8 +73,13 @@ function MetricsAccessDenied({
           <>
             <p>
               You don't currently have access to this metrics surface.
-              Required grant{anyOf.length === 1 ? '' : 's'}:{' '}
-              <code>{anyOf.join(' OR ')}</code>.
+              {showGrantHint ? (
+                <>
+                  {' '}
+                  Required grant{anyOf.length === 1 ? '' : 's'}:{' '}
+                  <code>{anyOf.join(' OR ')}</code>.
+                </>
+              ) : null}
             </p>
             <p className="subtle-copy">
               Ask an admin to grant access on{' '}

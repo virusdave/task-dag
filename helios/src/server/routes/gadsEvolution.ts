@@ -5,7 +5,7 @@ import {
   GadsEvolutionResponseSchema,
 } from '../../shared/contracts/index.js'
 import { isGadsScope, requiredGadsGrants } from '../../shared/domain/gadsSites.js'
-import { requireMetricsGrant } from '../auth/requireSession.js'
+import { requireConfidentialMetricsGrant } from '../auth/requireSession.js'
 import { getGadsEvolution } from '../db/queries/gadsEvolutionQueries.js'
 
 export async function registerGadsEvolutionRoutes(
@@ -38,7 +38,7 @@ export async function registerGadsEvolutionRoutes(
     }
 
     const grants = requiredGadsGrants(site)
-    const user = await requireMetricsGrant(request, reply, ...grants)
+    const user = await requireConfidentialMetricsGrant(request, reply, grants)
     if (!user) return
 
     const result = await getGadsEvolution({

@@ -128,6 +128,67 @@ export type GadsSubPage =
 /** The default sub-page (the GAds tab lands here). */
 export const GADS_DEFAULT_SUBPAGE: GadsSubPage = 'landing-pages'
 
+/** Metrics-tab id for a GAds scope, e.g. `bronx` → `gads-bronx`. */
+export type GadsMetricTabId = `gads-${GadsScope}`
+
+export interface GadsMetricScope {
+  /** The route/API scope (`bronx`, `midtown`, or cross-site `all`). */
+  readonly scope: GadsScope
+  /** The metrics tab id and first URL segment under `/metrics`. */
+  readonly tabId: GadsMetricTabId
+  /** Human-readable nav/tab label. */
+  readonly label: string
+  /** Canonical first page for the scope. */
+  readonly path: `/metrics/${GadsMetricTabId}/${typeof GADS_DEFAULT_SUBPAGE}`
+  /** ANY-of grants that open this scope. */
+  readonly grants: ReadonlyArray<MetricGrantKey>
+}
+
+/**
+ * Canonical Metrics IA registry for GAds scopes.
+ *
+ * This is the single typed bridge between the grant model and the client
+ * `/metrics/gads-<site>/landing-pages` route tree. Server routes still derive
+ * authorization directly from `requiredGadsGrants(scope)`; client nav/tab code
+ * consumes this registry so `gads-all` remains a real superset grant instead
+ * of being reimplemented per component.
+ */
+const GADS_BRONX_METRIC_SCOPE: GadsMetricScope = {
+  scope: 'bronx',
+  tabId: 'gads-bronx',
+  label: 'GAds · Bronx',
+  path: '/metrics/gads-bronx/landing-pages',
+  grants: requiredGadsGrants('bronx'),
+}
+
+const GADS_MIDTOWN_METRIC_SCOPE: GadsMetricScope = {
+  scope: 'midtown',
+  tabId: 'gads-midtown',
+  label: 'GAds · Midtown',
+  path: '/metrics/gads-midtown/landing-pages',
+  grants: requiredGadsGrants('midtown'),
+}
+
+const GADS_ALL_METRIC_SCOPE: GadsMetricScope = {
+  scope: 'all',
+  tabId: 'gads-all',
+  label: 'GAds · All sites',
+  path: '/metrics/gads-all/landing-pages',
+  grants: requiredGadsGrants('all'),
+}
+
+export const GADS_METRIC_SCOPES: ReadonlyArray<GadsMetricScope> = [
+  GADS_BRONX_METRIC_SCOPE,
+  GADS_MIDTOWN_METRIC_SCOPE,
+  GADS_ALL_METRIC_SCOPE,
+]
+
+export const GADS_METRIC_SCOPE_BY_TAB_ID: Readonly<Record<GadsMetricTabId, GadsMetricScope>> = {
+  'gads-bronx': GADS_BRONX_METRIC_SCOPE,
+  'gads-midtown': GADS_MIDTOWN_METRIC_SCOPE,
+  'gads-all': GADS_ALL_METRIC_SCOPE,
+}
+
 /** Sub-pages that actually render today (others are reserved IA).
  *  Order is the in-tab sub-nav order. */
 export const GADS_IMPLEMENTED_SUBPAGES: ReadonlyArray<GadsSubPage> = [

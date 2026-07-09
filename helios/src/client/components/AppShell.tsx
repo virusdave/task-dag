@@ -8,7 +8,7 @@ import {
   type SessionEnvelope,
 } from '../../shared/contracts/index.js'
 import { userHasAnyMetricGrant } from '../../shared/domain/metricGrants.js'
-import { requiredGadsGrants } from '../../shared/domain/gadsSites.js'
+import { GADS_METRIC_SCOPES } from '../../shared/domain/gadsSites.js'
 import { buildAppPath } from '../app/paths.js'
 import { usePageTitle } from '../app/usePageTitle.js'
 import { buildCatalogSidebarSubtree } from '../routes/catalog/catalogSidebarSubtree.js'
@@ -154,24 +154,12 @@ export function buildPrimarySidebarNodes(
     { anyOf: ['distributors'], navKey: 'reports.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
     { anyOf: ['staff'], navKey: 'reports.metrics.staff', label: 'Staff', to: '/metrics/staff' },
     { anyOf: ['reordering'], navKey: 'reports.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
-    {
-      anyOf: requiredGadsGrants('bronx'),
-      navKey: 'reports.metrics.gadsBronx',
-      label: 'GAds · Bronx',
-      to: '/metrics/gads-bronx/landing-pages',
-    },
-    {
-      anyOf: requiredGadsGrants('midtown'),
-      navKey: 'reports.metrics.gadsMidtown',
-      label: 'GAds · Midtown',
-      to: '/metrics/gads-midtown/landing-pages',
-    },
-    {
-      anyOf: requiredGadsGrants('all'),
-      navKey: 'reports.metrics.gadsAll',
-      label: 'GAds · All sites',
-      to: '/metrics/gads-all/landing-pages',
-    },
+    ...GADS_METRIC_SCOPES.map((scope) => ({
+      anyOf: scope.grants,
+      navKey: `reports.metrics.${scope.tabId}`,
+      label: scope.label,
+      to: scope.path,
+    })),
   ]
   for (const leaf of metricsLeaves) {
     if (userHasAnyMetricGrant(session?.user, leaf.anyOf)) {

@@ -4,6 +4,8 @@ import type { MetricGrantKey, SessionUser } from '../contracts/domain/auth.js'
 import { userHasAnyMetricGrant } from './metricGrants.js'
 import {
   GADS_IMPLEMENTED_SUBPAGES,
+  GADS_METRIC_SCOPE_BY_TAB_ID,
+  GADS_METRIC_SCOPES,
   GADS_RESERVED_SUBPAGES,
   GADS_SCOPES,
   gadsScopeLabel,
@@ -43,6 +45,31 @@ describe('requiredGadsGrants', () => {
     for (const scope of ['bronx', 'midtown', 'all'] as const) {
       expect(requiredGadsGrants(scope).length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('GADS_METRIC_SCOPES', () => {
+  it('is the typed registry for tab ids, paths, scopes, and grants', () => {
+    expect(GADS_METRIC_SCOPES.map((s) => s.tabId)).toEqual([
+      'gads-bronx',
+      'gads-midtown',
+      'gads-all',
+    ])
+    expect(GADS_METRIC_SCOPES.map((s) => s.path)).toEqual([
+      '/metrics/gads-bronx/landing-pages',
+      '/metrics/gads-midtown/landing-pages',
+      '/metrics/gads-all/landing-pages',
+    ])
+    for (const scope of GADS_METRIC_SCOPES) {
+      expect(scope.grants).toEqual(requiredGadsGrants(scope.scope))
+      expect(GADS_METRIC_SCOPE_BY_TAB_ID[scope.tabId]).toBe(scope)
+    }
+  })
+
+  it('keeps the gads-all tab independent from the two per-site grants', () => {
+    expect(GADS_METRIC_SCOPE_BY_TAB_ID['gads-all'].grants).toEqual(['gads-all'])
+    expect(GADS_METRIC_SCOPE_BY_TAB_ID['gads-bronx'].grants).toContain('gads-all')
+    expect(GADS_METRIC_SCOPE_BY_TAB_ID['gads-midtown'].grants).toContain('gads-all')
   })
 })
 

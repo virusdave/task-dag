@@ -11,7 +11,7 @@ import {
   requiredGadsGrants,
   type GadsScope,
 } from '../../shared/domain/gadsSites.js'
-import { requireMetricsGrant } from '../auth/requireSession.js'
+import { requireConfidentialMetricsGrant } from '../auth/requireSession.js'
 import { readL3Artifacts, type L3ArtifactSummary } from '../ads/l3Artifacts.js'
 import { getGadsLpOutcomes } from '../db/queries/gadsLpOutcomesQueries.js'
 import { sitesForScope } from '../db/queries/gadsAttemptScope.js'
@@ -100,7 +100,7 @@ export async function registerGadsEnrichmentRoutes(
     }
 
     const grants = requiredGadsGrants(site)
-    const user = await requireMetricsGrant(request, reply, ...grants)
+    const user = await requireConfidentialMetricsGrant(request, reply, grants)
     if (!user) return
 
     const [l3Raw, lp] = await Promise.all([

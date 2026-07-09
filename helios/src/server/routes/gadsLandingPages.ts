@@ -5,7 +5,7 @@ import {
   GadsLandingPagesResponseSchema,
 } from '../../shared/contracts/index.js'
 import { isGadsScope, requiredGadsGrants } from '../../shared/domain/gadsSites.js'
-import { requireMetricsGrant } from '../auth/requireSession.js'
+import { requireConfidentialMetricsGrant } from '../auth/requireSession.js'
 import { getGadsLandingPages } from '../db/queries/gadsLandingPagesQueries.js'
 
 export async function registerGadsLandingPagesRoutes(
@@ -41,7 +41,7 @@ export async function registerGadsLandingPagesRoutes(
     }
 
     const grants = requiredGadsGrants(site)
-    const user = await requireMetricsGrant(request, reply, ...grants)
+    const user = await requireConfidentialMetricsGrant(request, reply, grants)
     if (!user) return
 
     const result = await getGadsLandingPages({

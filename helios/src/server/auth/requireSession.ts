@@ -156,6 +156,33 @@ export async function requireMetricsGrant(
 }
 
 /**
+ * Same authorization semantics as `requireMetricsGrant`, but with a generic
+ * denial body for confidential metrics surfaces whose 403 response must not
+ * enumerate grant/site names. Use this when even the existence of peer scopes
+ * is sensitive; keep `requireMetricsGrant` for ordinary admin-facing surfaces
+ * where the explicit grant hint is useful.
+ */
+export async function requireConfidentialMetricsGrant(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  anyOf: ReadonlyArray<MetricGrantKey>,
+): Promise<SessionUser | null> {
+  if (anyOf.length === 0) {
+    reply
+      .status(500)
+      .send({ error: 'requireConfidentialMetricsGrant called with no grant keys.' })
+    return null
+  }
+  const user = await requireSessionUser(request, reply, 'viewer')
+  if (!user) return null
+  if (userHasAnyMetricGrant(user, anyOf)) return user
+  reply
+    .status(403)
+    .send({ error: 'You do not have access to this confidential metrics surface.' })
+  return null
+}
+
+/**
  * Allowlist of email addresses granted access to the cashier-tablet
  * check-ins display (`/admin/customers/check-ins/cashier`) even
  * without admin role. The display is a privacy-redacted view (server-
