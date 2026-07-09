@@ -41,6 +41,7 @@ export const DEFAULT_AGENT_WASTE_CLUSTERER_MODEL = 'deepseek.v3.2'
 // override row that does nothing).
 export const BEDROCK_MODEL_CONTEXT_KEYS = [
   'pending_purchase_classifier',
+  'pending_purchase_refinement',
   'agent_waste_clusterer',
 ] as const
 export type BedrockModelContextKey = (typeof BEDROCK_MODEL_CONTEXT_KEYS)[number]
@@ -60,6 +61,13 @@ export const BEDROCK_MODEL_CONTEXTS: readonly BedrockModelContextDefinition[] = 
     label: 'Pending-purchase classifier',
     description:
       'Decodes a distributor delivery into draft pending-purchase rows (brand/taxonomy + a proposed reuse-link candidate). Runs once per delivery; rare, so a top-tier model is fine.',
+    defaultModel: DEFAULT_STANDARD_REASONING_MODEL,
+  },
+  {
+    key: 'pending_purchase_refinement',
+    label: 'Pending-purchase refinement',
+    description:
+      'Turns operator feedback on a pending-purchase packet into strict row-lineage patches. Output is schema-validated before any candidate revision can use it.',
     defaultModel: DEFAULT_STANDARD_REASONING_MODEL,
   },
   {
