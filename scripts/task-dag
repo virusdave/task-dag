@@ -2412,6 +2412,28 @@ EOF
         return 3
     fi
 
+    # Roots share the same dispatchability gates as frontier leaves: an
+    # operator/downstream block or an incomplete dependency means the root is
+    # real but not claimable now. Run this BEFORE the idempotent re-claim path
+    # so a root pre-claimed by the dispatcher cannot continue if it was parked
+    # before the spawned agent verifies ownership.
+    if is_task_blocked "$root_sha"; then
+        if [ "$json" = true ]; then
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"blocked",issue:$issue}'
+        else
+            printf "${RED}Epic root #%s is blocked — unblock it before claiming/decomposing.${RESET}\n" "$issue" >&2
+        fi
+        return 2
+    fi
+    if ! deps_satisfied "$root_sha"; then
+        if [ "$json" = true ]; then
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"deps-pending",issue:$issue}'
+        else
+            printf "${RED}Epic root #%s has incomplete dependencies — complete/link them before claiming/decomposing.${RESET}\n" "$issue" >&2
+        fi
+        return 2
+    fi
+
     # Already claimed by someone else?
     local existing_active
     existing_active=$(root_active_sha_on_remote "$issue")
@@ -2912,6 +2934,8 @@ Usage: task-dag roots [--pickable] [--json] [--no-fetch]
 List epic roots (tasks/pending/<N>) with orchestration state:
   decomposed  — already broken down into child tasks
   claimed     — tasks/root-active/<N> held (orchestration in flight)
+  blocked     — root is explicitly parked with tasks/blocked/<root-sha>
+  deps-pending — root has incomplete dependency parents
   pickable    — undecomposed AND unclaimed; claim-root then breakdown
 
 --pickable   show only pickable roots (dispatch discovery surface)
@@ -2940,6 +2964,10 @@ EOF
             state="decomposed"
         elif git show-ref --verify --quiet "refs/heads/tasks/root-active/$issue"; then
             state="claimed"
+        elif is_task_blocked "$root_sha"; then
+            state="blocked"
+        elif ! deps_satisfied "$root_sha"; then
+            state="deps-pending"
         else
             state="pickable"
         fi

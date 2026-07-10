@@ -430,6 +430,78 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# TEST 16: blocked and dependency-pending roots are not pickable/claimable.
+# ---------------------------------------------------------------------------
+EPIC_BLOCKED=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Blocked root
+
+Issue: #1208
+URL: https://github.com/test/test/issues/1208
+Author: tester
+Status: pending
+Type: epic")
+git update-ref refs/heads/tasks/pending/1208 "$EPIC_BLOCKED"
+git push -q origin refs/heads/tasks/pending/1208
+"$TD" block "$EPIC_BLOCKED" --operator --reason="fixture blocked root" >/dev/null 2>&1
+if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1208)' >/dev/null; then
+  bad "16a: blocked root #1208 appeared in roots --pickable"
+else
+  ok "16a: blocked root is omitted from roots --pickable"
+fi
+rc18=0
+"$TD" claim-root 1208 >/dev/null 2>&1 || rc18=$?
+if [ "$rc18" = 2 ] && ! remote_has refs/heads/tasks/root-active/1208; then
+  ok "16b: claim-root refuses a blocked root without creating root-active"
+else
+  bad "16b: blocked root claim rc=$rc18 root-active=$(remote_has refs/heads/tasks/root-active/1208 && echo yes || echo no)"
+fi
+"$TD" unblock "$EPIC_BLOCKED" >/dev/null 2>&1
+if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1208)' >/dev/null \
+   && "$TD" claim-root 1208 >/dev/null 2>&1; then
+  ok "16c: unblocked root becomes pickable and claimable"
+else
+  bad "16c: unblocked root did not become pickable/claimable"
+fi
+"$TD" release-root 1208 >/dev/null 2>&1 || true
+
+EMPTY_TREE_DEP=$(git mktree </dev/null)
+DEP_ROOT=$(git commit-tree "$EMPTY_TREE_DEP" -p HEAD -m "Task: Root dependency
+
+Issue: #1209
+Author: tester
+Status: pending
+Type: leaf")
+EPIC_DEP=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -p "$DEP_ROOT" -m "Task: Dependency-gated root
+
+Issue: #1209
+URL: https://github.com/test/test/issues/1209
+Author: tester
+Status: pending
+Type: epic")
+git update-ref refs/heads/tasks/pending/1209 "$EPIC_DEP"
+git push -q origin refs/heads/tasks/pending/1209
+if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1209)' >/dev/null; then
+  bad "16d: dependency-pending root #1209 appeared in roots --pickable"
+else
+  ok "16d: dependency-pending root is omitted from roots --pickable"
+fi
+rc19=0
+"$TD" claim-root 1209 >/dev/null 2>&1 || rc19=$?
+if [ "$rc19" = 2 ] && ! remote_has refs/heads/tasks/root-active/1209; then
+  ok "16e: claim-root refuses a dependency-pending root without creating root-active"
+else
+  bad "16e: dependency-pending root claim rc=$rc19 root-active=$(remote_has refs/heads/tasks/root-active/1209 && echo yes || echo no)"
+fi
+echo dep-root-work > dep-root-work.txt; git add dep-root-work.txt; git commit -qm "dep root work"
+"$TD" complete "$DEP_ROOT" >/dev/null 2>&1
+if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1209)' >/dev/null \
+   && "$TD" claim-root 1209 >/dev/null 2>&1; then
+  ok "16f: root becomes pickable and claimable after dependency completion"
+else
+  bad "16f: root did not become pickable/claimable after dependency completion"
+fi
+"$TD" release-root 1209 >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
 # TEST 16: complete fail-closed on an INDETERMINATE origin for a root-shaped
 #          epic. If origin is unreachable and there is no local pending mirror
 #          but the commit is shaped like a top-level epic root, complete must
