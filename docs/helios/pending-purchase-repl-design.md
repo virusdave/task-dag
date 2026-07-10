@@ -185,7 +185,13 @@ Mandatory context for the first refinement implementation:
 - stable row lineages and row versions,
 - allowed taxonomy and current catalog candidates used for validation,
 - current distributor links / Sweed suggestions when offered as reuse candidates,
-- operator feedback and bounded prior turn history.
+- operator feedback.
+
+The shipped first version shows bounded turn history to the reviewer, but does
+not feed prior turn text back to the model. The history API intentionally
+returns the feedback hash rather than the stored feedback text. A future prompt
+history feature must define its own size, privacy, and stale-context rules
+before adding that text to model context.
 
 Optional enrichment, after the core loop works:
 
@@ -216,10 +222,15 @@ Permissions:
 Audit events:
 
 - feedback submitted,
-- refinement job queued/started/finished/failed,
-- candidate revision created,
-- current revision accepted/switched/rolled back,
-- apply rejected because packet is non-current or non-applyable.
+- current revision accepted,
+- current revision rolled back.
+
+Queued/running/candidate-created/failed lifecycle is currently authoritative in
+the refinement-turn and job records rather than duplicated as separate audit
+events. Likewise, apply rejection is a synchronous conflict response and does
+not append an audit event. This keeps the shipped behavior explicit; adding
+more audit events later should be a deliberate contract change, not an
+assumption in callers or the runbook.
 
 Input safety:
 

@@ -12,6 +12,7 @@ import type {
   PendingPurchasePacketRevisionSummary,
   PendingPurchasePacketRootSummary,
   PendingPurchaseRefinementTurnSummary,
+  PendingPurchaseRevisionRowDiff,
   PendingPurchaseRowSnapshotRef,
   Role,
 } from '../../shared/contracts/index.js'
@@ -27,6 +28,7 @@ const mockState = vi.hoisted(() => {
     enqueuedJobId: 4242,
     auditEventId: 8080,
     schemaAvailable: true,
+    storedFeedbackText: null as string | null,
     snapshot: null as null | {
       packetTitle: string
       root: PendingPurchasePacketRootSummary
@@ -37,13 +39,31 @@ const mockState = vi.hoisted(() => {
       targetRevisionNumber: number
     },
     turn: null as null | PendingPurchaseRefinementTurnSummary,
-    switched: null as null | {
-      previousCurrentRevision: PendingPurchasePacketRevisionSummary | null
-      root: PendingPurchasePacketRootSummary
-      selectedRevision: PendingPurchasePacketRevisionSummary
+    prepared: null as null | {
+      feedbackText: string
+      packetTitle: string
+      rowRefs: PendingPurchaseRowSnapshotRef[]
+      rowSnapshot: Record<string, unknown>
+      rowSnapshotSha256: string
+    },
+    candidateRevision: null as PendingPurchasePacketRevisionSummary | null,
+    history: null as null | {
+      currentRevision: PendingPurchasePacketRevisionSummary | null
+      revisions: PendingPurchasePacketRevisionSummary[]
+      root: PendingPurchasePacketRootSummary | null
+      rowDiffs: PendingPurchaseRevisionRowDiff[]
+      turns: PendingPurchaseRefinementTurnSummary[]
     },
     applyGateError: null as null | Error,
-    pendingPurchaseRows: [] as Array<{ id: number; packet_id: number; distributor_product_name: string; approval_status: string; last_apply_status: string }>,
+    pendingPurchaseRows: [] as Array<{
+      approval_status: string
+      distributor_product_name: string
+      id: number
+      last_apply_status: string
+      packet_id: number
+      target_brand: string | null
+      version: number
+    }>,
     PendingPurchaseRefinementConflictError,
   }
 })
@@ -104,21 +124,158 @@ vi.mock('../db/queries/pendingPurchaseQueries.js', () => ({
 vi.mock('../db/queries/pendingPurchaseRefinementQueries.js', () => ({
   PendingPurchaseRefinementConflictError: mockState.PendingPurchaseRefinementConflictError,
   assertBaseRowsMatchSnapshot: vi.fn(() => undefined),
-  assertPendingPurchasePacketApplyable: vi.fn(async () => {
+  assertPendingPurchasePacketApplyable: vi.fn(async (_db: unknown, packetId: number) => {
     if (mockState.applyGateError) throw mockState.applyGateError
+    const revision = mockState.history?.revisions.find((item) => item.packetId === packetId)
+    if (
+      !revision ||
+      mockState.history?.root?.currentPacketId !== packetId ||
+      revision.revisionStatus !== 'current' ||
+      !revision.isApplyable
+    ) {
+      throw new mockState.PendingPurchaseRefinementConflictError(
+        'Only the current applyable packet revision can be applied.',
+      )
+    }
   }),
-  attachJobToPendingPurchaseRefinementTurn: vi.fn(async () => undefined),
-  createPendingPurchaseRefinementTurn: vi.fn(async () => mockState.turn),
+  attachJobToPendingPurchaseRefinementTurn: vi.fn(async (_db: unknown, turnId: number, jobId: number) => {
+    if (mockState.turn?.turnId === turnId) mockState.turn = { ...mockState.turn, jobId }
+  }),
+  createPendingPurchaseCandidateRevision: vi.fn(async (
+    _db: unknown,
+    turnId: number,
+    refinement: { model: string; patches: Array<{ fields: Record<string, unknown>; rowLineageId: string }>; promptVersion: string },
+  ) => {
+    if (!mockState.turn || mockState.turn.turnId !== turnId || !mockState.candidateRevision || !mockState.history) {
+      throw new Error('In-process refinement test state is incomplete.')
+    }
+    const baseRow = mockState.pendingPurchaseRows.find((row) => row.packet_id === mockState.turn?.targetPacketId)
+    const patch = refinement.patches.find((item) => item.rowLineageId === 'pprline_501')
+    if (!baseRow || !patch) throw new Error('In-process refinement patch did not target the stored row.')
+    const candidateRow = {
+      ...baseRow,
+      approval_status: 'pending',
+      id: 601,
+      last_apply_status: 'not_requested',
+      packet_id: mockState.candidateRevision.packetId,
+      target_brand: typeof patch.fields.targetBrand === 'string' ? patch.fields.targetBrand : baseRow.target_brand,
+      version: 1,
+    }
+    mockState.pendingPurchaseRows.push(candidateRow)
+    mockState.turn = {
+      ...mockState.turn,
+      candidatePacketId: mockState.candidateRevision.packetId,
+      finishedAt: '2026-07-09T15:06:00.000Z',
+      model: refinement.model,
+      promptVersion: refinement.promptVersion,
+      startedAt: '2026-07-09T15:02:00.000Z',
+      status: 'candidate_created',
+      updatedAt: '2026-07-09T15:06:00.000Z',
+    }
+    mockState.history.revisions.push(mockState.candidateRevision)
+    mockState.history.turns = [mockState.turn]
+    mockState.history.rowDiffs = baseRow.target_brand === candidateRow.target_brand ? [] : [{
+        after: candidateRow.target_brand,
+        before: baseRow.target_brand,
+        candidateRowId: 601,
+        field: 'targetBrand',
+        parentRowId: 501,
+        rowLineageId: 'pprline_501',
+      }]
+    return { candidatePacketId: mockState.candidateRevision.packetId, revisionNumber: 2 }
+  }),
+  createPendingPurchaseRefinementTurn: vi.fn(async (_db: unknown, input: {
+    expectedRootVersion: number
+    feedbackText: string
+    packetId: number
+    packetRootId: number
+    rowSnapshot: Record<string, unknown>
+    rowSnapshotSha256: string
+    targetRevisionNumber: number
+  }) => {
+    if (!mockState.turn || !mockState.snapshot) throw new Error('Expected the refinement submission fixture.')
+    mockState.storedFeedbackText = input.feedbackText
+    mockState.turn = {
+      ...mockState.turn,
+      packetRootId: input.packetRootId,
+      rowSnapshotSha256: input.rowSnapshotSha256,
+      targetPacketId: input.packetId,
+      targetRevisionNumber: input.targetRevisionNumber,
+      targetRootVersion: input.expectedRootVersion,
+    }
+    mockState.prepared = {
+      feedbackText: input.feedbackText,
+      packetTitle: mockState.snapshot.packetTitle,
+      rowRefs: mockState.snapshot.rowRefs,
+      rowSnapshot: input.rowSnapshot,
+      rowSnapshotSha256: input.rowSnapshotSha256,
+    }
+    if (mockState.history) mockState.history.turns = [mockState.turn]
+    return mockState.turn
+  }),
   isPendingPurchaseRefinementSchemaAvailable: vi.fn(async () => mockState.schemaAvailable),
-  listPendingPurchaseRefinementHistory: vi.fn(async () => ({
-    currentRevision: null,
-    revisions: [],
-    root: null,
-    rowDiffs: [],
-    turns: [],
+  listPendingPurchaseRefinementHistory: vi.fn(async () => mockState.history ?? ({
+    currentRevision: null, revisions: [], root: null, rowDiffs: [], turns: [],
   })),
   loadPendingPurchaseRefinementSnapshot: vi.fn(async () => mockState.snapshot),
-  switchPendingPurchaseCurrentRevision: vi.fn(async () => mockState.switched),
+  markPendingPurchaseRefinementTurnFailed: vi.fn(async (_db: unknown, turnId: number, errorMessage: string) => {
+    if (mockState.turn?.turnId === turnId) {
+      mockState.turn = {
+        ...mockState.turn,
+        errorMessage,
+        finishedAt: '2026-07-09T15:06:00.000Z',
+        status: 'failed',
+        updatedAt: '2026-07-09T15:06:00.000Z',
+      }
+      if (mockState.history) mockState.history.turns = [mockState.turn]
+    }
+  }),
+  preparePendingPurchaseRefinement: vi.fn(async () => {
+    if (!mockState.turn || !mockState.history?.root || !mockState.prepared) {
+      throw new Error('In-process refinement test state is incomplete.')
+    }
+    if (mockState.turn.targetRootVersion !== mockState.history.root.version) {
+      throw new mockState.PendingPurchaseRefinementConflictError(
+        'Target packet snapshot is stale. Submit feedback against the current revision.',
+      )
+    }
+    return mockState.prepared
+  }),
+  switchPendingPurchaseCurrentRevision: vi.fn(async (
+    _db: unknown,
+    input: { expectedRootVersion: number; selectedPacketId: number; userId: number },
+  ) => {
+    const history = mockState.history
+    const root = history?.root
+    const selected = history?.revisions.find((revision) => revision.packetId === input.selectedPacketId)
+    if (!history || !root || !selected || root.version !== input.expectedRootVersion) {
+      throw new mockState.PendingPurchaseRefinementConflictError('This packet revision changed. Refresh and try again.')
+    }
+    const previousCurrentRevision = history.currentRevision
+    history.revisions = history.revisions.map((revision) => revision.packetId === selected.packetId
+      ? {
+          ...revision,
+          acceptedAt: '2026-07-09T15:10:00.000Z',
+          acceptedByUser: 'Operator',
+          isApplyable: true,
+          revisionStatus: 'current' as const,
+        }
+      : revision.revisionStatus === 'current'
+        ? { ...revision, isApplyable: false, revisionStatus: 'superseded' as const }
+        : revision)
+    history.root = {
+      ...root,
+      currentPacketId: selected.packetId,
+      currentRevisionNumber: selected.revisionNumber,
+      version: root.version + 1,
+    }
+    history.currentRevision = history.revisions.find((revision) => revision.packetId === selected.packetId) ?? null
+    return { previousCurrentRevision, root: history.root, selectedRevision: history.currentRevision }
+  }),
+}))
+
+vi.mock('../../worker/pendingPurchases/refinePendingPurchasePacket.js', () => ({
+  refinePendingPurchasePacketWithLlm: vi.fn(),
 }))
 
 vi.mock('../db/queries/pendingPurchaseHintQueries.js', () => {
@@ -176,9 +333,14 @@ import {
   assertBaseRowsMatchSnapshot,
   assertPendingPurchasePacketApplyable,
   attachJobToPendingPurchaseRefinementTurn,
+  createPendingPurchaseCandidateRevision,
   createPendingPurchaseRefinementTurn,
+  markPendingPurchaseRefinementTurnFailed,
+  preparePendingPurchaseRefinement,
   switchPendingPurchaseCurrentRevision,
 } from '../db/queries/pendingPurchaseRefinementQueries.js'
+import { runCatalogPendingPurchasesRefineJob } from '../../worker/jobs/refinePendingPurchasePacketJob.js'
+import { refinePendingPurchasePacketWithLlm } from '../../worker/pendingPurchases/refinePendingPurchasePacket.js'
 
 let server: FastifyInstance
 
@@ -189,6 +351,25 @@ const baseRows: PendingPurchaseRowSnapshotRef[] = [{
   rowSnapshotSha256: 'a'.repeat(64),
   version: 3,
 }]
+
+const refinementRowSnapshot = {
+  packetId: 100,
+  revisionNumber: 1,
+  rows: [{
+    distributorProductId: 'dist-1',
+    distributorProductName: 'Pink Runtz 3.5g',
+    editedStructuredFields: null,
+    expectedCategory: 'Flower',
+    expectedSubcategory: 'Packaged Eighth',
+    rawProvenance: {
+      reuseProductId: 7001,
+      suggestionCandidates: [{ productId: 7001, productName: 'Pink Runtz', score: 0.98 }],
+      validatedReuseSnapshot: { productId: 7001, productName: 'Pink Runtz' },
+    },
+    rowId: 501,
+    rowLineageId: 'pprline_501',
+  }],
+}
 
 const root: PendingPurchasePacketRootSummary = {
   currentPacketId: 100,
@@ -230,6 +411,14 @@ const candidateRevision: PendingPurchasePacketRevisionSummary = {
   sourceRefinementTurnId: 9001,
 }
 
+function capturedRefinementJobPayload(): { refinementTurnId: number } {
+  const refineEnqueue = vi.mocked(enqueueJob).mock.calls.find(([, input]) =>
+    input.jobType === 'catalog.pending_purchases.refine',
+  )
+  if (!refineEnqueue) throw new Error('Expected a queued pending-purchase refinement job.')
+  return refineEnqueue[1].payload as { refinementTurnId: number }
+}
+
 beforeEach(async () => {
   mockState.role = 'approver'
   mockState.authenticated = true
@@ -238,14 +427,28 @@ beforeEach(async () => {
   mockState.auditEventId = 8080
   mockState.schemaAvailable = true
   mockState.applyGateError = null
+  mockState.storedFeedbackText = null
   mockState.pool.query.mockReset()
   mockState.tx.query.mockReset()
-  mockState.tx.query.mockImplementation(async (text: string) => {
+  mockState.tx.query.mockImplementation(async (text: string, values?: readonly unknown[]) => {
     if (/from pending_purchase_rows/i.test(text)) {
-      return { command: 'SELECT', fields: [], oid: 0, rowCount: mockState.pendingPurchaseRows.length, rows: mockState.pendingPurchaseRows }
+      const requestedId = typeof values?.[0] === 'number' && /where id = \$1/i.test(text) ? values[0] : null
+      const requestedPacketId = typeof values?.[0] === 'number' && /where packet_id = \$1/i.test(text) ? values[0] : null
+      const rows = mockState.pendingPurchaseRows.filter((row) =>
+        (requestedId === null || row.id === requestedId) &&
+        (requestedPacketId === null || row.packet_id === requestedPacketId),
+      )
+      return { command: 'SELECT', fields: [], oid: 0, rowCount: rows.length, rows }
     }
     if (/insert into pending_purchase_apply_requests/i.test(text)) {
       return { command: 'INSERT', fields: [], oid: 0, rowCount: 1, rows: [{ id: 7001 }] }
+    }
+    if (/set approval_status = \$2/i.test(text) && typeof values?.[0] === 'number') {
+      const row = mockState.pendingPurchaseRows.find((item) => item.id === values[0])
+      if (row && typeof values[1] === 'string' && typeof values[3] === 'number') {
+        row.approval_status = values[1]
+        row.version = values[3]
+      }
     }
     return { command: 'UPDATE', fields: [], oid: 0, rowCount: 1, rows: [] }
   })
@@ -255,12 +458,14 @@ beforeEach(async () => {
     id: 501,
     last_apply_status: 'not_requested',
     packet_id: 100,
+    target_brand: 'Wrong Brand',
+    version: 3,
   }]
   mockState.snapshot = {
     packetTitle: 'Bronx packet r1',
     root,
     rowRefs: baseRows,
-    rowSnapshot: { rows: [{ rowId: 501 }] },
+    rowSnapshot: refinementRowSnapshot,
     rowSnapshotSha256: 'b'.repeat(64),
     targetPacketId: 100,
     targetRevisionNumber: 1,
@@ -285,12 +490,40 @@ beforeEach(async () => {
     turnId: 9001,
     updatedAt: '2026-07-09T15:01:00.000Z',
   }
-  mockState.switched = {
-    previousCurrentRevision: currentRevision,
-    root: { ...root, currentPacketId: 101, currentRevisionNumber: 2, version: 5 },
-    selectedRevision: { ...candidateRevision, acceptedAt: '2026-07-09T15:10:00.000Z', acceptedByUser: 'Operator', isApplyable: true, revisionStatus: 'current' },
+  mockState.prepared = {
+    feedbackText: 'All Pink Runtz rows should map to the existing 3.5g flower product.',
+    packetTitle: 'Bronx packet r1',
+    rowRefs: baseRows,
+    rowSnapshot: refinementRowSnapshot,
+    rowSnapshotSha256: 'b'.repeat(64),
+  }
+  mockState.candidateRevision = candidateRevision
+  mockState.history = {
+    currentRevision,
+    revisions: [currentRevision],
+    root,
+    rowDiffs: [],
+    turns: [],
   }
   vi.clearAllMocks()
+  mockState.pool.query.mockImplementation(async (text: string) => {
+    if (/select distinct category_name/i.test(text)) return { rows: [{ value: 'Flower' }] }
+    if (/select distinct subcategory_name/i.test(text)) return { rows: [{ value: 'Packaged Eighth' }] }
+    if (/from catalog_group_products/i.test(text)) return { rows: [{ product_id: 7001 }] }
+    throw new Error(`Unexpected in-process test query: ${text}`)
+  })
+  vi.mocked(refinePendingPurchasePacketWithLlm).mockResolvedValue({
+    model: 'test-model',
+    patches: [{
+      basePacketSnapshotSha256: 'b'.repeat(64),
+      citedContextIds: ['catalog:pprline_501:7001'],
+      fields: { targetBrand: 'Runtz' },
+      rationale: 'The feedback and offered catalog product identify Pink Runtz.',
+      rowLineageId: 'pprline_501',
+    }],
+    promptVersion: 'test-prompt-v1',
+    schemaVersion: 1,
+  })
   server = Fastify()
   server.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) {
@@ -367,8 +600,186 @@ describe('pending-purchase refinement feedback route', () => {
   })
 })
 
+describe('pending-purchase refinement REPL in-process integration', () => {
+  it('runs feedback through the worker, exposes candidate history and diff, then gates apply until acceptance', async () => {
+    const feedbackText = 'All Pink Runtz rows should map to the existing 3.5g flower product.'
+    const submitted = await server.inject({
+      method: 'POST',
+      payload: { baseRows, expectedRootVersion: 4, feedbackText },
+      url: '/api/catalog/pending-purchases/100/refinements',
+    })
+
+    expect(submitted.statusCode).toBe(200)
+    expect(submitted.json().turn).toMatchObject({ jobId: 4242, status: 'queued', turnId: 9001 })
+
+    const queuedPayload = capturedRefinementJobPayload()
+    await runCatalogPendingPurchasesRefineJob(
+      {
+        id: 4242,
+        jobType: 'catalog.pending_purchases.refine',
+        module: 'catalog',
+        payload: queuedPayload,
+        scope: null,
+      },
+      queuedPayload,
+    )
+
+    expect(preparePendingPurchaseRefinement).toHaveBeenCalledWith(mockState.tx, 9001)
+    expect(refinePendingPurchasePacketWithLlm).toHaveBeenCalledWith(expect.objectContaining({
+      feedbackText,
+      rowSnapshotSha256: 'b'.repeat(64),
+      rows: [expect.objectContaining({ rowLineageId: 'pprline_501' })],
+    }))
+    expect(createPendingPurchaseCandidateRevision).toHaveBeenCalledWith(
+      mockState.tx,
+      9001,
+      expect.objectContaining({ model: 'test-model' }),
+    )
+
+    const history = await server.inject({
+      method: 'GET',
+      url: '/api/catalog/pending-purchases/101/refinement-history',
+    })
+    expect(history.statusCode).toBe(200)
+    expect(history.json()).toMatchObject({
+      currentRevision: { packetId: 100 },
+      revisions: [{ packetId: 100 }, { isApplyable: false, packetId: 101, revisionStatus: 'candidate' }],
+      rowDiffs: [{ after: 'Runtz', before: 'Wrong Brand', field: 'targetBrand', rowLineageId: 'pprline_501' }],
+      turns: [{ candidatePacketId: 101, status: 'candidate_created', turnId: 9001 }],
+    })
+
+    const candidateApply = await server.inject({
+      method: 'POST',
+      payload: { packetId: 101, rowIds: [601], reason: 'candidate apply attempt' },
+      url: '/api/catalog/pending-purchases/apply',
+    })
+    expect(candidateApply.statusCode).toBe(409)
+    expect(enqueueJob).toHaveBeenCalledTimes(1)
+
+    const accepted = await server.inject({
+      method: 'POST',
+      payload: { expectedRootVersion: 4, reason: 'candidate reviewed' },
+      url: '/api/catalog/pending-purchases/100/revisions/101/accept',
+    })
+    expect(accepted.statusCode).toBe(200)
+    expect(accepted.json()).toMatchObject({
+      root: { currentPacketId: 101, version: 5 },
+      selectedRevision: { isApplyable: true, packetId: 101, revisionStatus: 'current' },
+    })
+
+    const approved = await server.inject({
+      method: 'POST',
+      payload: { approvalStatus: 'approved', expectedVersion: 1 },
+      url: '/api/catalog/pending-purchases/601/approval',
+    })
+    expect(approved.statusCode).toBe(200)
+    expect(mockState.pendingPurchaseRows.find((row) => row.id === 601)).toMatchObject({
+      approval_status: 'approved',
+      version: 2,
+    })
+    const acceptedApply = await server.inject({
+      method: 'POST',
+      payload: { packetId: 101, rowIds: [601], reason: 'accepted candidate apply' },
+      url: '/api/catalog/pending-purchases/apply',
+    })
+    expect(acceptedApply.statusCode).toBe(200)
+    expect(acceptedApply.json()).toMatchObject({ jobId: 4242 })
+  })
+
+  it('marks a stale worker turn failed without calling the model or changing the current packet', async () => {
+    const feedbackText = 'Keep this exact feedback available after the stale turn fails.'
+    const submitted = await server.inject({
+      method: 'POST',
+      payload: { baseRows, expectedRootVersion: 4, feedbackText },
+      url: '/api/catalog/pending-purchases/100/refinements',
+    })
+    expect(submitted.statusCode).toBe(200)
+
+    if (!mockState.history?.root) throw new Error('Expected the refinement root fixture.')
+    mockState.history.root = { ...mockState.history.root, version: 5 }
+    const queuedPayload = capturedRefinementJobPayload()
+    await expect(runCatalogPendingPurchasesRefineJob(
+      {
+        id: 4242,
+        jobType: 'catalog.pending_purchases.refine',
+        module: 'catalog',
+        payload: queuedPayload,
+        scope: null,
+      },
+      queuedPayload,
+    )).rejects.toThrow(/snapshot is stale/)
+
+    expect(refinePendingPurchasePacketWithLlm).not.toHaveBeenCalled()
+    expect(markPendingPurchaseRefinementTurnFailed).toHaveBeenCalledWith(
+      mockState.tx,
+      9001,
+      expect.stringMatching(/snapshot is stale/),
+    )
+    expect(mockState.storedFeedbackText).toBe(feedbackText)
+    expect(mockState.history).toMatchObject({
+      currentRevision: { packetId: 100 },
+      revisions: [{ packetId: 100 }],
+      turns: [{ candidatePacketId: null, status: 'failed' }],
+    })
+    const history = await server.inject({
+      method: 'GET',
+      url: '/api/catalog/pending-purchases/100/refinement-history',
+    })
+    expect(history.json()).toMatchObject({
+      currentRevision: { packetId: 100 },
+      revisions: [{ packetId: 100 }],
+      turns: [{ candidatePacketId: null, status: 'failed' }],
+    })
+  })
+
+  it('preserves failed-model feedback and history without creating a candidate', async () => {
+    const feedbackText = 'Retry this feedback after the model recovers.'
+    const submitted = await server.inject({
+      method: 'POST',
+      payload: { baseRows, expectedRootVersion: 4, feedbackText },
+      url: '/api/catalog/pending-purchases/100/refinements',
+    })
+    expect(submitted.statusCode).toBe(200)
+    vi.mocked(refinePendingPurchasePacketWithLlm).mockRejectedValueOnce(
+      new Error('Model output failed strict validation.'),
+    )
+
+    const queuedPayload = capturedRefinementJobPayload()
+    await expect(runCatalogPendingPurchasesRefineJob(
+      {
+        id: 4242,
+        jobType: 'catalog.pending_purchases.refine',
+        module: 'catalog',
+        payload: queuedPayload,
+        scope: null,
+      },
+      queuedPayload,
+    )).rejects.toThrow('Model output failed strict validation.')
+
+    expect(createPendingPurchaseCandidateRevision).not.toHaveBeenCalled()
+    expect(mockState.storedFeedbackText).toBe(feedbackText)
+    expect(mockState.history).toMatchObject({
+      currentRevision: { packetId: 100 },
+      revisions: [{ packetId: 100 }],
+      turns: [{ candidatePacketId: null, errorMessage: 'Model output failed strict validation.', status: 'failed' }],
+    })
+    const history = await server.inject({
+      method: 'GET',
+      url: '/api/catalog/pending-purchases/100/refinement-history',
+    })
+    expect(history.json()).toMatchObject({
+      currentRevision: { packetId: 100 },
+      revisions: [{ packetId: 100 }],
+      turns: [{ errorMessage: 'Model output failed strict validation.', status: 'failed' }],
+    })
+  })
+})
+
 describe('pending-purchase revision switching and apply gating routes', () => {
   it('accepts a candidate revision transactionally through the revision switch helper', async () => {
+    if (!mockState.history) throw new Error('Expected the refinement history fixture.')
+    mockState.history.revisions.push(candidateRevision)
+
     const res = await server.inject({
       method: 'POST',
       payload: { expectedRootVersion: 4, reason: 'candidate looked right' },
@@ -391,10 +802,15 @@ describe('pending-purchase revision switching and apply gating routes', () => {
   })
 
   it('rolls back by switching current to an earlier safe revision', async () => {
-    mockState.switched = {
-      previousCurrentRevision: candidateRevision,
-      root: { ...root, currentPacketId: 100, currentRevisionNumber: 1, version: 6 },
-      selectedRevision: currentRevision,
+    mockState.history = {
+      currentRevision: { ...candidateRevision, isApplyable: true, revisionStatus: 'current' },
+      revisions: [
+        { ...currentRevision, isApplyable: false, revisionStatus: 'superseded' },
+        { ...candidateRevision, isApplyable: true, revisionStatus: 'current' },
+      ],
+      root: { ...root, currentPacketId: 101, currentRevisionNumber: 2, version: 5 },
+      rowDiffs: [],
+      turns: [],
     }
 
     const res = await server.inject({
