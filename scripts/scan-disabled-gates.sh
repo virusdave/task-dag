@@ -2,7 +2,7 @@
 # Disabled-gate scanner (fleet-green epic, Phase D.10 — automation#49).
 #
 # Fails (exit 1) if any *committed, first-party* source disables or
-# weakens a quality gate. It flags four classes of regression:
+# weakens a quality gate. It flags five classes of regression:
 #
 #   1. `@ts-ignore` / `@ts-nocheck` — silent TypeScript suppressions.
 #      (`@ts-expect-error` is NOT flagged: it is self-validating — the
@@ -19,6 +19,10 @@
 #      (`.githooks/`, `.github/workflows/`) — e.g. a `tsc` / `eslint` /
 #      `vitest` / `jest` / `npm run lint` step that someone disabled by
 #      prefixing it with a comment marker instead of deleting it.
+#   5. Drift in the repo's required gate contract — the committed
+#      pre-commit hook must be executable and must still run the same
+#      fast pre-master gates that CI advertises, including the Helios
+#      client typecheck (no carve-out).
 #
 # What is scanned: the git INDEX (`git grep --cached`), i.e. exactly the
 # content a commit would record — not stray unstaged working-tree edits.
@@ -48,6 +52,7 @@ done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+command -v jq >/dev/null || { echo "ERROR: jq is required for gate contract checks." >&2; exit 1; }
 
 # This scanner's own source obviously contains the very patterns it
 # hunts for; never scan it against itself. (Its *.test.sh sibling is a
@@ -74,6 +79,28 @@ git_grep_cached() {
   esac
 }
 
+git_show_cached() {
+  local path="$1" out status
+  set +e
+  out="$(git show ":$path" 2>/dev/null)"
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    echo "ERROR: required tracked file missing from index: $path" >&2
+    fail=1
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+require_cached_text() {
+  local path="$1" label="$2" needle="$3" content="$4"
+  if ! printf '%s\n' "$content" | grep -Fq -- "$needle"; then
+    note "FAIL: $path is missing required gate: $label ($needle)"
+    fail=1
+  fi
+}
+
 # Drop comment-only lines from "path:lineno:code" grep output, so prose
 # that merely mentions a forbidden token is not flagged. Reads stdin,
 # writes the surviving lines to stdout.
@@ -93,7 +120,7 @@ strip_comment_lines() {
 # ---------------------------------------------------------------------------
 # 1. @ts-ignore / @ts-nocheck in first-party source.
 # ---------------------------------------------------------------------------
-echo "==> 1/4 @ts-ignore / @ts-nocheck suppressions"
+echo "==> 1/5 @ts-ignore / @ts-nocheck suppressions"
 ts_hits="$(
   git_grep_cached -e '@ts-(ignore|nocheck)\b' -- \
     '*.ts' '*.tsx' '*.mts' '*.cts' '*.js' '*.jsx' '*.mjs' '*.cjs' \
@@ -110,7 +137,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. .skip / .only (and shorthands) in committed test files.
 # ---------------------------------------------------------------------------
-echo "==> 2/4 .skip / .only in committed tests"
+echo "==> 2/5 .skip / .only in committed tests"
 # A leading [^[:alnum:]_$.] (or start-of-line) guard ensures the test
 # global is a real call site, not a property like `model.fit(...)` or
 # `foo.test.only`. Chained modifiers (`.concurrent`, `.each(...)`, …)
@@ -139,7 +166,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. --no-verify recipes (executable lines only; not prose/comments/docs).
 # ---------------------------------------------------------------------------
-echo "==> 3/4 --no-verify recipes"
+echo "==> 3/5 --no-verify recipes"
 nv_hits="$(
   git_grep_cached -e '--no-verify' -- \
     . ':!*.md' ':!docs/**' ":!${self_rel}" ":!${self_test_rel}" | strip_comment_lines
@@ -155,7 +182,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Commented-out gate invocations in gate-bearing files.
 # ---------------------------------------------------------------------------
-echo "==> 4/4 commented-out checks in .githooks / .github/workflows"
+echo "==> 4/5 commented-out checks in .githooks / .github/workflows"
 # Anchor on a comment whose body *starts* with an executable gate-runner
 # shape: an optional GitHub Actions "- run:" prefix and/or leading env
 # assignments, then a package-manager gate script, an npx tool call, or a
@@ -172,6 +199,55 @@ if [ -n "$commented_hits" ]; then
   printf '%s\n' "$commented_hits" | sed 's/^/    /' >&2
   fail=1
 else
+  echo "  ok"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Required pre-commit / CI gate contract (automation#49 Phase D.12).
+# ---------------------------------------------------------------------------
+echo "==> 5/5 required pre-commit / CI gate contract"
+contract_fail_before="$fail"
+
+precommit_mode="$(git ls-files -s -- .githooks/pre-commit | awk '{print $1}')"
+if [ "$precommit_mode" != "100755" ]; then
+  note "FAIL: .githooks/pre-commit must be tracked and executable (mode 100755; got ${precommit_mode:-missing})"
+  fail=1
+fi
+
+precommit_content="$(git_show_cached .githooks/pre-commit || true)"
+ci_content="$(git_show_cached .github/workflows/ci.yml || true)"
+helios_pkg_content="$(git_show_cached helios/package.json || true)"
+
+if [ -n "$precommit_content" ]; then
+  require_cached_text .githooks/pre-commit "repo-wide explicit-any scanner" "scripts/scan-explicit-any.sh" "$precommit_content"
+  require_cached_text .githooks/pre-commit "repo-wide disabled-gate scanner" "scripts/scan-disabled-gates.sh" "$precommit_content"
+  require_cached_text .githooks/pre-commit "repo-wide test-resource scanner" "scripts/scan-test-resources.sh" "$precommit_content"
+  require_cached_text .githooks/pre-commit "Helios server compile/typecheck" "tsconfig.server.json" "$precommit_content"
+  require_cached_text .githooks/pre-commit "Helios client typecheck (no carve-out)" "tsconfig.client.json --noEmit" "$precommit_content"
+  require_cached_text .githooks/pre-commit "Helios in-process smoke" "scripts/smoke-server.ts" "$precommit_content"
+  require_cached_text .githooks/pre-commit "ads/google typecheck" "ads/google" "$precommit_content"
+  require_cached_text .githooks/pre-commit "ads/google typecheck command" "tsconfig.json --noEmit" "$precommit_content"
+fi
+
+if [ -n "$ci_content" ]; then
+  require_cached_text .github/workflows/ci.yml "repo-wide explicit-any scanner" "./scripts/scan-explicit-any.sh" "$ci_content"
+  require_cached_text .github/workflows/ci.yml "repo-wide disabled-gate scanner" "./scripts/scan-disabled-gates.sh" "$ci_content"
+  require_cached_text .github/workflows/ci.yml "repo-wide test-resource scanner" "./scripts/scan-test-resources.sh" "$ci_content"
+  require_cached_text .github/workflows/ci.yml "Helios full check" "npm run check" "$ci_content"
+  require_cached_text .github/workflows/ci.yml "Helios production build" "npm run build" "$ci_content"
+  require_cached_text .github/workflows/ci.yml "Helios client build heap" "--max-old-space-size=8192" "$ci_content"
+  require_cached_text .github/workflows/ci.yml "ads/google typecheck" "npm run typecheck" "$ci_content"
+fi
+
+if [ -n "$helios_pkg_content" ]; then
+  helios_check_script="$(printf '%s\n' "$helios_pkg_content" | jq -r '.scripts.check // empty')"
+  if [[ "$helios_check_script" != *"npm run typecheck"* || "$helios_check_script" != *"npm run typecheck:client"* || "$helios_check_script" != *"npm run test"* ]]; then
+    note "FAIL: helios/package.json scripts.check must include server typecheck, client typecheck, and tests (got: ${helios_check_script:-missing})"
+    fail=1
+  fi
+fi
+
+if [ "$fail" -eq "$contract_fail_before" ]; then
   echo "  ok"
 fi
 
