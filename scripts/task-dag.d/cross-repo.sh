@@ -700,6 +700,44 @@ _xrepo_validate_completion_fact() {
     ' <<<"$msg"
 }
 
+# Validate one isolated delegated/completion snapshot and report whether every
+# delegated child for an issue has a matching completion fact.  The caller
+# supplies a bare GIT_DIR populated from one verified origin advertisement, so
+# this never falls back to stale refs in the working checkout.
+_xrepo_strict_snapshot_status() {
+    local git_dir="$1" top_repo="$2" top_issue="$3"
+    local ref tail owner repo peer sha any=false missing=false delegation_sha peer_commit
+    while IFS=$'\t' read -r sha ref; do
+        [ -n "$ref" ] || continue
+        tail="${ref#refs/heads/tasks/completions/${top_issue}/}"
+        owner="${tail%%/*}"; tail="${tail#*/}"
+        repo="${tail%%/*}"; tail="${tail#*/}"
+        peer="${tail%%/*}"; peer_commit="${tail#*/}"
+        [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ && "$repo" =~ ^[A-Za-z0-9_.-]+$ && "$peer" =~ ^[1-9][0-9]*$ && "$peer_commit" =~ ^[0-9a-f]{7,40}$ ]] || return 2
+        delegation_sha=$(git --git-dir="$git_dir" rev-parse -q --verify \
+            "refs/heads/tasks/delegated/${top_issue}/${owner}/${repo}/${peer}^{commit}") || return 2
+        GIT_DIR="$git_dir" _xrepo_validate_completion_fact "$sha" "$delegation_sha" "$top_repo" \
+            "$top_issue" "${owner}/${repo}" "$peer" "$peer_commit" || return 2
+    done < <(git --git-dir="$git_dir" for-each-ref --format='%(objectname)%09%(refname)' \
+        "refs/heads/tasks/completions/${top_issue}/")
+    while IFS=$'\t' read -r sha ref; do
+        [ -n "$ref" ] || continue
+        any=true
+        tail="${ref#refs/heads/tasks/delegated/${top_issue}/}"
+        owner="${tail%%/*}"; tail="${tail#*/}"
+        repo="${tail%%/*}"; peer="${tail#*/}"
+        [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ && "$repo" =~ ^[A-Za-z0-9_.-]+$ && "$peer" =~ ^[1-9][0-9]*$ ]] || return 2
+        GIT_DIR="$git_dir" _xrepo_validate_delegation "$sha" "$top_repo" "$top_issue" "${owner}/${repo}" "$peer" || return 2
+        if ! GIT_DIR="$git_dir" _xrepo_child_satisfied "$top_issue" "${owner}/${repo}/${peer}"; then
+            missing=true
+        fi
+    done < <(git --git-dir="$git_dir" for-each-ref --format='%(objectname)%09%(refname)' \
+        "refs/heads/tasks/delegated/${top_issue}/")
+    [ "$any" = true ] || return 2
+    [ "$missing" = false ] || { printf 'waiting\n'; return 0; }
+    printf 'ready\n'
+}
+
 # cmd_ingest_completion — record a peer-repo Satisfies: as completion
 # ─────────────────────────────────────────────────────────────────────
 
@@ -762,7 +800,14 @@ cmd_ingest_completion() {
     # delegation), so the API is not on the critical path.
     local peer_full_sha="" peer_message=""
     local peer_commit_json=""
-    if peer_commit_json="$(gh api "repos/${XREPO_OWNER}/${XREPO_REPO}/commits/${XREPO_SHA_PREFIX}" 2>/dev/null)"; then
+    if declare -F _rc_api >/dev/null 2>&1; then
+        if _rc_api "repos/${XREPO_OWNER}/${XREPO_REPO}/commits/${XREPO_SHA_PREFIX}" optional; then
+            peer_commit_json=$(cat "${tmp:?reconciliation tempdir is required}/body")
+        fi
+    elif peer_commit_json="$(gh api "repos/${XREPO_OWNER}/${XREPO_REPO}/commits/${XREPO_SHA_PREFIX}" 2>/dev/null)"; then
+        :
+    fi
+    if [ -n "$peer_commit_json" ]; then
         peer_full_sha="$(printf '%s' "$peer_commit_json" | jq -r .sha)"
         peer_message="$(printf '%s' "$peer_commit_json" | jq -r .commit.message)"
     fi
@@ -1212,38 +1257,64 @@ _xrepo_make_receipt() {
     rm -f "$f"
 }
 
+# Pure classifier shared by event ingestion and repair scans.  Completion is
+# deliberately tested before the generic machine marker.  On success it emits
+# unit-separator-delimited disposition and completion arguments (the latter are
+# empty for non-completions). A non-whitespace delimiter preserves an empty
+# phase followed by a present peer issue.
+_xrepo_classify_comment_body() {
+    local repo="$1" issue="$2" body_file="$3" first_line first_nonblank
+    first_line="$(head -n1 "$body_file")"
+    first_nonblank="$(grep -m1 -v '^[[:space:]]*$' "$body_file" 2>/dev/null || true)"
+    if [[ "$first_line" =~ ^[[:space:]]*\<\!--[[:space:]]*task-dag:completion[[:space:]]*--\>[[:space:]]+Satisfies[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)[[:space:]]+via[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]+)([[:space:]]+phase[[:space:]]+([A-Za-z0-9]+))?([[:space:]]+peer-issue[[:space:]]+([0-9]+))?[[:space:]]*$ ]]; then
+        local target_repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" target_issue="${BASH_REMATCH[3]}"
+        [ "$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')" = "$repo" ] && [ "$target_issue" = "$issue" ] || return 2
+        printf 'completion\x1f%s/%s@%s\x1f%s\x1f%s\n' "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}" "${BASH_REMATCH[8]}" "${BASH_REMATCH[10]}"
+    elif [[ "$first_nonblank" =~ ^[[:space:]]*\<\!-- ]] || grep -q '<!-- task-dag:' "$body_file"; then
+        printf 'machine-skip\x1f\x1f\x1f\n'
+    else
+        printf 'human\x1f\x1f\x1f\n'
+    fi
+}
+
 _xrepo_ingest_observed_comment() {
     local issue="$1" comment_id="$2" created_at="$3" updated_at="$4" author="$5" comment_url="$6" body_file="$7"
-    local repo comment_ref remote_sha existing hash disposition effect_sha="" effect_ref="" first_line first_nonblank
+    local repo comment_ref remote_sha existing hash disposition effect_sha="" effect_ref="" classification peer_from peer_phase peer_issue
     repo="$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')"; comment_ref="refs/heads/gh/comments/${issue}/${comment_id}"
     [[ "$repo" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] || { _xrepo_die "cannot determine canonical owner/repository"; return 2; }
     [[ "$issue" =~ ^[1-9][0-9]*$ && "$comment_id" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "invalid issue/comment identity"; return 2; }
     local probe=0
-    remote_sha="$(_xrepo_remote_sha "$comment_ref")" || probe=$?
+    if [ "${_XREPO_SNAPSHOT_ABSENT:-false}" = true ]; then
+        remote_sha=""
+    else
+        remote_sha="$(_xrepo_remote_sha "$comment_ref")" || probe=$?
+    fi
     [ "$probe" -ne 3 ] || { _xrepo_die "cannot authoritatively read $comment_ref"; return 2; }
     if [ -n "$remote_sha" ]; then git fetch -q origin "$comment_ref" || return 2; _xrepo_validate_origin_receipt "$remote_sha" "$repo" "$issue" "$comment_id" >/dev/null || { _xrepo_die "origin has an invalid comment receipt: repo=${repo} issue=${issue} comment-id=${comment_id} ref=${comment_ref} sha=${remote_sha}; refusing to overwrite it. Run 'task-dag validate --strict' and repair the receipt before retrying."; return 2; }; git update-ref "$comment_ref" "$remote_sha" || true; return 0; fi
     _xrepo_valid_timestamp "$created_at" && _xrepo_valid_timestamp "$updated_at" \
         && { [ "$created_at" \< "$updated_at" ] || [ "$created_at" = "$updated_at" ]; } \
         || { _xrepo_die "invalid comment observation timestamps"; return 2; }
     hash="$(sha256sum "$body_file" | awk '{print $1}')"
-    first_line="$(head -n1 "$body_file")"; first_nonblank="$(grep -m1 -v '^[[:space:]]*$' "$body_file" 2>/dev/null || true)"
-    if [[ "$first_line" =~ ^[[:space:]]*\<\!--[[:space:]]*task-dag:completion[[:space:]]*--\>[[:space:]]+Satisfies[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)[[:space:]]+via[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]+)([[:space:]]+phase[[:space:]]+([A-Za-z0-9]+))?([[:space:]]+peer-issue[[:space:]]+([0-9]+))?[[:space:]]*$ ]]; then
-        local target_repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" target_issue="${BASH_REMATCH[3]}"
-        local peer_from="${BASH_REMATCH[4]}/${BASH_REMATCH[5]}@${BASH_REMATCH[6]}"
-        local peer_phase="${BASH_REMATCH[8]}" peer_issue="${BASH_REMATCH[10]}"
-        [ "$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')" = "$repo" ] && [ "$target_issue" = "$issue" ] || return 2
-        disposition=completion
+    classification="$(_xrepo_classify_comment_body "$repo" "$issue" "$body_file")" || return 2
+    IFS=$'\x1f' read -r disposition peer_from peer_phase peer_issue <<<"$classification"
+    if [ "$disposition" = completion ]; then
         local _XREPO_PREPARE_COMPLETION=true
         local completion_args=(--issue "$issue" --comment-id "$comment_id" --comment-url "$comment_url" --from "$peer_from")
         [ -z "$peer_phase" ] || completion_args+=(--phase "$peer_phase")
         [ -z "$peer_issue" ] || completion_args+=(--peer-issue "$peer_issue")
-        cmd_ingest_completion "${completion_args[@]}"
+        unset XREPO_PREPARED_COMPLETION_SHA XREPO_PREPARED_COMPLETION_REF \
+            XREPO_PREPARED_COMPLETION_EXISTS XREPO_PREPARED_DELEGATION_SHA
+        cmd_ingest_completion "${completion_args[@]}" || {
+            local completion_rc=$?
+            unset XREPO_PREPARED_COMPLETION_SHA XREPO_PREPARED_COMPLETION_REF \
+                XREPO_PREPARED_COMPLETION_EXISTS XREPO_PREPARED_DELEGATION_SHA
+            return "$completion_rc"
+        }
         effect_sha="$XREPO_PREPARED_COMPLETION_SHA"; effect_ref="$XREPO_PREPARED_COMPLETION_REF"
         local effect_exists="$XREPO_PREPARED_COMPLETION_EXISTS"
         local expected_delegation="$XREPO_PREPARED_DELEGATION_SHA"
-    elif [[ "$first_nonblank" =~ ^[[:space:]]*\<\!-- ]] || grep -q '<!-- task-dag:' "$body_file"; then disposition=machine-skip
-    else
-        disposition=human; local epic msgf short nonce
+    elif [ "$disposition" = human ]; then
+        local epic msgf short nonce
         epic="$(_xrepo_ensure_issue_epic "$issue")" || return $?; msgf="$(mktemp)"
         nonce="$(printf '%s:%s:%s:%s\n' "$BASHPID" "$RANDOM" "$(date +%s%N)" "$comment_id" | git hash-object --stdin)" || return 2
         { printf 'kind: message\nrole: human\nintent: comment\n\nissue:\n  number: %s\n\ngithub:\n  comment_id: %s\n  actor: %s\n  url: %s\n\nmessage_id: msg_%s\n\nbody: |\n' "$issue" "$comment_id" "$author" "$comment_url" "$nonce"; sed 's/^/  /' "$body_file"; } >"$msgf"
@@ -1293,7 +1364,11 @@ _xrepo_ingest_observed_comment() {
         if [ "$wu" = "$updated_at" ] && [ "$wh" = "$hash" ] && [ "$wd" != "$disposition" ]; then _xrepo_die "origin receipt conflict: repo=${repo} issue=${issue} comment-id=${comment_id} ref=${comment_ref} sha=${remote_sha}; the same updated-at/body hash is stored as '${wd}' but this run classified it as '${disposition}'. Inspect the origin receipt and comment before retrying."; return 2; fi
         receipt_sha="$remote_sha"
     else
-        remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2; [ "$remote_sha" = "$receipt_sha" ] || return 2
+        if [ "${_XREPO_SNAPSHOT_ABSENT:-false}" = true ]; then
+            remote_sha="$receipt_sha"
+        else
+            remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2; [ "$remote_sha" = "$receipt_sha" ] || return 2
+        fi
     fi
     local winner_info winner_disposition winner_effect winner_ref
     winner_info="$(_xrepo_validate_origin_receipt "$receipt_sha" "$repo" "$issue" "$comment_id")" || return 2
@@ -1318,13 +1393,300 @@ _xrepo_ingest_observed_comment() {
             git update-ref -d "$winner_ref" >/dev/null 2>&1 || true
         fi
     fi
-    if [ "$winner_disposition" = completion ]; then
+    if [ "$winner_disposition" = completion ] && [ "${_XREPO_DEFER_CONVERGENCE:-false}" != true ]; then
         local status_line
         status_line="$(_xrepo_epic_status "$issue" | tail -n1)"
         if [[ "$status_line" =~ ^epic[[:space:]]ready-to-close: ]]; then
             cmd_close_epic --issue "$issue" || return $?
         fi
     fi
+}
+
+# Bounded repair scanner for issue comments.  It deliberately delegates every
+# mutation to the same atomic primitive as the webhook path above.
+_xrepo_reconcile_argument_failure() {
+    local mode="$1" message="$2"
+    jq -nc --arg mode "$mode" --arg message "$message" '
+        {schema_version:1,mode:(if $mode=="" then null else $mode end),status:"failed",dry_run:false,
+         requests:0,pages:0,returned:0,unique:0,eligible:0,pull_requests:0,pre_boundary:0,
+         already_receipted:0,missing:0,dispositions:{human:0,completion:0,machine_skip:0},
+         attempted:0,applied:0,deferred:0,failures:1,
+         failure_items:[{stage:"arguments",issue:null,comment_id:null,message:$message}],
+         duration_seconds:0,rate_limit:{remaining:null,reset:null},
+         recent_success_at:null,complete_success_at:null}'
+}
+
+_xrepo_reconcile_comments_impl() {
+    local mode="" start="" since="" dry=false max_apply=100 max_pages=100 max_comments=10000 max_seconds=300
+    local -a allows=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --mode|--ingestion-start-at|--since|--allow-comment|--max-apply|--max-pages|--max-comments|--max-seconds)
+                [ $# -ge 2 ] || { _xrepo_reconcile_argument_failure "$mode" "$1 requires a value"; return 2; }
+                case "$1" in
+                    --mode) mode="$2";; --ingestion-start-at) start="$2";; --since) since="$2";;
+                    --allow-comment) allows+=("$2");; --max-apply) max_apply="$2";;
+                    --max-pages) max_pages="$2";; --max-comments) max_comments="$2";;
+                    --max-seconds) max_seconds="$2";;
+                esac
+                shift 2 ;;
+            --dry-run) dry=true; shift;;
+            --help|-h) cat <<'EOF'
+Usage: task-dag reconcile-comments --mode recent|complete --ingestion-start-at RFC3339
+       [--since RFC3339] [--allow-comment ISSUE:ID ...] [--dry-run]
+       [--max-apply N] [--max-pages N] [--max-comments N] [--max-seconds N]
+EOF
+                return 0;;
+            *) _xrepo_reconcile_argument_failure "$mode" "unknown argument: $1"; return 2;;
+        esac
+    done
+    _xrepo_need_cmd jq || return 2
+    if ! _xrepo_need_cmd gh; then _xrepo_reconcile_argument_failure "$mode" "required command not found: gh"; return 2; fi
+    local v; for v in "$max_apply" "$max_pages" "$max_comments" "$max_seconds"; do [[ "$v" =~ ^[1-9][0-9]*$ ]] || { _xrepo_reconcile_argument_failure "$mode" "ceilings must be positive integers"; return 2; }; done
+    [ "$mode" = recent ] || [ "$mode" = complete ] || { _xrepo_reconcile_argument_failure "$mode" "--mode must be recent or complete"; return 2; }
+    _xrepo_valid_timestamp "$start" || { _xrepo_reconcile_argument_failure "$mode" "invalid --ingestion-start-at"; return 2; }
+    if [ "$mode" = recent ]; then _xrepo_valid_timestamp "$since" || { _xrepo_reconcile_argument_failure "$mode" "recent requires valid --since"; return 2; }; else [ -z "$since" ] || { _xrepo_reconcile_argument_failure "$mode" "complete rejects --since"; return 2; }; fi
+
+    local began now deadline repo tmp listing rc=0 fatal=false real_git
+    began=$(date +%s); deadline=$((began + max_seconds)); repo=$(printf '%s' "$(_xrepo_current_repo_offline)" | tr '[:upper:]' '[:lower:]')
+    local GITHUB_REPOSITORY="$repo"
+    tmp=$(mktemp -d)
+    real_git=$(command -v git)
+    mkdir -p "$tmp/bin"
+    cat >"$tmp/bin/git" <<'EOF'
+#!/usr/bin/env bash
+remaining=$((TASKDAG_RECONCILE_DEADLINE - $(date +%s)))
+[ "$remaining" -gt 0 ] || exit 124
+exec timeout --signal=TERM "${remaining}s" "$TASKDAG_RECONCILE_REAL_GIT" "$@"
+EOF
+    chmod 0755 "$tmp/bin/git"
+    export TASKDAG_RECONCILE_DEADLINE="$deadline" TASKDAG_RECONCILE_REAL_GIT="$real_git"
+    local PATH="$tmp/bin:$PATH"
+    local requests=0 pages=0 returned=0 unique=0 eligible=0 prs=0 pre=0 receipted=0 missing=0 human=0 completion=0 machine=0 attempted=0 applied=0 deferred=0 failures=0 remaining=null reset=null
+    local failure_file="$tmp/failures"; : >"$failure_file"
+    _rc_fail() { failures=$((failures+1)); if [ "$failures" -le 100 ]; then jq -nc --arg stage "$1" --arg issue "${2:-}" --arg comment_id "${3:-}" --arg message "$4" '{stage:$stage,issue:(if ($issue|test("^[1-9][0-9]*$")) then ($issue|tonumber) else null end),comment_id:(if ($comment_id|test("^[1-9][0-9]*$")) then ($comment_id|tonumber) else null end),message:$message}' >>"$failure_file"; fi; return 0; }
+    _rc_time() { [ "$(date +%s)" -lt "$deadline" ]; }
+    # One authoritative namespace advertisement. It is also the proof used by
+    # the private no-initial-probe ingestion mode.
+    listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 2>"$tmp/git.err") || { _rc_fail snapshot "" "" "$(cat "$tmp/git.err")"; fatal=true; listing=""; }
+    printf '%s' "$listing" | LC_ALL=C sort >"$tmp/manifest"
+    if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
+    printf '%s\n' "$listing" | awk '$2 ~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ {print $2}' >"$tmp/receipts"
+    git init -q --bare "$tmp/snapshot.git" && git --git-dir="$tmp/snapshot.git" remote add origin "$(git remote get-url origin)" || { _rc_fail snapshot "" "" "cannot initialize isolated snapshot"; fatal=true; }
+    if [ "$fatal" = false ] && [ -s "$tmp/manifest" ]; then
+        timeout "${max_seconds}s" git --git-dir="$tmp/snapshot.git" fetch -q --no-tags origin \
+            '+refs/heads/gh/comments/*:refs/heads/gh/comments/*' \
+            '+refs/heads/tasks/completions/*:refs/heads/tasks/completions/*' \
+            '+refs/heads/tasks/delegated/*:refs/heads/tasks/delegated/*' || { _rc_fail snapshot "" "" "isolated snapshot fetch failed"; fatal=true; }
+    fi
+    git --git-dir="$tmp/snapshot.git" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/gh/comments refs/heads/tasks/completions refs/heads/tasks/delegated | LC_ALL=C sort >"$tmp/fetched"
+    cmp -s "$tmp/manifest" "$tmp/fetched" || { _rc_fail snapshot "" "" "snapshot changed during fetch"; fatal=true; }
+    : >"$tmp/converge-issues"
+    while IFS=$'\t' read -r sha ref; do
+        if [[ "$ref" =~ ^refs/heads/gh/comments/([1-9][0-9]*)/([1-9][0-9]*)$ ]]; then
+            local receipt_issue="${BASH_REMATCH[1]}" receipt_id="${BASH_REMATCH[2]}" receipt_info
+            if ! receipt_info=$(GIT_DIR="$tmp/snapshot.git" _xrepo_validate_receipt "$sha" "$repo" "$receipt_issue" "$receipt_id"); then
+                _rc_fail snapshot "$receipt_issue" "$receipt_id" "malformed comment receipt"; fatal=true
+            elif [[ "$receipt_info" = completion* || "$receipt_info" = legacy-completion* ]]; then
+                printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"
+            fi
+        elif [[ "$ref" =~ ^refs/heads/tasks/delegated/([1-9][0-9]*)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/([1-9][0-9]*)$ ]]; then
+            local delegated_issue="${BASH_REMATCH[1]}" delegated_owner="${BASH_REMATCH[2]}" delegated_repo="${BASH_REMATCH[3]}" delegated_peer="${BASH_REMATCH[4]}"
+            GIT_DIR="$tmp/snapshot.git" _xrepo_validate_delegation "$sha" "$repo" \
+                "$delegated_issue" "${delegated_owner}/${delegated_repo}" "$delegated_peer" \
+                || { _rc_fail snapshot "$delegated_issue" "" "malformed delegation fact"; fatal=true; }
+        elif [[ "$ref" =~ ^refs/heads/tasks/completions/([1-9][0-9]*)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/([1-9][0-9]*)/([0-9a-f]{7,40})$ ]]; then
+            local fact_issue="${BASH_REMATCH[1]}" fact_owner="${BASH_REMATCH[2]}" fact_repo="${BASH_REMATCH[3]}" fact_peer="${BASH_REMATCH[4]}" fact_commit="${BASH_REMATCH[5]}" fact_parent
+            fact_parent=$(git --git-dir="$tmp/snapshot.git" rev-parse -q --verify \
+                "refs/heads/tasks/delegated/${fact_issue}/${fact_owner}/${fact_repo}/${fact_peer}^{commit}") \
+                || { _rc_fail snapshot "$fact_issue" "" "completion fact has no canonical delegation"; fatal=true; continue; }
+            GIT_DIR="$tmp/snapshot.git" _xrepo_validate_completion_fact "$sha" "$fact_parent" "$repo" \
+                "$fact_issue" "${fact_owner}/${fact_repo}" "$fact_peer" "$fact_commit" \
+                || { _rc_fail snapshot "$fact_issue" "" "malformed completion fact"; fatal=true; }
+            printf '%s\n' "$fact_issue" >>"$tmp/converge-issues"
+        fi
+    done <"$tmp/manifest"
+
+    _rc_api() {
+        local endpoint="$1" required="${2:-required}" try=0 code retry="" envelope="$tmp/envelope" headers="$tmp/headers"
+        while :; do
+            _rc_time || return 124; requests=$((requests+1)); : >"$envelope"
+            local gh_rc=0 left
+            left=$((deadline - $(date +%s)))
+            [ "$left" -gt 0 ] || return 124
+            timeout --signal=TERM "${left}s" gh api --include "$endpoint" >"$envelope" 2>"$tmp/gh.err" || gh_rc=$?
+            awk 'BEGIN{h=1} h{gsub("\r",""); if($0==""){h=0;next} print}' "$envelope" >"$headers"
+            awk 'BEGIN{h=1} h{gsub("\r",""); if($0==""){h=0;next}} !h{print}' "$envelope" >"$tmp/body"
+            code=$(awk 'NR==1 && $1 ~ /^HTTP\// {print $2}' "$headers")
+            remaining=$(awk 'tolower($1)=="x-ratelimit-remaining:" {print $2}' "$headers" | tail -1); reset=$(awk 'tolower($1)=="x-ratelimit-reset:" {print $2}' "$headers" | tail -1)
+            [[ "$remaining" =~ ^[0-9]+$ ]] || remaining=null; [[ "$reset" =~ ^[0-9]+$ ]] || reset=null
+            [ "$gh_rc" -eq 0 ] && [ "$(grep -c '^HTTP/' "$headers")" -eq 1 ] && [[ "$code" =~ ^2[0-9][0-9]$ ]] && jq -e . "$tmp/body" >/dev/null 2>&1 && return 0
+            if { [ "$code" = 403 ] || [ "$code" = 429 ]; } && [ "$try" -eq 0 ]; then
+                retry=$(awk 'tolower($1)=="retry-after:" {print $2}' "$headers" | tail -1)
+                if [[ "$retry" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) + retry )) -lt "$deadline" ]; then sleep "$retry"; try=1; continue; fi
+            fi
+            return 1
+        done
+    }
+
+    local scan_from="$start"
+    [ "$mode" = recent ] && scan_from="$since"
+    scan_from=$(date -u -d "$scan_from - 900 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || fatal=true
+    local endpoint="repos/$repo/issues/comments?sort=updated&direction=asc&per_page=100&since=$scan_from" next item issue cid iu ca ua author url bodyf
+    : >"$tmp/all"
+    : >"$tmp/allow-receipts"
+    while [ "$fatal" = false ] && [ -n "$endpoint" ]; do
+        _rc_time || { _rc_fail ceiling "" "" "time ceiling reached"; fatal=true; break; }
+        _rc_api "$endpoint" || { _rc_fail list "" "" "comment page request failed"; fatal=true; break; }
+        pages=$((pages+1)); jq -e 'type=="array"' "$tmp/body" >/dev/null || { _rc_fail list "" "" "page body is not an array"; fatal=true; break; }
+        local n; n=$(jq length "$tmp/body"); returned=$((returned+n)); [ "$returned" -le "$max_comments" ] || { _rc_fail ceiling "" "" "comment ceiling reached"; fatal=true; break; }
+        jq -c '.[]' "$tmp/body" >>"$tmp/all"
+        next=$(awk 'tolower($1)=="link:" {$1=""; print substr($0,2)}' "$tmp/headers" | grep -o '<[^>]*>; rel="next"' | head -1 | sed 's/^<//;s/>; rel="next"$//' || true)
+        if [ -n "$next" ]; then [[ "$next" == https://api.github.com/repos/"$repo"/issues/comments* ]] || { _rc_fail list "" "" "unsafe pagination link"; fatal=true; break; }; endpoint="${next#https://api.github.com/}"; else endpoint=""; fi
+        [ "$pages" -lt "$max_pages" ] || { [ -z "$endpoint" ] || { _rc_fail ceiling "" "" "page ceiling reached with next page"; fatal=true; }; break; }
+    done
+    # Explicit historical objects are fetched even when outside the scan.
+    local a expected
+    for a in "${allows[@]}"; do
+        [ "$fatal" = false ] || break
+        [[ "$a" =~ ^([1-9][0-9]*):([1-9][0-9]*)$ ]] || { _rc_fail allowlist "" "" "invalid allow-comment: $a"; fatal=true; continue; }
+        expected=${BASH_REMATCH[1]}; cid=${BASH_REMATCH[2]}
+        if grep -qx "refs/heads/gh/comments/$expected/$cid" "$tmp/receipts"; then
+            printf '%s:%s\n' "$expected" "$cid" >>"$tmp/allow-receipts"
+            continue
+        fi
+        _rc_api "repos/$repo/issues/comments/$cid" || { _rc_fail allowlist "$expected" "$cid" "direct comment request failed"; fatal=true; continue; }
+        returned=$((returned+1)); if [ "$returned" -gt "$max_comments" ]; then _rc_fail ceiling "$expected" "$cid" "comment ceiling reached"; fatal=true; break; fi
+        jq -c --arg expected "$expected" '. + {__allow_issue:$expected}' "$tmp/body" >>"$tmp/all"
+    done
+    [ "$fatal" = false ] || : >"$tmp/all"
+    if ! jq -se 'all(.[]; (.id|type)=="number" and (.id|floor)==.id and .id>0 and (.issue_url|type)=="string" and (.created_at|type)=="string" and (.updated_at|type)=="string" and (.body|type)=="string")' "$tmp/all" >/dev/null 2>&1; then _rc_fail validate "" "" "malformed comment object"; fatal=true; fi
+    if ! jq -se 'group_by(.id) | all(.[]; (map({issue_url,created_at})|unique|length)==1)' "$tmp/all" >/dev/null 2>&1; then _rc_fail validate "" "" "conflicting observations for comment id"; fatal=true; fi
+    [ "$fatal" = false ] || : >"$tmp/all"
+    jq -sc 'map(select((.id|type)=="number" and (.issue_url|type)=="string" and (.created_at|type)=="string" and (.updated_at|type)=="string" and (.body|type)=="string")) | group_by(.id) | map(. as $g | (min_by([.updated_at,tojson])) + (if any($g[]; has("__allow_issue")) then {__allow_issue:($g|map(select(has("__allow_issue"))|.__allow_issue)|first)} else {} end)) | sort_by(.updated_at,.id) | .[]' "$tmp/all" >"$tmp/sorted" 2>/dev/null || { _rc_fail validate "" "" "invalid comment objects"; fatal=true; }
+    unique=$(wc -l <"$tmp/sorted")
+    declare -A issue_pr=()
+    while IFS= read -r item; do
+        _rc_time || { _rc_fail ceiling "" "" "time ceiling reached"; fatal=true; break; }
+        cid=$(jq -r '.id|tostring' <<<"$item"); iu=$(jq -r .issue_url <<<"$item"); issue=${iu##*/}
+        [[ "$iu" == https://api.github.com/repos/"$repo"/issues/"$issue" && "$issue" =~ ^[1-9][0-9]*$ ]] || { _rc_fail validate "$issue" "$cid" "invalid issue_url"; continue; }
+        ca=$(jq -r .created_at <<<"$item"); ua=$(jq -r .updated_at <<<"$item")
+        if ! _xrepo_valid_timestamp "$ca" || ! _xrepo_valid_timestamp "$ua" || [[ "$ua" < "$ca" ]]; then _rc_fail validate "$issue" "$cid" "invalid comment timestamps"; continue; fi
+        expected=$(jq -r '.__allow_issue // empty' <<<"$item"); [ -z "$expected" ] || [ "$expected" = "$issue" ] || { _rc_fail allowlist "$issue" "$cid" "allowlist issue mismatch"; continue; }
+        if grep -qx "refs/heads/gh/comments/$issue/$cid" "$tmp/receipts"; then receipted=$((receipted+1)); continue; fi
+        if [ -z "$expected" ] && [[ "$(jq -r .created_at <<<"$item")" < "$start" ]]; then pre=$((pre+1)); continue; fi
+        if [ -z "${issue_pr[$issue]+x}" ]; then
+            if ! _rc_api "repos/$repo/issues/$issue"; then
+                issue_pr[$issue]=-1
+                _rc_fail issue "$issue" "$cid" "issue request failed"
+            elif ! jq -e --argjson issue "$issue" 'type=="object" and .number==$issue and (.title|type)=="string" and (.html_url|type)=="string" and (.user.login|type)=="string" and ((.body|type)=="string" or .body==null) and ((has("pull_request")|not) or (.pull_request|type)=="object")' "$tmp/body" >/dev/null; then
+                issue_pr[$issue]=-1
+                _rc_fail issue "$issue" "$cid" "malformed issue metadata"
+            elif jq -e 'has("pull_request")' "$tmp/body" >/dev/null; then
+                issue_pr[$issue]=1
+            else
+                issue_pr[$issue]=0
+            fi
+            [ "${issue_pr[$issue]}" = -1 ] || cp "$tmp/body" "$tmp/issue-${issue}.json"
+        fi
+        [ "${issue_pr[$issue]}" != -1 ] || continue
+        if [ "${issue_pr[$issue]}" = 1 ]; then prs=$((prs+1)); continue; fi
+        eligible=$((eligible+1)); missing=$((missing+1))
+        bodyf="$tmp/body-$cid"; jq -rj .body <<<"$item" >"$bodyf"
+        local classified
+        if ! classified="$(_xrepo_classify_comment_body "$repo" "$issue" "$bodyf")"; then _rc_fail classify "$issue" "$cid" "invalid completion target"; continue; fi
+        case "${classified%%$'\x1f'*}" in
+            completion) completion=$((completion+1)); printf '%s\n' "$issue" >>"$tmp/converge-issues" ;;
+            machine-skip) machine=$((machine+1)) ;;
+            human) human=$((human+1)) ;;
+        esac
+        if [ "$dry" = true ]; then deferred=$((deferred+1)); continue; fi
+        if [ "$attempted" -ge "$max_apply" ]; then deferred=$((deferred+1)); continue; fi
+        attempted=$((attempted+1)); ca=$(jq -r .created_at <<<"$item"); ua=$(jq -r .updated_at <<<"$item"); author=$(jq -r '.user.login // "unknown"' <<<"$item"); url=$(jq -r .html_url <<<"$item")
+        if ISSUE_TITLE="$(jq -r .title "$tmp/issue-${issue}.json")" \
+            ISSUE_AUTHOR="$(jq -r .user.login "$tmp/issue-${issue}.json")" \
+            ISSUE_URL="$(jq -r .html_url "$tmp/issue-${issue}.json")" \
+            ISSUE_BODY="$(jq -r '.body // ""' "$tmp/issue-${issue}.json")" \
+            _XREPO_SNAPSHOT_ABSENT=true _XREPO_DEFER_CONVERGENCE=true \
+            _xrepo_ingest_observed_comment "$issue" "$cid" "$ca" "$ua" "$author" "$url" "$bodyf"; then
+            applied=$((applied+1))
+        else
+            _rc_fail ingest "$issue" "$cid" "atomic ingestion failed"
+        fi
+    done <"$tmp/sorted"
+    while IFS=: read -r issue cid; do
+        [ -n "$issue" ] || continue
+        if ! jq -e --argjson id "$cid" 'select(.id == $id)' "$tmp/sorted" >/dev/null 2>&1; then
+            receipted=$((receipted+1))
+            unique=$((unique+1))
+        fi
+    done < <(LC_ALL=C sort -u "$tmp/allow-receipts")
+    # Refresh each issue independently immediately before deciding to close.
+    # Delegations live outside master, so the initial run snapshot is not
+    # sufficient authority for a close several minutes later.
+    _rc_fresh_issue_status() {
+        local ci="$1" dir="$tmp/converge-${ci}.git" manifest="$tmp/converge-${ci}.manifest" fetched="$tmp/converge-${ci}.fetched"
+        local advertised
+        rm -rf "$dir"
+        advertised=$(git ls-remote --refs origin \
+            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/completions/${ci}/*") || return 2
+        printf '%s' "$advertised" | LC_ALL=C sort >"$manifest"
+        git init -q --bare "$dir" && git --git-dir="$dir" remote add origin "$(git remote get-url origin)" || return 2
+        if [ -s "$manifest" ]; then
+            git --git-dir="$dir" fetch -q --no-tags origin \
+                "+refs/heads/tasks/delegated/${ci}/*:refs/heads/tasks/delegated/${ci}/*" \
+                "+refs/heads/tasks/completions/${ci}/*:refs/heads/tasks/completions/${ci}/*" || return 2
+        fi
+        git --git-dir="$dir" for-each-ref --format='%(objectname)%09%(refname)' \
+            "refs/heads/tasks/delegated/${ci}/" "refs/heads/tasks/completions/${ci}/" | LC_ALL=C sort >"$fetched"
+        cmp -s "$manifest" "$fetched" || return 2
+        _xrepo_strict_snapshot_status "$dir" "$repo" "$ci"
+    }
+    if [ "$dry" = false ] && [ "$fatal" = false ]; then
+        while IFS= read -r issue; do
+            [ -n "$issue" ] || continue
+            _rc_time || { _rc_fail convergence "$issue" "" "time ceiling reached"; fatal=true; break; }
+            local strict_status
+            if ! strict_status=$(_rc_fresh_issue_status "$issue"); then
+                _rc_fail convergence "$issue" "" "cannot obtain a valid fresh delegation/completion snapshot"
+                continue
+            fi
+            [ "$strict_status" = ready ] || continue
+            if ! _XREPO_STRICT_SNAPSHOT_GIT_DIR="$tmp/converge-${issue}.git" \
+                cmd_close_epic --issue "$issue" >"$tmp/close-${issue}.out"; then
+                _rc_fail convergence "$issue" "" "strict epic close failed"
+            fi
+        done < <(LC_ALL=C sort -nu "$tmp/converge-issues")
+    fi
+    now=$(date +%s); local status=success; { [ "$fatal" = true ] || [ "$failures" -gt 0 ]; } && status=failed
+    local failure_json='[]'; [ -s "$failure_file" ] && failure_json=$(jq -s . "$failure_file")
+    local recent_at=null complete_at=null stamp
+    if [ "$status" = success ] && [ "$dry" = false ]; then stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); [ "$mode" = recent ] && recent_at="\"$stamp\"" || complete_at="\"$stamp\""; fi
+    jq -nc --arg mode "$mode" --arg status "$status" --argjson dry_run "$dry" --argjson requests "$requests" --argjson pages "$pages" --argjson returned "$returned" --argjson unique "$unique" --argjson eligible "$eligible" --argjson prs "$prs" --argjson pre "$pre" --argjson receipts "$receipted" --argjson missing "$missing" --argjson human "$human" --argjson completion "$completion" --argjson machine "$machine" --argjson attempted "$attempted" --argjson applied "$applied" --argjson deferred "$deferred" --argjson failures "$failures" --argjson items "$failure_json" --argjson duration "$((now-began))" --argjson remaining "$remaining" --argjson reset "$reset" --argjson recent "$recent_at" --argjson complete "$complete_at" '{schema_version:1,mode:$mode,status:$status,dry_run:$dry_run,requests:$requests,pages:$pages,returned:$returned,unique:$unique,eligible:$eligible,pull_requests:$prs,pre_boundary:$pre,already_receipted:$receipts,missing:$missing,dispositions:{human:$human,completion:$completion,machine_skip:$machine},attempted:$attempted,applied:$applied,deferred:$deferred,failures:$failures,failure_items:$items,duration_seconds:$duration,rate_limit:{remaining:$remaining,reset:$reset},recent_success_at:$recent,complete_success_at:$complete}'
+    rm -rf "$tmp"
+    [ "$status" != failed ]
+}
+
+cmd_reconcile_comments() {
+    if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
+        _xrepo_reconcile_comments_impl "$@"
+        return
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '%s\n' '{"schema_version":1,"mode":null,"status":"failed","dry_run":false,"requests":0,"pages":0,"returned":0,"unique":0,"eligible":0,"pull_requests":0,"pre_boundary":0,"already_receipted":0,"missing":0,"dispositions":{"human":0,"completion":0,"machine_skip":0},"attempted":0,"applied":0,"deferred":0,"failures":1,"failure_items":[{"stage":"dependencies","issue":null,"comment_id":null,"message":"required command not found: jq"}],"duration_seconds":0,"rate_limit":{"remaining":null,"reset":null},"recent_success_at":null,"complete_success_at":null}'
+        return 2
+    fi
+    local output rc=0
+    output=$(mktemp)
+    _xrepo_reconcile_comments_impl "$@" >"$output" || rc=$?
+    if [ "$(jq -s 'length' "$output" 2>/dev/null || printf 0)" = 1 ]; then
+        cat "$output"
+    else
+        _xrepo_reconcile_argument_failure "" "reconciliation terminated before metrics finalization"
+        [ "$rc" -ne 0 ] || rc=2
+    fi
+    rm -f "$output"
+    return "$rc"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1397,36 +1759,51 @@ cmd_close_epic() {
     }
 
     # Enumerate delegated children and confirm each has at least one completion.
-    git fetch origin \
-        "+refs/heads/tasks/delegated/${top_issue}/*:refs/heads/tasks/delegated/${top_issue}/*" \
-        "+refs/heads/tasks/completions/${top_issue}/*:refs/heads/tasks/completions/${top_issue}/*" \
-        >/dev/null 2>&1 || true
+    # Reconciliation supplies a freshly advertised, isolated snapshot so a
+    # delegation created during a long scan cannot be missed at close time.
+    if [ -n "${_XREPO_STRICT_SNAPSHOT_GIT_DIR:-}" ]; then
+        local strict_status
+        strict_status=$(_xrepo_strict_snapshot_status "$_XREPO_STRICT_SNAPSHOT_GIT_DIR" \
+            "$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')" "$top_issue") || {
+            _xrepo_die "close-epic: strict delegation/completion snapshot is invalid"
+            return 2
+        }
+        [ "$strict_status" = ready ] || {
+            _xrepo_die "close-epic: epic ${top_issue} is still waiting in the strict snapshot"
+            return 3
+        }
+    else
+        git fetch origin \
+            "+refs/heads/tasks/delegated/${top_issue}/*:refs/heads/tasks/delegated/${top_issue}/*" \
+            "+refs/heads/tasks/completions/${top_issue}/*:refs/heads/tasks/completions/${top_issue}/*" \
+            >/dev/null 2>&1 || true
 
-    local missing=()
-    local any_delegated="false"
+        local missing=()
+        local any_delegated="false"
 
-    while read -r refname; do
-        any_delegated="true"
-        local rest="${refname#refs/heads/tasks/delegated/${top_issue}/}"
-        if ! _xrepo_child_satisfied "$top_issue" "$rest"; then
-            local owner repo peer trail
-            owner="${rest%%/*}"
-            trail="${rest#*/}"
-            repo="${trail%%/*}"
-            peer="${trail#*/}"
-            missing+=("${owner}/${repo}#${peer}")
+        while read -r refname; do
+            any_delegated="true"
+            local rest="${refname#refs/heads/tasks/delegated/${top_issue}/}"
+            if ! _xrepo_child_satisfied "$top_issue" "$rest"; then
+                local owner repo peer trail
+                owner="${rest%%/*}"
+                trail="${rest#*/}"
+                repo="${trail%%/*}"
+                peer="${trail#*/}"
+                missing+=("${owner}/${repo}#${peer}")
+            fi
+        done < <(git for-each-ref --format='%(refname)' \
+            "refs/heads/tasks/delegated/${top_issue}/" 2>/dev/null)
+
+        if [ "$any_delegated" = "false" ]; then
+            _xrepo_die "close-epic: epic ${top_issue} has no delegated children to gate close on"
+            return 3
         fi
-    done < <(git for-each-ref --format='%(refname)' \
-        "refs/heads/tasks/delegated/${top_issue}/" 2>/dev/null)
 
-    if [ "$any_delegated" = "false" ]; then
-        _xrepo_die "close-epic: epic ${top_issue} has no delegated children to gate close on"
-        return 3
-    fi
-
-    if [ ${#missing[@]} -ne 0 ]; then
-        _xrepo_die "close-epic: epic ${top_issue} still waiting on $(IFS=,; echo "${missing[*]}")"
-        return 3
+        if [ ${#missing[@]} -ne 0 ]; then
+            _xrepo_die "close-epic: epic ${top_issue} still waiting on $(IFS=,; echo "${missing[*]}")"
+            return 3
+        fi
     fi
 
     echo "all delegated children satisfied for $(_xrepo_current_repo)#${top_issue}"

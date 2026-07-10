@@ -39,7 +39,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$here/projection-backstop.sh" "$here/completed-ref-reconcile.sh" "$here/graph-converge.sh" \
         "$here/validate-closed-issue-audit.sh" "$here/context-cmd.sh" \
         "$here/wrappers.sh" "$here/caller-workflow-preflight.sh" \
-        "$here/install-completion-order-hook.sh" || exit 1
+        "$here/install-completion-order-hook.sh" "$here/reconcile-comments.sh" || exit 1
 }
 echo "== bash -n =="
 bash -n "$TD" \
@@ -62,9 +62,12 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/../.github/scripts/post-reopen-notice.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/materialise-child-epics.sh" \
     && bash -n "$(dirname "$TD")/validate-caller-workflow.sh" \
-    && bash -n "$here/install-completion-order-hook.sh" || exit 1
+    && bash -n "$here/install-completion-order-hook.sh" \
+    && bash -n "$here/reconcile-comments.sh" || exit 1
 
 rc=0
+echo "== reconcile-comments.sh =="
+bash "$here/reconcile-comments.sh" "$TD" || rc=1
 for t in complete-safety.sh guard-commit-message.sh guard-pre-push.sh complete-subject-style.sh complete-historical.sh complete-ops.sh local-epic-close.sh local-epic-close-partial-view.sh close-ops-epic.sh close-completed-epic.sh close-issue-ref-cleanup.sh reconcile-closed-issue.sh projection-backstop.sh completed-ref-reconcile.sh validate-closed-issue-audit.sh ingest-loop.sh comment-receipts.sh comment-cmd.sh ingest-selfheal.sh cross-repo-completion-attribution.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh frontier-json.sh emitter-json.sh no-handbuilt-json.sh validate-strict.sh edges.sh edges-write.sh facts.sh reconcile.sh graph-converge.sh edges-prune.sh legacy-edges.sh mailbox.sh wrappers.sh caller-workflow-preflight.sh operator-blocked-dashboard.sh operator-blocked-dashboard-publish.sh operator-blocked-dispatch.sh transitive-block.sh claim-pid.sh claim-idempotent.sh claim-force-steal.sh reap.sh breakdown-self-claim.sh breakdown-self-continue.sh root-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-classifier.sh ci-verify-target.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh delegated-block-json.sh context-cmd.sh ../create-task-commit.sh ../post-reopen-notice.sh ../../.github/scripts/materialise-child-epics.test.sh; do
     echo "== $t =="
     bash "$here/$t" "$TD" || rc=1

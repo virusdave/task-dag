@@ -1682,6 +1682,10 @@ CROSS-REPO COORDINATION:
     ingest-comment <issue> <comment-file> [--author=<login>]
                            Ingest a human comment from this repo's issue
                            (called by shared-workflows comment sync)
+    reconcile-comments --mode recent|complete --ingestion-start-at RFC3339
+                           Repair missing durable comment receipts from the
+                           GitHub API; supports overlap, allowlists, ceilings,
+                           and a non-mutating --dry-run.
     ingest-completion ...  Internal only; direct invocation is rejected.
                            Process every completion comment with ingest-comment;
                            it atomically publishes the durable comment receipt
@@ -7741,6 +7745,7 @@ main() {
         guard-pre-push) cmd_guard_pre_push "$@" ;;
         delegate) cmd_delegate "$@" ;;
         ingest-comment) cmd_ingest_comment "$@" ;;
+        reconcile-comments) cmd_reconcile_comments "$@" ;;
         ingest-completion) cmd_ingest_completion "$@" ;;
         close-epic) cmd_close_epic "$@" ;;
         close-ops-epic) cmd_close_ops_epic "$@" ;;
