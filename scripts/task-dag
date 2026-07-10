@@ -186,6 +186,33 @@ deps_satisfied() {
     return 0
 }
 
+# Helper: same dependency predicate as deps_satisfied, but evaluated against a
+# caller-supplied master tip. Commands that build directly on origin/master use
+# this so they do not accidentally make a readiness decision from a stale or
+# unrelated local HEAD.
+deps_satisfied_at_commit() {
+    local tip="$1" sha="$2"
+    local deps dep
+    deps="$(get_dep_parents "$sha")" || return 1
+    while IFS= read -r dep; do
+        [ -z "$dep" ] && continue
+        task_is_completed_at_commit "$tip" "$dep" || return 1
+    done <<< "$deps"
+    return 0
+}
+
+# Helper: find the first reachable completion merge whose parent list includes
+# <task_sha>. Authoritative completion is parentage; callers inspect the
+# message only for audit/idempotency notes.
+completion_merge_for_task_at_commit() {
+    local tip="$1" task_sha="$2"
+    git rev-list "$tip" --parents 2>/dev/null |
+        awk -v sha="$task_sha" '
+            { for (i = 2; i <= NF; i++) if ($i == sha && first == "") first = $1 }
+            END { if (first != "") print first }
+        '
+}
+
 # Helper: is <sha> a task commit? Every task commit (epic/task/leaf, and
 # the comment/message/issue-root commits the workflows mint) is created
 # with the canonical EMPTY_TREE (see `breakdown`'s commit-tree call and
@@ -220,7 +247,7 @@ subject_is_conventional_commits() {
 #   • a completion/link MERGE: has a 2nd parent that is a task commit
 #     (empty-tree) and whose own tree equals its first parent's tree (adds only
 #     the parent edge, never file changes) — this covers `complete`,
-#     `complete --leaves`, and `complete-historical` link commits;
+#     `complete --leaves`, `complete-ops`, and `complete-historical` link commits;
 #   • an epic-close commit: carries a `Closes-Epic:` trailer and is tree-equal
 #     to its first parent.
 # Used by guard-pre-push to allow a properly-completed push through. Never keys
@@ -897,6 +924,29 @@ task_has_children() {
         # Only count empty-tree task commits as DAG children; real
         # implementation/master commits that happen to list the root are
         # not breakdown children.
+        is_task_commit "$commit" || continue
+        printf '%s\n' "$commit"
+        return 0
+    done < <(git rev-list --all --parents 2>/dev/null)
+    return 1
+}
+
+# Helper: true iff <parent_sha> has a direct STRUCTURAL child. Breakdown
+# containment is strictly first-parent; second+ parents are dependencies. Use
+# this when deciding whether a node itself is decomposed/intermediate. Do NOT
+# use task_has_children here: that intentionally matches any parent slot for
+# root/decomposition duplicate guards, where dependency children should also
+# make a root non-childless.
+task_has_structural_children() {
+    local parent_sha="$1"
+    local commit parents first subject
+    while read -r commit parents; do
+        first="${parents%% *}"
+        [ "$first" = "$parent_sha" ] || continue
+        subject=$(git log -1 --format='%s' "$commit" 2>/dev/null || true)
+        case "$subject" in
+            Claim:*|Blocked-Meta:*) continue ;;
+        esac
         is_task_commit "$commit" || continue
         printf '%s\n' "$commit"
         return 0
@@ -1603,6 +1653,10 @@ CROSS-REPO COORDINATION:
                            one resolved by an out-of-band operations action
                            with no implementation commit and no delegated
                            children (emits the sanctioned Closes-Epic merge)
+    complete-ops <sha> --evidence <https-url> --authorization <text> --yes
+                           Complete an OPS-ONLY leaf with no implementation
+                           commit by emitting a sanctioned tree-equal task
+                           completion merge carrying Ops-* audit trailers
 
 CI BROKEN-MASTER AUTO-REPAIR:
     parse-tree-fix [<commit-ish>] [--stdin] [--json]
@@ -4917,6 +4971,285 @@ post_completion_comment() {
     return 0
 }
 
+validate_ops_trailer_value() {
+    local label="$1" value="$2"
+    if [ -z "$value" ]; then
+        echo "Error: $label must not be empty." >&2
+        return 1
+    fi
+    case "$value" in
+        *$'\n'*|*$'\r'*)
+            echo "Error: $label must be a single line with no CR/LF characters." >&2
+            return 1
+            ;;
+    esac
+    if printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        echo "Error: $label must be a single line with no control characters." >&2
+        return 1
+    fi
+    return 0
+}
+
+post_ops_completion_comment() {
+    local task_sha="$1" completion_sha="$2" evidence="$3" authorization="$4"
+    local task_msg issue_num issue_url task_title
+    task_msg=$(parse_commit_metadata "$task_sha")
+    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    issue_url=$(extract_field "$task_msg" "URL")
+    task_title=$(get_task_title "$task_sha")
+    if [ -z "$issue_num" ] || [ -z "$issue_url" ] || ! _is_real_github_origin; then
+        return 0
+    fi
+    local repo short_task_sha comment_body
+    repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
+    short_task_sha=$(git rev-parse --short "$task_sha")
+    comment_body=$(printf '%s\n%s\n\n%s\n%s\n%s\n%s' \
+        "<!-- task-dag:status -->" \
+        "✅ Ops-only task **${task_title}** completed without an implementation commit." \
+        "Task SHA: \`${short_task_sha}\`" \
+        "Completion commit: \`$(git rev-parse --short "$completion_sha")\`" \
+        "Evidence: ${evidence}" \
+        "Authorization: ${authorization}")
+    if _post_issue_comment "$repo" "$issue_num" "$comment_body" >/dev/null; then
+        printf "${GREEN}✓ Posted ops-completion update to issue #$issue_num${RESET}\n"
+    else
+        printf "${YELLOW}⚠ Could not post ops-completion comment to issue #$issue_num (continuing; completion itself succeeded)${RESET}\n" >&2
+    fi
+    return 0
+}
+
+# Command: complete-ops - mark an operations-only leaf complete without an
+# implementation commit. This is deliberately separate from `complete`: normal
+# task completion still requires a real implementation commit. The durable done
+# fact remains git parentage (the task commit is a non-primary parent of a
+# master merge); the Ops-* trailers are audit metadata only.
+cmd_complete_ops() {
+    local task_sha="" evidence="" authorization="" reason="" no_cleanup=false do_force=false assume_yes=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --evidence) evidence="$2"; shift 2 ;;
+            --evidence=*) evidence="${1#*=}"; shift ;;
+            --authorization|--authorized-by) authorization="$2"; shift 2 ;;
+            --authorization=*|--authorized-by=*) authorization="${1#*=}"; shift ;;
+            --reason) reason="$2"; shift 2 ;;
+            --reason=*) reason="${1#*=}"; shift ;;
+            --yes|-y) assume_yes=true; shift ;;
+            --no-cleanup) no_cleanup=true; shift ;;
+            --force) do_force=true; shift ;;
+            --help|-h)
+                cat <<'EOF'
+Usage: task-dag complete-ops <task-sha> --evidence <https-url> \
+                             --authorization <text-or-url> --yes
+                             [--reason "..."] [--no-cleanup] [--force]
+
+Complete an operations-only LEAF whose real work happened out of band and has
+no honest implementation commit to link. This command does NOT relax normal
+`task-dag complete`: implementation work still needs a real non-empty commit.
+
+The command creates a tool-minted, tree-equal merge on master:
+  parent1 = the current origin/master tip (your HEAD must match it)
+  parent2 = the leaf task commit
+  tree    = parent1's tree
+
+That parent edge is the durable completion fact. Mandatory Ops-* trailers record
+audit evidence and authorization so this case is distinguishable from dropped or
+irrelevant work.
+
+Guards fail closed: requires explicit --evidence https://... and
+--authorization, refuses pending roots / epic tasks / decomposed nodes, checks
+dependencies, enforces active-claim ownership (unless --force), and publishes
+the completion to origin/master before cleaning frontier/active/blocked refs.
+Blocked leaves are allowed; completing them clears their blocked overlays after
+the master publish succeeds.
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$task_sha" ]; then
+                    task_sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
+    validate_ops_trailer_value "--evidence" "$evidence" || return 1
+    case "$evidence" in
+        https://*) ;;
+        *) echo "Error: --evidence must be an https:// URL pointing at durable evidence." >&2; return 1 ;;
+    esac
+    case "$evidence" in
+        *[[:space:]]*) echo "Error: --evidence URL must not contain whitespace." >&2; return 1 ;;
+    esac
+    validate_ops_trailer_value "--authorization" "$authorization" || return 1
+    if [ -n "$reason" ]; then
+        validate_ops_trailer_value "--reason" "$reason" || return 1
+    fi
+
+    if [ "$assume_yes" != true ]; then
+        if [ -t 0 ] && [ -t 1 ]; then
+            printf 'Complete ops-only task %s without an implementation commit? [y/N] ' "$task_sha"
+            local ans=""
+            read -r ans
+            case "$ans" in
+                y|Y|yes|YES|Yes) ;;
+                *) echo "complete-ops: aborted (no confirmation)." >&2; return 1 ;;
+            esac
+        else
+            echo "Error: non-interactive complete-ops callers must pass --yes." >&2
+            return 2
+        fi
+    fi
+
+    _xrepo_ensure_git_identity
+
+    task_sha=$(resolve_sha "$task_sha") || return 1
+    local short_sha
+    short_sha=$(git rev-parse --short "$task_sha")
+
+    if ! is_task_commit "$task_sha"; then
+        echo "Error: $short_sha is not an empty-tree task commit; complete-ops only completes task-dag leaves." >&2
+        return 1
+    fi
+
+    if ! fetch_task_refs_strict; then
+        echo "Error: cannot sync task refs from origin; refusing complete-ops on a partial DAG view." >&2
+        return 2
+    fi
+    if ! git fetch --quiet --no-tags origin '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1; then
+        echo "Error: cannot fetch origin/master; refusing complete-ops without an authoritative base." >&2
+        return 2
+    fi
+    local origin_master current_head
+    origin_master=$(git rev-parse --verify origin/master) || return 2
+    current_head=$(git rev-parse --verify HEAD^{commit}) || return 1
+
+    local task_type
+    task_type=$(extract_field "$(parse_commit_metadata "$task_sha")" "Type" 2>/dev/null || true)
+    if [ "$task_type" = epic ]; then
+        echo "Error: complete-ops is for leaf tasks, not epic tasks. Decompose the epic or use close-ops-epic for an undecomposed ops-only root." >&2
+        return 2
+    fi
+
+    local complete_issue="" rc_root=0
+    complete_issue=$(task_is_pending_root "$task_sha") || rc_root=$?
+    if [ "$rc_root" = 3 ]; then
+        echo "Error: cannot verify whether ${short_sha} is a live epic root; refusing complete-ops while origin state is indeterminate." >&2
+        return 2
+    fi
+    if [ -n "$complete_issue" ]; then
+        echo "Error: ${short_sha} is the pending epic root for issue #${complete_issue}; complete-ops only completes leaves." >&2
+        return 2
+    fi
+    if task_has_structural_children "$task_sha" >/dev/null; then
+        echo "Error: ${short_sha} has DAG child tasks; complete the children instead of marking the structural parent done." >&2
+        return 2
+    fi
+
+    # Idempotency is parentage-first and works even when the caller's local
+    # HEAD has not yet caught up to the already-pushed completion. It must run
+    # AFTER the structural guards above: completed child task commits make their
+    # structural parents reachable as parent tokens too, and those parents must
+    # still be refused rather than mistaken for completable leaves.
+    local verified_active_sha
+    verified_active_sha=$(verify_task_claim_ownership "$task_sha" "$short_sha" "$do_force") || return $?
+    if task_is_completed_at_commit "$origin_master" "$task_sha"; then
+        local existing
+        existing=$(completion_merge_for_task_at_commit "$origin_master" "$task_sha")
+        if [ -n "$existing" ] && ! git log -1 --format='%B' "$existing" \
+            | git interpret-trailers --parse 2>/dev/null \
+            | grep -qE '^Ops-Completion:[[:space:]]*true$'; then
+            echo "Task $short_sha is already completed on origin/master by a non-ops completion (${existing:0:12}); not minting another completion."
+        else
+            echo "Task $short_sha already has an ops completion on origin/master; cleaning stale refs only."
+        fi
+        cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "${existing:-$origin_master}" "$no_cleanup" || return $?
+        if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
+            emit_operator_blocked_dispatch complete "$short_sha"
+        fi
+        return 0
+    fi
+
+    if [ "$current_head" != "$origin_master" ]; then
+        echo "Error: HEAD must equal freshly-fetched origin/master for complete-ops." >&2
+        echo "       Rebase/sync first so the no-code completion cannot publish unrelated local commits." >&2
+        return 2
+    fi
+
+    if ! deps_satisfied_at_commit "$origin_master" "$task_sha"; then
+        echo "Error: Dependencies not met for task $task_sha on origin/master" >&2
+        local dep
+        while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            if task_is_completed_at_commit "$origin_master" "$dep"; then
+                echo "  ✓ ${dep:0:12} completed"
+            else
+                echo "  ✗ ${dep:0:12} not completed"
+            fi
+        done < <(get_dep_parents "$task_sha")
+        return 2
+    fi
+
+    local task_msg issue_num issue_url task_title now claimer host msg_file tree new_commit
+    task_msg=$(parse_commit_metadata "$task_sha")
+    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    issue_url=$(extract_field "$task_msg" "URL")
+    task_title=$(get_task_title "$task_sha")
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+    host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+    validate_ops_trailer_value "Ops-Completed-By" "$claimer" || return 1
+    validate_ops_trailer_value "Ops-Completed-Host" "$host" || return 1
+    msg_file=$(mktemp)
+    {
+        printf 'Complete ops-only task %s (no code change)\n' "$short_sha"
+        printf '\n'
+        printf 'Task "%s" was resolved by an out-of-band operations action.\n' "$task_title"
+        printf 'There is intentionally no implementation commit to link; this\n'
+        printf 'tree-equal merge records the task commit as a non-primary parent so\n'
+        printf 'normal task-dag completion/dependency readers see a durable done fact.\n'
+        printf '\n'
+        printf 'Task-Commit: %s\n' "$task_sha"
+        [ -n "$issue_num" ] && printf 'Issue: #%s\n' "$issue_num"
+        [ -n "$issue_url" ] && printf 'URL: %s\n' "$issue_url"
+        printf 'Status: completed\n'
+        printf 'Ops-Completion: true\n'
+        printf 'Ops-Evidence: %s\n' "$evidence"
+        printf 'Ops-Authorization: %s\n' "$authorization"
+        [ -n "$reason" ] && printf 'Ops-Reason: %s\n' "$reason"
+        printf 'Ops-Completed-By: %s\n' "$claimer"
+        printf 'Ops-Completed-Host: %s\n' "$host"
+        printf 'Ops-Completed-At: %s\n' "$now"
+        [ -n "$issue_url" ] && printf 'Related: %s\n' "$issue_url"
+    } > "$msg_file"
+
+    tree=$(git rev-parse "${origin_master}^{tree}") || { rm -f "$msg_file"; return 1; }
+    new_commit=$(git commit-tree "$tree" -p "$origin_master" -p "$task_sha" -F "$msg_file") || { rm -f "$msg_file"; return 1; }
+    rm -f "$msg_file"
+
+    advance_head_to_completion "$origin_master" "$new_commit" || return 1
+    echo "Created ops completion commit: $new_commit"
+
+    maybe_emit_local_epic_close "$task_sha"
+
+    if [ "$no_cleanup" = false ]; then
+        publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "$short_sha" || return $?
+    fi
+
+    cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "$new_commit" "$no_cleanup" || return $?
+    printf "${GREEN}✓ Ops task completed: %s${RESET}\n" "$task_title"
+    if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
+        emit_operator_blocked_dispatch complete "$short_sha"
+    fi
+    post_ops_completion_comment "$task_sha" "$new_commit" "$evidence" "$authorization"
+    return 0
+}
+
 # Command: complete --leaves — DAG-native BATCH completion of several
 # sibling leaves implemented as a stack of commits in ONE worktree.
 #
@@ -7388,6 +7721,7 @@ main() {
         context) cmd_context "$@" ;;
         breakdown) cmd_breakdown "$@" ;;
         complete) cmd_complete "$@" ;;
+        complete-ops) cmd_complete_ops "$@" ;;
         complete-historical) cmd_complete_historical "$@" ;;
         block) cmd_block "$@" ;;
         unblock) cmd_unblock "$@" ;;
@@ -7812,6 +8146,7 @@ EOF
     _gm_has() { grep -qiE "$1" <<<"$scan"; }
     _gm_has '^Task-Commit:'                          && hits+=("Task-Commit:       → the impl↔task link is the completion MERGE's parentage; use 'task-dag complete'")
     _gm_has '^Status:[[:space:]]*(completed|pending)([[:space:]]|$)' && hits+=("Status: …          → task lifecycle is set by 'task-dag complete' / 'breakdown', not a hand-written trailer")
+    _gm_has '^Ops-(Completion|Evidence|Authorization|Reason|Completed-By|Completed-Host|Completed-At):' && hits+=("Ops-* trailers   → no-code ops completions are minted by 'task-dag complete-ops', never by hand")
     _gm_has '^Closes-Epic:'                          && hits+=("Closes-Epic:       → epics are closed by 'task-dag close-epic' / 'close-ops-epic'")
     _gm_has '^Historical-Commit:'                    && hits+=("Historical-Commit: → retroactive links use 'task-dag complete-historical'")
     _gm_has '^Retroactive:[[:space:]]*true'          && hits+=("Retroactive: true  → use 'task-dag complete-historical'")

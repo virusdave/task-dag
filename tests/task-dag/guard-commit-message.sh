@@ -65,6 +65,8 @@ reject "Retroactive: true"               "retro
 Retroactive: true"
 reject "Blocked-Meta trailer"            "block it
 Blocked-Meta: something"
+reject "Ops-Completion trailer"          "ops completion
+Ops-Completion: true"
 reject "Type: leaf"                      "a task
 Type: leaf"
 reject "Task: subject (task commit)"     "Task: P5 enforce ads-policy lint"

@@ -492,6 +492,49 @@ the operator — `task-dag validate --closed-issue-audit [--repo=owner/repo]
 
 Fixture coverage: `tests/task-dag/validate-closed-issue-audit.sh`.
 
+## Completing an ops-only (no-code) leaf (`complete-ops`)
+
+Some **leaf** tasks represent real operations work that is completed outside the
+repository — a deployed migration artifact, a manual maintenance action, a
+vendor-console switch — and therefore has no honest implementation commit. Do
+not fabricate an empty commit and do not `drop` the task as irrelevant. Use:
+
+```sh
+task-dag complete-ops <task-sha> \
+  --evidence https://github.com/owner/repo/issues/N#issuecomment-... \
+  --authorization "operator approved on <issue/comment>" \
+  --yes
+```
+
+`complete-ops` emits a **tree-equal completion merge** on `master`: first
+parent is the freshly-fetched `origin/master` tip, second parent is the leaf
+task commit, and the tree equals the first parent's tree. That parent edge is
+the durable completion fact consumed by dependency/readiness/facts readers. The
+message carries the existing completion trailers (`Task-Commit:` and
+`Status: completed`) plus mandatory `Ops-*` audit trailers for evidence,
+authorization, actor, host, and time.
+
+Guard rails fail closed:
+
+- `HEAD` must equal freshly-fetched `origin/master` before a new ops completion
+  is minted, so the command cannot accidentally publish unrelated local commits;
+- `--evidence` must be an `https://` URL and `--authorization` must be explicit;
+  user-supplied trailer values are single-line only;
+- pending epic roots, `Type: epic` tasks, and any node with DAG children are
+  refused — complete the children, or use `close-ops-epic` for an undecomposed
+  ops-only root;
+- dependencies must already be complete on `origin/master`; `--force` only
+  overrides a known foreign active claim and never bypasses dependencies or
+  leaf/root/children guards;
+- blocked leaves are allowed (this is the pergatory/no-code case); their
+  `frontier`, `active`, `blocked`, and `blocked-meta` refs are cleaned with the
+  same leased cleanup as `complete`, but only after the completion tip has been
+  published to `origin/master`.
+
+The command is idempotent: if the task is already complete on `origin/master`,
+it mints no duplicate merge and only cleans stale scheduling refs it is allowed
+to clean. Fixture coverage: `tests/task-dag/complete-ops.sh`.
+
 The bot epic-close sweep (`cleanup-closed-issue-task-refs.sh`) also delegates
 to `reconcile-closed-issue`, passing the matched epic-root parent as
 `--hint-sha` so the belt-and-braces root cleanup still runs by exact task SHA

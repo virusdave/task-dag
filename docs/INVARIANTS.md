@@ -424,7 +424,15 @@ are the contract you must preserve when editing a minter.
 - **Completion record** (`tasks/completions/…`): `kind: completion`.
 - **Completion merge** (on `master`, from `complete`): a merge whose
   non-first parent is the task commit, carrying `Task-Commit:` +
-  `Status: completed`. Built on the **rebased** master tip.
+  `Status: completed`. Built on the **rebased** master tip. Normal
+  implementation completions have the implementation commit as first parent.
+- **Ops-only leaf completion merge** (on `master`, from `complete-ops`): a
+  tree-equal merge whose first parent is the synced `origin/master` tip and
+  whose non-first parent is the leaf task commit, carrying `Task-Commit:` +
+  `Status: completed` plus `Ops-Completion: true`, `Ops-Evidence:`,
+  `Ops-Authorization:`, and `Ops-Completed-*` audit trailers. The done fact is
+  still the parent edge; the `Ops-*` trailers distinguish this sanctioned
+  no-code operations case from dropped/irrelevant work and record evidence.
 - **Close** (on `master`, from `close-epic` / `close-ops-epic` / local
   epic close): a merge carrying `Closes-Epic: #N`, consumed by
   `close-completed-issues.yml`. A parent-only check is **wrong** — the

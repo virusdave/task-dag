@@ -114,6 +114,22 @@ parent), so completion detection stays a parent-edge query; only the
 carry it after the fact. This exception is admin-recovery only and pages
 the operator on every use.
 
+### The no-implementation sanctioned path: `complete-ops`
+
+`task-dag complete-ops` is the live path for an operations-only **leaf** whose
+real work happened out of band and has no honest implementation commit to link.
+It deliberately does **not** relax normal `complete`'s real-work guard. Instead
+it mints a tool-built, tree-equal merge on `master` whose first parent is the
+synced `origin/master` tip and whose second parent is the leaf task commit.
+
+That means the task completion fact still lives in the git DAG exactly like any
+other completion: `done(task)` is the task commit appearing as a reachable parent
+token on `master`. The absence of implementation provenance is intentional and
+audited with mandatory `Ops-*` trailers (`Ops-Evidence:`, `Ops-Authorization:`,
+who/host/time). Those trailers distinguish a sanctioned no-code operations
+completion from `drop`/irrelevant work, but readers must not use them as the
+authoritative done fact.
+
 ## Commit-message guard (stop accidental hand-crafted task commits)
 
 Every task-dag control commit — task/epic root, claim, blocked-meta,
@@ -130,7 +146,8 @@ task SHA that never existed).
 - The canonical check is `task-dag guard-commit-message <file>`. It rejects a
   message whose non-comment lines carry any of: a `Task:` subject, `Type:`,
   `Task-Commit:`, `Status: completed|pending`, `Closes-Epic:`,
-  `Historical-Commit:`, `Retroactive:`, `Blocked-Meta:`, or a GitHub-native
+  `Historical-Commit:`, `Retroactive:`, `Blocked-Meta:`, any `Ops-*`
+  completion trailer minted by `complete-ops`, or a GitHub-native
   close/fix/resolve keyword followed by `#N` / `owner/repo#N` — and points at
   the subcommand that should have produced it. Cross-repo trailers a normal
   impl commit legitimately carries by hand (`Satisfies:`, `Phase:`,
