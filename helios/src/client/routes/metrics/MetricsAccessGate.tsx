@@ -21,6 +21,8 @@ import { userHasAnyMetricGrant } from '../../../shared/domain/metricGrants.js'
 export interface MetricsAccessGateProps {
   /** Render the children iff the user has at least one of these grants. */
   readonly anyOf: ReadonlyArray<MetricGrantKey>
+  /** Optional role gate for metrics tabs whose endpoint is admin-only. */
+  readonly requiredRole?: 'admin'
   /** Optional override for the denial header. */
   readonly surfaceLabel?: string
   /** Hide concrete grant keys for confidential surfaces. */
@@ -30,13 +32,15 @@ export interface MetricsAccessGateProps {
 
 export function MetricsAccessGate({
   anyOf,
+  requiredRole,
   surfaceLabel,
   showGrantHint = true,
   children,
 }: MetricsAccessGateProps) {
   const session = useRouteLoaderData('root') as SessionEnvelope | undefined
   const user = session?.user ?? null
-  if (userHasAnyMetricGrant(user, anyOf)) {
+  const roleAllowed = requiredRole === 'admin' ? user?.role === 'admin' : true
+  if (roleAllowed && userHasAnyMetricGrant(user, anyOf)) {
     return <>{children}</>
   }
   return (

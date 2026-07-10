@@ -597,10 +597,14 @@ const METRICS_TAB_ALIASES: Record<string, MetricsTabId> = {
   reordering: 'inventory',
 }
 
-function resolveTab(raw: string | undefined): MetricsTab {
-  if (!raw) return METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
+function resolveExplicitTab(raw: string | undefined): MetricsTab | null {
+  if (!raw) return null
   const aliased = METRICS_TAB_ALIASES[raw] ?? (raw as MetricsTabId)
-  return METRICS_TABS_BY_ID.get(aliased) ?? METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
+  return METRICS_TABS_BY_ID.get(aliased) ?? null
+}
+
+function resolveTab(raw: string | undefined): MetricsTab {
+  return resolveExplicitTab(raw) ?? METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
 }
 
 // ---------------------------------------------------------------------------
@@ -732,15 +736,20 @@ export function MetricsLayoutPage() {
     [user],
   )
 
+  const explicitTab = useMemo(() => resolveExplicitTab(tabId), [tabId])
   const requestedTab = useMemo(() => resolveTab(tabId), [tabId])
   const activeTab = useMemo(() => {
     // If the URL points at a tab the user can see, keep it.
     if (visibleTabs.some((t) => t.id === requestedTab.id)) return requestedTab
+    // If the URL points at a known tab the user cannot see, keep that
+    // tab active so the grant gate denies the requested confidential
+    // surface instead of silently showing some other tab under this URL.
+    if (explicitTab) return requestedTab
     // Otherwise fall back to the first accessible tab (or the
     // requested one if NONE are accessible — the access-denied
     // page below will be rendered in that case).
     return visibleTabs[0] ?? requestedTab
-  }, [requestedTab, visibleTabs])
+  }, [explicitTab, requestedTab, visibleTabs])
 
   // Site filter: empty Set = all sites. Multi-select against KNOWN_SITES.
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => defaultSiteSelection())
@@ -922,6 +931,7 @@ export function MetricsLayoutPage() {
   // badge ("2 live, 1 missing") and the group list both reflect just this
   // tab's slice.
   const tabMetrics = useMemo(() => metrics.filter(activeTab.include), [metrics, activeTab])
+  const hasRegistryMetrics = tabMetrics.length > 0
 
   const expandedMetric = useMemo(
     () => tabMetrics.find((m) => m.id === expandedMetricId) ?? null,
@@ -952,8 +962,9 @@ export function MetricsLayoutPage() {
     >
     <MetricsAccessGate
       anyOf={pageGrants}
+      requiredRole={activeTab.adminOnly ? 'admin' : undefined}
       surfaceLabel={activeTab.label}
-      showGrantHint={!activeGadsScope}
+      showGrantHint={!activeGadsScope && !activeTab.adminOnly}
     >
       <TimeAxisProvider initial={initialWindow}>
         <section className="metrics-dashboard">
@@ -966,12 +977,14 @@ export function MetricsLayoutPage() {
               <MetricsDefaultsAdminControls
                 lineState={{ aggByTab, stackByTab, yBaselineByTab }}
               />
-              <DataCoverageBadge
-                realCount={partitioned.real.length}
-                missingCount={partitioned.missing.length}
-                showMissing={showMissing}
-                onToggleShowMissing={setShowMissing}
-              />
+              {hasRegistryMetrics && (
+                <DataCoverageBadge
+                  realCount={partitioned.real.length}
+                  missingCount={partitioned.missing.length}
+                  showMissing={showMissing}
+                  onToggleShowMissing={setShowMissing}
+                />
+              )}
             </div>
           </header>
 

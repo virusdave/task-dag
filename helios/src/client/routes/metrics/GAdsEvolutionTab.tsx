@@ -697,10 +697,10 @@ function L3FeedbackPanel({
           hint={l3.addenda.generatedByEvaluationId ?? undefined}
         />
         <Kpi
-          label="Later L2 consumed"
+          label="Later L2 likely consumed"
           value={consumptionLabel(l3.consumption.status)}
           pending={l3.consumption.status === 'unknown'}
-          hint={l3.consumption.newestL2RunAt ? `newest ${fmtDateTime(l3.consumption.newestL2RunAt)}` : undefined}
+          hint={l3ConsumptionHint(l3)}
         />
       </div>
       <div className="gads-ev-facts">
@@ -827,6 +827,13 @@ function consumptionLabel(status: GadsL3Section['consumption']['status']): strin
     case 'unknown':
       return 'unknown'
   }
+}
+
+function l3ConsumptionHint(l3: GadsL3Section): string {
+  const newest = l3.consumption.newestL2RunAt
+    ? `newest ${fmtDateTime(l3.consumption.newestL2RunAt)}`
+    : 'no newer L2 timestamp'
+  return `heuristic · ${newest}`
 }
 
 // ---------------------------------------------------------------------------
