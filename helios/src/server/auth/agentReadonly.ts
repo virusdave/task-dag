@@ -120,6 +120,38 @@ export type AgentReadonlyVerificationResult =
       detail?: string
     }
 
+export interface AgentReadonlyPrincipal {
+  kind: 'agent_readonly'
+  keyId: string
+  ruleId: string
+  method: AgentReadonlyAllowedMethod
+  pathAndQuery: string
+  pathKind: AgentReadonlyPathKind
+  pathMatch: AgentReadonlyPathMatch
+  pathRule: string
+  safeReadNote: string
+  maxResponseBytes: number
+}
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    agentReadonlyPrincipal?: AgentReadonlyPrincipal
+    agentReadonlyAudit?: {
+      outcome: 'accepted' | 'denied'
+      reason?: AgentReadonlyDenyReason | 'response_too_large'
+      keyId?: string
+      ruleId?: string
+      method: string
+      pathAndQuery: string
+      pathKind?: AgentReadonlyPathKind
+      statusCode?: number
+      responseBytes?: number
+      maxResponseBytes?: number
+      nonce?: string
+    }
+  }
+}
+
 export function parseAgentReadonlyConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AgentReadonlyConfig {
   try {
     const timestampSkewSeconds = readPositiveIntegerEnv(

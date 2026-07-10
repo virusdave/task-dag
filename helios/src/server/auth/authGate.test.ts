@@ -1,7 +1,14 @@
+import { generateKeyPairSync, sign } from 'node:crypto'
+
 import cookieSigner from '@fastify/cookie'
+import Fastify from 'fastify'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { describeRequiresTestDb } from '../__tests__/requiresTestDb.js'
+import {
+  AGENT_READONLY_HEADER_NAMES,
+  buildAgentReadonlyCanonicalPayload,
+} from './agentReadonly.js'
 
 const originalEnv = { ...process.env }
 
@@ -28,6 +35,212 @@ function signSessionCookie(userId: string): string {
   const signer = new cookieSigner.Signer(process.env.SESSION_COOKIE_SECRET!)
   return `helios-session=${encodeURIComponent(signer.sign(userId))}`
 }
+
+const AGENT_KEY_ID = 'amp-local-vps3-2026q3'
+const AGENT_RULE_ID = 'agent-waste-review-2026-07-10'
+
+function makeAgentKeyPair() {
+  const keyPair = generateKeyPairSync('ed25519')
+  const publicKeyDer = keyPair.publicKey.export({ format: 'der', type: 'spki' })
+  return {
+    privateKey: keyPair.privateKey,
+    publicKeyBase64Url: publicKeyDer.subarray(-32).toString('base64url'),
+  }
+}
+
+async function buildSignedAgentGateHarness(options: { maxResponseBytes?: number } = {}) {
+  const keys = makeAgentKeyPair()
+  const logs: string[] = []
+  process.env = {
+    ...process.env,
+    APP_BASE_URL: 'http://helios.test',
+    HELIOS_AGENT_READONLY_PUBLIC_KEYS_JSON: JSON.stringify({ [AGENT_KEY_ID]: keys.publicKeyBase64Url }),
+    HELIOS_AGENT_READONLY_ALLOWLIST_JSON: JSON.stringify({
+      id: AGENT_RULE_ID,
+      owner: 'test',
+      reason: 'auth gate integration coverage',
+      not_before: '2026-07-10T00:00:00Z',
+      not_after: '2026-07-11T00:00:00Z',
+      max_response_bytes: options.maxResponseBytes ?? 256,
+      paths: [
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/read',
+          safe_read_note: 'Small test read.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/too-large',
+          safe_read_note: 'Exercises response cap.',
+        },
+        {
+          method: 'GET',
+          kind: 'page',
+          match: 'exact',
+          path: '/page',
+          safe_read_note: 'SPA page shell.',
+        },
+        {
+          method: 'GET',
+          kind: 'asset',
+          match: 'prefix',
+          path: '/assets/',
+          safe_read_note: 'Static hashed asset.',
+        },
+      ],
+    }),
+  }
+  vi.resetModules()
+  const { registerAuthGate } = await import('./authGate.js')
+  const server = Fastify({
+    logger: {
+      level: 'info',
+      stream: { write: (line: string) => logs.push(line) },
+    },
+  })
+  await server.register(cookieSigner, {
+    hook: 'onRequest',
+    secret: process.env.SESSION_COOKIE_SECRET,
+  })
+  registerAuthGate(server)
+  server.get('/api/read', async (request) => ({
+    ok: true,
+    principal: request.agentReadonlyPrincipal?.kind ?? null,
+  }))
+  server.get('/api/too-large', async () => 'x'.repeat((options.maxResponseBytes ?? 256) + 20))
+  server.get('/page', async () => '<!doctype html><title>ok</title>')
+  server.get('/assets/ok.js', async (_request, reply) => reply.type('application/javascript').send('export default 1'))
+  return { server, logs, keys }
+}
+
+function signAgentRequest(input: {
+  privateKey: ReturnType<typeof makeAgentKeyPair>['privateKey']
+  method?: string
+  pathAndQuery?: string
+  nonce?: string
+  headers?: Record<string, string>
+}) {
+  const method = input.method ?? 'GET'
+  const pathAndQuery = input.pathAndQuery ?? '/api/read'
+  const nonce = input.nonce ?? `nonce-${method}-${pathAndQuery}`.replace(/[^A-Za-z0-9_-]/g, '_')
+  const timestamp = new Date().toISOString()
+  const payload = buildAgentReadonlyCanonicalPayload({
+    method: method as 'GET' | 'HEAD',
+    host: 'helios.test',
+    pathAndQuery,
+    keyId: AGENT_KEY_ID,
+    ruleId: AGENT_RULE_ID,
+    timestamp,
+    nonce,
+  })
+  const signature = sign(null, Buffer.from(payload, 'utf8'), input.privateKey).toString('base64url')
+  return {
+    host: 'helios.test',
+    [AGENT_READONLY_HEADER_NAMES.keyId]: AGENT_KEY_ID,
+    [AGENT_READONLY_HEADER_NAMES.ruleId]: AGENT_RULE_ID,
+    [AGENT_READONLY_HEADER_NAMES.timestamp]: timestamp,
+    [AGENT_READONLY_HEADER_NAMES.nonce]: nonce,
+    [AGENT_READONLY_HEADER_NAMES.signature]: signature,
+    ...input.headers,
+  }
+}
+
+it('accepts signed-agent GET and HEAD requests for allowlisted reads', async () => {
+  const { server, keys, logs } = await buildSignedAgentGateHarness()
+  try {
+    const getResponse = await server.inject({
+      method: 'GET',
+      url: '/api/read',
+      headers: signAgentRequest({ privateKey: keys.privateKey, nonce: 'signed_get_nonce_1234' }),
+    })
+    expect(getResponse.statusCode).toBe(200)
+    expect(getResponse.json()).toMatchObject({ ok: true, principal: 'agent_readonly' })
+
+    const headResponse = await server.inject({
+      method: 'HEAD',
+      url: '/api/read',
+      headers: signAgentRequest({ privateKey: keys.privateKey, method: 'HEAD', nonce: 'signed_head_nonce_1234' }),
+    })
+    expect(headResponse.statusCode).toBe(200)
+    expect(headResponse.body).toBe('')
+    expect(logs.join('')).toContain('"outcome":"accepted"')
+  } finally {
+    await server.close()
+  }
+})
+
+it('denies signed-agent mutating and mixed-credential requests before route handling', async () => {
+  const { server, keys, logs } = await buildSignedAgentGateHarness()
+  try {
+    const postResponse = await server.inject({
+      method: 'POST',
+      url: '/api/read',
+      headers: signAgentRequest({ privateKey: keys.privateKey, method: 'POST', nonce: 'signed_post_nonce_1234' }),
+    })
+    expect(postResponse.statusCode).toBe(403)
+    expect(postResponse.json()).toEqual({ error: 'Signed-agent access denied.' })
+
+    const signedHeaders = signAgentRequest({
+      privateKey: keys.privateKey,
+      nonce: 'signed_cookie_nonce_1234',
+      headers: { cookie: 'helios-session=signed-secret', authorization: 'Bearer secret-token' },
+    })
+    const mixedResponse = await server.inject({ method: 'GET', url: '/api/read', headers: signedHeaders })
+    expect(mixedResponse.statusCode).toBe(403)
+    expect(mixedResponse.json()).toEqual({ error: 'Signed-agent access denied.' })
+
+    const renderedLogs = logs.join('')
+    expect(renderedLogs).toContain('signed-agent readonly request audit')
+    expect(renderedLogs).not.toContain(signedHeaders[AGENT_READONLY_HEADER_NAMES.signature])
+    expect(renderedLogs).not.toContain('helios-session=signed-secret')
+    expect(renderedLogs).not.toContain('secret-token')
+  } finally {
+    await server.close()
+  }
+})
+
+it.each([
+  ['page', '/not-allowlisted-page'],
+  ['api', '/api/not-allowlisted'],
+  ['asset', '/assetsx/ok.js'],
+] as const)('denies signed-agent non-allowlisted %s requests', async (_kind, pathAndQuery) => {
+  const { server, keys } = await buildSignedAgentGateHarness()
+  try {
+    const response = await server.inject({
+      method: 'GET',
+      url: pathAndQuery,
+      headers: signAgentRequest({ privateKey: keys.privateKey, pathAndQuery }),
+    })
+    expect(response.statusCode).toBe(403)
+    expect(response.json()).toEqual({ error: 'Signed-agent access denied.' })
+  } finally {
+    await server.close()
+  }
+})
+
+it('denies accepted signed-agent responses that exceed the allowlist byte cap', async () => {
+  const { server, keys, logs } = await buildSignedAgentGateHarness({ maxResponseBytes: 64 })
+  try {
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/too-large',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/too-large',
+        nonce: 'signed_large_nonce_1234',
+      }),
+    })
+    expect(response.statusCode).toBe(403)
+    expect(response.json()).toEqual({ error: 'Signed-agent response byte cap exceeded.' })
+    expect(logs.join('')).toContain('response_too_large')
+  } finally {
+    await server.close()
+  }
+})
 
 describeRequiresTestDb('auth gate', () => {
   it('lets /healthzz through without a session', async () => {

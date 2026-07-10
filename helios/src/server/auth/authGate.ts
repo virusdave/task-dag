@@ -3,6 +3,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { joinBasePath } from '../../shared/config/appBasePath.js'
 import { normalizeReturnTo } from '../../shared/config/returnTo.js'
 import { getServerEnv, isGoogleOAuthReady, type ServerEnv } from '../config/env.js'
+import {
+  createAgentReadonlyVerifier,
+  isSignedAgentReadonlyRequest,
+  type AgentReadonlyConfig,
+  type AgentReadonlyVerificationResult,
+} from './agentReadonly.js'
 import { readSessionUserId } from './sessionCookie.js'
 
 // Paths that are always reachable without a session. These are the
@@ -73,14 +79,34 @@ const LOGIN_FLOW_PREFIXES: ReadonlyArray<{ method: 'GET' | 'POST'; prefix: strin
   { method: 'POST', prefix: '/v1/reviews/', suffix: '/drawing-entry' },
 ]
 
+let cachedAgentReadonlyConfig: AgentReadonlyConfig | null = null
+let cachedAgentReadonlyVerifier: ReturnType<typeof createAgentReadonlyVerifier> | null = null
+
 export function registerAuthGate(server: FastifyInstance): void {
   server.addHook('onRequest', async (request, reply) => {
     const env = getServerEnv()
+    const pathOnly = stripQuery(request.url)
+    const appPath = stripAppBasePath(pathOnly, env.appBasePath)
+
+    if (isSignedAgentReadonlyRequest(request.headers)) {
+      const verification = getAgentReadonlyVerifier(env.agentReadonly).verify({
+        method: request.method,
+        host: request.headers.host,
+        pathAndQuery: `${appPath}${extractQuery(request.url)}`,
+        headers: request.headers,
+      })
+      if (!verification.ok) {
+        auditDeniedSignedAgentRequest(request, verification)
+        return reply.status(verification.statusCode).send({ error: 'Signed-agent access denied.' })
+      }
+      attachAgentReadonlyPrincipal(request, verification)
+      return
+    }
 
     // /healthzz is registered at the absolute root (not under the
     // appBasePath) for infrastructure probes and must never require
     // authentication.
-    if (stripQuery(request.url) === '/healthzz') {
+    if (pathOnly === '/healthzz') {
       return
     }
 
@@ -91,11 +117,9 @@ export function registerAuthGate(server: FastifyInstance): void {
     // VERISCAN_WEBHOOK_TOKEN inside the handler — see
     // routes/visitorScans.ts and
     // virusdave/top-level#9 / FreshlyBakedNYC/automation#31.
-    if (request.method === 'POST' && stripQuery(request.url).startsWith('/wh/')) {
+    if (request.method === 'POST' && pathOnly.startsWith('/wh/')) {
       return
     }
-
-    const appPath = stripAppBasePath(stripQuery(request.url), env.appBasePath)
 
     if (isLoginFlowRequest(request.method, appPath)) {
       return
@@ -114,6 +138,149 @@ export function registerAuthGate(server: FastifyInstance): void {
 
     return respondUnauthenticated(request, reply, env, appPath)
   })
+
+  server.addHook('onSend', async (request, reply, payload) => {
+    const principal = request.agentReadonlyPrincipal
+    if (!principal) {
+      return payload
+    }
+    if (request.method === 'HEAD' || payload === null || payload === undefined) {
+      request.agentReadonlyAudit = {
+        ...request.agentReadonlyAudit,
+        outcome: 'accepted',
+        method: principal.method,
+        pathAndQuery: principal.pathAndQuery,
+        statusCode: reply.statusCode,
+        responseBytes: 0,
+      }
+      return payload
+    }
+    if (isStreamPayload(payload)) {
+      request.agentReadonlyAudit = {
+        ...request.agentReadonlyAudit,
+        outcome: 'denied',
+        reason: 'response_too_large',
+        method: principal.method,
+        pathAndQuery: principal.pathAndQuery,
+        statusCode: 403,
+        responseBytes: principal.maxResponseBytes + 1,
+      }
+      reply.status(403).type('application/json; charset=utf-8')
+      return JSON.stringify({ error: 'Signed-agent response byte cap exceeded.' })
+    }
+
+    const responseBytes = Buffer.isBuffer(payload)
+      ? payload.byteLength
+      : Buffer.byteLength(String(payload), 'utf8')
+    if (responseBytes > principal.maxResponseBytes) {
+      request.agentReadonlyAudit = {
+        ...request.agentReadonlyAudit,
+        outcome: 'denied',
+        reason: 'response_too_large',
+        method: principal.method,
+        pathAndQuery: principal.pathAndQuery,
+        statusCode: 403,
+        responseBytes,
+      }
+      reply.status(403).type('application/json; charset=utf-8')
+      return JSON.stringify({ error: 'Signed-agent response byte cap exceeded.' })
+    }
+
+    request.agentReadonlyAudit = {
+      ...request.agentReadonlyAudit,
+      outcome: 'accepted',
+      method: principal.method,
+      pathAndQuery: principal.pathAndQuery,
+      statusCode: reply.statusCode,
+      responseBytes,
+    }
+    return payload
+  })
+
+  server.addHook('onResponse', async (request, reply) => {
+    const audit = request.agentReadonlyAudit
+    if (!audit) {
+      return
+    }
+    const logFields = {
+      outcome: audit.outcome,
+      reason: audit.reason,
+      keyId: audit.keyId,
+      ruleId: audit.ruleId,
+      method: audit.method,
+      pathAndQuery: audit.pathAndQuery,
+      pathKind: audit.pathKind,
+      statusCode: audit.statusCode ?? reply.statusCode,
+      responseBytes: audit.responseBytes,
+      maxResponseBytes: audit.maxResponseBytes,
+      nonce: audit.nonce,
+      remoteAddress: request.ip,
+      forwardedFor: request.headers['x-forwarded-for'],
+      forwardedHost: request.headers['x-forwarded-host'],
+      userAgent: request.headers['user-agent'],
+    }
+    const message = 'signed-agent readonly request audit'
+    if (audit.outcome === 'accepted') {
+      request.log.info(logFields, message)
+    } else {
+      request.log.warn(logFields, message)
+    }
+  })
+}
+
+function getAgentReadonlyVerifier(config: AgentReadonlyConfig): ReturnType<typeof createAgentReadonlyVerifier> {
+  if (cachedAgentReadonlyConfig !== config || cachedAgentReadonlyVerifier === null) {
+    cachedAgentReadonlyConfig = config
+    cachedAgentReadonlyVerifier = createAgentReadonlyVerifier(config)
+  }
+  return cachedAgentReadonlyVerifier
+}
+
+function auditDeniedSignedAgentRequest(
+  request: FastifyRequest,
+  result: Extract<AgentReadonlyVerificationResult, { ok: false }>,
+): void {
+  request.agentReadonlyAudit = {
+    outcome: 'denied',
+    reason: result.reason,
+    keyId: result.keyId,
+    ruleId: result.ruleId,
+    method: result.method ?? request.method,
+    pathAndQuery: result.pathAndQuery ?? request.url,
+    statusCode: result.statusCode,
+  }
+}
+
+function attachAgentReadonlyPrincipal(
+  request: FastifyRequest,
+  result: Extract<AgentReadonlyVerificationResult, { ok: true }>,
+): void {
+  request.agentReadonlyPrincipal = {
+    kind: 'agent_readonly',
+    keyId: result.keyId,
+    ruleId: result.ruleId,
+    method: result.method,
+    pathAndQuery: result.pathAndQuery,
+    pathKind: result.pathRule.kind,
+    pathMatch: result.pathRule.match,
+    pathRule: result.pathRule.path,
+    safeReadNote: result.pathRule.safeReadNote,
+    maxResponseBytes: result.maxResponseBytes,
+  }
+  request.agentReadonlyAudit = {
+    outcome: 'accepted',
+    keyId: result.keyId,
+    ruleId: result.ruleId,
+    method: result.method,
+    pathAndQuery: result.pathAndQuery,
+    pathKind: result.pathRule.kind,
+    maxResponseBytes: result.maxResponseBytes,
+    nonce: result.nonce,
+  }
+}
+
+function isStreamPayload(payload: unknown): boolean {
+  return typeof payload === 'object' && payload !== null && 'pipe' in payload && typeof payload.pipe === 'function'
 }
 
 function isLoginFlowRequest(method: string, appPath: string): boolean {
