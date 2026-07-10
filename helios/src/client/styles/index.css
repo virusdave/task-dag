@@ -11261,6 +11261,266 @@ span.metric-chart-legend-item {
   }
 }
 
+/* ── Low-inventory floor review (read-only P0) ─────────────────────────── */
+.low-inventory-page {
+  display: grid;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.low-inventory-header,
+.low-inventory-location-header,
+.low-inventory-sku > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.low-inventory-header h2,
+.low-inventory-location-header h3,
+.low-inventory-product h4 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-header h2 {
+  font-size: clamp(1.65rem, 6vw, 2.35rem);
+}
+
+.low-inventory-status:empty {
+  display: none;
+}
+
+.low-inventory-state-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 250, 241, 0.7);
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-state-card-error {
+  border-color: var(--danger);
+  background: rgba(192, 99, 84, 0.1);
+}
+
+.low-inventory-state-card-stale {
+  border-color: var(--warning);
+  background: rgba(199, 154, 46, 0.14);
+}
+
+.low-inventory-state-card .ghost-button {
+  min-height: 44px;
+  width: fit-content;
+  margin-top: 0.25rem;
+}
+
+.low-inventory-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.7rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 12px;
+  background: var(--accent-muted);
+}
+
+.low-inventory-summary strong {
+  font-size: 1.1rem;
+}
+
+.low-inventory-summary span {
+  color: var(--text-muted-strong);
+  font-size: 0.85rem;
+}
+
+.low-inventory-locations,
+.low-inventory-location,
+.low-inventory-skus {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.low-inventory-location {
+  padding-top: 0.15rem;
+}
+
+.low-inventory-location + .low-inventory-location {
+  padding-top: 1rem;
+  border-top: 2px solid var(--panel-border);
+}
+
+.low-inventory-location-header span:not(.pill) {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.low-inventory-location-header h3 {
+  font-size: 1.2rem;
+  line-height: 1.2;
+}
+
+.low-inventory-sku {
+  display: grid;
+  gap: 0.7rem;
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: rgba(255, 250, 241, 0.68);
+}
+
+.low-inventory-product {
+  min-width: 0;
+}
+
+.low-inventory-product h4 {
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.low-inventory-product span {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-total {
+  flex: 0 0 auto;
+  display: grid;
+  justify-items: end;
+  line-height: 1;
+}
+
+.low-inventory-total strong {
+  color: #8c2f1e;
+  font-size: 1.45rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.low-inventory-total span {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.low-inventory-total small {
+  margin-top: 0.25rem;
+  color: var(--text-muted-strong);
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+
+.low-inventory-packages {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.low-inventory-packages > li {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.low-inventory-packages > li > div {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.low-inventory-packages strong,
+.low-inventory-packages span {
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-packages strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+.low-inventory-packages span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.low-inventory-packages dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.low-inventory-packages dl > div {
+  min-width: 0;
+}
+
+.low-inventory-packages dt {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+}
+
+.low-inventory-packages dd {
+  margin: 0.1rem 0 0;
+  font-size: 0.84rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-empty {
+  padding-block: 1.2rem;
+  text-align: center;
+}
+
+.low-inventory-about {
+  color: var(--text-muted-strong);
+  font-size: 0.82rem;
+}
+
+.low-inventory-about summary {
+  min-height: 44px;
+  padding: 0.7rem 0;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.low-inventory-about p {
+  margin: 0 0 0.6rem;
+}
+
+@media (min-width: 768px) {
+  .low-inventory-skus {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 420px) {
+  .low-inventory-sku > header {
+    gap: 0.45rem;
+  }
+
+  .low-inventory-sku,
+  .low-inventory-state-card {
+    padding-inline: 0.7rem;
+  }
+}
+
 /* =========================================================================
    Parse-correction drawer / mobile bottom sheet
    (Catalog → Family Explorer → LitAlerts market match; issue #59 T4)

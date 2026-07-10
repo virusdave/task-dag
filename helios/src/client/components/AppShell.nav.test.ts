@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { Role } from '../../shared/contracts/domain/auth.js'
+import type { MetricGrantKey, Role } from '../../shared/contracts/domain/auth.js'
 import type { SessionEnvelope } from '../../shared/contracts/index.js'
 import { getPermissionsForRole } from '../../shared/domain/permissions.js'
 import { buildPrimarySidebarNodes } from './AppShell.js'
@@ -18,6 +18,20 @@ function sessionForRole(role: Role | null): SessionEnvelope {
     permissions: getPermissionsForRole(role),
     runtimeDependencies: [],
     user: null,
+  }
+}
+
+function viewerWithMetricGrants(metricGrants: MetricGrantKey[]): SessionEnvelope {
+  return {
+    ...sessionForRole('viewer'),
+    user: {
+      active: true,
+      email: 'viewer@example.com',
+      id: 1,
+      metricGrants,
+      name: 'Inventory Viewer',
+      role: 'viewer',
+    },
   }
 }
 
@@ -83,5 +97,25 @@ describe('buildPrimarySidebarNodes — pending-migrations nav entry (#62)', () =
   it('hides the leaf while the session is still loading (null)', () => {
     const nodes = buildPrimarySidebarNodes({}, null)
     expect(findByNavKey(nodes, 'config.database.pending-migrations')).toBeUndefined()
+  })
+})
+
+describe('buildPrimarySidebarNodes — low-inventory site navigation', () => {
+  it('provides direct Bronx and Midtown routes to a user with the reordering grant', () => {
+    const nodes = buildPrimarySidebarNodes({}, viewerWithMetricGrants(['reordering']))
+    expect(findByNavKey(nodes, 'catalog.low-inventory.bronx')).toMatchObject({
+      kind: 'leaf',
+      to: '/catalog/inventory/low/bronx',
+    })
+    expect(findByNavKey(nodes, 'catalog.low-inventory.midtown')).toMatchObject({
+      kind: 'leaf',
+      to: '/catalog/inventory/low/midtown',
+    })
+  })
+
+  it('hides both routes from a viewer without the reordering grant', () => {
+    const nodes = buildPrimarySidebarNodes({}, viewerWithMetricGrants([]))
+    expect(findByNavKey(nodes, 'catalog.low-inventory.bronx')).toBeUndefined()
+    expect(findByNavKey(nodes, 'catalog.low-inventory.midtown')).toBeUndefined()
   })
 })

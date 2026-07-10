@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 
 import {
   buildHeliosModulePath,
+  HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type CatalogMaintenanceSurveyResponse,
 } from '../../../shared/contracts/index.js'
 import { useRegisterSidebarSubtree } from '../../components/SidebarNavContext.js'
@@ -25,6 +26,10 @@ export function buildMaintenanceIndexPath(): string {
 
 export function buildMaintenanceSitePath(siteKey: string): string {
   return `${buildMaintenanceIndexPath()}/site/${encodeURIComponent(siteKey)}`
+}
+
+export function buildLowInventorySitePath(siteKey: string): string {
+  return `${buildHeliosModulePath('catalog', 'inventory/low')}/${encodeURIComponent(siteKey)}`
 }
 
 /**
@@ -173,6 +178,12 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
       to: buildHeliosModulePath('catalog', 'purchases'),
     },
     buildImagesAndBarcodesNode(imagesAndBarcodes),
+    ...HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => ({
+      kind: 'leaf' as const,
+      navKey: `catalog.low-inventory.${site.siteKey}`,
+      label: `Low inventory · ${site.siteLabel}`,
+      to: buildLowInventorySitePath(site.siteKey),
+    })),
     {
       // Canonical home for "refresh current inventory stock for a site"
       // (virusdave/top-level#14). Previously this could only be triggered

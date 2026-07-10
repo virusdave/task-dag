@@ -7,7 +7,7 @@ import {
   type MetricGrantKey,
   type SessionEnvelope,
 } from '../../shared/contracts/index.js'
-import { userHasAnyMetricGrant } from '../../shared/domain/metricGrants.js'
+import { userHasAnyMetricGrant, userHasMetricGrant } from '../../shared/domain/metricGrants.js'
 import { GADS_METRIC_SCOPES } from '../../shared/domain/gadsSites.js'
 import { buildAppPath } from '../app/paths.js'
 import { usePageTitle } from '../app/usePageTitle.js'
@@ -215,7 +215,9 @@ export function buildPrimarySidebarNodes(
     to: buildHeliosModulePath('catalog', 'browser'),
     end: false,
     defaultOpen: false,
-    children: subtreeFor('catalog'),
+    children: subtreeFor('catalog').filter((node) =>
+      !node.navKey.startsWith('catalog.low-inventory.') || userHasMetricGrant(session?.user, 'reordering'),
+    ),
   }
 
   // ---- 3. Marketing & Competitors ----
