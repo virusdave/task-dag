@@ -1716,6 +1716,9 @@ CI BROKEN-MASTER AUTO-REPAIR:
     chain-write <owner/repo> <branch> --for-sha=<commit>
                            Compare-and-set that state; race-safe and
                            stale-run-safe (rejects superseded CI SHAs)
+    reconcile-lease <owner/repo> <branch> --owner=<id> --now=<UTC>
+                           Acquire or renew the repair reconciler's five-minute
+                           metadata-only lease with a monotonic fencing token
     classify <owner/repo> <branch> --for-sha=<commit> (--result|--gate ...)
                            Classify a commit's aggregate required-gate
                            result green/red/unknown and drive the repair
@@ -7738,6 +7741,7 @@ main() {
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;
+        reconcile-lease) cmd_reconcile_lease "$@" ;;
         comment) cmd_comment "$@" ;;
         issue-update) cmd_issue_update "$@" ;;
         check-workflow) cmd_check_workflow "$@" ;;

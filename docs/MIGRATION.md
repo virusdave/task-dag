@@ -336,6 +336,28 @@ Operational caveats:
   graph-convergence instead; no tombstone is needed because `master` carries the
   durable completion witness.
 
+## Repair-chain reconciliation format activation
+
+The reconciliation lease and evidence fields extend the existing
+`tasks/ci-chains/**` message format without creating another state store.
+Current `chain-write` preserves every new field, but a pre-extension binary
+serializes only the legacy field list and would erase a live lease, fence,
+evidence, and accepted registry authority.
+
+Do not invoke `reconcile-lease` or write any nonempty new-format field until
+every classifier, tree-fix, and repair-ticket caller is running the preserving
+binary and all in-flight jobs using an older binary have drained. In
+particular, never run an old `repair-ticket` against an active new-format
+chain. This upgrade/drain check is an activation barrier, not an optional
+compatibility precaution.
+
+Rollback disables new callers first and leaves chain refs and repair tickets
+intact. If any active chain contains new-format state, migrate it with an
+explicit compare-and-set operation and verify origin readback before an older
+writer is allowed to resume. Never interpret a fence erased by an old writer
+as a legitimate legacy zero, and never delete coordination refs or tickets as
+rollback.
+
 ## Transitional duplication (known, accepted)
 
 During the migration the canonical CLI exists both here and in

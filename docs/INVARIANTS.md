@@ -71,7 +71,7 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/blocked-meta/<sha>` | parked-task side metadata (tree==task tree, first parent==task commit) | `block` |
    | `tasks/delegated/<N>/<owner>/<repo>/<peer>` | cross-repo delegation edge | `delegate` |
    | `tasks/completions/<N>/…/<sha>` | recorded downstream completion | `ingest-comment` completion disposition |
-   | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write` |
+   | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write`, `reconcile-lease` |
    | `tasks/v1/graph` | dependency-edge index branch — a data-in-tree ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
    | `tasks/v1/mailbox/00`..`0f` | cross-repo notification mailbox — 16 fixed data-in-tree shard branches, exempt from the empty-tree floor (see below) | the mailbox writer (issue #13) |
    | `gh/issues/<N>` | GitHub-side epic mapping | `create-task-commit.sh` |
@@ -84,6 +84,13 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    in the *same* change, or `validate --strict` (and the CLI-tests CI gate)
    will correctly reject it. This ordering is deliberate: it forces the
    contract and its test to land before any ref uses the new path.
+
+   CI repair-chain messages are a typed line protocol. `Current-Head` is
+   derived only from `chain-write --for-sha`; the legacy classifier writer can
+   mutate only its classifier fields. Evidence, registry authority,
+   diagnostics, and `Reconcile-Lease-*` / `Reconcile-Fence` are protected
+   fields written by their owning typed operations. Every serializer rejects
+   CR/LF-bearing values before creating a commit.
 
 `validate --strict` is **read-only** and **race-tolerant**: it snapshots
 refs in a single `for-each-ref` and skips any ref whose object vanished

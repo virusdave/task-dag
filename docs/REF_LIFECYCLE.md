@@ -120,8 +120,11 @@ graph.
 workflow ref — it is the durable per-repo/branch state store for the
 CI-driven broken-master auto-repair subsystem (`chain-read` /
 `chain-write`; design §1/§4). The ref points at an empty-tree commit
-whose *message* holds the chain fields (`Current-Head`, `Last-Green`,
-`First-Red`, `State`, `Repair-Mode`, `Repair-Issue`, `Repair-Attempt`);
+whose *message* holds the desired repair state, bounded observation/evidence,
+accepted registry generation and enrollment mode, reconciliation diagnostics,
+and the `Reconcile-Lease-Owner`, `Reconcile-Lease-Until`, and monotonically
+increasing `Reconcile-Fence` coordination tuple. The complete field list and
+canonical order live in `_CICHAIN_FIELDS` in `ci-chains.sh`;
 each write's first parent is the prior chain commit, so the ref is the
 chain's audit history. `<branch>` is percent-encoded to one ref-safe
 path component so a slashed branch (`release/v1`) can't D/F-conflict with
@@ -129,6 +132,15 @@ a plain `release` ref. Writes are compare-and-set: an atomic
 `--force-with-lease` push + readback (concurrency) **plus** a stale-run
 guard that refuses a `--for-sha` already superseded by a newer stored
 `Current-Head` (out-of-order CI). See `scripts/task-dag.d/ci-chains.sh`.
+
+`reconcile-lease` is the only public lease writer. It uses the same internal
+compare-and-set serializer without changing `Current-Head` or any classifier
+field. Acquisition after an absent, unlocked, or expired lease increments the
+retained fence exactly once. Renewal requires the same owner and matching
+fence and retains that fence. The five-minute deadline and `Updated-At` derive
+from the caller's canonical, already clock-skew-validated `--now`; host time is
+not lease authority. Partial, duplicate, noncanonical, or exhausted stored
+tuples fail closed without a ref mutation.
 
 ## Epic-root orchestration is cross-host claimable (CAS)
 

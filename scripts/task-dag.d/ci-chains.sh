@@ -67,7 +67,39 @@
 # after a small threshold instead of churning continue tasks forever. They are
 # inherited/written like every other field (chain-write only persists fields
 # listed here), and cleared whenever a chain closes green or a fresh chain opens.
-_CICHAIN_FIELDS=(Current-Head Last-Green First-Red State Repair-Mode Repair-Issue Repair-Attempt Fail-Signature Same-Sig-Count)
+_CICHAIN_FIELDS=(
+    Current-Head Last-Green First-Red State Repair-Mode Repair-Issue
+    Repair-Attempt Fail-Signature Same-Sig-Count
+    Observed-Head Policy-Digest Aggregate Required-Evidence
+    Head-First-Seen-At Observed-At Evidence-Key Decision-Key
+    Registry-Commit Registry-Blob Enrollment-Mode
+    Reconcile-Status Reconcile-Error
+    Reconcile-Lease-Owner Reconcile-Lease-Until Reconcile-Fence
+)
+
+# `chain-write` is the legacy classifier writer. Authority, evidence,
+# diagnostics, and lease fields are deliberately NOT writable through its
+# generic --set surface; their owning commands update them through the typed
+# internal CAS primitive below.
+_CICHAIN_CLASSIFIER_WRITABLE_FIELDS=(
+    Last-Green First-Red State Repair-Mode Repair-Issue Repair-Attempt
+    Fail-Signature Same-Sig-Count
+)
+
+_cichain_classifier_field_writable() {
+    local wanted="$1" field
+    for field in "${_CICHAIN_CLASSIFIER_WRITABLE_FIELDS[@]}"; do
+        [ "$field" = "$wanted" ] && return 0
+    done
+    return 1
+}
+
+_cichain_single_line() {
+    case "$1" in
+        *$'\n'* | *$'\r'*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
 
 # Helper: percent-encode a string to a single ref-safe path component.
 # Everything outside [A-Za-z0-9._-] becomes %XX so slashed/odd branch names
@@ -130,7 +162,94 @@ _cichain_field() {
         | sed -n "s/^${field}: *//p" | head -1
 }
 
+_cichain_field_count() {
+    local commit="$1" field="$2"
+    git log -1 --format=%B "$commit" 2>/dev/null \
+        | awk -v prefix="${field}:" 'index($0, prefix) == 1 { n++ } END { print n + 0 }'
+}
+
 _cichain_now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+# Serialize and compare-and-set a fully materialized chain state. This is the
+# one mutation primitive shared by classifier writes and metadata-only lease
+# writes. Callers own all semantic validation and must provide every canonical
+# field; this helper enforces the line-oriented storage boundary again before
+# creating a commit.
+#
+# Result globals:
+#   _CICHAIN_PUSH_COMMIT  new commit on success
+#   _CICHAIN_PUSH_REASON  race-lost | push-failed | not-confirmed on failure
+_cichain_push_state() { # <repo> <branch> <ref> <old> <updated-at> <map-name>
+    local repo="$1" branch="$2" ref="$3" old="$4" updated_at="$5" map_name="$6"
+    local -n state="$map_name"
+    local field msg new_commit lease push_output readback
+
+    _CICHAIN_PUSH_COMMIT=""
+    _CICHAIN_PUSH_REASON=""
+
+    if [ -z "$repo" ] || [ -z "$branch" ] \
+        || ! _cichain_single_line "$repo" \
+        || ! _cichain_single_line "$branch" \
+        || ! _cichain_single_line "$updated_at"; then
+        _CICHAIN_PUSH_REASON="push-failed"
+        return 4
+    fi
+    for field in "${_CICHAIN_FIELDS[@]}"; do
+        if [ -z "${state[$field]+present}" ] \
+            || ! _cichain_single_line "${state[$field]}"; then
+            _CICHAIN_PUSH_REASON="push-failed"
+            return 4
+        fi
+    done
+
+    _cichain_ensure_identity
+    msg="CI-Chain: ${repo}@${branch}
+"
+    for field in "${_CICHAIN_FIELDS[@]}"; do
+        msg="${msg}
+${field}: ${state[$field]}"
+    done
+    msg="${msg}
+Updated-At: ${updated_at}"
+
+    if [ -n "$old" ]; then
+        new_commit="$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE" -p "$old")" || {
+            _CICHAIN_PUSH_REASON="push-failed"
+            return 4
+        }
+    else
+        new_commit="$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE")" || {
+            _CICHAIN_PUSH_REASON="push-failed"
+            return 4
+        }
+    fi
+
+    lease="--force-with-lease=${ref}:${old}"
+    if ! push_output=$(git push --atomic origin "$lease" "${new_commit}:${ref}" 2>&1); then
+        if printf '%s' "$push_output" | grep -qiE 'rejected|stale info|non-fast-forward|fetch first'; then
+            _cichain_fetch "$ref"
+            _CICHAIN_PUSH_REASON="race-lost"
+            return 5
+        fi
+        _CICHAIN_PUSH_REASON="push-failed"
+        return 4
+    fi
+
+    if ! readback="$(_cichain_remote_sha "$ref")"; then
+        _CICHAIN_PUSH_REASON="not-confirmed"
+        return 4
+    fi
+    if [ "$readback" != "$new_commit" ]; then
+        _cichain_fetch "$ref"
+        _CICHAIN_PUSH_REASON="race-lost"
+        return 5
+    fi
+
+    git update-ref "$ref" "$new_commit" 2>/dev/null \
+        || echo "Warning: origin updated but local mirror of $ref failed" >&2
+    _CICHAIN_PUSH_COMMIT="$new_commit"
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Command: chain-read <owner/repo> <branch> [--json] [--no-fetch]
@@ -270,6 +389,10 @@ cmd_chain_write() {
             echo "Error: --set expects Field=Value, got '$kv'" >&2
             return 1
         fi
+        if ! _cichain_classifier_field_writable "$k"; then
+            echo "Error: chain-write cannot mutate protected or derived field '$k'" >&2
+            return 1
+        fi
         overrides["$k"]="$v"
     }
 
@@ -340,10 +463,22 @@ EOF
         echo "Error: <owner/repo> and <branch> are required" >&2
         return 1
     fi
+    if ! _cichain_single_line "$repo" || ! _cichain_single_line "$branch"; then
+        echo "Error: <owner/repo> and <branch> must each be a single line" >&2
+        return 1
+    fi
     if [ -z "$for_sha" ]; then
         echo "Error: --for-sha=<commit> is required" >&2
         return 1
     fi
+    local override_field
+    for override_field in "${!overrides[@]}"; do
+        if ! _cichain_classifier_field_writable "$override_field" \
+            || ! _cichain_single_line "${overrides[$override_field]}"; then
+            echo "Error: invalid single-line chain-write value for '$override_field'" >&2
+            return 1
+        fi
+    done
 
     # Resolve --for-sha to a full, immutable commit object up front. This
     # rejects junk (HEAD, a branch name, a typo, an abbreviated/ambiguous
@@ -475,91 +610,262 @@ EOF
     done
     vals[Current-Head]="$for_sha"
 
-    # Build the chain-state commit message.
-    local msg="CI-Chain: ${repo}@${branch}
-"
+    # Materialize every canonical field before entering the typed serializer.
+    # This is what makes current writers preserve fields owned by later
+    # reconciliation stages even though chain-write cannot mutate them.
     for f in "${_CICHAIN_FIELDS[@]}"; do
-        msg="${msg}
-${f}: ${vals[$f]:-}"
+        [ -n "${vals[$f]+present}" ] || vals["$f"]=""
     done
-    msg="${msg}
-Updated-At: $(_cichain_now)"
 
-    local new_commit
-    if [ -n "$old" ]; then
-        new_commit="$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE" -p "$old")" || {
-            echo "Error: failed to build chain-state commit" >&2
-            return 4
-        }
-    else
-        new_commit="$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE")" || {
-            echo "Error: failed to build chain-state commit" >&2
-            return 4
-        }
-    fi
-
-    # Atomic CAS push: lease pins the expected old value (empty = create).
-    local lease="--force-with-lease=${ref}:${old}"
-    local push_output
-    if push_output=$(git push --atomic origin "$lease" "${new_commit}:${ref}" 2>&1); then
-        # Double-checked locking: confirm origin actually holds OUR commit.
-        # A CHECKED readback lets us tell "confirmation transport failed"
-        # (exit 4, our write may well have landed) from "origin holds a
-        # different commit" (exit 5, we genuinely lost a race).
-        local readback
-        if ! readback="$(_cichain_remote_sha "$ref")"; then
-            if [ "$json" = true ]; then
-                printf '{"ok":false,"reason":"not-confirmed","ref":%s,"commit":%s}\n' \
-                    "$(json_escape "$ref")" "$(json_escape "$new_commit")"
-            else
-                printf "${YELLOW}Chain-write push for %s@%s succeeded but origin readback was unreachable; could not confirm.${RESET}\n" \
-                    "$repo" "$branch" >&2
-            fi
-            return 4
-        fi
-        if [ "$readback" != "$new_commit" ]; then
-            _cichain_fetch "$ref"
-            if [ "$json" = true ]; then
-                printf '{"ok":false,"reason":"race-lost","ref":%s,"expected":%s,"actual":%s}\n' \
-                    "$(json_escape "$ref")" "$(json_escape "$new_commit")" "$(json_escape "${readback:-}")"
-            else
-                printf "${RED}✗ Chain-write push succeeded but origin readback shows %s (expected %s); another writer raced us.${RESET}\n" \
-                    "${readback:-<missing>}" "$new_commit" >&2
-            fi
-            return 5
-        fi
-        # Mirror into the local ref for convenience. This is NOT the source
-        # of truth (origin already confirmed), so a local failure must not
-        # turn a confirmed remote success into an error exit.
-        git update-ref "$ref" "$new_commit" 2>/dev/null \
-            || echo "Warning: origin updated but local mirror of $ref failed" >&2
+    local push_rc=0
+    _cichain_push_state "$repo" "$branch" "$ref" "$old" "$(_cichain_now)" vals || push_rc=$?
+    if [ "$push_rc" -eq 0 ]; then
         if [ "$json" = true ]; then
             printf '{"ok":true,"ref":%s,"commit":%s,"currentHead":%s,"state":%s}\n' \
-                "$(json_escape "$ref")" "$(json_escape "$new_commit")" "$(json_escape "${vals[Current-Head]:-}")" "$(json_escape "${vals[State]:-}")"
+                "$(json_escape "$ref")" "$(json_escape "$_CICHAIN_PUSH_COMMIT")" "$(json_escape "${vals[Current-Head]:-}")" "$(json_escape "${vals[State]:-}")"
         else
             printf "${GREEN}✓ Chain state for %s@%s -> %s (Current-Head %s, State %s)${RESET}\n" \
-                "$repo" "$branch" "$(git rev-parse --short "$new_commit")" \
+                "$repo" "$branch" "$(git rev-parse --short "$_CICHAIN_PUSH_COMMIT")" \
                 "${vals[Current-Head]:-}" "${vals[State]:-}"
         fi
         return 0
     fi
 
-    if echo "$push_output" | grep -qiE 'rejected|stale info|non-fast-forward|fetch first'; then
-        _cichain_fetch "$ref"
+    if [ "$_CICHAIN_PUSH_REASON" = "race-lost" ]; then
         if [ "$json" = true ]; then
             printf '{"ok":false,"reason":"race-lost","ref":%s}\n' "$(json_escape "$ref")"
         else
             printf "${YELLOW}Lost chain-write CAS race for %s@%s (another writer won).${RESET}\n" \
                 "$repo" "$branch" >&2
-            echo "$push_output" >&2
         fi
         return 5
     fi
 
     if [ "$json" = true ]; then
-        printf '{"ok":false,"reason":"push-failed","ref":%s}\n' "$(json_escape "$ref")"
+        printf '{"ok":false,"reason":%s,"ref":%s}\n' \
+            "$(json_escape "$_CICHAIN_PUSH_REASON")" "$(json_escape "$ref")"
     else
-        printf "${RED}Chain-write push failed:${RESET}\n%s\n" "$push_output" >&2
+        printf "${RED}Chain-write failed for %s@%s (%s).${RESET}\n" \
+            "$repo" "$branch" "$_CICHAIN_PUSH_REASON" >&2
     fi
     return 4
+}
+
+_cichain_timestamp_epoch() {
+    local value="$1" rendered epoch
+    [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+        || return 1
+    rendered="$(date -u -d "$value" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)" \
+        || return 1
+    [ "$rendered" = "$value" ] || return 1
+    epoch="$(date -u -d "$value" +%s 2>/dev/null)" || return 1
+    [[ "$epoch" =~ ^-?[0-9]+$ ]] || return 1
+    printf '%s' "$epoch"
+}
+
+# ---------------------------------------------------------------------------
+# Command: reconcile-lease <owner/repo> <branch> --owner=<id> --now=<UTC>
+# ---------------------------------------------------------------------------
+# Acquire or renew the five-minute reconciliation lease stored in the existing
+# chain ref. `--now` is an explicit trust boundary: the future evidence
+# collector supplies GitHub's already-skew-validated Date value, so host time
+# never decides lease validity or persisted Updated-At.
+cmd_reconcile_lease() {
+    local repo="" branch="" owner="" now="" supplied_fence=""
+    local have_fence=false json=false
+
+    _reconcile_lease_report() { # <rc> <reason> [message]
+        local rc="$1" reason="$2" message="${3:-}"
+        if [ "$json" = true ]; then
+            printf '{"ok":%s,"reason":%s,"rc":%s' \
+                "$([ "$rc" -eq 0 ] && printf true || printf false)" \
+                "$(json_escape "$reason")" "$rc"
+            if [ "$rc" -eq 0 ]; then
+                printf ',"repo":%s,"branch":%s,"owner":%s,"fence":%s,"leaseUntil":%s,"ref":%s,"commit":%s' \
+                    "$(json_escape "$repo")" "$(json_escape "$branch")" \
+                    "$(json_escape "$owner")" "$new_fence" \
+                    "$(json_escape "$new_until")" "$(json_escape "$ref")" \
+                    "$(json_escape "$_CICHAIN_PUSH_COMMIT")"
+            fi
+            printf '}\n'
+        elif [ "$rc" -eq 0 ]; then
+            printf "${GREEN}✓ Reconciliation lease %s for %s@%s (owner %s, fence %s, until %s)${RESET}\n" \
+                "$reason" "$repo" "$branch" "$owner" "$new_fence" "$new_until"
+        else
+            printf "${RED}Reconciliation lease refused (%s): %s${RESET}\n" \
+                "$reason" "$message" >&2
+        fi
+        return "$rc"
+    }
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --owner=*) owner="${1#*=}"; shift ;;
+            --now=*) now="${1#*=}"; shift ;;
+            --fence=*) supplied_fence="${1#*=}"; have_fence=true; shift ;;
+            --json) json=true; shift ;;
+            --help | -h)
+                cat <<'EOF'
+Usage: task-dag reconcile-lease <owner/repo> <branch> --owner=<pass-id> \
+         --now=<YYYY-MM-DDTHH:MM:SSZ> [--fence=<n>] [--json]
+
+Acquire or renew the five-minute fenced lease for one CI repair chain.
+The caller must pass an authoritative, clock-skew-validated UTC time. A new
+or expired lease increments the retained fence; --fence, when supplied, is a
+compare precondition. Renewing a live lease requires its matching owner and
+fence. The operation changes only Reconcile-Lease-* / Reconcile-Fence and
+preserves every classifier and evidence field.
+
+Owner: 1..128 characters matching [A-Za-z0-9][A-Za-z0-9._:@/-]*
+Fence: canonical nonnegative decimal, at most 999999999999999999
+
+Exit codes / JSON reasons:
+  0  acquired | renewed
+  1  invalid-argument
+  4  push-failed | not-confirmed
+  5  race-lost
+  7  lease-held | fence-mismatch
+  8  stored-invalid
+  9  fence-exhausted
+EOF
+                return 0
+                ;;
+            -*)
+                _reconcile_lease_report 1 invalid-argument "unknown option '$1'"
+                return $?
+                ;;
+            *)
+                if [ -z "$repo" ]; then repo="$1"
+                elif [ -z "$branch" ]; then branch="$1"
+                else
+                    _reconcile_lease_report 1 invalid-argument "unexpected argument '$1'"
+                    return $?
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$repo" ] || [ -z "$branch" ] || [ -z "$owner" ] || [ -z "$now" ] \
+        || ! _cichain_single_line "$repo" || ! _cichain_single_line "$branch" \
+        || ! [[ "$owner" =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$ ]]; then
+        _reconcile_lease_report 1 invalid-argument "repo, branch, owner, and canonical --now are required"
+        return $?
+    fi
+    if [ "$have_fence" = true ] \
+        && { ! [[ "$supplied_fence" =~ ^(0|[1-9][0-9]*)$ ]] \
+            || [ "${#supplied_fence}" -gt 18 ] \
+            || [ "$supplied_fence" -gt 999999999999999999 ]; }; then
+        _reconcile_lease_report 1 invalid-argument "--fence must be canonical and between 0 and 999999999999999999"
+        return $?
+    fi
+
+    local now_epoch new_until new_until_epoch
+    if ! now_epoch="$(_cichain_timestamp_epoch "$now")"; then
+        _reconcile_lease_report 1 invalid-argument "--now must be an exact canonical UTC timestamp"
+        return $?
+    fi
+    new_until="$(date -u -d "@$((now_epoch + 300))" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+    if [ -z "$new_until" ] || ! new_until_epoch="$(_cichain_timestamp_epoch "$new_until")" \
+        || [ "$new_until_epoch" -ne $((now_epoch + 300)) ]; then
+        _reconcile_lease_report 1 invalid-argument "--now plus the five-minute lease cannot be represented canonically"
+        return $?
+    fi
+
+    local ref old
+    ref="$(_cichain_ref "$repo" "$branch")"
+    if ! old="$(_cichain_remote_sha "$ref")"; then
+        _reconcile_lease_report 4 push-failed "cannot reach origin to read the chain"
+        return $?
+    fi
+    if [ -n "$old" ]; then
+        _cichain_fetch "$ref"
+        if ! git cat-file -e "${old}^{commit}" 2>/dev/null; then
+            _reconcile_lease_report 4 push-failed "origin chain object is unavailable locally"
+            return $?
+        fi
+    fi
+
+    declare -A vals=()
+    local field
+    for field in "${_CICHAIN_FIELDS[@]}"; do
+        vals["$field"]=""
+        [ -n "$old" ] && vals["$field"]="$(_cichain_field "$old" "$field")"
+    done
+
+    local stored_owner="${vals[Reconcile-Lease-Owner]}"
+    local stored_until="${vals[Reconcile-Lease-Until]}"
+    local prior_fence="${vals[Reconcile-Fence]}"
+    local count
+    if [ -n "$old" ]; then
+        for field in Reconcile-Lease-Owner Reconcile-Lease-Until Reconcile-Fence; do
+            count="$(_cichain_field_count "$old" "$field")"
+            if [ "$count" -gt 1 ]; then
+                _reconcile_lease_report 8 stored-invalid "stored lease field '$field' is duplicated"
+                return $?
+            fi
+        done
+    fi
+
+    [ -n "$prior_fence" ] || prior_fence=0
+    if ! [[ "$prior_fence" =~ ^(0|[1-9][0-9]*)$ ]] \
+        || [ "${#prior_fence}" -gt 18 ] \
+        || [ "$prior_fence" -gt 999999999999999999 ]; then
+        _reconcile_lease_report 8 stored-invalid "stored reconciliation fence is malformed"
+        return $?
+    fi
+    if { [ -n "$stored_owner" ] && [ -z "$stored_until" ]; } \
+        || { [ -z "$stored_owner" ] && [ -n "$stored_until" ]; }; then
+        _reconcile_lease_report 8 stored-invalid "stored lease owner/deadline tuple is partial"
+        return $?
+    fi
+
+    local active=false stored_until_epoch=""
+    if [ -n "$stored_owner" ]; then
+        if ! [[ "$stored_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$ ]] \
+            || [ "$prior_fence" = 0 ] \
+            || ! stored_until_epoch="$(_cichain_timestamp_epoch "$stored_until")"; then
+            _reconcile_lease_report 8 stored-invalid "stored active lease tuple is malformed"
+            return $?
+        fi
+        [ "$now_epoch" -lt "$stored_until_epoch" ] && active=true
+    fi
+
+    local action new_fence
+    if [ "$active" = true ]; then
+        if [ "$stored_owner" != "$owner" ]; then
+            _reconcile_lease_report 7 lease-held "a different owner holds the live lease"
+            return $?
+        fi
+        if [ "$have_fence" != true ] || [ "$supplied_fence" != "$prior_fence" ]; then
+            _reconcile_lease_report 7 fence-mismatch "live renewal requires the matching fence"
+            return $?
+        fi
+        action=renewed
+        new_fence="$prior_fence"
+    else
+        if [ "$have_fence" = true ] && [ "$supplied_fence" != "$prior_fence" ]; then
+            _reconcile_lease_report 7 fence-mismatch "acquisition fence precondition does not match"
+            return $?
+        fi
+        if [ "$prior_fence" = 999999999999999999 ]; then
+            _reconcile_lease_report 9 fence-exhausted "stored fence cannot be incremented safely"
+            return $?
+        fi
+        action=acquired
+        new_fence=$((10#$prior_fence + 1))
+    fi
+
+    vals[Reconcile-Lease-Owner]="$owner"
+    vals[Reconcile-Lease-Until]="$new_until"
+    vals[Reconcile-Fence]="$new_fence"
+
+    local push_rc=0
+    _cichain_push_state "$repo" "$branch" "$ref" "$old" "$now" vals || push_rc=$?
+    if [ "$push_rc" -ne 0 ]; then
+        _reconcile_lease_report "$push_rc" "$_CICHAIN_PUSH_REASON" "chain compare-and-set failed"
+        return $?
+    fi
+
+    _reconcile_lease_report 0 "$action"
 }

@@ -274,7 +274,7 @@ fi
 # regression that raw-interpolated it would emit invalid JSON.
 # ---------------------------------------------------------------------------
 "$TD" chain-write "$REPO" advc --for-sha="$C1" \
-  --set 'State=re"d\x' --set 'First-Red='"$C1" --set 'Current-Head='"$C1" \
+  --set 'State=re"d\x' --set 'First-Red='"$C1" \
   --create >/dev/null 2>&1
 adv=$("$TD" classify "$REPO" advc --for-sha="$C1" --result=red \
   --current-head="$C1" --json --dry-run 2>/dev/null)
