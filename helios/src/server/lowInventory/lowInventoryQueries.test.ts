@@ -150,6 +150,7 @@ describe('low-inventory read model', () => {
         productSku: 'SHARED',
       },
     ])
+    expect(model.snapshotObservedAt).toBe('2026-07-10T14:00:00.000Z')
   })
 
   it('queries the current mirror with the canonical sellable filters', async () => {
@@ -257,7 +258,10 @@ describe('low-inventory read model', () => {
     ).rejects.toThrow('Unknown Helios dealer id 999999.')
     await expect(
       queryLowInventoryReadModel({ dealerId: 210705, threshold: 0 }),
-    ).rejects.toThrow('Low-inventory threshold must be a positive integer.')
+    ).rejects.toThrow('Low-inventory threshold must be an integer from 1 through 100.')
+    await expect(
+      queryLowInventoryReadModel({ dealerId: 210705, threshold: 101 }),
+    ).rejects.toThrow('Low-inventory threshold must be an integer from 1 through 100.')
     expect(query).not.toHaveBeenCalled()
   })
 })

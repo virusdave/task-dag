@@ -1,53 +1,13 @@
 import {
   getHeliosPendingPurchaseSiteDealer,
   isValidWarehouseLocationCode,
+  LowInventoryThresholdSchema,
+  type LowInventoryLocation,
+  type LowInventoryLocationGroup,
+  type LowInventoryReadModel,
+  type LowInventorySku,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
-
-export interface LowInventoryShelfLocation {
-  kind: 'shelf'
-  label: string
-}
-
-export interface LowInventoryStockRoomLocation {
-  kind: 'stock-room'
-  label: string
-}
-
-export type LowInventoryLocation = LowInventoryShelfLocation | LowInventoryStockRoomLocation
-
-export interface LowInventoryPackage {
-  availableQty: number
-  currentQty: number | null
-  holdQty: number | null
-  internalTrackCode: string | null
-  inventoryItemId: string
-  metrcTag: string | null
-  observedAt: string
-  productId: number
-  productName: string | null
-  stockLocation: string
-}
-
-export interface LowInventorySku {
-  combinedAvailableQty: number
-  packages: LowInventoryPackage[]
-  productIds: number[]
-  productName: string | null
-  productSku: string | null
-}
-
-export interface LowInventoryLocationGroup {
-  location: LowInventoryLocation
-  skus: LowInventorySku[]
-}
-
-export interface LowInventoryReadModel {
-  dealerId: number
-  locationGroups: LowInventoryLocationGroup[]
-  snapshotObservedAt: string | null
-  threshold: number
-}
 
 interface LowInventoryRow {
   available_qty: number | string
@@ -179,6 +139,7 @@ export function buildLowInventoryReadModel(args: {
   >()
   let snapshotObservedAt: string | null = null
   const resolvedRows: Array<{
+    observedAt: string
     productId: number
     productKey: string
     productName: string | null
@@ -192,6 +153,10 @@ export function buildLowInventoryReadModel(args: {
     if (catalogProduct?.active === false) {
       continue
     }
+    const observedAt = isoTimestamp(row.observed_at_max)
+    if (snapshotObservedAt === null || observedAt > snapshotObservedAt) {
+      snapshotObservedAt = observedAt
+    }
     const productId = positiveInteger(row.product_id, 'product_id')
     const productSku = row.product_sku ?? catalogProduct?.product_sku ?? null
     const productKey = productSku === null ? `product-id:${productId}` : `sku:${productSku}`
@@ -201,10 +166,10 @@ export function buildLowInventoryReadModel(args: {
       productKey,
       (combinedAvailableByProduct.get(productKey) ?? 0) + availableQty,
     )
-    resolvedRows.push({ productId, productKey, productName, productSku, row })
+    resolvedRows.push({ observedAt, productId, productKey, productName, productSku, row })
   }
 
-  for (const { productId, productKey, productName, productSku, row } of resolvedRows) {
+  for (const { observedAt, productId, productKey, productName, productSku, row } of resolvedRows) {
     const combinedAvailableQty = combinedAvailableByProduct.get(productKey)
     if (
       combinedAvailableQty === undefined ||
@@ -235,10 +200,6 @@ export function buildLowInventoryReadModel(args: {
       sku.productIds.push(productId)
     }
 
-    const observedAt = isoTimestamp(row.observed_at_max)
-    if (snapshotObservedAt === null || observedAt > snapshotObservedAt) {
-      snapshotObservedAt = observedAt
-    }
     sku.packages.push({
       availableQty: numeric(row.available_qty, 'available_qty'),
       currentQty: nullableNumeric(row.current_qty, 'current_qty'),
@@ -293,8 +254,8 @@ export async function queryLowInventoryReadModel(args: {
   if (getHeliosPendingPurchaseSiteDealer(args.dealerId) === null) {
     throw new Error(`Unknown Helios dealer id ${args.dealerId}.`)
   }
-  if (!Number.isInteger(args.threshold) || args.threshold < 1) {
-    throw new Error('Low-inventory threshold must be a positive integer.')
+  if (!LowInventoryThresholdSchema.safeParse(args.threshold).success) {
+    throw new Error('Low-inventory threshold must be an integer from 1 through 100.')
   }
 
   const db = getPool()

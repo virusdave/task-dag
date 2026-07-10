@@ -49,6 +49,7 @@ import { registerJobRoutes } from '../routes/jobs.js'
 import { registerPendingMigrationsAdminRoutes } from '../routes/pendingMigrationsAdmin.js'
 import { registerLlmRoutes } from '../routes/llm.js'
 import { registerLpEventsRoutes } from '../routes/lpEvents.js'
+import { registerLowInventoryRoutes } from '../routes/lowInventory.js'
 import { registerMetricAnnotationsRoutes } from '../routes/metricAnnotations.js'
 import { registerMetricsRoutes } from '../routes/metrics.js'
 import { registerBedrockModelConfigRoutes } from '../routes/bedrockModelConfig.js'
@@ -277,6 +278,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerHistoryRoutes(server)
   await registerLlmRoutes(server)
   await registerLpEventsRoutes(server)
+  await registerLowInventoryRoutes(server)
   await registerMetricAnnotationsRoutes(server)
   await registerMetricsRoutes(server)
   await registerMetricsDefaultsRoutes(server)
