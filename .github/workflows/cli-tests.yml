@@ -11,15 +11,19 @@ on:
     branches: [master]
     paths:
       - 'scripts/task-dag'
+      - 'scripts/validate-caller-workflow.sh'
       - 'scripts/task-dag.d/**'
       - 'tests/**'
+      - 'docs/MIGRATION.md'
       - '.github/scripts/**'
       - '.github/workflows/cli-tests.yml'
   pull_request:
     paths:
       - 'scripts/task-dag'
+      - 'scripts/validate-caller-workflow.sh'
       - 'scripts/task-dag.d/**'
       - 'tests/**'
+      - 'docs/MIGRATION.md'
       - '.github/scripts/**'
       - '.github/workflows/cli-tests.yml'
 

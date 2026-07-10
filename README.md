@@ -23,6 +23,7 @@ App token, passed explicitly by callers.
 ```
 scripts/
   task-dag                          canonical task-dag CLI (source of truth)
+  validate-caller-workflow.sh        preflight for per-repo task-dag.yml callers
   task-dag.d/
     cross-repo.sh                   cross-repo subcommands (delegate, ingest-completion, ...)
     phase-gates.conf                multi-phase epics that need a final-phase Satisfies

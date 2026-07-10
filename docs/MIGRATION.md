@@ -29,6 +29,9 @@ spans `virusdave` / `Nicponskis` / `FreshlyBakedNYC` — hence this repo is
 ```yaml
 name: Task-DAG
 on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch: {}
   issues: { types: [opened, reopened, edited] }
   issue_comment: { types: [created] }
   push: { branches: [master] }
@@ -36,8 +39,11 @@ jobs:
   issue-to-task:
     if: ${{ github.event_name == 'issues' }}
     uses: virusdave/task-dag/.github/workflows/issue-to-task.yml@master
-    permissions: { contents: write, issues: write }
-    secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
+    permissions:
+      contents: write
+      issues: write
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
   reopen-notice:
     # Monotonic-completion notice on REOPEN (issue #13). create-task-commit.sh
     # is create-only (no phantom task on reopen); this upserts ONE
@@ -46,12 +52,16 @@ jobs:
     # work is needed. Gated on the `reopened` action so it fires only on reopen.
     if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' }}
     uses: virusdave/task-dag/.github/workflows/reopen-notice.yml@master
-    permissions: { issues: write }
-    secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
+    permissions:
+      issues: write
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
   comment-sync:
     if: ${{ github.event_name == 'issue_comment' }}
     uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@master
-    permissions: { contents: write, issues: write }
+    permissions:
+      contents: write
+      issues: write
     # Add the two App secrets ONLY on a repo whose comment-sync can auto-close
     # a cross-repo delegated epic (it runs `task-dag close-epic`, which pushes a
     # `Closes-Epic: #N` merge to master). A GITHUB_TOKEN push cannot trigger the
@@ -63,14 +73,30 @@ jobs:
       # app_id: ${{ secrets.TASK_DAG_APP_ID }}
       # app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
   close-completed:
+    # Push is the low-latency path; schedule/manual are the master-derived
+    # projection backstop when a push workflow was missed.
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
     # contents: write (not read) — the close script deletes the stale
     # tasks/pending/<N> + tasks/root-active/<N> refs after closing the issue;
     # schedule/manual provide the master-derived projection backstop when the
     # push-range workflow was missed.
-    permissions: { contents: write, issues: write }
-    secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
+    permissions:
+      contents: write
+      issues: write
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
+  graph-converge:
+    # Folds satisfied dependency-graph edges on push and also runs from the
+    # schedule/manual backstop so lost mailbox/push events still converge from
+    # durable master history.
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    uses: virusdave/task-dag/.github/workflows/graph-converge.yml@master
+    permissions:
+      contents: write
+    with:
+      base_sha: ${{ github.event_name == 'push' && github.event.before || '' }}
+      head_sha: ${{ github.event_name == 'push' && github.sha || '' }}
   completion-aggregate:
     if: ${{ github.event_name == 'push' }}
     uses: virusdave/task-dag/.github/workflows/aggregate-cross-repo-completions.yml@master
@@ -88,7 +114,9 @@ jobs:
     # TASK_DAG_APP_* App secrets as completion-aggregate.
     if: ${{ github.event_name == 'push' }}
     uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@master
-    permissions: { contents: write, issues: write }
+    permissions:
+      contents: write
+      issues: write
     with:
       base_sha: ${{ github.event.before }}
       head_sha: ${{ github.sha }}
@@ -96,6 +124,19 @@ jobs:
       app_id: ${{ secrets.TASK_DAG_APP_ID }}
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
 ```
+
+Before promoting a peer caller, validate the actual file with the canonical
+preflight (use `--require-materialise` only for peers that wire the optional
+materialise job; add `--require-comment-sync-app` on repos whose comment-sync
+can auto-close delegated parent epics):
+
+```sh
+scripts/validate-caller-workflow.sh .github/workflows/task-dag.yml
+```
+
+The preflight fails closed on drift in the event matrix, per-job permissions,
+required secrets, projection and graph-convergence backstop wiring,
+push-range inputs, and reusable workflow source (`virusdave/task-dag@master`).
 
 Pin `@master` while stabilising; cut a moving `task-dag-v1` tag once the
 fixture smoke test is green and pin peers to it so future patches need no
