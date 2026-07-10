@@ -6,6 +6,7 @@ import {
   readRequiredEnv,
 } from '../../shared/config/runtimeEnv.js'
 import { deriveBasePathFromAppBaseUrl, joinBasePath } from '../../shared/config/appBasePath.js'
+import { parseAgentReadonlyConfigFromEnv, type AgentReadonlyConfig } from '../auth/agentReadonly.js'
 
 const GOOGLE_OAUTH_CLIENT_ID_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
   'google-oauth/catalog-curation.env',
@@ -123,6 +124,12 @@ export interface ServerEnv {
   reviewsSmtpHost: string | null
   reviewsSmtpPort: number
   reviewsSmtpTimeoutMs: number
+  // Signed local-agent readonly verification (parent
+  // virusdave/top-level#62 / child automation#72). Helios stores only
+  // verifier public keys and an expiring safe-read allowlist; absent
+  // or malformed config leaves this disabled so normal OAuth sessions
+  // keep working while signed-agent access fails closed.
+  agentReadonly: AgentReadonlyConfig
 }
 
 let cachedEnv: ServerEnv | null = null
@@ -183,6 +190,7 @@ export function getServerEnv(): ServerEnv {
     reviewsSmtpHost: readOptionalEnv('REVIEWS_SMTP_HOST'),
     reviewsSmtpPort: readNumberEnv('REVIEWS_SMTP_PORT', 25),
     reviewsSmtpTimeoutMs: readNumberEnv('REVIEWS_SMTP_TIMEOUT_MS', 10000),
+    agentReadonly: parseAgentReadonlyConfigFromEnv(),
   }
 
   return cachedEnv
