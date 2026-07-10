@@ -13,7 +13,8 @@ import { loadJson } from '../../app/fetchJson.js'
 // GAds → Landing pages dashboard tab (V1).
 //
 // One per-site surface (scope = bronx | midtown | all), all fed by a
-// SINGLE /api/gads/landing-pages fetch (see gadsLandingPagesQueries.ts).
+// SINGLE /api/gads/<site-scope>/landing-pages fetch (see
+// gadsLandingPagesQueries.ts).
 // V1 is observed performance only — funnel + variant table computed
 // from the lp_events assignment cohort. Cost / revenue / ROAS are NOT
 // wired yet, so those KPIs render an explicit "pending" badge rather
@@ -56,6 +57,10 @@ function fmtAgo(iso: string): string {
   const hrs = Math.round(mins / 60)
   if (hrs < 24) return `${hrs} hr ago`
   return `${Math.round(hrs / 24)} d ago`
+}
+
+function scopeApiSegment(scope: GadsScope): `gads-${GadsScope}` {
+  return `gads-${scope}`
 }
 
 /** Stable key + readable label for a variant row. */
@@ -156,12 +161,14 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
   useEffect(() => {
     let cancelled = false
     const params = new URLSearchParams()
-    params.set('site', scope)
     params.set('from', new Date(fromMs).toISOString())
     params.set('to', new Date(toMs).toISOString())
     setLoading(true)
     setError(null)
-    loadJson(`/api/gads/landing-pages?${params.toString()}`, GadsLandingPagesResponseSchema)
+    loadJson(
+      `/api/gads/${scopeApiSegment(scope)}/landing-pages?${params.toString()}`,
+      GadsLandingPagesResponseSchema,
+    )
       .then((r) => {
         if (!cancelled) setData(r)
       })
@@ -264,7 +271,11 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
       {/* 1. Freshness + attribution status strip */}
       {data && (
         <div className="gads-lp-status">
-          <span className="gads-lp-badge">Updated {fmtAgo(data.generatedAt)}</span>
+          <span className={data.freshness.stale ? 'gads-lp-badge is-warn' : 'gads-lp-badge'}>
+            {data.freshness.lastCompletedAt
+              ? `Rollup ${fmtAgo(data.freshness.lastCompletedAt)}`
+              : data.freshness.message}
+          </span>
           <span className="gads-lp-badge is-pending">
             {data.attributionStatus === 'not-wired'
               ? 'Cost & revenue attribution not wired'

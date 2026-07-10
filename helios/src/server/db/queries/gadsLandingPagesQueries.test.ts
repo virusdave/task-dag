@@ -50,7 +50,18 @@ function variantRow(over: Partial<Record<string, unknown>> = {}): Record<string,
   }
 }
 
-const STATE_OK = [{ assignments_missing_id: '3', unattributed_stage_events: '7' }]
+const STATE_OK = [
+  {
+    status: 'ok',
+    last_started_at: '2026-07-02T00:00:00.000Z',
+    last_completed_at: new Date(),
+    source_min_at: '2026-06-01T00:00:00.000Z',
+    source_max_at: '2026-07-02T00:00:00.000Z',
+    rows_written: '42',
+    assignments_missing_id: '3',
+    unattributed_stage_events: '7',
+  },
+]
 
 describe('getGadsLandingPages (P3 — rollup-backed serving path)', () => {
   it('never queries lp_events on the serving path', async () => {
@@ -130,6 +141,17 @@ describe('getGadsLandingPages (P3 — rollup-backed serving path)', () => {
     expect(res.dataQuality.unattributedStageEvents).toBe(7)
   })
 
+  it('surfaces freshness metadata from the refresh-state row', async () => {
+    const res = await getGadsLandingPages({
+      scope: 'bronx',
+      db: mockDb({ variantRows: [variantRow()], stateRows: STATE_OK }).db,
+    })
+    expect(res.freshness.status).toBe('ok')
+    expect(res.freshness.badge).toBe('fresh')
+    expect(res.freshness.rowsWritten).toBe(42)
+    expect(res.freshness.sourceMinAt).toBe('2026-06-01T00:00:00.000Z')
+  })
+
   it('computes per-variant avg served probability from sum / count-with-prob', async () => {
     const res = await getGadsLandingPages({
       scope: 'bronx',
@@ -148,5 +170,37 @@ describe('getGadsLandingPages (P3 — rollup-backed serving path)', () => {
     expect(res.sites.length).toBeGreaterThan(1)
     const variantCall = calls.find((c) => /from\s+gads_lp_rollup\b/i.test(c.text))
     expect(variantCall?.params?.[2]).toEqual(res.sites)
+  })
+
+  it('adds a per-site breakdown for the gads-all payload', async () => {
+    const res = await getGadsLandingPages({
+      scope: 'all',
+      db: mockDb({
+        variantRows: [
+          variantRow({ site: 'bronx', assignments: '100', impressions: '80', redirects: '40', conversions_30d: '10' }),
+          variantRow({ site: 'midtown', assignments: '50', impressions: '25', redirects: '10', conversions_30d: '5' }),
+        ],
+        stateRows: STATE_OK,
+      }).db,
+    })
+
+    expect(res.siteBreakdown).toEqual([
+      {
+        site: 'bronx',
+        assignments: 100,
+        trafficShare: 100 / 150,
+        impressionRate: 80 / 100,
+        redirectRate: 40 / 80,
+        conversionRate: 10 / 100,
+      },
+      {
+        site: 'midtown',
+        assignments: 50,
+        trafficShare: 50 / 150,
+        impressionRate: 25 / 50,
+        redirectRate: 10 / 25,
+        conversionRate: 5 / 50,
+      },
+    ])
   })
 })

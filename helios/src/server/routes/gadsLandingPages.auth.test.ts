@@ -41,6 +41,17 @@ vi.mock('../db/queries/gadsLandingPagesQueries.js', () => ({
     range: { from: '2026-07-01T00:00:00.000Z', to: '2026-07-02T00:00:00.000Z' },
     generatedAt: '2026-07-02T00:00:00.000Z',
     sites: args.scope === 'all' ? ['bronx', 'midtown'] : [args.scope],
+    freshness: {
+      status: 'ok',
+      badge: 'fresh',
+      stale: false,
+      message: 'Rollup data is fresh.',
+      lastStartedAt: '2026-07-02T00:00:00.000Z',
+      lastCompletedAt: '2026-07-02T00:00:01.000Z',
+      sourceMinAt: null,
+      sourceMaxAt: null,
+      rowsWritten: 0,
+    },
     attributionStatus: 'not-wired',
     kpis: {
       assignments: 0,
@@ -53,6 +64,7 @@ vi.mock('../db/queries/gadsLandingPagesQueries.js', () => ({
       cpa: null,
     },
     funnel: [],
+    siteBreakdown: [],
     variants: [],
     dataQuality: {
       assignmentsMissingId: 0,
@@ -87,7 +99,7 @@ describe('GET /api/gads/landing-pages grant isolation', () => {
   it('allows gads-all to read a per-site scope', async () => {
     mockState.grants = ['gads-all']
 
-    const res = await server.inject({ method: 'GET', url: '/api/gads/landing-pages?site=bronx' })
+    const res = await server.inject({ method: 'GET', url: '/api/gads/gads-bronx/landing-pages' })
 
     expect(res.statusCode).toBe(200)
     expect(requireConfidentialMetricsGrantMock).toHaveBeenCalledWith(
@@ -101,7 +113,7 @@ describe('GET /api/gads/landing-pages grant isolation', () => {
   it('denies the wrong per-site grant before reading data and without naming scopes', async () => {
     mockState.grants = ['gads-midtown']
 
-    const res = await server.inject({ method: 'GET', url: '/api/gads/landing-pages?site=bronx' })
+    const res = await server.inject({ method: 'GET', url: '/api/gads/gads-bronx/landing-pages' })
 
     expect(res.statusCode).toBe(403)
     expect(getGadsLandingPagesMock).not.toHaveBeenCalled()
@@ -111,7 +123,7 @@ describe('GET /api/gads/landing-pages grant isolation', () => {
   it('does not synthesize gads-all from holding every per-site grant', async () => {
     mockState.grants = ['gads-bronx', 'gads-midtown']
 
-    const res = await server.inject({ method: 'GET', url: '/api/gads/landing-pages?site=all' })
+    const res = await server.inject({ method: 'GET', url: '/api/gads/gads-all/landing-pages' })
 
     expect(res.statusCode).toBe(403)
     expect(requireConfidentialMetricsGrantMock).toHaveBeenCalledWith(
@@ -121,5 +133,17 @@ describe('GET /api/gads/landing-pages grant isolation', () => {
     )
     expect(getGadsLandingPagesMock).not.toHaveBeenCalled()
     expect(res.body).not.toMatch(/gads-|bronx|midtown/i)
+  })
+
+  it('ignores a query-string site and derives scope from the path only', async () => {
+    mockState.grants = ['gads-bronx']
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/gads/gads-bronx/landing-pages?site=all',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(getGadsLandingPagesMock).toHaveBeenCalledWith(expect.objectContaining({ scope: 'bronx' }))
   })
 })

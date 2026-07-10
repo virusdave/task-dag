@@ -36,9 +36,12 @@ import {
 import type {
   GadsAttributionStatus,
   GadsDataQuality,
+  GadsFreshness,
   GadsFunnelStage,
   GadsLandingPagesKpis,
   GadsLandingPagesResponse,
+  GadsRefreshStatus,
+  GadsSiteBreakdownRow,
   GadsVariantRow,
 } from '../../../shared/contracts/index.js'
 import { getPool, type Queryable } from '../pool.js'
@@ -56,6 +59,8 @@ export const GADS_LANDING_PAGES_LOW_SAMPLE_THRESHOLD = 25
 /** Cap on the number of variant rows returned (the UI bounds the
  *  table; full drilldown is V2). */
 const VARIANT_ROW_LIMIT = 50
+/** Rollup refresh cadence is ~60 minutes; after 2h the badge should warn. */
+const GADS_LANDING_PAGES_STALE_AFTER_MS = 2 * 60 * 60 * 1000
 
 export interface GadsLandingPagesArgs {
   readonly scope: GadsScope
@@ -107,6 +112,12 @@ interface VariantAggRow {
 }
 
 interface RefreshStateRow {
+  status: string | null
+  last_started_at: Date | string | null
+  last_completed_at: Date | string | null
+  source_min_at: Date | string | null
+  source_max_at: Date | string | null
+  rows_written: string | number | null
   assignments_missing_id: string | number | null
   unattributed_stage_events: string | number | null
 }
@@ -117,6 +128,56 @@ function attributionStatusFrom(hasAllocated: boolean, hasUnavailable: boolean): 
   if (hasAllocated && !hasUnavailable) return 'allocated'
   if (hasAllocated && hasUnavailable) return 'incomplete'
   return 'not-wired'
+}
+
+function toIso(v: unknown): string | null {
+  if (v === null || v === undefined) return null
+  if (v instanceof Date) return v.toISOString()
+  const d = new Date(String(v))
+  return Number.isNaN(d.getTime()) ? null : d.toISOString()
+}
+
+function refreshStatus(v: unknown): GadsRefreshStatus {
+  return v === 'idle' || v === 'running' || v === 'ok' || v === 'error' ? v : 'idle'
+}
+
+function freshnessFrom(row: RefreshStateRow | undefined, now: Date): GadsFreshness {
+  const status = refreshStatus(row?.status)
+  const lastCompletedAt = toIso(row?.last_completed_at)
+  const completedMs = lastCompletedAt === null ? null : Date.parse(lastCompletedAt)
+  const stale = completedMs === null || now.getTime() - completedMs > GADS_LANDING_PAGES_STALE_AFTER_MS
+  const badge =
+    status === 'error'
+      ? 'error'
+      : status === 'running'
+        ? 'running'
+        : lastCompletedAt === null
+          ? 'never-refreshed'
+          : stale
+            ? 'stale'
+            : 'fresh'
+  const message =
+    badge === 'error'
+      ? 'Rollup refresh failed; showing last completed data if available.'
+      : badge === 'running'
+        ? 'Rollup refresh is running; data may update shortly.'
+        : badge === 'never-refreshed'
+          ? 'Rollup has not completed yet.'
+          : badge === 'stale'
+            ? 'Rollup data is older than the expected refresh cadence.'
+            : 'Rollup data is fresh.'
+
+  return {
+    status,
+    badge,
+    stale,
+    message,
+    lastStartedAt: toIso(row?.last_started_at),
+    lastCompletedAt,
+    sourceMinAt: toIso(row?.source_min_at),
+    sourceMaxAt: toIso(row?.source_max_at),
+    rowsWritten: asInt(row?.rows_written),
+  }
 }
 
 export async function getGadsLandingPages(
@@ -188,7 +249,15 @@ export async function getGadsLandingPages(
   // job (so the serving path never scans lp_events). It is an
   // as-of-last-refresh, horizon-bounded snapshot, not per-window.
   const stateSql = `
-    select assignments_missing_id, unattributed_stage_events
+    select
+      status,
+      last_started_at,
+      last_completed_at,
+      source_min_at,
+      source_max_at,
+      rows_written,
+      assignments_missing_id,
+      unattributed_stage_events
       from gads_lp_rollup_refresh_state
      where id = 'singleton'
   `
@@ -278,7 +347,39 @@ export async function getGadsLandingPages(
       }
     })
 
+  const siteTotals = new Map<
+    string,
+    { assignments: number; impressions: number; redirects: number; conversions: number }
+  >()
+  for (const site of sites) {
+    siteTotals.set(site, { assignments: 0, impressions: 0, redirects: 0, conversions: 0 })
+  }
+  for (const r of variantResult.rows) {
+    const current = siteTotals.get(r.site) ?? {
+      assignments: 0,
+      impressions: 0,
+      redirects: 0,
+      conversions: 0,
+    }
+    current.assignments += asInt(r.assignments)
+    current.impressions += asInt(r.impressions)
+    current.redirects += asInt(r.redirects)
+    current.conversions += asInt(r.conversions_30d)
+    siteTotals.set(r.site, current)
+  }
+  const siteBreakdown: GadsSiteBreakdownRow[] = Array.from(siteTotals.entries()).map(
+    ([site, totals]) => ({
+      site,
+      assignments: totals.assignments,
+      trafficShare: rate(totals.assignments, totalAssignments) ?? 0,
+      impressionRate: rate(totals.impressions, totals.assignments),
+      redirectRate: rate(totals.redirects, totals.impressions),
+      conversionRate: rate(totals.conversions, totals.assignments),
+    }),
+  )
+
   const stateRow = stateResult.rows[0]
+  const freshness = freshnessFrom(stateRow, now)
   const dataQuality: GadsDataQuality = {
     assignmentsMissingId: asInt(stateRow?.assignments_missing_id),
     unattributedStageEvents: asInt(stateRow?.unattributed_stage_events),
@@ -290,9 +391,11 @@ export async function getGadsLandingPages(
     range: { from: from.toISOString(), to: to.toISOString() },
     generatedAt: now.toISOString(),
     sites,
+    freshness,
     attributionStatus,
     kpis,
     funnel,
+    siteBreakdown,
     variants,
     dataQuality,
   }

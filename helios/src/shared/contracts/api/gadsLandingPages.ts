@@ -1,6 +1,11 @@
 import { z } from 'zod'
 
-import { GADS_SCOPES, type GadsScope } from '../../domain/gadsSites.js'
+import {
+  GADS_METRIC_SCOPES,
+  GADS_SCOPES,
+  type GadsMetricTabId,
+  type GadsScope,
+} from '../../domain/gadsSites.js'
 
 // ---------------------------------------------------------------------------
 // GAds → Landing pages analytics (V1)
@@ -9,10 +14,10 @@ import { GADS_SCOPES, type GadsScope } from '../../domain/gadsSites.js'
 // (parent epic virusdave/top-level#18, first sub-page of the holistic
 // paid-acquisition / lead-gen measurement system).
 //
-// ONE consolidated endpoint — GET /api/gads/landing-pages — returns
-// the KPI strip + funnel waterfall + variant table + freshness /
-// attribution status in a single payload so the page makes ONE
-// backend round-trip (no MetricChart fan-out).
+// ONE consolidated endpoint — GET /api/gads/<site-scope>/landing-pages —
+// returns the KPI strip + funnel waterfall + variant table + per-site
+// breakdown + freshness / attribution status in a single payload so the page
+// makes ONE backend round-trip (no MetricChart fan-out).
 //
 // V1 is "observed performance" only. The serving path reads ONLY the
 // out-of-band `gads_lp_rollup` day-grain table + its refresh-state row
@@ -36,10 +41,17 @@ const GadsScopeSchema = z.enum(
   GADS_SCOPES as readonly [GadsScope, ...GadsScope[]],
 )
 
-export const GadsLandingPagesRequestSchema = z.object({
-  /** 'bronx' | 'midtown' | 'all'. Gates which grant the endpoint
-   *  requires (see requiredGadsGrants). */
-  site: GadsScopeSchema,
+const GadsMetricTabIdSchema = z.enum(
+  GADS_METRIC_SCOPES.map((s) => s.tabId) as [GadsMetricTabId, ...GadsMetricTabId[]],
+)
+
+export const GadsLandingPagesParamsSchema = z.object({
+  /** Path segment: 'gads-bronx' | 'gads-midtown' | 'gads-all'. */
+  siteScope: GadsMetricTabIdSchema,
+})
+export type GadsLandingPagesParams = z.infer<typeof GadsLandingPagesParamsSchema>
+
+export const GadsLandingPagesQuerySchema = z.object({
   /** ISO timestamps. Half-open window [from, to); the server clamps
    *  the span to a max and defaults to a recent window when omitted. */
   from: z.string().datetime().optional(),
@@ -48,6 +60,12 @@ export const GadsLandingPagesRequestSchema = z.object({
   family: z.string().trim().min(1).optional(),
   /** Optional experiment filter. */
   experimentId: z.string().trim().min(1).optional(),
+})
+
+export const GadsLandingPagesRequestSchema = GadsLandingPagesQuerySchema.extend({
+  /** Legacy/request-object shape: 'bronx' | 'midtown' | 'all'. New HTTP
+   *  serving derives this from the path param, not a query parameter. */
+  site: GadsScopeSchema,
 })
 export type GadsLandingPagesRequest = z.infer<typeof GadsLandingPagesRequestSchema>
 
@@ -137,6 +155,20 @@ export const GadsVariantRowSchema = z.object({
 })
 export type GadsVariantRow = z.infer<typeof GadsVariantRowSchema>
 
+// ============================ Per-site breakdown ===========================
+
+/** Same observed funnel rates, aggregated to site grain. Most useful for
+ *  `gads-all`, where it prevents a cross-site headline from hiding one store. */
+export const GadsSiteBreakdownRowSchema = z.object({
+  site: z.string(),
+  assignments: z.number().int().nonnegative(),
+  trafficShare: z.number(),
+  impressionRate: z.number().nullable(),
+  redirectRate: z.number().nullable(),
+  conversionRate: z.number().nullable(),
+})
+export type GadsSiteBreakdownRow = z.infer<typeof GadsSiteBreakdownRowSchema>
+
 // ============================ Data quality =================================
 
 export const GadsDataQualitySchema = z.object({
@@ -154,6 +186,33 @@ export const GadsDataQualitySchema = z.object({
 })
 export type GadsDataQuality = z.infer<typeof GadsDataQualitySchema>
 
+// ============================ Freshness metadata ===========================
+
+export const GadsFreshnessBadgeSchema = z.enum([
+  'fresh',
+  'stale',
+  'running',
+  'error',
+  'never-refreshed',
+])
+export type GadsFreshnessBadge = z.infer<typeof GadsFreshnessBadgeSchema>
+
+export const GadsRefreshStatusSchema = z.enum(['idle', 'running', 'ok', 'error'])
+export type GadsRefreshStatus = z.infer<typeof GadsRefreshStatusSchema>
+
+export const GadsFreshnessSchema = z.object({
+  status: GadsRefreshStatusSchema,
+  badge: GadsFreshnessBadgeSchema,
+  stale: z.boolean(),
+  message: z.string(),
+  lastStartedAt: z.string().datetime().nullable(),
+  lastCompletedAt: z.string().datetime().nullable(),
+  sourceMinAt: z.string().datetime().nullable(),
+  sourceMaxAt: z.string().datetime().nullable(),
+  rowsWritten: z.number().int().nonnegative(),
+})
+export type GadsFreshness = z.infer<typeof GadsFreshnessSchema>
+
 // ============================ Response =====================================
 
 export const GadsLandingPagesResponseSchema = z.object({
@@ -162,10 +221,13 @@ export const GadsLandingPagesResponseSchema = z.object({
   generatedAt: z.string().datetime(),
   /** The concrete sites covered (e.g. ['bronx'] or ['bronx','midtown']). */
   sites: z.array(z.string()),
+  /** Refresh-state metadata from the singleton rollup state row. */
+  freshness: GadsFreshnessSchema,
   /** Cost / revenue attribution status — 'not-wired' in V1. */
   attributionStatus: GadsAttributionStatusSchema,
   kpis: GadsLandingPagesKpisSchema,
   funnel: z.array(GadsFunnelStageSchema),
+  siteBreakdown: z.array(GadsSiteBreakdownRowSchema),
   variants: z.array(GadsVariantRowSchema),
   dataQuality: GadsDataQualitySchema,
 })
