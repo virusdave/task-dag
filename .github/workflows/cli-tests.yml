@@ -10,6 +10,7 @@ on:
   push:
     branches: [master]
     paths:
+      - '.github/workflows/task-dag.yml'
       - 'scripts/task-dag'
       - 'scripts/validate-caller-workflow.sh'
       - 'scripts/task-dag.d/**'
@@ -19,6 +20,7 @@ on:
       - '.github/workflows/cli-tests.yml'
   pull_request:
     paths:
+      - '.github/workflows/task-dag.yml'
       - 'scripts/task-dag'
       - 'scripts/validate-caller-workflow.sh'
       - 'scripts/task-dag.d/**'

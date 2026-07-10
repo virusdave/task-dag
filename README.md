@@ -72,8 +72,12 @@ template.
 
 ## Status
 
-Bootstrap / Phase 1: this repo is established as the source of truth
-(additive — no peer references it yet, so nothing is rewired or at risk).
-Peer rewiring and retiring the old `Nicponskis/shared-workflows` task-dag
-workflows + duplicated per-repo scripts is the phased migration tracked in
-`docs/MIGRATION.md`.
+The single-home migration is live: peer repos consume the reusable workflows
+from this repo and keep only the thin `.github/workflows/task-dag.yml` caller.
+The issue #13 workflow rollout contract is represented by this repo's own
+self-hosting caller, the caller preflight (`scripts/validate-caller-workflow.sh`),
+and the fixture suite wired through `.github/workflows/cli-tests.yml`.
+
+Before changing any caller workflow, run the preflight from `docs/MIGRATION.md`;
+CI also runs the fixture suite when the self-hosting caller, reusable scripts,
+tests, or migration docs change.
