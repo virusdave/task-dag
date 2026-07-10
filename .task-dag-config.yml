@@ -15,4 +15,4 @@ enable_state_change_tasks: false  # V2 feature
 refs_namespace: "refs/gh"
 
 # Repository-specific notes
-# This repo is the primary development repo for the task-dag system
+# This repo uses the canonical task-dag reusable workflows from virusdave/task-dag

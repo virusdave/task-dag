@@ -1,24 +1,32 @@
 # Agent instructions for the `automation` repo
 
-**MANDATORY FIRST READ — agent canon (re-read every session).** Before
-doing anything in this repo, read the cross-repo canonical agent rules
-fresh from a throwaway ephemeral checkout of `virusdave/top-level` at
-`origin/master` (never the stale shared `~/src/top-level`):
+**MANDATORY FIRST READ for every session — dispatcher, manual, or
+one-off. Re-read agent canon each session; every rule applies unless
+explicitly scoped to dispatcher/worker machinery.**
+
+**First check `AGENT_WORKSPACE_MANIFEST`.** If it is set and validates
+(see `docs/agent-runtime/PREPARED_WORKSPACE_CONTRACT.md` in top-level),
+canon is already on local disk at `canon.canon_core_path` and task-dag
+at `task_dag.cli`; **do NOT bootstrap** — read the Core in full from
+`canon.canon_core_path` (no clone), record `canon.canon_sha`, and if a
+runtime capsule was injected follow it as your startup briefing instead.
+
+**Otherwise** (no/invalid manifest) read canon from a fresh ephemeral
+checkout of `virusdave/top-level` at `origin/master`:
 
 ```sh
-cw=$(/home/amp-local/src/top-level/scripts/ephemeral_checkout \
-        top-level --label canon-read)
-cat "$cw/docs/canon/AGENTS_CANON.md"
-# … apply the rules; follow the Core's §4 dispatch table into rules/ …
-/home/amp-local/src/top-level/scripts/ephemeral_checkout --remove "$cw"
+ec=/home/amp-local/src/top-level/scripts/ephemeral_checkout
+cw=$("$ec" top-level --label "canon-read-$$-$RANDOM")  # unique label; no shared paths
+cat "$cw/docs/canon/AGENTS_CANON.md"                   # session end: "$ec" --remove "$cw"
 ```
 
-That file is the **Canon Core**: read it in full, then follow its §4
+That file is the **Canon Core**: read it in full, then follow its
 dispatch table to the relevant `docs/canon/rules/*` docs for your task.
-It changes frequently; never cache or paraphrase it. Your final work
-must include the **Agent Gate Record** (Core §3, template at
-`docs/canon/templates/AGENT_GATE_RECORD.md`). If anything below
-conflicts with canon, **canon wins** — fix the stale prose here.
+It is authoritative across all repos and changes frequently. Your final
+work must include the **Agent Gate Record** (see Core §3). The rest of
+this `AGENTS.md` only adds repo-specific instructions and must not
+weaken canon. If canon and this file conflict, canon wins — update the
+stale one.
 
 ---
 
@@ -161,9 +169,9 @@ silently.
 ## Git-DAG tasks — task-dag (canon: rules/WORKFLOW.md)
 
 Canon mandates the task-dag system where a repo has it and forbids
-tombstone commits for new work. **Run the canonical CLI from a dedicated
-`task-dag` ephemeral checkout** — this repo's vendored `scripts/task-dag`
-is being retired (virusdave/top-level#21); do not depend on it. Repo
+tombstone commits for new work. This repo does **not** vendor the CLI;
+run the canonical CLI from the prepared workspace `task_dag.cli` or,
+for manual sessions, from a dedicated `task-dag` ephemeral checkout. Repo
 specifics:
 
 - An issue is task-tracked once `github-actions` posts a
@@ -181,6 +189,13 @@ specifics:
   "$td/scripts/task-dag" complete <task-sha>         # links the commit, retires refs
   git push origin HEAD:master
   ```
+
+The repo-local `.github/workflows/task-dag.yml` is a logic-free caller for
+`virusdave/task-dag` reusable workflows. It intentionally includes the
+scheduled/manual projection backstop, `graph-converge`, `reopen-notice`,
+`completion-aggregate`, and `materialise`; keep it passing the canonical
+`validate-caller-workflow.sh --require-materialise --require-comment-sync-app`
+preflight before marking task-dag workflow changes complete.
 
 ## Public URL for viewable artifacts
 
