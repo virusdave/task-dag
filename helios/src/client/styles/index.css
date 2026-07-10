@@ -1212,16 +1212,12 @@ pre {
 }
 
 .pp-refinement-panel {
-  position: sticky;
-  top: 0.5rem;
-  z-index: 6;
   display: grid;
-  gap: 0.65rem;
-  padding: 0.75rem 0.85rem;
+  gap: 0.55rem;
+  padding: 0.65rem 0.75rem;
   border-radius: 14px;
   border: 1px solid var(--panel-border);
-  background: rgba(255, 250, 241, 0.97);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  background: rgba(255, 250, 241, 0.72);
 }
 
 .pp-refinement-header {
@@ -1243,13 +1239,42 @@ pre {
 
 .pp-refinement-feedback textarea {
   width: 100%;
-  min-height: 5.2rem;
+  min-height: 3.5rem;
+  resize: vertical;
+}
+
+.pp-refinement-failure,
+.pp-refinement-next-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.pp-refinement-failure {
+  border-color: var(--danger, #a52a2a);
+  color: #7a2719;
+}
+
+.pp-refinement-failure p {
+  margin: 0.15rem 0 0;
+}
+
+.pp-refinement-failure-job {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
 }
 
 .pp-refinement-revisions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 0.45rem;
+  margin-top: 0.45rem;
 }
 
 .pp-refinement-revision {
@@ -1271,10 +1296,59 @@ pre {
 }
 
 .pp-refinement-diffs {
+  min-width: 0;
+}
+
+.pp-refinement-diffs > summary,
+.pp-refinement-more > summary {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.pp-refinement-history-heading {
+  margin: 0.8rem 0 0.35rem;
+}
+
+.pp-refinement-diff-rows {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.25rem;
+}
+
+.pp-refinement-diff-row {
+  min-width: 0;
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.5rem;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.pp-refinement-diff-row-link {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.pp-refinement-diff-values {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   gap: 0.35rem;
+}
+
+.pp-refinement-actions > a,
+.pp-refinement-next-action > a,
+.pp-refinement-next-action-buttons > a {
+  display: inline-flex;
+  align-items: center;
 }
 
 .pp-diff-chip {
@@ -1288,15 +1362,11 @@ pre {
   font-size: 0.78rem;
   line-height: 1.2;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
 .pp-diff-chip:hover {
   text-decoration: underline;
-}
-
-.pp-refinement-history > summary {
-  cursor: pointer;
-  font-weight: 600;
 }
 
 /* Issue #35 — family-panel grouping for /catalog/pending-purchases.
@@ -1392,7 +1462,53 @@ pre {
   }
 
   .pp-refinement-panel {
-    position: static;
+    padding: 0.6rem;
+  }
+
+  .pp-refinement-header,
+  .pp-refinement-failure,
+  .pp-refinement-next-action {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pp-refinement-actions,
+  .pp-refinement-next-action-buttons {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .pp-refinement-actions > .primary-button,
+  .pp-refinement-actions > .ghost-button,
+  .pp-refinement-next-action > .primary-button,
+  .pp-refinement-next-action-buttons > .primary-button,
+  .pp-refinement-next-action-buttons > .ghost-button {
+    width: 100%;
+    min-height: 44px;
+    justify-content: center;
+  }
+
+  .pp-refinement-failure-job,
+  .pp-refinement-revision-link,
+  .pp-refinement-diff-row-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .pp-refinement-failure-job {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .pp-refinement-revision-link {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .pp-refinement-revisions {
+    grid-template-columns: 1fr;
   }
 }
 

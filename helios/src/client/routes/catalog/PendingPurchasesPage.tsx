@@ -713,8 +713,8 @@ export function PendingPurchasesPage() {
       )
       setRefinementSuccessMessage(
         action === 'accept'
-          ? `Accepted candidate revision r${response.selectedRevision.revisionNumber ?? '—'} as current.`
-          : `Rolled back to revision r${response.selectedRevision.revisionNumber ?? '—'}.`,
+          ? `Accepted candidate revision r${response.selectedRevision.revisionNumber ?? '?'} as current.`
+          : `Rolled back to revision r${response.selectedRevision.revisionNumber ?? '?'}.`,
       )
       await loadRefinementHistory()
       navigate(buildPendingPurchasesHref(filters, { mode: 'rows', packetId: response.selectedRevision.packetId, page: 1 }))
@@ -1330,18 +1330,32 @@ function PendingPurchaseRefinementPanel({
   const currentPacketId = root?.currentPacketId ?? null
   const activeRevision = history?.revisions.find((revision) => revision.packetId === activePacketId) ?? null
   const activeTurn = history?.turns.find((turn) => turn.status === 'queued' || turn.status === 'running') ?? null
+  const candidateRevision = history?.revisions.find((revision) => revision.revisionStatus === 'candidate') ?? null
+  const latestFailedTurn = history?.turns[0]?.status === 'failed' ? history.turns[0] : null
   const canSubmit = canEdit && root !== null && activePacketId === currentPacketId && feedback.trim().length > 0 && !isRefining && !activeTurn
   const diffCount = history?.rowDiffs.length ?? 0
   const rootVersionLabel = root ? `root v${root.version}` : 'refinement unavailable'
+  const currentRevisionHref = history?.currentRevision
+    ? buildPendingPurchasesHref(
+        { mode: 'rows', packetId: activePacketId, page: 1, pageSize: 25 },
+        { mode: 'rows', packetId: history.currentRevision.packetId, page: 1 },
+      )
+    : null
+  const candidateRevisionHref = candidateRevision
+    ? buildPendingPurchasesHref(
+        { mode: 'rows', packetId: activePacketId, page: 1, pageSize: 25 },
+        { mode: 'rows', packetId: candidateRevision.packetId, page: 1 },
+      )
+    : null
 
   return (
     <section className="pp-refinement-panel" aria-label="Packet refinement">
       <header className="pp-refinement-header">
         <div>
-          <strong>Refine packet with feedback</strong>
+          <strong>Ask the packet analyst</strong>
           <p className="subtle-copy">
             {activeRevision
-              ? `Viewing r${activeRevision.revisionNumber ?? '—'} · ${rootVersionLabel}`
+              ? `Viewing r${activeRevision.revisionNumber ?? '?'} · ${rootVersionLabel}`
               : rootVersionLabel}
           </p>
         </div>
@@ -1358,43 +1372,95 @@ function PendingPurchaseRefinementPanel({
         <p className="subtle-copy">This packet predates the refinement lineage schema; use the existing row overrides below.</p>
       ) : (
         <>
-          <label className="stack-field pp-refinement-feedback">
-            <span>Analyst feedback</span>
-            <textarea
-              disabled={!canEdit || activePacketId !== currentPacketId}
-              onChange={(event) => onFeedbackChange(event.currentTarget.value)}
-              placeholder="Tell the analyst what to correct in this packet. Example: “These Camino rows are gummies, not chocolate; keep Bronx prices unchanged.”"
-              rows={3}
-              value={feedback}
-            />
-          </label>
-          <div className="inline-row wrap-row pp-refinement-actions">
-            <button className="primary-button" disabled={!canSubmit} onClick={onSubmit} type="button">
-              {isRefining ? 'Queueing…' : activeTurn ? 'Refinement running' : 'Submit feedback'}
-            </button>
-            {jobStatus ? <Link className="ghost-button" to={`/jobs/${jobStatus.job.jobId}`}>{`Open job #${jobStatus.job.jobId}`}</Link> : null}
-            {activePacketId !== currentPacketId ? (
-              <span className="subtle-copy">Feedback targets only the current revision.</span>
-            ) : null}
-          </div>
+          {activePacketId === currentPacketId ? (
+            <>
+              <label className="stack-field pp-refinement-feedback">
+                <span>Analyst feedback</span>
+                <textarea
+                  disabled={!canEdit}
+                  onChange={(event) => onFeedbackChange(event.currentTarget.value)}
+                  placeholder="Tell the analyst what to correct in this packet. Example: “These Camino rows are gummies, not chocolate; keep Bronx prices unchanged.”"
+                  rows={latestFailedTurn ? 3 : 2}
+                  value={feedback}
+                />
+              </label>
+              <div className="inline-row wrap-row pp-refinement-actions">
+                <button className="primary-button" disabled={!canSubmit} onClick={onSubmit} type="button">
+                  {isRefining
+                    ? 'Queueing…'
+                    : activeTurn
+                      ? 'Refinement running'
+                      : latestFailedTurn
+                        ? 'Retry feedback'
+                        : 'Submit feedback'}
+                </button>
+                {jobStatus ? <Link className="ghost-button" to={`/jobs/${jobStatus.job.jobId}`}>{`Open job #${jobStatus.job.jobId}`}</Link> : null}
+              </div>
+            </>
+          ) : null}
 
-          <div className="pp-refinement-revisions" aria-label="Packet revisions">
-            {history?.revisions.map((revision) => (
-              <PendingPurchaseRevisionCard
-                activePacketId={activePacketId}
-                currentPacketId={currentPacketId}
-                isSwitchingRevision={isSwitchingRevision}
-                key={revision.packetId}
-                onSwitchRevision={onSwitchRevision}
-                revision={revision}
-              />
-            ))}
-          </div>
+          {latestFailedTurn ? (
+            <div className="pp-refinement-failure" role="alert">
+              <div>
+                <strong>Last refinement failed</strong>
+                <p>{latestFailedTurn.errorMessage ?? 'The analyst could not create a candidate. Your feedback is ready to retry.'}</p>
+              </div>
+              {latestFailedTurn.jobId ? (
+                <Link className="ghost-button pp-refinement-failure-job" to={`/jobs/${latestFailedTurn.jobId}`}>
+                  {`Open job #${latestFailedTurn.jobId}`}
+                </Link>
+              ) : null}
+            </div>
+          ) : null}
+
+          {candidateRevision ? (
+            <div className="pp-refinement-next-action" aria-label="Candidate next action">
+              <div>
+                <strong>{`Candidate r${candidateRevision.revisionNumber ?? '?'} ready`}</strong>
+                <span className="subtle-copy">
+                  {activePacketId === candidateRevision.packetId ? ' Review the changed rows below.' : ' Open it to review its changed rows.'}
+                </span>
+              </div>
+              <div className="inline-row wrap-row pp-refinement-next-action-buttons">
+                {activePacketId === candidateRevision.packetId ? (
+                  <button
+                    className="primary-button"
+                    disabled={isSwitchingRevision}
+                    onClick={() => onSwitchRevision(candidateRevision, 'accept')}
+                    type="button"
+                  >
+                    Accept candidate
+                  </button>
+                ) : candidateRevisionHref ? <Link className="primary-button" to={candidateRevisionHref}>Review candidate</Link> : null}
+                {activePacketId !== currentPacketId && currentRevisionHref ? (
+                  <Link className="ghost-button" to={currentRevisionHref}>Back to current</Link>
+                ) : null}
+              </div>
+            </div>
+          ) : activePacketId !== currentPacketId && currentRevisionHref ? (
+            <div className="pp-refinement-next-action" aria-label="Revision next action">
+              <span>You are reviewing a historical revision.</span>
+              <Link className="primary-button" to={currentRevisionHref}>Back to current</Link>
+            </div>
+          ) : null}
 
           <PendingPurchaseDiffChips diffs={history?.rowDiffs ?? []} rows={rows} />
 
-          <details className="pp-refinement-history">
-            <summary>Turn history &amp; provenance ({history?.turns.length ?? 0})</summary>
+          <details className="pp-refinement-more">
+            <summary>{`Revisions (${history?.revisions.length ?? 0}) · turn history (${history?.turns.length ?? 0})`}</summary>
+            <div className="pp-refinement-revisions" aria-label="Packet revisions">
+              {history?.revisions.map((revision) => (
+                <PendingPurchaseRevisionCard
+                  activePacketId={activePacketId}
+                  currentPacketId={currentPacketId}
+                  isSwitchingRevision={isSwitchingRevision}
+                  key={revision.packetId}
+                  onSwitchRevision={onSwitchRevision}
+                  revision={revision}
+                />
+              ))}
+            </div>
+            <h4 className="pp-refinement-history-heading">Turn history &amp; provenance</h4>
             {history && history.turns.length > 0 ? (
               <ul className="timeline-list compact-list">
                 {history.turns.map((turn) => (
@@ -1447,12 +1513,12 @@ function PendingPurchaseRevisionCard({
   return (
     <article className={`pp-refinement-revision${isActive ? ' pp-refinement-revision-active' : ''}`}>
       <div>
-        <strong>{`r${revision.revisionNumber ?? '—'}`}</strong>
+        <strong>{`r${revision.revisionNumber ?? '?'}`}</strong>
         <span className="subtle-copy"> {`packet #${revision.packetId}`}</span>
       </div>
       <div className="inline-row wrap-row">
         <Pill tone={revisionTone(revision)}>{revisionLabel(revision)}</Pill>
-        {isActive ? <Pill tone="muted">viewing</Pill> : <Link to={openHref}>Open</Link>}
+        {isActive ? <Pill tone="muted">viewing</Pill> : <Link className="pp-refinement-revision-link" to={openHref}>Open</Link>}
       </div>
       <p className="subtle-copy">{nyLongDateTime(new Date(revision.createdAt).getTime())}</p>
       {revision.revisionCreatedReason ? <p className="subtle-copy">{revision.revisionCreatedReason}</p> : null}
@@ -1483,20 +1549,38 @@ function PendingPurchaseDiffChips({
     return null
   }
   const rowsByLineage = new Map(rows.map((row) => [row.rowLineageId, row]))
+  const diffsByLineage = new Map<string, PendingPurchaseRevisionRowDiff[]>()
+  for (const diff of diffs) {
+    const rowDiffs = diffsByLineage.get(diff.rowLineageId)
+    if (rowDiffs) {
+      rowDiffs.push(diff)
+    } else {
+      diffsByLineage.set(diff.rowLineageId, [diff])
+    }
+  }
   return (
-    <div className="pp-refinement-diffs" aria-label="Changed fields">
-      {diffs.slice(0, 24).map((diff) => {
-        const row = rowsByLineage.get(diff.rowLineageId) ?? null
-        const href = row ? `#${buildPendingPurchaseRowAnchorId(row)}` : undefined
-        const label = `${diff.field}: ${formatCompactDiffValue(diff.before)} → ${formatCompactDiffValue(diff.after)}`
-        return href ? (
-          <a className="pp-diff-chip" href={href} key={`${diff.candidateRowId}-${diff.field}`}>{label}</a>
-        ) : (
-          <span className="pp-diff-chip" key={`${diff.candidateRowId}-${diff.field}`}>{label}</span>
-        )
-      })}
-      {diffs.length > 24 ? <span className="subtle-copy">+{diffs.length - 24} more</span> : null}
-    </div>
+    <details className="pp-refinement-diffs">
+      <summary>{`${diffs.length} field${diffs.length === 1 ? '' : 's'} changed across ${diffsByLineage.size} row${diffsByLineage.size === 1 ? '' : 's'}`}</summary>
+      <div className="pp-refinement-diff-rows" aria-label="Changed fields">
+        {[...diffsByLineage.entries()].map(([rowLineageId, rowDiffs]) => {
+          const row = rowsByLineage.get(rowLineageId) ?? null
+          const href = row ? `#${buildPendingPurchaseRowAnchorId(row)}` : undefined
+          const rowLabel = row?.distributorProductName ?? `Row ${rowDiffs[0]?.candidateRowId ?? rowLineageId}`
+          return (
+            <article className="pp-refinement-diff-row" key={rowLineageId}>
+              {href ? <a className="pp-refinement-diff-row-link" href={href}>{rowLabel}</a> : <strong>{rowLabel}</strong>}
+              <div className="pp-refinement-diff-values">
+                {rowDiffs.map((diff) => (
+                  <span className="pp-diff-chip" key={`${diff.candidateRowId}-${diff.field}`}>
+                    {`${diff.field}: ${formatCompactDiffValue(diff.before)} → ${formatCompactDiffValue(diff.after)}`}
+                  </span>
+                ))}
+              </div>
+            </article>
+          )
+        })}
+      </div>
+    </details>
   )
 }
 
@@ -1516,10 +1600,14 @@ function revisionLabel(revision: PendingPurchasePacketRevisionSummary): string {
 }
 
 function formatCompactDiffValue(value: unknown): string {
-  if (value === null) return '—'
-  if (typeof value === 'string') return value.length > 24 ? `${value.slice(0, 21)}…` : value
+  if (value === null) return 'None'
+  if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return 'changed'
+  const serialized = JSON.stringify(value)
+  if (serialized === undefined) {
+    throw new Error('Pending-purchase diff contains a non-JSON value.')
+  }
+  return serialized
 }
 
 function FamilyBulkPriceControl({ rowIds }: { rowIds: readonly number[] }) {
