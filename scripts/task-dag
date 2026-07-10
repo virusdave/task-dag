@@ -351,7 +351,7 @@ list_task_refs() {
 # at a path the tool would never mint — i.e. exactly the "I'll just do the
 # ref surgery by hand" mistake this whole subsystem exists to prevent.
 # ─────────────────────────────────────────────────────────────────────
-TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated completions ci-chains"
+TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated completions ci-chains repair-superseded"
 TASKDAG_KNOWN_GH_NS="issues comments child-epics child-epic-slots"
 
 # ─────────────────────────────────────────────────────────────────────
@@ -506,6 +506,14 @@ taskdag_ref_violations() {
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || return 0   # vanished → skip
     if [ "$objtype" != commit ]; then
         echo "✗ ${ref} → ${sha} is a ${objtype}, expected an (empty-tree) commit"
+        return 0
+    fi
+    # Repair-retirement audits have an exact path and typed commit protocol,
+    # not merely a broadly accepted namespace. The validator is defined by
+    # ci-repair.sh and checks the complete semantic identity and chain parent.
+    if [[ "$ref" = refs/heads/tasks/repair-superseded \
+        || "$ref" = refs/heads/tasks/repair-superseded/* ]]; then
+        taskdag_repair_superseded_violations "$sha" "$ref"
         return 0
     fi
     # The dependency-graph index branch is the ONE known exception to the

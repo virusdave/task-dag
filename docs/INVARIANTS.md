@@ -72,6 +72,7 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/delegated/<N>/<owner>/<repo>/<peer>` | cross-repo delegation edge | `delegate` |
    | `tasks/completions/<N>/…/<sha>` | recorded downstream completion | `ingest-comment` completion disposition |
    | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write`, `reconcile-lease` |
+   | `tasks/repair-superseded/<64-hex>` | immutable, non-scheduling repair-retirement audit | `repair-retire` |
    | `tasks/v1/graph` | dependency-edge index branch — a data-in-tree ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
    | `tasks/v1/mailbox/00`..`0f` | cross-repo notification mailbox — 16 fixed data-in-tree shard branches, exempt from the empty-tree floor (see below) | the mailbox writer (issue #13) |
    | `gh/issues/<N>` | GitHub-side epic mapping | `create-task-commit.sh` |
@@ -91,6 +92,28 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    diagnostics, and `Reconcile-Lease-*` / `Reconcile-Fence` are protected
    fields written by their owning typed operations. Every serializer rejects
    CR/LF-bearing values before creating a commit.
+
+   A repair-retirement audit uses the exact ref
+   `tasks/repair-superseded/<identity>`, where `identity` is lowercase SHA-256
+   over the NUL-delimited tuple `repair-superseded-v1`, canonical lowercase
+   repository, branch, first-red commit, and retired issue number. It points at
+   an empty-tree commit with exactly one parent: the authorizing CI-chain
+   commit. Its subject is `Repair-Superseded: v1`; its body contains exactly
+   one each of `Repository`, `Branch`, `Issue`, `First-Red`,
+   `Canonical-Issue`, `Reason`, `Registry-Commit`, `Registry-Blob`,
+   `Decision-Key`, `Reconcile-Fence`, and `Retired-At`, with no unknown
+   protocol lines. `Issue` and a non-`none` `Canonical-Issue` use `#N`;
+   `Reason` is one of `duplicate`, `stale-chain`, `green`, `downgrade`, or
+   `non-fast-forward`; object IDs are exactly 40 or 64 lowercase hex;
+   `Decision-Key` is `sha256:<64-hex>`; and the positive decimal fence is at
+   most `999999999999999999`. Strict validation recomputes the identity and
+   verifies that the parent is in the exact encoded repository/branch chain
+   ref's first-parent history, has every field in the frozen V1 parent-field
+   snapshot exactly once (future chain fields do not invalidate old audits),
+   and agrees on first-red, registry, decision, and fence. The retirement time
+   must satisfy `Updated-At <= Retired-At < Reconcile-Lease-Until`. This
+   namespace is audit-only and is never frontier,
+   pending, active, blocked, or otherwise discoverable as scheduling work.
 
 `validate --strict` is **read-only** and **race-tolerant**: it snapshots
 refs in a single `for-each-ref` and skips any ref whose object vanished

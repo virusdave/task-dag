@@ -572,6 +572,176 @@ _ci_repair_collect_evidence() {
 }
 
 # ---------------------------------------------------------------------------
+# Repair-superseded audit validation
+#
+# `repair-retire` (implemented by a dependent task) records one immutable,
+# non-scheduling audit ref for each retired repair issue. Strict validation is
+# defined before the writer so malformed audits can never be legitimised by
+# adding a broad namespace alone.
+# ---------------------------------------------------------------------------
+_REPAIR_SUPERSEDED_V1_PARENT_FIELDS=(
+    Current-Head Last-Green First-Red State Repair-Mode Repair-Issue
+    Repair-Attempt Fail-Signature Same-Sig-Count
+    Observed-Head Policy-Digest Aggregate Required-Evidence
+    Head-First-Seen-At Observed-At Evidence-Key Decision-Key
+    Registry-Commit Registry-Blob Enrollment-Mode
+    Reconcile-Status Reconcile-Error
+    Reconcile-Lease-Owner Reconcile-Lease-Until Reconcile-Fence
+)
+
+taskdag_repair_superseded_violations() { # <commit> <full-ref>
+    local sha="$1" ref="$2" identity="${ref##*/}" message subject tree parent
+    local field line key count expected_identity parent_subject chain_ref chain_tip
+    local retired_epoch lease_until_epoch updated_epoch parent_value subject_count
+    local -A values=()
+    local -a fields=(
+        Repository Branch Issue First-Red Canonical-Issue Reason
+        Registry-Commit Registry-Blob Decision-Key Reconcile-Fence Retired-At
+    )
+
+    if ! [[ "$ref" =~ ^refs/heads/tasks/repair-superseded/[0-9a-f]{64}$ ]]; then
+        echo "✗ ${ref}: malformed repair-superseded ref; expected exactly one 64-lowercase-hex identity"
+        return 0
+    fi
+    if [ "$(git cat-file -t "$sha" 2>/dev/null || true)" != commit ]; then
+        echo "✗ ${ref}: repair-superseded audit target is not a commit"
+        return 0
+    fi
+    tree="$(git rev-parse "${sha}^{tree}" 2>/dev/null || true)"
+    if [ "$tree" != "$EMPTY_TREE" ]; then
+        echo "✗ ${ref}: repair-superseded audit must use the empty tree"
+    fi
+    if [ "$(git rev-list --parents -n 1 "$sha" 2>/dev/null | awk '{ print NF - 1 }')" -ne 1 ]; then
+        echo "✗ ${ref}: repair-superseded audit must have exactly one authorizing chain parent"
+        return 0
+    fi
+    parent="$(git rev-parse "${sha}^" 2>/dev/null || true)"
+    message="$(git log -1 --format=%B "$sha" 2>/dev/null)" || {
+        echo "✗ ${ref}: repair-superseded audit message is unreadable"
+        return 0
+    }
+    subject="$(printf '%s\n' "$message" | sed -n '1p')"
+    subject_count="$(printf '%s\n' "$message" | awk '$0 == "Repair-Superseded: v1" { n++ } END { print n + 0 }')"
+    if [ "$subject" != "Repair-Superseded: v1" ] || [ "$subject_count" -ne 1 ]; then
+        echo "✗ ${ref}: audit subject must be 'Repair-Superseded: v1'"
+    fi
+
+    for field in "${fields[@]}"; do
+        count="$(printf '%s\n' "$message" | awk -v prefix="${field}: " 'index($0, prefix) == 1 { n++ } END { print n + 0 }')"
+        if [ "$count" -ne 1 ]; then
+            echo "✗ ${ref}: audit requires exactly one ${field} field"
+        fi
+        values["$field"]="$(printf '%s\n' "$message" | sed -n "s/^${field}: //p" | head -1)"
+    done
+
+    # Reject unknown nonblank protocol lines. This makes the audit immutable
+    # and prevents a future writer from smuggling a second interpretation into
+    # a commit that an older strict validator would otherwise accept.
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [ "$line" = "Repair-Superseded: v1" ] && continue
+        if ! [[ "$line" =~ ^([A-Za-z-]+):\ (.*)$ ]]; then
+            echo "✗ ${ref}: unexpected audit protocol line '$line'"
+            continue
+        fi
+        key="${BASH_REMATCH[1]}"
+        case " $key " in
+            " Repository "|" Branch "|" Issue "|" First-Red "|" Canonical-Issue "|" Reason "|" Registry-Commit "|" Registry-Blob "|" Decision-Key "|" Reconcile-Fence "|" Retired-At ") ;;
+            *) echo "✗ ${ref}: unexpected audit protocol line '$line'" ;;
+        esac
+    done <<< "$message"
+
+    [[ "${values[Repository]}" =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]] \
+        || echo "✗ ${ref}: Repository must be canonical lowercase owner/repo"
+    [ -n "${values[Branch]}" ] && _cichain_single_line "${values[Branch]}" \
+        || echo "✗ ${ref}: Branch must be nonempty and single-line"
+    [[ "${values[Issue]}" =~ ^#[1-9][0-9]*$ ]] \
+        || echo "✗ ${ref}: Issue must be # followed by canonical positive decimal"
+    [[ "${values[First-Red]}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        || echo "✗ ${ref}: First-Red must be a full lowercase commit id"
+    if [ "${values[Canonical-Issue]}" != none ] \
+        && ! [[ "${values[Canonical-Issue]}" =~ ^#[1-9][0-9]*$ ]]; then
+        echo "✗ ${ref}: Canonical-Issue must be none or # followed by canonical positive decimal"
+    fi
+    case "${values[Reason]}" in
+        duplicate|stale-chain|green|downgrade|non-fast-forward) ;;
+        *) echo "✗ ${ref}: Reason is not a recognised repair-retirement reason" ;;
+    esac
+    [[ "${values[Registry-Commit]}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        || echo "✗ ${ref}: Registry-Commit must be a full lowercase object id"
+    [[ "${values[Registry-Blob]}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        || echo "✗ ${ref}: Registry-Blob must be a full lowercase object id"
+    [[ "${values[Decision-Key]}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || echo "✗ ${ref}: Decision-Key must be sha256:<64-lowercase-hex>"
+    if ! [[ "${values[Reconcile-Fence]}" =~ ^[1-9][0-9]{0,17}$ ]] \
+        || [ "${values[Reconcile-Fence]}" -gt 999999999999999999 ]; then
+        echo "✗ ${ref}: Reconcile-Fence must be a canonical positive bounded integer"
+    fi
+    retired_epoch="$(_cichain_timestamp_epoch "${values[Retired-At]}" 2>/dev/null || true)"
+    [ -n "$retired_epoch" ] || echo "✗ ${ref}: Retired-At must be canonical UTC"
+
+    expected_identity="$(printf 'repair-superseded-v1\0%s\0%s\0%s\0%s' \
+        "${values[Repository]}" "${values[Branch]}" "${values[First-Red]}" \
+        "${values[Issue]#\#}" | sha256sum | awk '{ print $1 }')"
+    [ "$identity" = "$expected_identity" ] \
+        || echo "✗ ${ref}: ref identity does not match the semantic audit tuple"
+
+    if [ "$(git cat-file -t "$parent" 2>/dev/null || true)" != commit ] \
+        || [ "$(git rev-parse "${parent}^{tree}" 2>/dev/null || true)" != "$EMPTY_TREE" ]; then
+        echo "✗ ${ref}: authorizing parent must be an empty-tree CI-chain commit"
+        return 0
+    fi
+    parent_subject="$(git log -1 --format=%s "$parent" 2>/dev/null || true)"
+    if [ "$parent_subject" != "CI-Chain: ${values[Repository]}@${values[Branch]}" ]; then
+        echo "✗ ${ref}: authorizing parent is not the audited repository/branch CI chain"
+    fi
+    chain_ref="$(_cichain_ref "${values[Repository]}" "${values[Branch]}")"
+    chain_tip="$(git rev-parse --verify --quiet "$chain_ref" 2>/dev/null || true)"
+    if [ -z "$chain_tip" ] || ! git rev-list --first-parent "$chain_tip" 2>/dev/null \
+        | awk -v wanted="$parent" '$0 == wanted { found=1 } END { exit !found }'; then
+        echo "✗ ${ref}: authorizing parent is not in the canonical CI-chain ref history"
+    fi
+    # V1 audits are immutable, so their parent schema is frozen too. A future
+    # chain field must not retroactively invalidate historical V1 audits;
+    # requiring a larger parent protocol needs a new audit version.
+    for field in "${_REPAIR_SUPERSEDED_V1_PARENT_FIELDS[@]}"; do
+        [ "$(_cichain_field_count "$parent" "$field")" -eq 1 ] \
+            || echo "✗ ${ref}: authorizing parent requires exactly one canonical ${field} field"
+    done
+    if [ "$(_cichain_field_count "$parent" Updated-At)" -ne 1 ]; then
+        echo "✗ ${ref}: authorizing parent requires exactly one Updated-At field"
+    fi
+    for field in First-Red Registry-Commit Registry-Blob Decision-Key Reconcile-Fence; do
+        if [ "$(_cichain_field_count "$parent" "$field")" -ne 1 ]; then
+            echo "✗ ${ref}: authorizing parent requires exactly one ${field} field"
+            continue
+        fi
+        parent_value="$(_cichain_field "$parent" "$field")"
+        [ "$parent_value" = "${values[$field]}" ] \
+            || echo "✗ ${ref}: ${field} disagrees with the authorizing chain parent"
+    done
+    for field in Reconcile-Lease-Owner Reconcile-Lease-Until; do
+        [ "$(_cichain_field_count "$parent" "$field")" -eq 1 ] \
+            || echo "✗ ${ref}: authorizing parent requires exactly one ${field} field"
+    done
+    parent_value="$(_cichain_field "$parent" Reconcile-Lease-Owner)"
+    [[ "$parent_value" =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$ ]] \
+        || echo "✗ ${ref}: authorizing parent has an invalid reconciliation owner"
+    lease_until_epoch="$(_cichain_timestamp_epoch "$(_cichain_field "$parent" Reconcile-Lease-Until)" 2>/dev/null || true)"
+    updated_epoch="$(_cichain_timestamp_epoch "$(_cichain_field "$parent" Updated-At)" 2>/dev/null || true)"
+    [ -n "$updated_epoch" ] || echo "✗ ${ref}: authorizing parent has an invalid Updated-At"
+    if [ -z "$lease_until_epoch" ]; then
+        echo "✗ ${ref}: authorizing parent has an invalid reconciliation deadline"
+    elif [ -n "$retired_epoch" ] && [ -n "$updated_epoch" ] \
+        && [ "$retired_epoch" -lt "$updated_epoch" ]; then
+        echo "✗ ${ref}: Retired-At predates the authorizing lease state"
+    elif [ -n "$retired_epoch" ] && [ "$retired_epoch" -ge "$lease_until_epoch" ]; then
+        echo "✗ ${ref}: Retired-At is not within the authorizing lease"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # parse-tree-fix
 #
 # A repair worker marks its fix commit with trailers the classifier interprets:
