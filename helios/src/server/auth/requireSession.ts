@@ -12,9 +12,29 @@ import { getUserById } from '../db/queries/authQueries.js'
 import { hasAtLeastRole } from './permissions.js'
 import { readSessionUserId } from './sessionCookie.js'
 
+const AGENT_READONLY_SESSION_USER: SessionUser = {
+  active: true,
+  email: 'agent-readonly@local.helios',
+  id: 2_147_483_647,
+  metricGrants: [],
+  name: 'Agent Readonly',
+  role: 'viewer',
+}
+
 export async function buildSessionEnvelope(request: FastifyRequest): Promise<SessionEnvelope> {
   const runtimeDependencies = buildRuntimeDependencyStatuses()
   const localDevSignInAvailable = isLocalDevSignInAvailable()
+  if (request.agentReadonlyPrincipal) {
+    return {
+      authMode: 'agent_readonly',
+      localDevSignInAvailable,
+      pendingMigrations: [],
+      permissions: getPermissionsForRole(AGENT_READONLY_SESSION_USER.role),
+      runtimeDependencies,
+      user: AGENT_READONLY_SESSION_USER,
+    }
+  }
+
   // Pending-migration detection runs against the live DB but is
   // cached for ~30s inside getPendingMigrations, so the per-request
   // cost is amortized. We intentionally surface this on every

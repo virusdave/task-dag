@@ -27,7 +27,7 @@ export const PendingMigrationSchema = z.object({
 export type PendingMigration = z.infer<typeof PendingMigrationSchema>
 
 export const SessionEnvelopeSchema = z.object({
-  authMode: z.enum(['anonymous', 'session']),
+  authMode: z.enum(['anonymous', 'session', 'agent_readonly']),
   localDevSignInAvailable: z.boolean(),
   pendingMigrations: z.array(PendingMigrationSchema),
   permissions: PermissionSetSchema,

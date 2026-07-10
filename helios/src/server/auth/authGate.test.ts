@@ -67,8 +67,57 @@ async function buildSignedAgentGateHarness(options: { maxResponseBytes?: number 
           method: 'GET',
           kind: 'api',
           match: 'exact',
+          path: '/api/session',
+          safe_read_note: 'Synthetic agent session envelope.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
           path: '/api/read',
           safe_read_note: 'Small test read.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/viewer',
+          safe_read_note: 'Viewer-gated test read.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/editor',
+          safe_read_note: 'Editor-gated denial test.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/admin',
+          safe_read_note: 'Admin-gated denial test.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/metrics-test',
+          safe_read_note: 'Metrics-grant denial test.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/confidential-metrics-test',
+          safe_read_note: 'Confidential metrics-grant denial test.',
+        },
+        {
+          method: 'GET',
+          kind: 'api',
+          match: 'exact',
+          path: '/api/cashier-test',
+          safe_read_note: 'Cashier-display denial test.',
         },
         {
           method: 'GET',
@@ -107,10 +156,52 @@ async function buildSignedAgentGateHarness(options: { maxResponseBytes?: number 
     secret: process.env.SESSION_COOKIE_SECRET,
   })
   registerAuthGate(server)
+  const { SessionEnvelopeSchema } = await import('../../shared/contracts/api/session.js')
+  const {
+    buildSessionEnvelope,
+    requireCashierDisplayUser,
+    requireConfidentialMetricsGrant,
+    requireMetricsGrant,
+    requireSessionUser,
+  } = await import('./requireSession.js')
+  server.get('/api/session', async (request, reply) => {
+    const envelope = SessionEnvelopeSchema.parse(await buildSessionEnvelope(request))
+    return reply.send(envelope)
+  })
   server.get('/api/read', async (request) => ({
     ok: true,
     principal: request.agentReadonlyPrincipal?.kind ?? null,
   }))
+  server.get('/api/viewer', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) return
+    return reply.send({ ok: true, email: user.email, role: user.role })
+  })
+  server.get('/api/editor', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) return
+    return reply.send({ ok: true })
+  })
+  server.get('/api/admin', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+    return reply.send({ ok: true })
+  })
+  server.get('/api/metrics-test', async (request, reply) => {
+    const user = await requireMetricsGrant(request, reply, 'explore')
+    if (!user) return
+    return reply.send({ ok: true })
+  })
+  server.get('/api/confidential-metrics-test', async (request, reply) => {
+    const user = await requireConfidentialMetricsGrant(request, reply, ['gads-bronx'])
+    if (!user) return
+    return reply.send({ ok: true })
+  })
+  server.get('/api/cashier-test', async (request, reply) => {
+    const user = await requireCashierDisplayUser(request, reply)
+    if (!user) return
+    return reply.send({ ok: true })
+  })
   server.get('/api/too-large', async () => 'x'.repeat((options.maxResponseBytes ?? 256) + 20))
   server.get('/page', async () => '<!doctype html><title>ok</title>')
   server.get('/assets/ok.js', async (_request, reply) => reply.type('application/javascript').send('export default 1'))
@@ -168,6 +259,142 @@ it('accepts signed-agent GET and HEAD requests for allowlisted reads', async () 
     expect(headResponse.statusCode).toBe(200)
     expect(headResponse.body).toBe('')
     expect(logs.join('')).toContain('"outcome":"accepted"')
+  } finally {
+    await server.close()
+  }
+})
+
+it('exposes an accepted signed-agent request as a synthetic readonly viewer session', async () => {
+  const { server, keys } = await buildSignedAgentGateHarness({ maxResponseBytes: 4096 })
+  try {
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/session',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/session',
+        nonce: 'signed_session_nonce_1234',
+      }),
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      authMode: 'agent_readonly',
+      permissions: {
+        canApprove: false,
+        canEditProposals: false,
+        canForceReconcile: false,
+        canManageUsers: false,
+        canUndo: false,
+      },
+      user: {
+        active: true,
+        email: 'agent-readonly@local.helios',
+        metricGrants: [],
+        name: 'Agent Readonly',
+        role: 'viewer',
+      },
+    })
+    expect(response.json().user.id).toEqual(expect.any(Number))
+  } finally {
+    await server.close()
+  }
+})
+
+it('lets accepted signed-agent requests through explicit viewer routes only', async () => {
+  const { server, keys } = await buildSignedAgentGateHarness({ maxResponseBytes: 4096 })
+  try {
+    const viewerResponse = await server.inject({
+      method: 'GET',
+      url: '/api/viewer',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/viewer',
+        nonce: 'signed_viewer_nonce_1234',
+      }),
+    })
+    expect(viewerResponse.statusCode).toBe(200)
+    expect(viewerResponse.json()).toEqual({
+      ok: true,
+      email: 'agent-readonly@local.helios',
+      role: 'viewer',
+    })
+
+    const editorResponse = await server.inject({
+      method: 'GET',
+      url: '/api/editor',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/editor',
+        nonce: 'signed_editor_nonce_1234',
+      }),
+    })
+    expect(editorResponse.statusCode).toBe(403)
+    expect(editorResponse.json()).toEqual({ error: 'You do not have permission to perform this action.' })
+
+    const adminResponse = await server.inject({
+      method: 'GET',
+      url: '/api/admin',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/admin',
+        nonce: 'signed_admin_nonce_1234',
+      }),
+    })
+    expect(adminResponse.statusCode).toBe(403)
+    expect(adminResponse.json()).toEqual({ error: 'You do not have permission to perform this action.' })
+  } finally {
+    await server.close()
+  }
+})
+
+it('denies accepted signed-agent requests at metrics and cashier-display gates', async () => {
+  const { server, keys } = await buildSignedAgentGateHarness({ maxResponseBytes: 4096 })
+  try {
+    const metricsResponse = await server.inject({
+      method: 'GET',
+      url: '/api/metrics-test',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/metrics-test',
+        nonce: 'signed_metrics_nonce_1234',
+      }),
+    })
+    expect(metricsResponse.statusCode).toBe(403)
+    expect(metricsResponse.json()).toEqual({
+      error:
+        'You do not have access to this metrics surface. Required: explore. ' +
+        'Ask an admin to grant access via /config/users.',
+    })
+
+    const confidentialMetricsResponse = await server.inject({
+      method: 'GET',
+      url: '/api/confidential-metrics-test',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/confidential-metrics-test',
+        nonce: 'signed_confidential_metrics_nonce_1234',
+      }),
+    })
+    expect(confidentialMetricsResponse.statusCode).toBe(403)
+    expect(confidentialMetricsResponse.json()).toEqual({
+      error: 'You do not have access to this confidential metrics surface.',
+    })
+
+    const cashierResponse = await server.inject({
+      method: 'GET',
+      url: '/api/cashier-test',
+      headers: signAgentRequest({
+        privateKey: keys.privateKey,
+        pathAndQuery: '/api/cashier-test',
+        nonce: 'signed_cashier_nonce_1234',
+      }),
+    })
+    expect(cashierResponse.statusCode).toBe(403)
+    expect(cashierResponse.json()).toEqual({
+      error:
+        'You do not have access to the cashier check-ins display. ' +
+        'Contact an admin to add your account to the allowlist.',
+    })
   } finally {
     await server.close()
   }
