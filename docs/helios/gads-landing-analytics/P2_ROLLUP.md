@@ -83,6 +83,11 @@ later shows the refresh seq-scanning a large table.
 
 ## Operator note
 
+The durable P5 runbook for cadence, refresh inspection, manual rebuild,
+rollout, rollback, and deferred V2 scope is
+[`RUNBOOK.md`](./RUNBOOK.md). The original P2 operator notes are kept
+below for historical context.
+
 Migration `087_gads_lp_rollup.sql` is applied **manually** (helios has
 no boot-time migration runner; the pending-migration banner surfaces it
 via `pendingMigrations.ts`). Apply it before/around the deploy:

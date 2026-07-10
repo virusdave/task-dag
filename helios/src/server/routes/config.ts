@@ -152,6 +152,10 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
         const jobId = await runNowEnrichCustomerAddress(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
+      if (taskKey === 'workers.scheduling.gads_lp_rollup_refresh') {
+        const jobId = await runNowGadsLpRollupRefresh(user.id)
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
 
       return reply.status(400).send({
         error: `Background task ${taskKey} has no run-now wiring yet.`,
@@ -340,6 +344,43 @@ async function runNowCatalogRefresh(userId: number): Promise<number> {
 async function buildCatalogTaskDetail() {
   const recentSnapshots = await loadRecentCatalogTaxonomySnapshots(20)
   return { recentSnapshots }
+}
+
+async function runNowGadsLpRollupRefresh(userId: number): Promise<number> {
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: 'config.workers.gads_lp_rollup_refresh',
+      dedupeKey: `config.workers.gads_lp_rollup_refresh:manual:${enqueuedAt.toISOString().slice(0, 19)}`,
+      jobType: 'config.workers.gads_lp_rollup_refresh',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        trigger: 'manual_run',
+      },
+      requestedByUserId: userId,
+      runAt: enqueuedAt,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.gads_lp_rollup_refresh', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.gads_lp_rollup_refresh.requested',
+      module: 'config',
+      payload: {
+        taskKey: 'workers.scheduling.gads_lp_rollup_refresh',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
 }
 
 async function runNowSweedOrdersIngest(userId: number): Promise<number> {

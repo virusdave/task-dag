@@ -34,17 +34,27 @@ export async function runRefreshGadsLpRollupJob(
 ): Promise<void> {
   const pool = getPool()
   const horizonDays = payload.horizonDays ?? GADS_LP_ROLLUP_HORIZON_DAYS
+  const startedAt = Date.now()
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[gads-lp-rollup-refresh] job=${context.id} trigger=${payload.trigger} ` +
+      `status=running horizonDays=${horizonDays}`,
+  )
 
   await markGadsLpRollupRefreshRunning(pool)
 
   try {
     const result = await refreshGadsLpRollup(horizonDays)
     await markGadsLpRollupRefreshOk(result, pool)
+    const durationMs = Date.now() - startedAt
 
     // eslint-disable-next-line no-console
     console.log(
-      `[gads-lp-rollup-refresh] job=${context.id} trigger=${payload.trigger} ` +
-        `horizonDays=${horizonDays} floor=${result.horizonFloor} rows=${result.rowsWritten}`,
+      `[gads-lp-rollup-refresh] job=${context.id} trigger=${payload.trigger} status=ok ` +
+        `durationMs=${durationMs} horizonDays=${horizonDays} floor=${result.horizonFloor} ` +
+        `rows=${result.rowsWritten} assignmentsMissingId=${result.assignmentsMissingId} ` +
+        `unattributedStageEvents=${result.unattributedStageEvents}`,
     )
 
     await appendAuditEvent(pool, {
@@ -61,6 +71,9 @@ export async function runRefreshGadsLpRollupJob(
         rowsWritten: result.rowsWritten,
         sourceMinAt: result.sourceMinAt,
         sourceMaxAt: result.sourceMaxAt,
+        durationMs,
+        assignmentsMissingId: result.assignmentsMissingId,
+        unattributedStageEvents: result.unattributedStageEvents,
       },
       requestId: null,
       scope: null,
@@ -69,10 +82,30 @@ export async function runRefreshGadsLpRollupJob(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     await markGadsLpRollupRefreshError(message, pool)
+    const durationMs = Date.now() - startedAt
     // eslint-disable-next-line no-console
     console.error(
-      `[gads-lp-rollup-refresh] job=${context.id} trigger=${payload.trigger} failed: ${message}`,
+      `[gads-lp-rollup-refresh] job=${context.id} trigger=${payload.trigger} status=error ` +
+        `durationMs=${durationMs} horizonDays=${horizonDays}: ${message}`,
     )
+    await appendAuditEvent(pool, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: 'singleton',
+      entityType: 'job',
+      eventType: 'config.workers.gads_lp_rollup_refresh.completed',
+      module: 'config',
+      payload: {
+        trigger: payload.trigger,
+        horizonDays,
+        durationMs,
+        status: 'error',
+        errorMessage: message.slice(0, 2000),
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
     throw error
   }
 }
