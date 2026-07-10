@@ -7730,8 +7730,10 @@ Usage: task-dag guard-commit-message <message-file>
 
 Exit non-zero if the commit message either (a) has a Conventional-Commits
 subject prefix (feat:, fix(scope):, chore!:, …) — canon requires a plain,
-capitalized, imperative subject (rules/WORKFLOW.md 'Commit messages') — or
-(b) names task-dag control-plane content that only the tooling may emit
+capitalized, imperative subject (rules/WORKFLOW.md 'Commit messages'),
+(b) uses GitHub-native close/fix/resolve keywords with an issue reference,
+which would bypass task-dag's epic-close projection, or (c) names task-dag
+control-plane content that only the tooling may emit
 (Task: subject, Type:, Task-Commit:, Status: completed/pending, Closes-Epic:,
 Historical-Commit:, Retroactive:, Blocked-Meta:). The control-plane commits
 are all built with 'git commit-tree' (which bypasses hooks), so those markers
@@ -7815,6 +7817,7 @@ EOF
     _gm_has '^Retroactive:[[:space:]]*true'          && hits+=("Retroactive: true  → use 'task-dag complete-historical'")
     _gm_has '^Blocked-Meta:'                         && hits+=("Blocked-Meta:      → blocking is done by 'task-dag block'")
     _gm_has '^Type:[[:space:]]*(epic|task|leaf)([[:space:]]|$)' && hits+=("Type: …            → task commits are minted by tooling ('task-dag breakdown')")
+    _gm_has '(^|[^[:alnum:]_-])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+([-[:alnum:]_.]+/[-[:alnum:]_.]+)?#[1-9][0-9]*([^0-9]|$)' && hits+=("GitHub close keyword → use task-dag close/complete flows; native close/fix/resolve keywords bypass projection")
 
     [ ${#hits[@]} -eq 0 ] && return 0
 

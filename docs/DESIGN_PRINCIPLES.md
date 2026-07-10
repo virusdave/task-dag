@@ -130,9 +130,10 @@ task SHA that never existed).
 - The canonical check is `task-dag guard-commit-message <file>`. It rejects a
   message whose non-comment lines carry any of: a `Task:` subject, `Type:`,
   `Task-Commit:`, `Status: completed|pending`, `Closes-Epic:`,
-  `Historical-Commit:`, `Retroactive:`, `Blocked-Meta:` — and points at the
-  subcommand that should have produced it. Cross-repo trailers a normal impl
-  commit legitimately carries by hand (`Satisfies:`, `Phase:`,
+  `Historical-Commit:`, `Retroactive:`, `Blocked-Meta:`, or a GitHub-native
+  close/fix/resolve keyword followed by `#N` / `owner/repo#N` — and points at
+  the subcommand that should have produced it. Cross-repo trailers a normal
+  impl commit legitimately carries by hand (`Satisfies:`, `Phase:`,
   `Materialise-Child-Epic:`) are deliberately allowed.
 - The same check **also enforces canon commit style** (top-level
   `rules/WORKFLOW.md` "Commit messages"): it rejects a Conventional-Commits

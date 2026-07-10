@@ -70,6 +70,15 @@ Type: leaf"
 reject "Task: subject (task commit)"     "Task: P5 enforce ads-policy lint"
 reject "Status: pending"                 "new task
 Status: pending"
+reject "native closes keyword"           "Add the projection repair
+
+This closes #46."
+reject "native fixes keyword"            "Repair the close path
+
+Fixes virusdave/top-level#60."
+reject "native resolved keyword uppercase" "Repair projection
+
+RESOLVED #61 after the rollout."
 
 # ── ordinary work → ALLOW ───────────────────────────────────────────
 allow "impl commit with Satisfies/Phase" \
@@ -83,6 +92,14 @@ allow "prose mentioning a task casually" \
 "Handle the completed state in the UI
 
 This renders the Status label when a task is completed."
+allow "non-close use of fix" \
+"Improve the fix list
+
+This explains a fixed-width parser and a bug fix without an issue keyword."
+allow "Closes-Epic is handled as task-dag marker" \
+"Describe the close trailer
+
+The sanctioned trailer is Closes-Epic: #46, not a native keyword."
 
 # ── comment lines (git strips them) must NOT trigger ────────────────
 allow "reserved marker only inside a # comment line" \
