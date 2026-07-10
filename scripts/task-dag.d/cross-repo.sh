@@ -1207,6 +1207,10 @@ cmd_close_epic() {
     git fetch origin master >/dev/null 2>&1 || true
     local master_tip master_tree
     master_tip="$(git rev-parse --verify origin/master 2>/dev/null || git rev-parse --verify master)"
+    if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
+        _xrepo_die "close-epic: child-epic materialisation intent for #${top_issue} is not durably delegated yet"
+        return 3
+    fi
     master_tree="$(git rev-parse "${master_tip}^{tree}")"
 
     local close_msg_file
@@ -1491,6 +1495,11 @@ EOF
         return 0
     fi
 
+    if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
+        _xrepo_die "close-ops-epic: child-epic materialisation intent for #${top_issue} is not durably delegated; refusing to close."
+        return 3
+    fi
+
     master_tree="$(git rev-parse "${master_tip}^{tree}")"
 
     local close_msg_file
@@ -1733,6 +1742,10 @@ EOF
     if epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip"; then
         _xrepo_log "close-completed-epic: epic #${top_issue} already closed on master (concurrent close); nothing to do."
         return 0
+    fi
+    if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
+        _xrepo_die "close-completed-epic: child-epic materialisation intent for #${top_issue} is not durably delegated; refusing to close."
+        return 3
     fi
     master_tree="$(git rev-parse "${master_tip}^{tree}")"
 

@@ -80,6 +80,18 @@ check_valid "p2 x"      bad   # no space
 check_valid "$(printf 'a%.0s' {1..65})" bad # >64 chars
 check_valid "$(printf 'a%.0s' {1..64})" ok  # exactly 64 chars
 
+# Parent normalization is shared by the materialiser and every close barrier.
+check "parent '#17' normalizes" "$(taskdag_materialise_parent_number '#17')" "17"
+check "parent '  #017  ' normalizes" "$(taskdag_materialise_parent_number '  #017  ')" "17"
+check "parent '17' normalizes" "$(taskdag_materialise_parent_number '17')" "17"
+if taskdag_materialise_parent_number '#0' >/dev/null 2>&1 \
+    || taskdag_materialise_parent_number '#17x' >/dev/null 2>&1; then
+    echo "NOT OK - malformed/zero Parent-Issue values must be rejected"
+    fail=1
+else
+    echo "ok  - malformed/zero Parent-Issue values are rejected"
+fi
+
 # --- extract_materialise_trailers_from_message (whole-message parser) ------
 #
 # The parser is the fix for virusdave/task-dag#11: it must recognise a
@@ -296,9 +308,9 @@ else
     echo "ok  - #44: group before a trailing Related: block is still acted upon (non-zero)"
 fi
 case "$SCRIPT_OUT" in
-    *"not present in that commit's tree"*)
-        echo "ok  - #44: group reached materialisation (body-file check)" ;;
-    *) echo "NOT OK - #44: group was dropped (never reached the body-file check)"; fail=1 ;;
+    *"Could not determine whether the materialisation marker for #1 some/peer exists"*)
+        echo "ok  - #44: group reached materialisation and remote uncertainty failed closed" ;;
+    *) echo "NOT OK - #44: group was dropped before the marker safety check"; fail=1 ;;
 esac
 
 # (empty opener) An opener with no <owner/repo> value is a malformed group
@@ -321,6 +333,66 @@ case "$SCRIPT_OUT" in
         echo "ok  - empty opener reports the missing-value ::error::" ;;
     *) echo "NOT OK - empty opener: expected a missing-value ::error::"; fail=1 ;;
 esac
+
+# Marker-only recovery: issue creation and marker publication precede
+# `task-dag delegate`, so a failure in that final step used to become a
+# permanent false "already materialised" no-op. A replay must read the peer
+# issue from the marker and re-run the idempotent delegate dual-write.
+MARKER_ROOT="$(mktemp -d)"
+git init -q --bare "$MARKER_ROOT/origin.git"
+git -C "$INT_REPO" remote add origin "$MARKER_ROOT/origin.git"
+git -C "$INT_REPO" push -q origin HEAD:master
+EMPTY_TREE="$(git -C "$INT_REPO" mktree </dev/null)"
+MARKER_SHA="$(git -C "$INT_REPO" commit-tree "$EMPTY_TREE" -m 'kind: gh-child-epic-marker
+role: system
+
+parent_issue: 55
+peer:
+  repo: some/peer
+  issue: 123
+materialised_by_commit: fixture
+materialised_at: 2026-07-10T00:00:00Z')"
+git -C "$INT_REPO" push -q origin \
+    "$MARKER_SHA:refs/heads/gh/child-epics/55/some/peer"
+printf '# repair fixture\n' > "$INT_REPO/repair-plan.md"
+git -C "$INT_REPO" add repair-plan.md
+git -C "$INT_REPO" commit -q -F - <<'EOF'
+Replay a marker-only materialisation
+
+Materialise-Child-Epic: some/peer
+Child-Epic-Title: Repair fixture
+Child-Epic-Body-File: repair-plan.md
+Parent-Issue: #55
+EOF
+REPAIR_SHA="$(git -C "$INT_REPO" rev-parse HEAD)"
+FAKE_TD="$MARKER_ROOT/task-dag"
+TD_CALL_LOG="$MARKER_ROOT/task-dag.calls"
+cat > "$FAKE_TD" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TD_CALL_LOG"
+exit 0
+SH
+chmod +x "$FAKE_TD"
+: > "$TD_CALL_LOG"
+rc=0
+SCRIPT_OUT="$(
+    cd "$INT_REPO"
+    env -i PATH="$PATH" HOME="$HOME" \
+        BEFORE_SHA="$E_SHA" AFTER_SHA="$REPAIR_SHA" \
+        GH_REPO="FreshlyBakedNYC/automation" SOURCE_TOKEN=stub-token \
+        APP_ID=1 APP_PRIVATE_KEY=stub TASK_DAG="$FAKE_TD" \
+        TD_CALL_LOG="$TD_CALL_LOG" \
+        bash "$HERE/materialise-child-epics.sh" 2>&1
+)" || rc=$?
+if [ "$rc" -eq 0 ] \
+    && grep -qx 'delegate --issue 55 --to some/peer#123' "$TD_CALL_LOG" \
+    && printf '%s' "$SCRIPT_OUT" | grep -q 'Verified/repaired some/peer#123'; then
+    echo "ok  - marker-only retry replays delegate and verifies durable materialisation"
+else
+    echo "NOT OK - marker-only retry did not repair delegation (rc=$rc out=$SCRIPT_OUT calls=$(cat "$TD_CALL_LOG"))"
+    fail=1
+fi
+rm -rf "$MARKER_ROOT"
 
 rm -rf "$INT_REPO"
 

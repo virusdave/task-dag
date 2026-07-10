@@ -99,4 +99,75 @@ else
   bad "5: no trailer-gated close merge reachable from HEAD"
 fi
 
+# Regression for issue #17: the final leaf's implementation commit also
+# declares a child epic. The marker/delegation/edge do not exist until the
+# asynchronous materialise workflow handles the push, so `complete` must not
+# publish a close in that gap. This is the 9662dbf -> complete -> async
+# delegation ordering that prematurely closed top-level#32.
+git init -q --bare "$ROOT/origin-mce.git"
+git clone -q "$ROOT/origin-mce.git" "$ROOT/wc-mce"; cd "$ROOT/wc-mce"
+echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
+git config taskdag.current-repo test/test
+
+EMPTY_TREE=$(git mktree </dev/null)
+EPIC_MCE=$(git commit-tree "$EMPTY_TREE" -p HEAD -m "Task: Materialising epic
+
+Issue: #778
+URL: https://github.com/test/test/issues/778
+Author: tester
+Status: pending
+Type: epic")
+git update-ref refs/heads/gh/issues/778 "$EPIC_MCE"
+git update-ref refs/heads/tasks/pending/778 "$EPIC_MCE"
+git push -q origin refs/heads/gh/issues/778 refs/heads/tasks/pending/778
+"$TD" claim-root 778 >/dev/null 2>&1
+printf '[{"title":"final local plan leaf","type":"leaf"}]' > "$ROOT/spec-mce.json"
+MCE_LEAF=$("$TD" breakdown "$EPIC_MCE" --spec-file="$ROOT/spec-mce.json" --json 2>/dev/null \
+  | jq -r '.tasks[0].shortSha')
+TASK_DAG_CLAIMER=w1 TASK_DAG_CLAIMER_HOST=h1 TASK_DAG_CLAIMER_PID=111 \
+  "$TD" claim "$MCE_LEAF" >/dev/null 2>&1
+printf '# child plan\n' > child-plan.md
+git add child-plan.md
+git commit -q -F - <<'EOF'
+Strengthen and materialise the child plan
+
+Materialise-Child-Epic: peer/repo
+Child-Epic-Title: Implement child plan
+Child-Epic-Body-File: child-plan.md
+Parent-Issue: #778
+EOF
+out=$(TASK_DAG_CLAIMER=w1 TASK_DAG_CLAIMER_HOST=h1 TASK_DAG_CLAIMER_PID=111 \
+  "$TD" complete "$MCE_LEAF" 2>&1); rc=$?
+
+has_mce_close() {
+  git log "$1" --merges --format='%H %P' 2>/dev/null \
+    | awk -v e="$EPIC_MCE" '{for(i=2;i<=NF;i++) if($i==e) print $1}' \
+    | while read -r mc; do
+        git log -1 --format='%B' "$mc" | git interpret-trailers --parse 2>/dev/null \
+          | grep -qE '^Closes-Epic:[[:space:]]*#?778([^0-9]|$)' && echo found
+      done | grep -q found
+}
+
+git fetch -q origin master
+if [ "$rc" -eq 0 ] && ! has_mce_close HEAD && ! has_mce_close origin/master; then
+  ok "6: complete defers close while its child-epic declaration is not durable"
+else
+  bad "6: complete published a premature close before async materialisation (rc=$rc out=$out)"
+fi
+if printf '%s' "$out" | grep -q "materialisation intent that is not durable"; then
+  ok "7: completion output explains why auto-close was deferred"
+else
+  bad "7: completion did not explain the materialisation close barrier (out=$out)"
+fi
+
+# A manual local closer must share the same barrier rather than bypassing the
+# protection while the marker/delegation/edge are still absent.
+out=$("$TD" close-completed-epic --issue 778 --reason "fixture" --yes 2>&1); rc=$?
+git fetch -q origin master
+if [ "$rc" -ne 0 ] && ! has_mce_close origin/master; then
+  ok "8: manual completed-epic close also refuses unresolved materialisation intent"
+else
+  bad "8: manual closer bypassed the materialisation barrier (rc=$rc out=$out)"
+fi
+
 echo "-----"; echo "PASS=$PASS FAIL=$FAIL"; [ "$FAIL" -eq 0 ]

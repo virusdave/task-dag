@@ -1115,6 +1115,16 @@ maybe_emit_local_epic_close() {
     # Whole subtree must be complete (this completion is already on HEAD).
     epic_subtree_complete "$root_sha" || return 0
 
+    # A Materialise-Child-Epic trailer in this local completion range is an
+    # obligation declaration even though its marker/delegation/edge are only
+    # created after the eventual push. Never turn temporary absence of those
+    # asynchronous projections into a close fact.
+    if ! taskdag_materialisation_intents_durable "$issue" "$root_sha" HEAD; then
+        printf "${YELLOW}⚠ Epic #%s has child-epic materialisation intent that is not durable yet; not auto-closing.${RESET}\n" \
+            "$issue" >&2
+        return 0
+    fi
+
     # Don't duplicate an existing close (local HEAD or origin/master;
     # origin/master was just synced above).
     epic_already_closed_on "$issue" "$root_sha" "HEAD" && return 0

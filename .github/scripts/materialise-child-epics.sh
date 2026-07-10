@@ -103,6 +103,27 @@
 
 set -euo pipefail
 
+# Use the same whole-message parser as every epic-close barrier. The reusable
+# workflow downloads this module beside the script; repository/test runs use
+# the checked-in copy. Fail loud rather than letting parser drift recreate a
+# window where materialisation sees an obligation but closure does not.
+MATERIALISE_INTENT_LIB="${MATERIALISE_INTENT_LIB:-}"
+if [ -z "$MATERIALISE_INTENT_LIB" ]; then
+    _materialise_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "${_materialise_here}/../../scripts/task-dag.d/materialise-intent.sh" ]; then
+        MATERIALISE_INTENT_LIB="${_materialise_here}/../../scripts/task-dag.d/materialise-intent.sh"
+    else
+        MATERIALISE_INTENT_LIB="${_materialise_here}/materialise-intent.sh"
+    fi
+fi
+[ -r "$MATERIALISE_INTENT_LIB" ] || {
+    echo "::error ::shared Materialise-Child-Epic parser not found: $MATERIALISE_INTENT_LIB" >&2
+    exit 1
+}
+# shellcheck source=/dev/null
+source "$MATERIALISE_INTENT_LIB"
+unset _materialise_here
+
 # When sourced by the unit test with MATERIALISE_LIB_ONLY=1, define the
 # helper functions but skip the required-env checks, the App-key setup,
 # and the main scan at the bottom of this file.
@@ -291,75 +312,19 @@ push_marker_ref() {
     echo "Pushed marker ref ${ref} -> ${marker_sha}"
 }
 
-# Check whether the marker ref already exists on origin. A slug lookup
-# consults ONLY the slot namespace; the default lookup consults ONLY the
-# legacy namespace (see marker_ref_for) — the two never cross-suppress.
-marker_exists() {
+# Tri-state marker lookup. Prints the marker SHA and returns 0 when present,
+# returns 2 only when origin confirms absence, and returns 3 on transport/auth
+# uncertainty. Only rc=2 may proceed to peer issue creation.
+marker_sha_checked() {
     local parent_issue="$1" peer_owner="$2" peer_repo="$3" slug="$4"
-    local ref
+    local ref out rc=0
     ref="$(marker_ref_for "$parent_issue" "$peer_owner" "$peer_repo" "$slug")"
-    git ls-remote origin "$ref" 2>/dev/null | grep -q .
-}
-
-# Extract Materialise-Child-Epic groups from a full commit message.
-#
-# Reads the WHOLE commit message on stdin and emits a normalised synthetic
-# trailer stream on stdout: one `Key: value` line per recognised column-1
-# key, in message order. This deliberately REPLACES the old
-# `git interpret-trailers --parse` pre-filter, which only recognised the
-# last contiguous trailer paragraph and so silently dropped a
-# `Materialise-Child-Epic:` group whenever any other trailer paragraph (a
-# blank line + `Related:`, or a task-dag `Task-Commit:/Issue:/URL:/Status:`
-# block) followed it (virusdave/task-dag#11, parent top-level#49).
-#
-# Contract (see the header trailer-contract comment):
-#   * A group opens ONLY on a column-1 (no leading whitespace),
-#     case-insensitive `Materialise-Child-Epic:` / `Materialize-Child-Epic:`
-#     key line, and stays open until the next opener or EOF.
-#   * Blank lines, prose, and unrelated trailer-like lines (`Related:`,
-#     `Task-Commit:`, `Issue:`, `URL:`, `Status:`, unknown keys) are IGNORED
-#     — never group terminators (closing on a blank line would reintroduce
-#     the whitespace footgun this fix removes).
-#   * While a group is open, only the recognised child-epic keys are
-#     collected: Child-Epic-Title, Child-Epic-Body-File, Parent-Issue,
-#     Child-Epic-Slug, Delegation-Note. Keys before the first opener are
-#     ignored.
-#   * A key must be at column 1: `^[A-Za-z0-9-]+:` (indented example/code
-#     lines therefore cannot open or feed a group).
-#   * Values split on the FIRST `:`, trim leading whitespace, and preserve
-#     any later colons in the value.
-#   * A trailing `\r` (CRLF) is stripped and a final line with no trailing
-#     newline is handled (`read ... || [ -n "$line" ]`).
-# Duplicate recognised keys are emitted in order; the downstream consuming
-# loop keeps its existing last-wins semantics.
-extract_materialise_trailers_from_message() {
-    local line key val key_lc in_group=0
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-        # Only a column-1 trailer-key line can be significant. Anything
-        # else (blank, prose, indented) is ignored and never terminates an
-        # open group.
-        [[ "$line" =~ ^[A-Za-z0-9-]+: ]] || continue
-        key="${line%%:*}"
-        val="${line#*:}"
-        val="${val#"${val%%[![:space:]]*}"}"
-        key_lc="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
-        case "$key_lc" in
-            materialise-child-epic|materialize-child-epic)
-                in_group=1
-                printf '%s: %s\n' "$key" "$val"
-                ;;
-            child-epic-title|child-epic-body-file|parent-issue|child-epic-slug|delegation-note)
-                if [ "$in_group" = 1 ]; then
-                    printf '%s: %s\n' "$key" "$val"
-                fi
-                ;;
-            *)
-                : # unknown column-1 key: ignored, NOT a group terminator
-                ;;
-        esac
-    done
-    return 0
+    out=$(git ls-remote --exit-code origin "$ref" 2>/dev/null) || rc=$?
+    case "$rc" in
+        0) printf '%s\n' "$out" | awk 'NR==1{print $1}'; return 0 ;;
+        2) return 2 ;;
+        *) return 3 ;;
+    esac
 }
 
 # --- main scan --------------------------------------------------------------
@@ -420,7 +385,7 @@ flush_group() {
         failed=$((failed + 1))
         return 0
     fi
-    if [[ ! "$cur_peer" =~ ^[^/]+/[^/]+$ ]]; then
+    if [[ ! "$cur_peer" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
         echo "::error ::Commit $commit: Materialise-Child-Epic value '$cur_peer' is not <owner/repo>. Failing this group."
         had_error=true
         failed=$((failed + 1))
@@ -434,9 +399,8 @@ flush_group() {
     fi
 
     local peer_owner="${cur_peer%/*}" peer_repo="${cur_peer#*/}"
-    local parent_num="${cur_parent#\#}"
-
-    if ! [[ "$parent_num" =~ ^[0-9]+$ ]]; then
+    local parent_num
+    if ! parent_num=$(taskdag_materialise_parent_number "$cur_parent"); then
         echo "::error ::Commit $commit: Parent-Issue value '$cur_parent' is not '#<N>'. Failing this group."
         had_error=true
         failed=$((failed + 1))
@@ -458,8 +422,38 @@ flush_group() {
     local slug_label=""
     [ -n "$cur_slug" ] && slug_label=" (slug '${cur_slug}')"
 
-    if marker_exists "$parent_num" "$peer_owner" "$peer_repo" "$cur_slug"; then
-        echo "Skipping ${peer_owner}/${peer_repo} for #${parent_num}${slug_label}: marker ref already present (already materialised)."
+    local marker_sha="" marker_rc=0
+    marker_sha=$(marker_sha_checked "$parent_num" "$peer_owner" "$peer_repo" "$cur_slug") || marker_rc=$?
+    if [ "$marker_rc" -eq 3 ]; then
+        echo "::error ::Could not determine whether the materialisation marker for #${parent_num} ${peer_owner}/${peer_repo}${slug_label} exists; refusing to create a possibly-duplicate peer issue."
+        had_error=true; failed=$((failed + 1)); return 0
+    fi
+    if [ "$marker_rc" -eq 0 ]; then
+        # A previous run may have created the peer issue + marker and then
+        # failed before `delegate` made the obligation durable. Read the issue
+        # number from the marker and replay the idempotent dual-write instead
+        # of treating marker-only state as complete forever.
+        local marker_ref marker_tmp peer_issue
+        marker_ref="$(marker_ref_for "$parent_num" "$peer_owner" "$peer_repo" "$cur_slug")"
+        marker_tmp="refs/task-dag-tmp/materialise-repair/${marker_sha}"
+        git update-ref -d "$marker_tmp" 2>/dev/null || true
+        if ! git fetch --quiet --no-tags origin "+${marker_ref}:${marker_tmp}" 2>/dev/null; then
+            echo "::error ::Could not read existing marker ${marker_ref}; refusing to report materialisation durable."
+            had_error=true; failed=$((failed + 1)); return 0
+        fi
+        peer_issue="$(taskdag_validate_materialise_marker_commit "$marker_tmp" "$parent_num" "${peer_owner}/${peer_repo}" "$cur_slug" || true)"
+        git update-ref -d "$marker_tmp" 2>/dev/null || true
+        if [ -z "$peer_issue" ]; then
+            echo "::error ::Existing marker ${marker_ref} does not record a valid peer issue; refusing to continue."
+            had_error=true; failed=$((failed + 1)); return 0
+        fi
+        local repair_args=(--issue "$parent_num" --to "${peer_owner}/${peer_repo}#${peer_issue}")
+        [ -n "$cur_note" ] && repair_args+=(--note "$cur_note")
+        if ! { ensure_task_dag && GH_TOKEN="$SOURCE_TOKEN" "$TASK_DAG" delegate "${repair_args[@]}"; }; then
+            echo "::error ::Existing marker ${marker_ref} is not backed by a durable delegation/edge; idempotent delegate repair failed."
+            had_error=true; failed=$((failed + 1)); return 0
+        fi
+        echo "Verified/repaired ${peer_owner}/${peer_repo}#${peer_issue} for #${parent_num}${slug_label}: marker, delegation, and dependency write are durable."
         already=$((already + 1))
         return 0
     fi
@@ -519,7 +513,7 @@ flush_group() {
     local delegate_args=(--issue "$parent_num" --to "${peer_owner}/${peer_repo}#${peer_issue}")
     [ -n "$cur_note" ] && delegate_args+=(--note "$cur_note")
     if ! { ensure_task_dag && GH_TOKEN="$SOURCE_TOKEN" "$TASK_DAG" delegate "${delegate_args[@]}"; }; then
-        echo "::error ::task-dag delegate failed for #${parent_num} -> ${peer_owner}/${peer_repo}#${peer_issue}. The peer issue and marker ref were created, so a retry will report 'already materialised' and will NOT re-run delegate; re-run 'task-dag delegate' manually to register the delegation on #${parent_num}."
+        echo "::error ::task-dag delegate failed for #${parent_num} -> ${peer_owner}/${peer_repo}#${peer_issue}. The peer issue and marker ref were created safely; a later materialisation replay will read the issue from the marker and retry the idempotent delegate write."
         had_error=true
         failed=$((failed + 1))
         return 0
@@ -529,66 +523,35 @@ flush_group() {
     echo "Materialised ${peer_owner}/${peer_repo}#${peer_issue} for parent #${parent_num} (${GH_REPO}) and registered the delegation."
 }
 
+commits=$(git rev-list --reverse "${commit_range[@]}") || {
+    echo "::error ::Could not enumerate pushed commits for materialisation." >&2
+    exit 1
+}
 while IFS= read -r commit; do
     [ -z "$commit" ] && continue
     msg="$(git log -1 --format=%B "$commit")"
-    # Parse the WHOLE commit message (not just the last trailer paragraph):
-    # extract_materialise_trailers_from_message emits a normalised synthetic
-    # trailer stream of only the recognised column-1 keys, so a group is
-    # never dropped by an intervening blank line + unrelated trailer block
-    # (virusdave/task-dag#11).
-    trailers="$(printf '%s\n' "$msg" | extract_materialise_trailers_from_message)"
-    [ -z "$trailers" ] && continue
-
-    # Collect groups: each Materialise-Child-Epic: opens one.
-    cur_open=false
-    cur_peer="" cur_title="" cur_body_file="" cur_parent="" cur_note="" cur_slug=""
-
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        key="${line%%:*}"
-        val="${line#*:}"
-        val="${val#"${val%%[![:space:]]*}"}"
-        key_lc="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
-
-        case "$key_lc" in
-            materialise-child-epic|materialize-child-epic)
-                # Flush any pending group, then open a new one.
-                flush_group
-                opener_seen=true
-                cur_open=true
-                cur_peer="$val"
-                cur_title=""
-                cur_body_file=""
-                cur_parent=""
-                cur_note=""
-                cur_slug=""
-                ;;
-            child-epic-title)
-                cur_title="$val"
-                ;;
-            child-epic-body-file)
-                cur_body_file="$val"
-                ;;
-            parent-issue)
-                cur_parent="$val"
-                ;;
-            child-epic-slug)
-                cur_slug="$val"
-                ;;
-            delegation-note)
-                cur_note="$val"
-                ;;
-            *)
-                : # ignore unrelated trailers (Post-Comment etc.)
-                ;;
-        esac
-    done <<< "$trailers"
-
-    # Flush the last group in this commit.
-    flush_group
-
-done < <(git rev-list --reverse "${commit_range[@]}")
+    groups_json="$(printf '%s\n' "$msg" | taskdag_materialise_groups_json_from_message)" || {
+        echo "::error ::Could not parse Materialise-Child-Epic groups in ${commit}." >&2
+        exit 1
+    }
+    group_lines=$(printf '%s' "$groups_json" | jq -c '.[]') || {
+        echo "::error ::Could not decode Materialise-Child-Epic groups in ${commit}." >&2
+        exit 1
+    }
+    while IFS= read -r group; do
+        [ -n "$group" ] || continue
+        opener_seen=true
+        cur_open=true
+        cur_peer=$(printf '%s' "$group" | jq -r '.peer')
+        cur_title=$(printf '%s' "$group" | jq -r '.title')
+        cur_body_file=$(printf '%s' "$group" | jq -r '.bodyFile')
+        cur_parent=$(printf '%s' "$group" | jq -r '.parent')
+        cur_note=$(printf '%s' "$group" | jq -r '.note')
+        cur_slug=$(printf '%s' "$group" | jq -r '.slug')
+        flush_group
+        cur_open=false
+    done <<< "$group_lines"
+done <<< "$commits"
 
 # Fail-loud summary. A commit that carries an explicit Materialise-Child-Epic
 # directive but produces zero successful materialisations must NOT exit green

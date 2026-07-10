@@ -65,6 +65,27 @@ ref, sends/consumes cross-repo mailbox hints, cascades newly durable
 completions, and auto-closes obligation-complete epics with the normal close
 merge shape.
 
+### Materialisation declarations are obligations before their refs exist
+
+A reachable `Materialise-Child-Epic:` group for parent `#N` is an obligation
+declaration as soon as its commit is in the candidate close history. Its three
+durable projections are created asynchronously, in safety order:
+
+1. `gh/child-epics/<N>/<owner>/<repo>` (or the named-slot namespace) records
+   the peer issue, preventing duplicate issue creation;
+2. `tasks/delegated/<N>/<owner>/<repo>/<peer-issue>` records the legacy
+   delegation; and
+3. the parent-root `requires` edge records the dependency in `tasks/v1/graph`.
+
+Every close producer fails closed until all three exist (or the edge has an
+explicit terminal tombstone). This includes local completion auto-close,
+graph convergence, and the three explicit epic closers. Therefore a GitHub
+push cannot close an epic merely because graph convergence ran before the
+materialisation workflow. If a run fails after publishing the marker, the
+next materialisation replay reads the peer issue from that marker and reruns
+the idempotent `delegate` dual-write; marker-only state is never accepted as
+fully materialised.
+
 ## Graph and mailbox writes are direct CAS with bounded backoff
 
 The graph writer and mailbox writer do not stage work through task refs or

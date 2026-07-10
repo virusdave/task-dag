@@ -85,12 +85,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download materialise-child-epics script
+      - name: Download canonical task-dag bundle
+        env:
+          TASK_DAG_REF: ${{ inputs.ref }}
         run: |
+          set -euo pipefail
+          mkdir -p /tmp/task-dag-cli
           curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
-            "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/materialise-child-epics.sh" \
-            -o /tmp/materialise-child-epics.sh
-          chmod 0755 /tmp/materialise-child-epics.sh
+            "https://github.com/virusdave/task-dag/archive/${TASK_DAG_REF}.tar.gz" \
+            | tar -xz --strip-components=1 -C /tmp/task-dag-cli
+          chmod 0755 /tmp/task-dag-cli/scripts/task-dag \
+            /tmp/task-dag-cli/.github/scripts/materialise-child-epics.sh
 
       - name: Materialise child epics from commit trailers
         env:
@@ -100,4 +105,5 @@ jobs:
           SOURCE_TOKEN: ${{ github.token }}
           APP_ID: ${{ secrets.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-        run: bash /tmp/materialise-child-epics.sh
+          TASK_DAG: /tmp/task-dag-cli/scripts/task-dag
+        run: bash /tmp/task-dag-cli/.github/scripts/materialise-child-epics.sh

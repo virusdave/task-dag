@@ -100,6 +100,15 @@ taskdag_emit_origin_epic_close() {
         return 0
     fi
 
+    local intent_tip
+    intent_tip=$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
+        || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \
+        || git rev-parse --verify -q HEAD^{commit}) || return 1
+    if ! taskdag_materialisation_intents_durable "$issue" "$root_sha" "$intent_tip"; then
+        echo "Epic #${issue} has child-epic materialisation intent that is not durable; deferring auto-close." >&2
+        return 0
+    fi
+
     local base tree msg close_sha readback
     base=$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
         || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \

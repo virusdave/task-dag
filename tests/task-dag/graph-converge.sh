@@ -166,7 +166,124 @@ else
     bad "E1 reconcile-backstop did not close the cross-repo requires-only epic"
 fi
 
-# ── F. empty-obligations epic never auto-closes ────────────────────────────
+# ── F. materialisation intent blocks the independent graph closer ─────────
+# The graph-converge workflow races the materialise workflow on the same push.
+# Even if it sees the final child completion first, the declaration itself is
+# an obligation and must prevent a close until marker+delegation+edge exist.
+EP_MCE=$(mk_task "$ROOT/dst" "Task: materialising epic
+
+Issue: #91
+Type: epic")
+publish_pending_epic "$ROOT/dst" 91 "$EP_MCE"
+CH_MCE=$(mk_task "$ROOT/dst" "Task: materialising child
+Type: leaf" "$EP_MCE")
+MCE_BASE=$(git -C "$ROOT/dst" rev-parse HEAD)
+(
+    cd "$ROOT/dst" || exit 1
+    printf '# child plan\n' > child-plan.md
+    git add child-plan.md
+    git commit -q -F - <<'EOF'
+Materialise the child implementation
+
+Materialise-Child-Epic: peer/repo
+Child-Epic-Title: Child implementation
+Child-Epic-Body-File: child-plan.md
+Parent-Issue: #91
+EOF
+)
+MCE_FEATURE=$(git -C "$ROOT/dst" rev-parse HEAD)
+MCE_TREE=$(git -C "$ROOT/dst" rev-parse "$MCE_FEATURE^{tree}")
+# Put the declaration only on a NON-first-parent commit. The materialisation
+# workflow scans every reachable commit in the push range, so the close barrier
+# must do the same rather than inspecting only the mainline merge message.
+MCE_IMPL=$(git -C "$ROOT/dst" commit-tree "$MCE_TREE" -p "$MCE_BASE" -p "$MCE_FEATURE" -m "Merge child plan declaration")
+MCE_DONE=$(git -C "$ROOT/dst" commit-tree "$MCE_TREE" -p "$MCE_IMPL" -p "$CH_MCE" -m "Complete materialising child")
+git -C "$ROOT/dst" update-ref refs/heads/master "$MCE_DONE"
+git -C "$ROOT/dst" push -q origin master:master
+git -C "$ROOT/dst" fetch -q origin '+refs/heads/master:refs/remotes/origin/master'
+if ( cd "$ROOT/dst" && "$TD" graph-converge --range "$MCE_IMPL^..$MCE_DONE" --no-fetch >/dev/null 2>&1 ) \
+    && ! has_close_merge "$ROOT/dst" 91 "$EP_MCE"; then
+    ok "F1 graph convergence defers close until materialisation intent is durable"
+else
+    bad "F1 graph convergence closed before asynchronous materialisation"
+fi
+
+# ── G. a valid satisfied fold remains durable for a later close ────────────
+EP_FOLD=$(mk_task "$ROOT/dst" "Task: mixed materialised epic
+
+Issue: #92
+Type: epic")
+publish_pending_epic "$ROOT/dst" 92 "$EP_FOLD"
+CH_FOLD=$(mk_task "$ROOT/dst" "Task: remaining local child
+Type: leaf" "$EP_FOLD")
+(
+    cd "$ROOT/dst" || exit 1
+    printf '# folded child plan\n' > folded-plan.md
+    git add folded-plan.md
+    git commit -q -F - <<'EOF'
+Declare a materialised child alongside local work
+
+Materialise-Child-Epic: owner/src
+Child-Epic-Title: Folded child
+Child-Epic-Body-File: folded-plan.md
+Parent-Issue: #92
+EOF
+    git push -q origin HEAD:master
+    git fetch -q origin '+refs/heads/master:refs/remotes/origin/master'
+)
+MARKER=$(git -C "$ROOT/dst" commit-tree "$EMPTY_TREE" -m "kind: gh-child-epic-marker
+role: system
+
+parent_issue: 92
+peer:
+  repo: owner/src
+  issue: 99
+materialised_by_commit: fixture
+materialised_at: 2026-07-10T00:00:00Z")
+DELEGATED=$(git -C "$ROOT/dst" commit-tree "$EMPTY_TREE" -p "$EP_FOLD" -m "kind: delegated
+role: system
+intent: delegated-child
+
+issue:
+  repo: owner/dst
+  number: 92
+
+delegated:
+  repo: owner/src
+  number: 99")
+git -C "$ROOT/dst" push -q origin \
+    "$MARKER:refs/heads/gh/child-epics/92/owner/src" \
+    "$DELEGATED:refs/heads/tasks/delegated/92/owner/src/99"
+NFOLD="task:owner/dst@$EP_FOLD"; NPEER="issue:owner/src#99"
+EFOLD=$(edge_id "$ROOT/dst" "$NFOLD" "$NPEER" requires)
+# Make owner/src#99 durably done so reconciliation folds its requires edge.
+SRC_TIP=$(git -C "$ROOT/src" rev-parse master)
+SRC_TREE=$(git -C "$ROOT/src" rev-parse "$SRC_TIP^{tree}")
+SRC_ROOT=$(mk_task "$ROOT/src" "Task: peer issue 99
+Issue: #99
+Type: epic")
+SRC_CLOSE=$(git -C "$ROOT/src" commit-tree "$SRC_TREE" -p "$SRC_TIP" -p "$SRC_ROOT" -m "Close peer issue
+
+Closes-Epic: #99")
+git -C "$ROOT/src" update-ref refs/heads/master "$SRC_CLOSE"
+git -C "$ROOT/src" push -q origin master:master
+git -C "$ROOT/src" fetch -q origin '+refs/heads/master:refs/remotes/origin/master'
+if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
+    && edge_absent "$ROOT/dst" "$EFOLD" \
+    && ! has_close_merge "$ROOT/dst" 92 "$EP_FOLD"; then
+    ok "G1 satisfied materialised edge folds while another obligation remains"
+else
+    bad "G1 mixed-obligation setup did not fold safely"
+fi
+W_FOLD=$(complete_task "$ROOT/dst" "$CH_FOLD")
+if ( cd "$ROOT/dst" && "$TD" graph-converge --range "$W_FOLD^..$W_FOLD" --no-fetch >/dev/null 2>&1 ) \
+    && has_close_merge "$ROOT/dst" 92 "$EP_FOLD"; then
+    ok "G2 validated fold history permits close after the remaining obligation completes"
+else
+    bad "G2 folded materialisation state permanently wedged epic closure"
+fi
+
+# ── H. empty-obligations epic never auto-closes ────────────────────────────
 EPE=$(mk_task "$ROOT/dst" "Task: empty epic
 
 Issue: #90
@@ -174,9 +291,9 @@ Type: epic")
 publish_pending_epic "$ROOT/dst" 90 "$EPE"
 if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
     && ! has_close_merge "$ROOT/dst" 90 "$EPE"; then
-    ok "F1 empty-obligations epic does not auto-close"
+    ok "H1 empty-obligations epic does not auto-close"
 else
-    bad "F1 empty-obligations epic was incorrectly closed"
+    bad "H1 empty-obligations epic was incorrectly closed"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"
