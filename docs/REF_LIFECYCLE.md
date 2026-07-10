@@ -573,8 +573,10 @@ trailer**, so it stays within the invariant floor (nothing to add to
 `TASKDAG_KNOWN_*_NS`).
 
 It is **not** the closer for a decomposed epic (complete the leaves / use
-`close-epic`); it is a **guarded, last-cell** tool. Every guard **fails
-closed** — it refuses rather than risk a premature/abusive close:
+`close-epic`, or use `close-completed-epic` only after a decomposed local
+epic is already fully resolved but still lacks the close merge); it is a
+**guarded, last-cell** tool. Every guard **fails closed** — it refuses rather
+than risk a premature/abusive close:
 
 - confirms the `tasks/pending/<N>` root identity on **origin** (origin
   unreachable → refuse), mirroring `complete`'s root guard;
@@ -604,7 +606,41 @@ rejection that a re-run converges from — so at most one close merge is ever
 created. Fixture coverage: `tests/task-dag/close-ops-epic.sh`.
 
 > Full closure-signal contract and the `complete` vs `close-epic` vs
-> `close-ops-epic` decision: `virusdave/top-level:docs/task_dag/EPIC_CLOSURE.md`.
+> `close-ops-epic` vs `close-completed-epic` decision:
+> `virusdave/top-level:docs/task_dag/EPIC_CLOSURE.md`.
+
+## Closing a completed decomposed local epic (`close-completed-epic`)
+
+`task-dag close-completed-epic --issue N --reason "..." [--yes]` covers the
+post-convergence gap where an epic **was decomposed** into local task-dag
+children, the child DAG is already resolved, and the issue still lacks the
+tree-equal `Closes-Epic: #<N>` merge. The trigger was
+`virusdave/top-level#59`: live rollout work had completed (or optional
+non-participating repo work was explicitly dropped), `validate --strict` was
+green, but `close-epic` refused because there were no delegated children and
+`close-ops-epic` refused because the root had DAG children.
+
+The command emits the normal close merge shape — tree == `origin/master`,
+first parent == `origin/master`, second parent == `tasks/pending/<N>`, trailer
+`Closes-Epic: #<N>` — and pushes it to `origin/master`. It does not mint a new
+ref namespace or trailer.
+
+Every guard fails closed:
+
+- confirms `tasks/pending/<N>` on origin and treats an existing close merge as
+  an idempotent no-op;
+- requires the root to be decomposed (undecomposed ops-only roots still use
+  `close-ops-epic`);
+- refuses any cross-repo delegated children (use `close-epic`);
+- proves the local DAG subtree complete from freshly-fetched `origin/master`
+  and origin task refs; any frontier, active, blocked, or otherwise incomplete
+  descendant remains an incomplete leaf and is refused;
+- refuses a blocked root and any foreign live root-decompose lock;
+- requires `--reason` so the close merge records the rollout/done evidence or
+  operator-approved exception that makes the epic safe to close;
+- requires `--yes` for non-interactive callers.
+
+Fixture coverage: `tests/task-dag/close-completed-epic.sh`.
 
 ## History (closed gap)
 

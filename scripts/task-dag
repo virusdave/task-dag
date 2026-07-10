@@ -1653,6 +1653,10 @@ CROSS-REPO COORDINATION:
                            one resolved by an out-of-band operations action
                            with no implementation commit and no delegated
                            children (emits the sanctioned Closes-Epic merge)
+    close-completed-epic --issue N --reason "..." [--yes]
+                           Close a completed DECOMPOSED local epic that has no
+                           live frontier/active/blocked/delegated child work
+                           but still needs the sanctioned Closes-Epic merge
     complete-ops <sha> --evidence <https-url> --authorization <text> --yes
                            Complete an OPS-ONLY leaf with no implementation
                            commit by emitting a sanctioned tree-equal task
@@ -7751,6 +7755,7 @@ main() {
         ingest-completion) cmd_ingest_completion "$@" ;;
         close-epic) cmd_close_epic "$@" ;;
         close-ops-epic) cmd_close_ops_epic "$@" ;;
+        close-completed-epic) cmd_close_completed_epic "$@" ;;
         parse-tree-fix) cmd_parse_tree_fix "$@" ;;
         classify) cmd_classify "$@" ;;
         tree-fix-outcome) cmd_tree_fix_outcome "$@" ;;
