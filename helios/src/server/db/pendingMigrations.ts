@@ -1502,6 +1502,18 @@ const SENTINELS: MigrationSentinel[] = [
       'candidate revision metadata, stable row_lineage_id fields, row snapshot ' +
       'hash/provenance columns, and one-active-refinement-per-root indexes; no ' +
       'LLM/UI/apply behavior is enabled by this migration.',
+    blessing: {
+      ref: 'https://ampcode.com/threads/T-019f4a59-c436-7431-b37c-9b86e7355b74',
+      reviewedSha: 'cc147f13a2c34902679f6ce656db10ac9ffd4755',
+      artifactSha256: 'fb9c15eff6d26d78ed95fe9fb7dd8fd324d5f4d155986cafaa66e0b160564b4b',
+      transactionMode: 'transactional',
+      note:
+        'Oracle-approved schema-only expand migration for pending-purchase refinement ' +
+        'lineage; no includes and no CREATE INDEX CONCURRENTLY. Self-wrapped in ' +
+        'begin/commit with 5s lock_timeout; small one-time backfills at reviewed ' +
+        'prod scale (~70 packets/~945 rows). Down file is destructive and not part ' +
+        'of admin apply.',
+    },
     check: async (db) => {
       const [
         hasRoots,
