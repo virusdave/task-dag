@@ -9,6 +9,7 @@ set -uo pipefail
 
 TD="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}"
 case "$TD" in /*) ;; *) TD="$(pwd)/$TD" ;; esac
+ORDER_HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-completion-order-hook.sh"
 ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
@@ -19,6 +20,7 @@ export TASK_DAG_GIT_NAME=t TASK_DAG_GIT_EMAIL=t@t
 export TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=myhost TASK_DAG_CLAIMER_PID=$$
 
 git init -q --bare "$ROOT/origin.git"
+bash "$ORDER_HOOK" "$ROOT/origin.git"
 git clone -q "$ROOT/origin.git" "$ROOT/wc"; cd "$ROOT/wc"
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
 
@@ -60,7 +62,9 @@ LEAF=$(breakdown_spec "$EPIC" '[{"title":"ops blocked leaf","type":"leaf"}]' for
 if [ -n "$LEAF" ]; then
   LEAF_SHA=$(git rev-parse "refs/heads/tasks/frontier/$LEAF")
   "$TD" block "$LEAF" --reason="ops evidence exists; waiting for no-code primitive" >/dev/null 2>&1
+  touch "$ROOT/origin.git/enforce-completion-order"
   out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
+  rm -f "$ROOT/origin.git/enforce-completion-order"
   if [ "$rc" -eq 0 ]; then ok "1a: complete-ops succeeds on a blocked leaf"; else bad "1a: complete-ops failed (rc=$rc): $out"; fi
   git fetch -q origin master
   CM=$(git log origin/master --merges --format='%H %P' | awk -v t="$LEAF_SHA" '{for(i=2;i<=NF;i++) if($i==t){print $1; exit}}')
@@ -88,18 +92,21 @@ if [ -n "$LEAF" ]; then
   else
     bad "1e: stale refs remain after ops completion (frontier=$f blocked=$b meta=$bm)"
   fi
+  grep -q "^$LEAF_SHA " "$ROOT/origin.git/completion-order.log" \
+    && ok "1f: ops completion published master before ref deletion" \
+    || bad "1f: completion-order hook did not observe ops cleanup"
   AFTER1=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
   AFTER2=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   if [ "$rc" -eq 0 ] && [ "$AFTER1" = "$AFTER2" ] && echo "$out" | grep -qi 'already'; then
-    ok "1f: idempotent rerun does not mint a duplicate completion"
+    ok "1g: idempotent rerun does not mint a duplicate completion"
   else
-    bad "1f: idempotent rerun moved master or failed (rc=$rc before=$AFTER1 after=$AFTER2 out=$out)"
+    bad "1g: idempotent rerun moved master or failed (rc=$rc before=$AFTER1 after=$AFTER2 out=$out)"
   fi
   if git log origin/master --merges --format='%B' | grep -q '^Closes-Epic: #901$'; then
-    ok "1g: final ops leaf triggers the normal local epic close"
+    ok "1h: final ops leaf triggers the normal local epic close"
   else
-    bad "1g: final ops leaf did not append a Closes-Epic merge"
+    bad "1h: final ops leaf did not append a Closes-Epic merge"
   fi
   git clone -q --no-local "$ROOT/origin.git" "$ROOT/keepalive"
   (
@@ -119,9 +126,9 @@ if [ -n "$LEAF" ]; then
   out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
   AFTER_LONG2=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   if [ "$rc" -eq 0 ] && [ "$AFTER_LONG" = "$AFTER_LONG2" ] && echo "$out" | grep -qi 'already'; then
-    ok "1h: long-history idempotent rerun scans without SIGPIPE failure"
+    ok "1i: long-history idempotent rerun scans without SIGPIPE failure"
   else
-    bad "1h: long-history idempotent rerun failed or moved master (rc=$rc out=$out)"
+    bad "1i: long-history idempotent rerun failed or moved master (rc=$rc out=$out)"
   fi
 fi
 

@@ -1613,8 +1613,9 @@ COMMANDS:
                            hints, then re-derive satisfied local graph edges
                            from master (including configured peer worktrees).
     graph-converge         Push-reaction entry point: scan a pushed range for
-                           completion facts, propagate them, then run the
-                           backstop once. --range <git-range>.
+                           completion facts, propagate them, run the graph
+                           backstop, then CAS-clean stale completed scheduling
+                           refs from origin/master. --range <git-range>.
     migrate-legacy-edges   Backfill legacy dependency encodings (extra task
                            parents, delegated refs, explicit downstream /
                            supersede node fields) into tasks/v1/graph. See
@@ -4522,6 +4523,210 @@ cleanup_completed_task_refs() {
         fi
     fi
     return 0
+}
+
+# Reconcile stale scheduling refs from the only durable completion authority:
+# canonical completion parentage on origin/master's first-parent spine. This is
+# deliberately separate from cleanup_completed_task_refs(): live completion
+# must protect claim ownership, while this backstop repairs projection state
+# only after master already proves the task done (including an active claim
+# created after that fact landed).
+#
+# The strict fetch is one atomic local snapshot of master plus all scheduling
+# namespaces. Exact observed ref names/OIDs become the cleanup leases; never
+# recompute a ref suffix with `git rev-parse --short`, because abbreviation
+# length can change as the object database grows or core.abbrev changes.
+# Returns non-zero after attempting all independent tasks if fetch, shape
+# validation, or a CAS cleanup fails.
+reconcile_completed_task_refs() {
+    local remote="${1:-origin}"
+    local master_ref="refs/remotes/${remote}/master"
+    if ! git fetch --quiet --atomic --prune --no-tags "$remote" \
+        "+refs/heads/master:${master_ref}" \
+        '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
+        '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
+        '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
+        '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*'; then
+        echo "Error: could not take an authoritative master/task-ref snapshot; completed-ref reconciliation made no changes." >&2
+        return 2
+    fi
+
+    local -A witness=() frontier_ref=() frontier_oid=() active_ref=() active_oid=()
+    local -A blocked_ref=() blocked_oid=() meta_ref=() meta_oid=() invalid_task=() invalid_suffix=() suffix_task=()
+    local commit first parent commit_tree first_tree
+    while read -r commit first parent; do
+        [ -n "$commit" ] && [ -n "$first" ] && [ -n "$parent" ] || continue
+        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
+        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
+        [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ] || continue
+        for parent in $parent; do
+            is_task_commit "$parent" || continue
+            [ -n "${witness[$parent]:-}" ] || witness["$parent"]="$commit"
+        done
+    done < <(git rev-list --first-parent --parents "$master_ref" 2>/dev/null)
+
+    local oid ref suffix task task_field existing rc=0
+    while read -r oid ref; do
+        [ -n "$oid" ] && [ -n "$ref" ] || continue
+        task=""
+        suffix="${ref##*/}"
+        case "$ref" in
+            refs/heads/tasks/frontier/*)
+                task="$oid"
+                if ! is_task_commit "$task" || [[ ! "$suffix" =~ ^[0-9a-f]+$ ]] || [[ "$task" != "$suffix"* ]]; then
+                    echo "Error: malformed frontier projection $ref -> $oid; leaving it untouched." >&2
+                    is_task_commit "$task" && invalid_task["$task"]=1
+                    [[ "$suffix" =~ ^[0-9a-f]+$ ]] && invalid_suffix["$suffix"]=1
+                    rc=1; continue
+                fi
+                existing="${frontier_ref[$task]:-}"
+                if [ -n "$existing" ] && [ "$existing" != "$ref" ]; then
+                    echo "Error: task $task has conflicting frontier suffixes ($existing, $ref); leaving it untouched." >&2
+                    invalid_task["$task"]=1; rc=1; continue
+                fi
+                existing="${suffix_task[$suffix]:-}"
+                if [ -n "$existing" ] && [ "$existing" != "$task" ]; then
+                    echo "Error: scheduling suffix $suffix identifies multiple tasks ($existing, $task); leaving them untouched." >&2
+                    invalid_suffix["$suffix"]=1; invalid_task["$existing"]=1; invalid_task["$task"]=1; rc=1
+                else
+                    suffix_task["$suffix"]="$task"
+                fi
+                frontier_ref["$task"]="$ref"; frontier_oid["$task"]="$oid"
+                ;;
+            refs/heads/tasks/active/*)
+                task=$(get_first_parent "$oid" 2>/dev/null || true)
+                task_field=$(extract_field "$(parse_commit_metadata "$oid" 2>/dev/null || true)" "Task-Commit" 2>/dev/null || true)
+                if ! is_task_commit "$task" || { [ -n "$task_field" ] && [ "$task_field" != "$task" ]; } \
+                   || [[ ! "$suffix" =~ ^[0-9a-f]+$ ]] || [[ "$task" != "$suffix"* ]]; then
+                    echo "Error: malformed active projection $ref -> $oid; leaving it untouched." >&2
+                    is_task_commit "$task" && invalid_task["$task"]=1
+                    [[ "$task_field" =~ ^[0-9a-f]{40}$ ]] && is_task_commit "$task_field" \
+                        && invalid_task["$task_field"]=1
+                    [[ "$suffix" =~ ^[0-9a-f]+$ ]] && invalid_suffix["$suffix"]=1
+                    rc=1; continue
+                fi
+                existing="${active_ref[$task]:-}"
+                if [ -n "$existing" ] && [ "$existing" != "$ref" ]; then
+                    echo "Error: task $task has conflicting active suffixes ($existing, $ref); leaving it untouched." >&2
+                    invalid_task["$task"]=1; rc=1; continue
+                fi
+                existing="${suffix_task[$suffix]:-}"
+                if [ -n "$existing" ] && [ "$existing" != "$task" ]; then
+                    echo "Error: scheduling suffix $suffix identifies multiple tasks ($existing, $task); leaving them untouched." >&2
+                    invalid_suffix["$suffix"]=1; invalid_task["$existing"]=1; invalid_task["$task"]=1; rc=1
+                else
+                    suffix_task["$suffix"]="$task"
+                fi
+                active_ref["$task"]="$ref"; active_oid["$task"]="$oid"
+                ;;
+            refs/heads/tasks/blocked/*)
+                task="$suffix"
+                if [[ ! "$task" =~ ^[0-9a-f]{40}$ ]] || [ "$oid" != "$task" ] || ! is_task_commit "$task"; then
+                    echo "Error: malformed blocked projection $ref -> $oid; leaving it untouched." >&2
+                    [[ "$task" =~ ^[0-9a-f]{40}$ ]] && is_task_commit "$task" \
+                        && invalid_task["$task"]=1
+                    is_task_commit "$oid" && invalid_task["$oid"]=1
+                    rc=1; continue
+                fi
+                blocked_ref["$task"]="$ref"; blocked_oid["$task"]="$oid"
+                ;;
+            refs/heads/tasks/blocked-meta/*)
+                task="$suffix"
+                task_field=$(extract_field "$(parse_commit_metadata "$oid" 2>/dev/null || true)" "Task-Commit" 2>/dev/null || true)
+                local meta_parent
+                meta_parent=$(get_first_parent "$oid" 2>/dev/null || true)
+                if [[ ! "$task" =~ ^[0-9a-f]{40}$ ]] || [ "$meta_parent" != "$task" ] \
+                   || [ "$task_field" != "$task" ] || ! is_task_commit "$task"; then
+                    echo "Error: malformed blocked-meta projection $ref -> $oid; leaving it untouched." >&2
+                    [[ "$task" =~ ^[0-9a-f]{40}$ ]] && is_task_commit "$task" \
+                        && invalid_task["$task"]=1
+                    is_task_commit "$meta_parent" && invalid_task["$meta_parent"]=1
+                    [[ "$task_field" =~ ^[0-9a-f]{40}$ ]] && is_task_commit "$task_field" \
+                        && invalid_task["$task_field"]=1
+                    rc=1; continue
+                fi
+                meta_ref["$task"]="$ref"; meta_oid["$task"]="$oid"
+                ;;
+        esac
+    done < <(git for-each-ref --format='%(objectname) %(refname)' \
+        refs/heads/tasks/frontier refs/heads/tasks/active \
+        refs/heads/tasks/blocked refs/heads/tasks/blocked-meta)
+
+    local -A candidates=()
+    for task in "${!frontier_ref[@]}" "${!active_ref[@]}" "${!blocked_ref[@]}" "${!meta_ref[@]}"; do
+        [ -n "$task" ] && candidates["$task"]=1
+    done
+    for suffix in "${!invalid_suffix[@]}"; do
+        for task in "${!candidates[@]}"; do
+            [[ "$task" = "$suffix"* ]] && invalid_task["$task"]=1
+        done
+    done
+
+    local -a leases refs
+    local had_block=false short current read_rc cleanup_ok
+    for task in "${!candidates[@]}"; do
+        [ -n "${witness[$task]:-}" ] || continue
+        [ -z "${invalid_task[$task]:-}" ] || continue
+        if [ -n "${frontier_ref[$task]:-}" ] && [ -n "${active_ref[$task]:-}" ] \
+           && [ "${frontier_ref[$task]##*/}" != "${active_ref[$task]##*/}" ]; then
+            echo "Error: completed task $task has conflicting frontier/active suffixes; leaving all its refs untouched." >&2
+            rc=1; continue
+        fi
+
+        leases=(); refs=(); had_block=false
+        for ref in "${frontier_ref[$task]:-}" "${active_ref[$task]:-}" \
+                   "${blocked_ref[$task]:-}" "${meta_ref[$task]:-}"; do
+            [ -n "$ref" ] || continue
+            case "$ref" in
+                refs/heads/tasks/frontier/*) oid="${frontier_oid[$task]}" ;;
+                refs/heads/tasks/active/*) oid="${active_oid[$task]}" ;;
+                refs/heads/tasks/blocked/*) oid="${blocked_oid[$task]}"; had_block=true ;;
+                refs/heads/tasks/blocked-meta/*) oid="${meta_oid[$task]}" ;;
+            esac
+            leases+=("--force-with-lease=$ref:$oid")
+            refs+=(":$ref")
+        done
+        [ "${#refs[@]}" -gt 0 ] || continue
+
+        cleanup_ok=false
+        if git push --atomic "$remote" "${leases[@]}" "${refs[@]}" >/dev/null 2>&1; then
+            cleanup_ok=true
+        else
+            # A concurrent idempotent cleaner may have removed every ref after
+            # our snapshot. That is success. A replacement OID or an unchanged
+            # stale ref is a visible retryable conflict; atomic push semantics
+            # guarantee this run did not partially remove the other refs.
+            cleanup_ok=true
+            for ref in "${frontier_ref[$task]:-}" "${active_ref[$task]:-}" \
+                       "${blocked_ref[$task]:-}" "${meta_ref[$task]:-}"; do
+                [ -n "$ref" ] || continue
+                current=""; read_rc=0
+                current=$(remote_ref_sha_checked "$ref") || read_rc=$?
+                if [ "$read_rc" = 3 ] || [ -n "$current" ]; then cleanup_ok=false; fi
+            done
+        fi
+        if [ "$cleanup_ok" = true ]; then
+            for ref in "${frontier_ref[$task]:-}" "${active_ref[$task]:-}" \
+                       "${blocked_ref[$task]:-}" "${meta_ref[$task]:-}"; do
+                [ -n "$ref" ] && git update-ref -d "$ref" 2>/dev/null || true
+            done
+            short="${active_ref[$task]:-}"
+            short="${short##*/}"
+            if [ -z "$short" ]; then
+                short="${frontier_ref[$task]:-}"
+                short="${short##*/}"
+            fi
+            [ -n "$short" ] || short="${task:0:12}"
+            echo "Reconciled completed task refs for $short from master witness ${witness[$task]}"
+            if [ "$had_block" = true ]; then
+                emit_operator_blocked_dispatch complete "$short"
+            fi
+        else
+            echo "Error: CAS cleanup raced or failed for completed task $task; no partial cleanup was accepted." >&2
+            rc=1
+        fi
+    done
+    return "$rc"
 }
 
 # Helper: build a completion merge's commit message from the task commit's

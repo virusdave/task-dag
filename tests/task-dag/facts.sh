@@ -105,6 +105,14 @@ EPIC5=$(mk_task "Task: epic5")        # will be closed as issue #5
 complete_task "$TASK_A"
 close_issue "$EPIC5" 5
 
+# A completed child makes its structural and dependency parents reachable
+# from master ancestry. Only the child is a canonical non-primary parent on
+# master's first-parent spine; the other two must never become done facts.
+STRUCT_PARENT=$(mk_task "Task: structural parent")
+DEP_PARENT=$(mk_task "Task: dependency parent")
+CHILD=$(git commit-tree "$EMPTY_TREE" -p "$STRUCT_PARENT" -p "$DEP_PARENT" -m "Task: child")
+complete_task "$CHILD"
+
 FROM_TASK="task:owner/repo@$(printf 'a%.0s' {1..40})"
 
 # ===========================================================================
@@ -123,27 +131,35 @@ else
     bad "A2: uncompleted task wrong rc ($rc)"
 fi
 
+taskdag_node_done "task:owner/repo@$STRUCT_PARENT"; rp=$?
+taskdag_node_done "task:owner/repo@$DEP_PARENT"; rd=$?
+if [ "$rp" -eq 1 ] && [ "$rd" -eq 1 ] && taskdag_node_done "task:owner/repo@$CHILD"; then
+    ok "A3: completed child does not mark structural/dependency parents done"
+else
+    bad "A3: ancestry leaked a false completion (structural=$rp dependency=$rd)"
+fi
+
 # empty-tree guard: the completion merge's FIRST parent is the impl/seed
 # commit (non-empty tree). It IS in the parent-token done-set, but must NOT
 # be reported done as a task node.
 taskdag_node_done "task:owner/repo@$SEED_SHA"; rc=$?
 if [ "$rc" -eq 1 ]; then
-    ok "A3: an impl (non-empty-tree) SHA is not a done task (empty-tree guard)"
+    ok "A4: an impl (non-empty-tree) SHA is not a done task (empty-tree guard)"
 else
-    bad "A3: impl SHA wrongly reported done (rc $rc)"
+    bad "A4: impl SHA wrongly reported done (rc $rc)"
 fi
 
 if taskdag_node_done "issue:owner/repo#5"; then
-    ok "A4: an issue closed via Closes-Epic trailer is done"
+    ok "A5: an issue closed via Closes-Epic trailer is done"
 else
-    bad "A4: closed issue not reported done"
+    bad "A5: closed issue not reported done"
 fi
 
 taskdag_node_done "issue:owner/repo#6"; rc=$?
 if [ "$rc" -eq 1 ]; then
-    ok "A5: an unclosed issue is not done"
+    ok "A6: an unclosed issue is not done"
 else
-    bad "A5: unclosed issue wrong rc ($rc)"
+    bad "A6: unclosed issue wrong rc ($rc)"
 fi
 
 # ===========================================================================
@@ -212,19 +228,22 @@ build_graph_ref() {  # <blobsha> <path> lines via stdin
 }
 
 # requires → done task A (satisfied); satisfies → not-done task B
-# (unsatisfied); requires → closed issue #5 (satisfied).
+# (unsatisfied); requires → closed issue #5 (satisfied); requires → reachable
+# but unfinished structural parent (unsatisfied).
 {
     add_edge "$FROM_TASK" "task:owner/repo@$TASK_A" requires all 100 w1
     add_edge "$FROM_TASK" "task:owner/repo@$TASK_B" satisfies any 100 w2
     add_edge "$FROM_TASK" "issue:owner/repo#5"      requires all 100 w3
+    add_edge "$FROM_TASK" "task:owner/repo@$STRUCT_PARENT" requires all 100 w4
 } | build_graph_ref
 
 facts_out=$(taskdag_edges_with_facts --no-fetch) || bad "D0: edges_with_facts failed"
 if printf '%s' "$facts_out" | jq -e '
-      length == 3
+      length == 4
       and (any(.[]; .relation=="requires" and .to=="task:owner/repo@'"$TASK_A"'" and .satisfied==true))
       and (any(.[]; .relation=="satisfies" and .to=="task:owner/repo@'"$TASK_B"'" and .satisfied==false))
       and (any(.[]; .relation=="requires" and .to=="issue:owner/repo#5" and .satisfied==true))
+      and (any(.[]; .relation=="requires" and .to=="task:owner/repo@'"$STRUCT_PARENT"'" and .satisfied==false))
     ' >/dev/null 2>&1; then
     ok "D1: satisfied(edge)=done(.to) for requires+satisfies (no aggregation)"
 else

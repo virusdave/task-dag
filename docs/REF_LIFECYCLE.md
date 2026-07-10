@@ -447,6 +447,32 @@ for sanctioned `Closes-Epic:` facts and re-applies the issue-close/ref-cleanup
 projection idempotently. This makes GitHub issue state and scheduling refs a
 repairable projection of `master`, not the source of task truth.
 
+## Completed-leaf scheduling refs are a repairable projection
+
+Completion parentage on `origin/master` must be durable **before** any leaf's
+`tasks/frontier`, `tasks/active`, `tasks/blocked`, or `tasks/blocked-meta` ref
+is deleted. All live completion paths (`complete`, batch `complete --leaves`,
+`complete-ops`, and `complete-historical`) therefore publish their completion
+tip first, then remove the scheduling refs in one leased atomic push. A failed
+or racing master push leaves the scheduling refs live and returns an error.
+
+The inverse failure — master published, then the worker died before cleanup —
+is repaired by `graph-converge` on both push events and scheduled/manual runs.
+The reconciler takes one strict, pruned snapshot of `origin/master` and the
+four scheduling namespaces. It treats a task as completed for cleanup only
+when a tree-equal completion merge on master's **first-parent spine** names the
+task as a non-primary parent. Restricting the witness to that spine is
+load-bearing: structural and dependency task commits are reachable through a
+completed child but are not themselves completed.
+
+Cleanup uses the exact ref names and object IDs in the snapshot (never a newly
+computed short SHA) as `--force-with-lease` expectations and removes all refs
+for one task atomically. This safely removes even a stale active claim created
+after completion became durable. A replacement claim, malformed projection,
+transport failure, or rejected push is left untouched and makes the workflow
+fail visibly; a later run takes a fresh snapshot and retries. `--no-fetch`
+explicitly skips this mutation because a stale local view is not authoritative.
+
 ## Reconciling a CONFIRMED-CLOSED issue (`reconcile-closed-issue`)
 
 The epic-close sweep above only fires on the sanctioned bot `Closes-Epic:`

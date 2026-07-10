@@ -3,6 +3,7 @@
 set -uo pipefail
 
 TD="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}"
+ORDER_HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-completion-order-hook.sh"
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
@@ -13,6 +14,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 
 # bare origin + working clone
 git init -q --bare "$ROOT/origin.git"
+bash "$ORDER_HOOK" "$ROOT/origin.git"
 git clone -q "$ROOT/origin.git" "$ROOT/wc"
 cd "$ROOT/wc"
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
@@ -101,9 +103,12 @@ fi
 # ---------------------------------------------------------------------------
 T3=$(mk_task "t3 cleanup")
 if [ -n "$T3" ]; then
+  TASK3=$(git rev-parse "refs/heads/tasks/frontier/$T3")
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$T3" >/dev/null 2>&1
   echo work3 > impl3.txt; git add impl3.txt; git commit -qm "impl t3"
+  touch "$ROOT/origin.git/enforce-completion-order"
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T3" >/dev/null 2>&1
+  rm -f "$ROOT/origin.git/enforce-completion-order"
   a=$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)
   f=$(git ls-remote origin "refs/heads/tasks/frontier/$T3" | wc -l)
   if [ "$a" -eq 0 ] && [ "$f" -eq 0 ]; then
@@ -111,6 +116,9 @@ if [ -n "$T3" ]; then
   else
     bad "C2: refs lingered (active=$a frontier=$f)"
   fi
+  grep -q "^$TASK3 " "$ROOT/origin.git/completion-order.log" \
+    && ok "C2: single completion published master before ref deletion" \
+    || bad "C2: completion-order hook did not observe the single cleanup"
 fi
 
 # ---------------------------------------------------------------------------
@@ -226,8 +234,16 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
   fi
 
   # (b) batch --leaves completes BOTH stacked siblings in one shot
+  touch "$ROOT/origin.git/enforce-completion-order"
   out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$S_LEAF:$S,$C_LEAF:$C" 2>&1); rc=$?
+  rm -f "$ROOT/origin.git/enforce-completion-order"
   if [ $rc -eq 0 ]; then ok "7: complete --leaves completes both stacked siblings (rc=0)"; else bad "7: complete --leaves failed (rc=$rc): $out"; fi
+  if grep -q "^$SLEAF_SHA " "$ROOT/origin.git/completion-order.log" \
+     && grep -q "^$CLEAF_SHA " "$ROOT/origin.git/completion-order.log"; then
+    ok "7: batch published all completion parentage before ref deletion"
+  else
+    bad "7: completion-order hook did not observe both batch cleanups"
+  fi
 
   # both task commits reachable as completion parents
   if git log HEAD --format='%P' | tr ' ' '\n' | grep -qx "$SLEAF_SHA" \

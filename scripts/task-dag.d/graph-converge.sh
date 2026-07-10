@@ -43,7 +43,7 @@ taskdag_peer_worktree_for() {
 }
 
 taskdag_node_done_in_worktree() {
-    local wt="$1" node="$2" rest repo ref tip
+    local wt="$1" node="$2" rest repo ref tip scan commit first parents commit_tree first_tree found=false
     node=$(taskdag_normalize_node "$node") || return 2
     repo=$(taskdag_node_repo "$node") || return 2
     tip=$(git -C "$wt" rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
@@ -52,10 +52,16 @@ taskdag_node_done_in_worktree() {
     case "$node" in
         task:*)
             rest="${node#task:}"; ref="${rest##*@}"
-            git -C "$wt" log "$tip" --format='%P' 2>/dev/null |
-                awk -v sha="$ref" '{ for (i=1; i<=NF; i++) if ($i == sha) found=1 } END { exit found ? 0 : 1 }' \
-                || return 1
             [ "$(git -C "$wt" rev-parse "$ref^{tree}" 2>/dev/null)" = "$EMPTY_TREE" ] || return 1
+            scan=$(git -C "$wt" rev-list --first-parent --parents "$tip" 2>/dev/null) || return 2
+            while read -r commit first parents; do
+                [ -n "$commit" ] && [ -n "$first" ] && [ -n "$parents" ] || continue
+                case " $parents " in *" $ref "*) ;; *) continue ;; esac
+                commit_tree=$(git -C "$wt" rev-parse "$commit^{tree}" 2>/dev/null || true)
+                first_tree=$(git -C "$wt" rev-parse "$first^{tree}" 2>/dev/null || true)
+                if [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ]; then found=true; break; fi
+            done <<< "$scan"
+            [ "$found" = true ] || return 1
             ;;
         issue:*)
             rest="${node#issue:}"; ref="${rest##*#}"
@@ -442,11 +448,23 @@ EOF
 }
 
 taskdag_push_completed_nodes() {
-    local range="$1" cur commit parents p tree issue
+    local range="$1" cur commit parents first p tree issue commits commit_tree first_tree
     cur=$(taskdag_current_repo) || return 2
+    commits=$(git rev-list --reverse --first-parent "$range" 2>/dev/null) || {
+        echo "Error: cannot scan pushed range '$range' for completion facts" >&2
+        return 2
+    }
     while IFS= read -r commit; do
         [ -n "$commit" ] || continue
         parents=$(git show -s --format='%P' "$commit")
+        first="${parents%% *}"
+        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
+        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
+        if [ -n "$first" ] && [ "$commit_tree" = "$first_tree" ]; then
+            parents="${parents#"$first"}"
+        else
+            parents=""
+        fi
         for p in $parents; do
             tree=$(git rev-parse -q --verify "$p^{tree}" 2>/dev/null || true)
             if [ "$tree" = "$EMPTY_TREE" ]; then
@@ -456,7 +474,7 @@ taskdag_push_completed_nodes() {
         while IFS= read -r issue; do
             [ -n "$issue" ] && printf 'issue:%s#%s\t%s\n' "$cur" "${issue#\#}" "$commit"
         done < <(git show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$commit" | grep -E '^#?[1-9][0-9]*$' || true)
-    done < <(git rev-list --reverse "$range" 2>/dev/null)
+    done <<< "$commits"
 }
 
 cmd_graph_converge() {
@@ -474,24 +492,34 @@ cmd_graph_converge() {
 Usage: task-dag graph-converge [--range <git-range>] [--notify-peer <remote>:<owner/repo>] [--no-fetch]
 
 Push-reaction entry point: fold completions found in a pushed master range,
-deliver optional mailbox hints, then run the periodic backstop once.
+deliver optional mailbox hints, run the periodic graph backstop, then repair
+stale scheduling refs from durable completion parentage on origin/master.
 EOF
                 return 0 ;;
             *) echo "Error: unknown option to graph-converge: $1" >&2; return 2 ;;
         esac
     done
-    local args=() rc=0 n w
+    local args=() rc=0 n w completed
     [ "$do_fetch" = false ] && args+=(--no-fetch)
     if [ -n "$range" ]; then
         local notify_args=() spec
         for spec in "${notify[@]}"; do
             notify_args+=(--notify-peer "$spec")
         done
-        while IFS=$'\t' read -r n w; do
-            [ -n "$n" ] || continue
-            cmd_propagate_completion --node "$n" --witness "$w" "${args[@]}" "${notify_args[@]}" || rc=1
-        done < <(taskdag_push_completed_nodes "$range")
+        if completed=$(taskdag_push_completed_nodes "$range"); then
+            while IFS=$'\t' read -r n w; do
+                [ -n "$n" ] || continue
+                cmd_propagate_completion --node "$n" --witness "$w" "${args[@]}" "${notify_args[@]}" || rc=1
+            done <<< "$completed"
+        else
+            rc=1
+        fi
     fi
     cmd_reconcile_backstop "${args[@]}" || rc=1
+    if [ "$do_fetch" = true ]; then
+        reconcile_completed_task_refs origin || rc=1
+    else
+        echo "Note: --no-fetch skips completed scheduling-ref reconciliation (an authoritative origin snapshot is required)." >&2
+    fi
     return "$rc"
 }

@@ -336,13 +336,13 @@ mirrored ref count `O(open work)`, not `O(total history)`):
 - `done(node)` is authoritative from **this repo's** master history and is
   **scoped to the current repo** (a node's identity is `owner/repo` +
   object-id, and local history is authoritative only for the current repo):
-  a `task:<cur-repo>@<sha>` is done ⟺ `<sha>` appears as a parent-field
-  token of a commit reachable from the master tip **and** is an empty-tree
-  task commit (mirrors the tool's authoritative `task_is_completed_at_commit`
-  semantics, with an empty-tree guard so an implementation SHA — a first
-  parent — is never mistaken for a completed task); an `issue:<cur-repo>#<N>`
-  is done ⟺ a merge reachable from the tip carries a `Closes-Epic: #<N>`
-  **trailer** (parsed as a git trailer, so body prose cannot forge it). A
+  a `task:<cur-repo>@<sha>` is done ⟺ a tree-equal commit on master's
+  **first-parent spine** records `<sha>` as a non-primary parent **and** it is
+  an empty-tree task commit (the spine restriction excludes structural and
+  dependency parent tokens reachable through task commits); an
+  `issue:<cur-repo>#<N>` is done ⟺ a merge reachable from the tip carries a
+  `Closes-Epic: #<N>` **trailer** (parsed as a git trailer, so body prose
+  cannot forge it). A
   **foreign** node (repo ≠ current) is not locally derivable ⇒ not done here
   (the cross-repo hint/backstop siblings carry those).
 - `satisfied(edge) = done(edge.to)` for **both** relations. The
@@ -379,14 +379,10 @@ epics are proven complete.
   AND unblocked. A LEAF's requires-edges gate **readiness**, never its own
   completeness.
 - **Load-bearing ordering:** a node is classified EPIC vs LEAF by
-  **containment** *before* the raw `done()` fact is trusted. `done()` is
-  derived from **any** parent-field token reachable from `master`, and an
-  epic root is its children's **first-parent** token, so a decomposed epic
-  would false-positive as `done()` the instant any child completes.
-  Completeness of an epic is therefore always derived from its obligations
-  (exactly like the legacy `epic_subtree_complete`), never from `done()`;
-  `done()` stays authoritative only for a leaf (which appears solely as the
-  2nd parent of its own completion merge) and an issue (`Closes-Epic`).
+  **containment** *before* a direct leaf-style `done()` fact is trusted.
+  Canonical witness derivation prevents structural/dependency parent tokens
+  from becoming facts, while epic completeness still comes from obligations
+  (exactly like `epic_subtree_complete`), not a direct leaf completion.
 
 The push-reaction handler + periodic reconciler **backstop** (local-CAS
 fold, cross-repo hint delivery, cascade, supersede synth-completion), the

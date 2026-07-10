@@ -67,6 +67,7 @@ has_close_merge() { # <repo-dir> <issue> <epic-sha>
 
 edge_id() { ( cd "$1" && "$TD" dep add --from "$2" --to "$3" --relation "$4" --repo-id 101 --witness w >/dev/null && "$TD" dep add --from "$2" --to "$3" --relation "$4" --repo-id 101 --witness w >/dev/null 2>&1 || true && "$TD" edges --json --no-fetch | jq -r --arg f "$2" --arg t "$3" --arg r "$4" '.[] | select(.from==$f and .to==$t and .relation==$r) | .edgeId' ); }
 edge_absent() { ! git -C "$1" cat-file -e "refs/heads/tasks/v1/graph:edges/$2.json" 2>/dev/null; }
+edge_present() { git -C "$1" cat-file -e "refs/heads/tasks/v1/graph:edges/$2.json" 2>/dev/null; }
 
 # ── A. same-repo requires fold ─────────────────────────────────────────────
 init_repo same owner/repo
@@ -85,6 +86,30 @@ if "$TD" propagate-completion --node "$NA" --witness "$WA" >/dev/null 2>&1; then
     ok "A2 same-repo fold is idempotent"
 else
     bad "A2 same-repo fold was not idempotent"
+fi
+
+# A completed child makes structural/dependency parents reachable, but they
+# are not canonical completion witnesses and must not fold targeting edges.
+P=$(mk_task "$ROOT/same" "Task: structural parent")
+DP=$(mk_task "$ROOT/same" "Task: dependency parent")
+CH=$(git commit-tree "$EMPTY_TREE" -p "$P" -p "$DP" -m "Task: child")
+CHS=$(git rev-parse --short "$CH")
+git update-ref "refs/heads/tasks/frontier/$CHS" "$CH"
+git push -q origin "refs/heads/tasks/frontier/$CHS"
+NP="task:owner/repo@$P"; NDP="task:owner/repo@$DP"
+EP=$(edge_id "$ROOT/same" "$NB" "$NP" requires)
+EDP=$(edge_id "$ROOT/same" "$NB" "$NDP" requires)
+WCH=$(complete_task "$ROOT/same" "$CH")
+if "$TD" graph-converge --range "$WCH" >/dev/null 2>&1 \
+   && edge_present "$ROOT/same" "$EP" && edge_present "$ROOT/same" "$EDP"; then
+    ok "A3 push scan leaves structural/dependency parent edges active"
+else
+    bad "A3 push scan falsely folded a reachable task parent's edge"
+fi
+if "$TD" graph-converge --range does-not-exist >/dev/null 2>&1; then
+    bad "A4 invalid push range returned success"
+else
+    ok "A4 invalid push range fails loudly"
 fi
 
 # ── B. cascade through satisfies synth-completion ──────────────────────────

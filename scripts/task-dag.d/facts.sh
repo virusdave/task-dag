@@ -26,13 +26,10 @@
 #   done(node) — authoritative from THIS repo's master history, scoped to the
 #     current repo (a node's identity is owner/repo + object-id, and the
 #     local history is only authoritative for the current repo):
-#       task:<cur-repo>@<sha>   done ⟺ <sha> appears as a parent-field token
-#           of a commit reachable from the master tip AND <sha> is an
-#           empty-tree task commit. This mirrors the tool's authoritative
-#           `task_is_completed_at_commit` parent-token semantics EXACTLY (a
-#           completion merge records the task commit as a non-first parent),
-#           with the empty-tree guard so an implementation SHA (which appears
-#           as a first parent) can never be mistaken for a completed task.
+#       task:<cur-repo>@<sha>   done ⟺ a tree-equal commit on master's
+#           FIRST-PARENT spine records <sha> as a non-primary parent AND
+#           <sha> is an empty-tree task commit. The spine restriction excludes
+#           structural/dependency parent tokens reachable through task commits.
 #       issue:<cur-repo>#<N>    done ⟺ a merge reachable from the master tip
 #           carries a `Closes-Epic: #<N>` TRAILER. `Closes-Epic` stores only
 #           the number (no owner/repo), so this fact MUST be scoped to the
@@ -158,15 +155,22 @@ taskdag_load_facts() {
     TASKDAG_DONE_TASKS=()
     TASKDAG_CLOSED_ISSUES=()
 
-    # done-set: every parent-field token reachable from the tip. This is the
-    # EXACT set task_is_completed_at_commit scans (task commits are recorded
-    # as parents of their completion merge); building it once makes each
-    # done() query O(1). Populated via process substitution so the array
-    # survives (a `... | while` loop would fill a subshell copy and lose it).
-    local sha
-    while IFS= read -r sha; do
-        [ -n "$sha" ] && TASKDAG_DONE_TASKS["$sha"]=1
-    done < <(git log "$want_oid" --format='%P' 2>/dev/null | tr ' ' '\n')
+    # done-set: non-primary empty-tree task parents of tree-equal commits on
+    # master's first-parent spine. Walking arbitrary ancestry would encounter
+    # task commits themselves and falsely mark their structural/dependency
+    # parents done. Build once so each done() query remains O(1).
+    local commit first rest sha commit_tree first_tree scan
+    scan=$(git rev-list --first-parent --parents "$want_oid" 2>/dev/null) || return 2
+    while read -r commit first rest; do
+        [ -n "$commit" ] && [ -n "$first" ] && [ -n "$rest" ] || continue
+        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
+        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
+        [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ] || continue
+        for sha in $rest; do
+            [ "$(git rev-parse "$sha^{tree}" 2>/dev/null || true)" = "$EMPTY_TREE" ] \
+                && TASKDAG_DONE_TASKS["$sha"]=1
+        done
+    done <<< "$scan"
 
     # closed-issue set: Closes-Epic trailers on reachable merges.
     local n

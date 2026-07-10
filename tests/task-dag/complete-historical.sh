@@ -6,6 +6,7 @@
 set -uo pipefail
 
 TD="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}"
+ORDER_HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-completion-order-hook.sh"
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
@@ -29,6 +30,7 @@ page_count() { [ -f "$ROOT/page.log" ] && wc -l < "$ROOT/page.log" | tr -d ' ' |
 
 # bare origin + working clone
 git init -q --bare "$ROOT/origin.git"
+bash "$ORDER_HOOK" "$ROOT/origin.git"
 git clone -q "$ROOT/origin.git" "$ROOT/wc"
 cd "$ROOT/wc"
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
@@ -80,7 +82,9 @@ mk_history t1
 OLD_TIP=$(git rev-parse HEAD)
 OLD_TREE=$(git rev-parse "HEAD^{tree}")
 P0=$(page_count)
+touch "$ROOT/origin.git/enforce-completion-order"
 out=$("$TD" complete-historical "$T1" --commit="$HSHA" 2>"$ROOT/err1"); rc=$?
+rm -f "$ROOT/origin.git/enforce-completion-order"
 err=$(cat "$ROOT/err1")
 
 if [ $rc -eq 0 ]; then ok "happy: complete-historical rc=0"; else bad "happy: rc=$rc out=$out err=$err"; fi
@@ -99,6 +103,9 @@ echo "$MSG" | grep -q "^Status: completed$" && ok "happy: Status: completed trai
 
 # frontier ref must be gone on origin
 if [ "$(git ls-remote origin "refs/heads/tasks/frontier/$T1" | wc -l)" -eq 0 ]; then ok "happy: frontier ref cleaned on origin"; else bad "happy: frontier ref lingered"; fi
+grep -q "^$TASK1 " "$ROOT/origin.git/completion-order.log" \
+  && ok "happy: historical link reached master before ref deletion" \
+  || bad "happy: completion-order hook did not observe historical cleanup"
 
 # LOUD banner on stderr
 if echo "$err" | grep -qi "ONLY" && echo "$err" | grep -qi "missed" && echo "$err" | grep -qi "normal workflow"; then
