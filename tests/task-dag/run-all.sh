@@ -11,6 +11,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TD="${1:-$(cd "$here/../../scripts" && pwd)/task-dag}"
 
 echo "Testing CLI: $TD"
+
+# GitHub Actions exports the caller repository globally, but these fixtures
+# create independent synthetic repositories and supply their own identity when
+# a scenario needs one. Do not let the workflow's repository override fixture
+# config/remote discovery; tests for the environment path set it explicitly.
+unset GITHUB_REPOSITORY
+
 command -v shellcheck >/dev/null 2>&1 && {
     echo "== shellcheck =="
     shellcheck -S error "$TD" "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
