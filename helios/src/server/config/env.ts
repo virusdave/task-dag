@@ -128,7 +128,10 @@ export interface ServerEnv {
   // virusdave/top-level#62 / child automation#72). Helios stores only
   // verifier public keys and an expiring safe-read allowlist; absent
   // or malformed config leaves this disabled so normal OAuth sessions
-  // keep working while signed-agent access fails closed.
+  // keep working while signed-agent access fails closed. Route authors
+  // must use docs/helios/signed-agent-readonly-allowlists.md before
+  // adding a page/API route to the allowlist; private signing keys
+  // never belong in Helios config.
   agentReadonly: AgentReadonlyConfig
 }
 
