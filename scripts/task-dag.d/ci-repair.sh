@@ -14,6 +14,564 @@
 #  reusable workflow are the other leaves of #1.)
 
 # ---------------------------------------------------------------------------
+# repair-reconcile evidence internals
+#
+# These private helpers implement the read-only authority + evidence half of
+# the future `repair-reconcile` command.  They intentionally are not registered
+# as a public command yet: the public contract also includes an atomic chain
+# decision and fenced projection convergence.  Keeping collection private lets
+# Actions hints and the host reconciler share one strict implementation without
+# advertising a dangerously incomplete reconciler.
+#
+# `_ci_repair_collect_evidence <owner/repo> <branch>` writes one compact JSON
+# outcome to stdout and has no projection or git-ref side effects.  Outcomes:
+#   off             authoritative registry says this slot is not enrolled
+#   observation     strict policy + check evidence produced a classification
+#   policy-invalid  repository-owned policy/identity is invalid
+#   evidence-error  transient/authority/stored-state evidence is unsafe
+# Exit 0 is off/observation; exit 2 is policy-invalid/evidence-error.
+# ---------------------------------------------------------------------------
+
+_CI_REPAIR_TOP_LEVEL_REPO="virusdave/top-level"
+_CI_REPAIR_REGISTRY_PATH="scripts/ephemeral_checkout.d/repos.conf"
+_CI_REPAIR_POLICY_PATH=".github/ci-repair-policy.json"
+_CI_REPAIR_MAX_BODY_BYTES=1048576
+_CI_REPAIR_MAX_POLICY_BYTES=65536
+_CI_REPAIR_MAX_REGISTRY_BYTES=262144
+_CI_REPAIR_MAX_CHECKS=64
+_CI_REPAIR_MAX_RUNS=1000
+_CI_REPAIR_MAX_PAGES=10
+
+_ci_repair_error() { # <outcome> <bounded-code> [authority-json]
+    local outcome="$1" code="$2" authority="${3:-null}"
+    jq -cn --arg outcome "$outcome" --arg code "$code" \
+        --argjson authority "$authority" \
+        '{outcome:$outcome,error:$code,authority:$authority}'
+    return 2
+}
+
+_ci_repair_sha256() {
+    sha256sum | awk '{print "sha256:" $1}'
+}
+
+_ci_repair_base64url() {
+    base64 -w0 | tr '+/' '-_' | tr -d '='
+}
+
+# Fetch one GitHub API page while retaining its response metadata.  Globals:
+# _CI_HTTP_BODY_FILE, _CI_HTTP_DATE, _CI_HTTP_DATE_EPOCH.  Every response Date
+# is checked against host time at receipt; host time never becomes observation
+# or lease authority.
+_ci_repair_http_get() { # <endpoint> <scratch-dir> <sequence>
+    local endpoint="$1" scratch="$2" seq="$3"
+    local envelope="$scratch/http.$seq" headers="$scratch/headers.$seq"
+    local body="$scratch/body.$seq" split status date_count date_value
+    local capture_limit=$((_CI_REPAIR_MAX_BODY_BYTES + 32769))
+    local -a pipeline_status=()
+
+    {
+        gh api --include "$endpoint" 2>/dev/null | head -c "$capture_limit" >"$envelope"
+        pipeline_status=("${PIPESTATUS[@]}")
+    }
+    [ "$(wc -c <"$envelope")" -le "$((_CI_REPAIR_MAX_BODY_BYTES + 32768))" ] \
+        || return 21
+
+    split="$(awk '{ line=$0; sub(/\r$/, "", line); if (line == "") { print NR; exit } }' "$envelope")"
+    [[ "$split" =~ ^[1-9][0-9]*$ ]] || return 20
+    head -n "$((split - 1))" "$envelope" >"$headers" || return 22
+    tail -n "+$((split + 1))" "$envelope" >"$body" || return 22
+    [ "$(wc -c <"$body")" -le "$_CI_REPAIR_MAX_BODY_BYTES" ] || return 21
+
+    status="$(head -1 "$headers" | tr -d '\r' | awk '{print $2}')"
+    _CI_HTTP_STATUS="$status"
+    date_count="$(awk 'BEGIN{IGNORECASE=1} /^date:[[:space:]]/ {n++} END{print n+0}' "$headers")"
+    [ "$date_count" -eq 1 ] || return 24
+    date_value="$(awk 'BEGIN{IGNORECASE=1} /^date:[[:space:]]/ {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}' "$headers")"
+
+    local date_epoch host_epoch skew
+    date_epoch="$(date -u -d "$date_value" +%s 2>/dev/null)" || return 24
+    host_epoch="$(date -u +%s)" || return 24
+    skew=$((host_epoch - date_epoch)); [ "$skew" -lt 0 ] && skew=$((-skew))
+    [ "$skew" -le 300 ] || return 25
+
+    _CI_HTTP_BODY_FILE="$body"
+    _CI_HTTP_DATE="$(date -u -d "@$date_epoch" +'%Y-%m-%dT%H:%M:%SZ')" || return 24
+    _CI_HTTP_DATE_EPOCH="$date_epoch"
+    [ "$status" = 200 ] || return 23
+    [ "${pipeline_status[0]:-1}" -eq 0 ] || return 20
+    return 0
+}
+
+_ci_repair_http_error_code() {
+    case "$1" in
+        20) printf api-failure ;;
+        21) printf response-too-large ;;
+        22) printf malformed-http-response ;;
+        23) printf api-status ;;
+        24) printf missing-or-invalid-date ;;
+        25) printf clock-skew ;;
+        *) printf api-failure ;;
+    esac
+}
+
+_ci_repair_note_date() {
+    if [ "$_CI_HTTP_DATE_EPOCH" -gt "${_CI_REPAIR_OBSERVED_EPOCH:-0}" ]; then
+        _CI_REPAIR_OBSERVED_EPOCH="$_CI_HTTP_DATE_EPOCH"
+        _CI_REPAIR_OBSERVED_AT="$_CI_HTTP_DATE"
+    fi
+}
+
+_ci_repair_repo_from_url() {
+    local url="$1" path
+    case "$url" in
+        git@*:*/*) path="${url#*:}" ;;
+        https://github.com/*/*|ssh://git@github.com/*/*) path="${url#*github.com/}" ;;
+        *) return 1 ;;
+    esac
+    path="${path%.git}"
+    [[ "$path" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+    printf '%s' "$path"
+}
+
+_ci_repair_urlencode_component() {
+    local LC_ALL=C value="$1" out="" i char
+    for ((i = 0; i < ${#value}; i++)); do
+        char="${value:i:1}"
+        case "$char" in
+            [A-Za-z0-9._~-]) out+="$char" ;;
+            *) out+="$(printf '%%%02X' "'$char")" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+_ci_repair_decode_content() { # <api-json> <output-file> <max-bytes>
+    local input="$1" output="$2" maximum="$3" encoded
+    jq -e '.type == "file" and .encoding == "base64"
+           and (.sha | type == "string" and test("^[0-9a-f]{40,64}$"))
+           and (.content | type == "string")' "$input" >/dev/null 2>&1 \
+        || return 1
+    encoded="$(jq -r '.content' "$input")" || return 1
+    printf '%s' "$encoded" | tr -d '\n' | base64 -d >"$output" 2>/dev/null \
+        || return 1
+    [ "$(wc -c <"$output")" -le "$maximum" ] || return 2
+    # Bash cannot represent NUL; reject it before any shell parsing.
+    [ "$(wc -c <"$output")" -eq "$(tr -d '\000' <"$output" | wc -c)" ] || return 1
+}
+
+# Resolve one immutable registry snapshot and strictly validate the complete
+# file. Globals: _CI_REGISTRY_COMMIT, _CI_REGISTRY_BLOB, _CI_REGISTRY_MODE,
+# _CI_REGISTRY_BRANCH, _CI_REGISTRY_AUTHORITY.
+_ci_repair_registry_snapshot() { # <repo> <requested-branch> <scratch>
+    local wanted_repo="$1" wanted_branch="$2" scratch="$3" rc=0
+    local endpoint registry="$scratch/repos.conf" line trimmed name url mode branch extra identity
+    local row_mode="off" row_branch="" found=false
+    declare -A names=() identities=()
+
+    endpoint="repos/${_CI_REPAIR_TOP_LEVEL_REPO}/git/ref/heads/master"
+    _ci_repair_http_get "$endpoint" "$scratch" registry-ref || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    _ci_repair_note_date
+    _CI_REGISTRY_COMMIT="$(jq -er 'select(.object.type == "commit") | .object.sha
+        | select(type == "string" and test("^[0-9a-f]{40,64}$"))' "$_CI_HTTP_BODY_FILE" 2>/dev/null)" \
+        || return 30
+
+    endpoint="repos/${_CI_REPAIR_TOP_LEVEL_REPO}/contents/${_CI_REPAIR_REGISTRY_PATH}?ref=${_CI_REGISTRY_COMMIT}"
+    _ci_repair_http_get "$endpoint" "$scratch" registry-content || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    _ci_repair_note_date
+    _ci_repair_decode_content "$_CI_HTTP_BODY_FILE" "$registry" "$_CI_REPAIR_MAX_REGISTRY_BYTES" \
+        || return 31
+    _CI_REGISTRY_BLOB="$(jq -er '.sha | select(type == "string" and test("^[0-9a-f]{40,64}$"))' \
+        "$_CI_HTTP_BODY_FILE")" || return 31
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in *$'\r'*) return 32 ;; esac
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        [ -n "$trimmed" ] || continue
+        [[ "$trimmed" == \#* ]] && continue
+        name=""; url=""; mode=""; branch=""; extra=""
+        read -r name url mode branch extra <<<"$trimmed"
+        [ -n "$name" ] && [ -n "$url" ] && [ -z "$extra" ] || return 32
+        [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 32
+        [ -z "${names[$name]+set}" ] || return 33
+        names[$name]=1
+        identity="$(_ci_repair_repo_from_url "$url")" || return 32
+        [ -z "${identities[$identity]+set}" ] || return 34
+        identities[$identity]=1
+        if [ -z "$mode" ] && [ -z "$branch" ]; then
+            mode=off
+        else
+            [ -n "$mode" ] && [ -n "$branch" ] || return 32
+            case "$mode" in off|observe|enforce) ;; *) return 32 ;; esac
+            git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 32
+        fi
+        if [ "$identity" = "$wanted_repo" ]; then
+            found=true
+            if [ "$mode" != off ] && [ "$branch" = "$wanted_branch" ]; then
+                row_mode="$mode"; row_branch="$branch"
+            fi
+        fi
+    done <"$registry"
+
+    _CI_REGISTRY_MODE="$row_mode"
+    _CI_REGISTRY_BRANCH="$row_branch"
+    _CI_REGISTRY_AUTHORITY="$(jq -cn --arg commit "$_CI_REGISTRY_COMMIT" \
+        --arg blob "$_CI_REGISTRY_BLOB" --arg mode "$row_mode" \
+        --arg branch "$row_branch" --argjson found "$found" \
+        '{commit:$commit,blob:$blob,mode:$mode,branch:$branch,repositoryFound:$found}')" \
+        || return 35
+}
+
+_ci_repair_read_stored_authority() { # <repo> <branch>
+    local repo="$1" branch="$2" ref old="" f count first_epoch observed_epoch
+    ref="$(_cichain_ref "$repo" "$branch")"
+    old="$(_cichain_remote_sha "$ref")" || return 40
+    _CI_REPAIR_CHAIN_COMMIT="$old"
+    _CI_REPAIR_STORED_REGISTRY_COMMIT=""
+    _CI_REPAIR_STORED_REGISTRY_BLOB=""
+    _CI_REPAIR_STORED_MODE=""
+    _CI_REPAIR_STORED_HEAD=""
+    _CI_REPAIR_STORED_FIRST_SEEN=""
+    _CI_REPAIR_STORED_OBSERVED_AT=""
+    [ -n "$old" ] || return 0
+    git fetch --quiet --no-write-fetch-head origin "$ref" 2>/dev/null || return 40
+    git cat-file -e "${old}^{commit}" 2>/dev/null || return 40
+    for f in Registry-Commit Registry-Blob Enrollment-Mode Observed-Head Head-First-Seen-At Observed-At; do
+        count="$(_cichain_field_count "$old" "$f")" || return 41
+        [ "$count" -le 1 ] || return 41
+    done
+    _CI_REPAIR_STORED_REGISTRY_COMMIT="$(_cichain_field "$old" Registry-Commit)" || return 41
+    _CI_REPAIR_STORED_REGISTRY_BLOB="$(_cichain_field "$old" Registry-Blob)" || return 41
+    _CI_REPAIR_STORED_MODE="$(_cichain_field "$old" Enrollment-Mode)" || return 41
+    _CI_REPAIR_STORED_HEAD="$(_cichain_field "$old" Observed-Head)" || return 41
+    _CI_REPAIR_STORED_FIRST_SEEN="$(_cichain_field "$old" Head-First-Seen-At)" || return 41
+    _CI_REPAIR_STORED_OBSERVED_AT="$(_cichain_field "$old" Observed-At)" || return 41
+
+    if [ -z "$_CI_REPAIR_STORED_HEAD$_CI_REPAIR_STORED_FIRST_SEEN$_CI_REPAIR_STORED_OBSERVED_AT" ]; then
+        : # all-empty legacy observation tuple
+    else
+        [[ "$_CI_REPAIR_STORED_HEAD" =~ ^[0-9a-f]{40,64}$ ]] \
+            && [ -n "$_CI_REPAIR_STORED_FIRST_SEEN" ] \
+            && [ -n "$_CI_REPAIR_STORED_OBSERVED_AT" ] || return 41
+        first_epoch="$(_cichain_timestamp_epoch "$_CI_REPAIR_STORED_FIRST_SEEN")" || return 41
+        observed_epoch="$(_cichain_timestamp_epoch "$_CI_REPAIR_STORED_OBSERVED_AT")" || return 41
+        [ "$first_epoch" -le "$observed_epoch" ] || return 41
+    fi
+
+    if [ -z "$_CI_REPAIR_STORED_REGISTRY_COMMIT$_CI_REPAIR_STORED_REGISTRY_BLOB$_CI_REPAIR_STORED_MODE" ]; then
+        return 0
+    fi
+    [[ "$_CI_REPAIR_STORED_REGISTRY_COMMIT" =~ ^[0-9a-f]{40,64}$ ]] \
+        && [[ "$_CI_REPAIR_STORED_REGISTRY_BLOB" =~ ^[0-9a-f]{40,64}$ ]] \
+        || return 41
+    case "$_CI_REPAIR_STORED_MODE" in off|observe|enforce) ;; *) return 41 ;; esac
+}
+
+_ci_repair_validate_registry_descent() { # <scratch>
+    local scratch="$1" rc=0 status
+    [ -n "$_CI_REPAIR_STORED_REGISTRY_COMMIT" ] || return 0
+    [ "$_CI_REPAIR_STORED_REGISTRY_COMMIT" = "$_CI_REGISTRY_COMMIT" ] && return 0
+    _ci_repair_http_get \
+        "repos/${_CI_REPAIR_TOP_LEVEL_REPO}/compare/${_CI_REPAIR_STORED_REGISTRY_COMMIT}...${_CI_REGISTRY_COMMIT}" \
+        "$scratch" registry-compare || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    _ci_repair_note_date
+    status="$(jq -er '.status | select(type == "string")' "$_CI_HTTP_BODY_FILE" 2>/dev/null)" \
+        || return 42
+    case "$status" in ahead|identical) return 0 ;; behind|diverged) return 43 ;; *) return 42 ;; esac
+}
+
+# jq normally accepts duplicate JSON object keys (last one wins).  Streaming
+# exposes every occurrence, allowing strict boundary validation before normal
+# schema checks.
+_ci_repair_json_has_duplicate_paths() { # <file>
+    jq --stream -c 'select(length == 2) | .[0]' "$1" 2>/dev/null \
+        | LC_ALL=C sort | uniq -d | grep -q .
+}
+
+_ci_repair_validate_policy() { # <policy-file>
+    local policy="$1"
+    iconv -f UTF-8 -t UTF-8 "$policy" >/dev/null 2>&1 || return 1
+    _ci_repair_json_has_duplicate_paths "$policy" && return 1
+    jq -e --argjson max "$_CI_REPAIR_MAX_CHECKS" '
+      type == "object"
+      and (keys == ["missingGateGraceSeconds","requiredChecks","version"])
+      and .version == 1
+      and (.missingGateGraceSeconds | type == "number" and floor == . and . >= 0 and . <= 86400)
+      and (.requiredChecks | type == "array" and length > 0 and length <= $max)
+      and (all(.requiredChecks[];
+        type == "object"
+        and (keys == ["acceptedConclusions","appId","appSlug","name"])
+        and (.name | type == "string" and length > 0 and length <= 200 and test("^[^\\r\\n]+$"))
+        and (.appId | type == "number" and floor == . and . > 0 and . <= 9007199254740991)
+        and (.appSlug | type == "string" and test("^[a-z0-9][a-z0-9-]{0,99}$"))
+        and (.acceptedConclusions | type == "array" and length > 0 and length <= 16)
+        and (all(.acceptedConclusions[];
+          type == "string" and IN("success","failure","neutral","cancelled","skipped","timed_out","action_required","startup_failure","stale")))
+        and ((.acceptedConclusions | unique | length) == (.acceptedConclusions | length))))
+      and ((.requiredChecks | map(.name) | unique | length) == (.requiredChecks | length))
+    ' "$policy" >/dev/null 2>&1
+}
+
+_ci_repair_validate_run_page() { # <page-file> <head-sha>
+    local page="$1" head="$2" value created started completed timestamps="${1}.timestamps"
+    jq -e --arg head "$head" '
+      type == "object" and (.total_count | type == "number" and floor == . and . >= 0)
+      and (.check_runs | type == "array")
+      and all(.check_runs[];
+        type == "object"
+        and (.id | type == "number" and floor == . and . > 0 and . <= 9007199254740991)
+        and .head_sha == $head
+        and (.name | type == "string" and length > 0 and length <= 200)
+        and (.app | type == "object" and (.id | type == "number" and floor == . and . > 0)
+             and (.slug | type == "string"))
+        and (.status | IN("queued","in_progress","completed","waiting","requested","pending"))
+        and ((.conclusion == null) or (.conclusion | type == "string" and
+             IN("success","failure","neutral","cancelled","skipped","timed_out","action_required","startup_failure","stale")))
+        and (if .status == "completed" then .conclusion != null else .conclusion == null end)
+        and (if .status == "completed" then .completed_at != null else .completed_at == null end)
+        and (.created_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+        and ((.started_at == null) or (.started_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")))
+        and ((.completed_at == null) or (.completed_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))))
+    ' "$page" >/dev/null 2>&1 || return 1
+    jq -r '.check_runs[] | [.created_at, (.started_at // "null"), (.completed_at // "null")] | @tsv' \
+        "$page" >"$timestamps" || return 1
+    while IFS=$'\t' read -r created started completed; do
+        _cichain_timestamp_epoch "$created" >/dev/null || return 1
+        if [ "$started" != null ]; then
+            _cichain_timestamp_epoch "$started" >/dev/null || return 1
+            [ "$(_cichain_timestamp_epoch "$created")" -le "$(_cichain_timestamp_epoch "$started")" ] || return 1
+        fi
+        if [ "$completed" != null ]; then
+            _cichain_timestamp_epoch "$completed" >/dev/null || return 1
+            value="${started/null/$created}"
+            [ "$(_cichain_timestamp_epoch "$value")" -le "$(_cichain_timestamp_epoch "$completed")" ] || return 1
+        fi
+    done <"$timestamps"
+}
+
+_ci_repair_collect_check_runs() { # <repo> <head> <scratch>
+    local repo="$1" head="$2" scratch="$3" page=1 rc=0 count total="" all="$scratch/runs.jsonl"
+    : >"$all" || return 64
+    while [ "$page" -le "$_CI_REPAIR_MAX_PAGES" ]; do
+        _ci_repair_http_get \
+            "repos/${repo}/commits/${head}/check-runs?filter=all&per_page=100&page=${page}" \
+            "$scratch" "checks.$page" || rc=$?
+        [ "$rc" -eq 0 ] || return "$rc"
+        _ci_repair_note_date
+        _ci_repair_validate_run_page "$_CI_HTTP_BODY_FILE" "$head" || return 60
+        if [ -z "$total" ]; then total="$(jq -r .total_count "$_CI_HTTP_BODY_FILE")"
+        elif [ "$total" != "$(jq -r .total_count "$_CI_HTTP_BODY_FILE")" ]; then return 61
+        fi
+        jq -c '.check_runs[]' "$_CI_HTTP_BODY_FILE" >>"$all" || return 64
+        count="$(jq '.check_runs | length' "$_CI_HTTP_BODY_FILE")" || return 64
+        [ "$(wc -l <"$all")" -le "$_CI_REPAIR_MAX_RUNS" ] || return 62
+        [ "$count" -eq 100 ] || break
+        page=$((page + 1))
+    done
+    [ "$page" -le "$_CI_REPAIR_MAX_PAGES" ] || return 63
+
+    jq -s '.' "$all" >"$scratch/runs.json" || return 64
+    # Identical repeated IDs across pages are harmless; conflicting records
+    # are a pagination consistency failure.
+    jq -e 'group_by(.id) | all(.[]; (map(tojson) | unique | length) == 1)' \
+        "$scratch/runs.json" >/dev/null || return 61
+    jq 'unique_by(.id)' "$scratch/runs.json" >"$scratch/runs.unique.json" || return 64
+    [ "$(jq 'length' "$scratch/runs.unique.json")" -eq "$total" ] || return 61
+    _CI_REPAIR_RUNS_FILE="$scratch/runs.unique.json"
+}
+
+_ci_repair_build_evidence() { # <policy> <runs> <output>
+    local policy="$1" runs="$2" output="$3"
+    jq -n --slurpfile policy "$policy" --slurpfile runs "$runs" '
+      $policy[0].requiredChecks as $checks | $runs[0] as $all |
+      [ $checks[] as $check |
+        ($all | map(select(.name == $check.name))) as $named |
+        ($named | map(select(.app.id == $check.appId and .app.slug == $check.appSlug))) as $matching |
+        if ($named | length) > 0 and ($matching | length) == 0 then
+          {error:"identity-mismatch",name:$check.name}
+        elif ($matching | length) == 0 then
+          {name:$check.name,runId:null,appId:$check.appId,appSlug:$check.appSlug,
+           status:"absent",conclusion:null,createdAt:null,startedAt:null,completedAt:null,
+           acceptedConclusions:$check.acceptedConclusions}
+        else
+          ($matching | max_by([(.started_at // .created_at),.created_at,.id])) as $run |
+          {name:$check.name,runId:($run.id|tostring),appId:$run.app.id,appSlug:$run.app.slug,
+           status:$run.status,conclusion:$run.conclusion,createdAt:$run.created_at,
+           startedAt:$run.started_at,completedAt:$run.completed_at,
+           acceptedConclusions:$check.acceptedConclusions}
+        end
+      ] | sort_by([.name,.appId,.appSlug])
+    ' >"$output" || return 1
+}
+
+_ci_repair_collect_evidence_impl() { # <repo> <branch> <scratch>
+    local repo="$1" branch="$2" scratch="$3" rc=0 code authority=null
+    local policy="$scratch/policy.json" evidence="$scratch/evidence.json"
+    local endpoint head policy_digest evidence_json evidence_b64 evidence_key decision_key
+    local first_seen first_epoch deadline_epoch deadline aggregate reason grace
+
+    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+        && git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 \
+        || { _ci_repair_error evidence-error invalid-target; return 2; }
+
+    _CI_REPAIR_OBSERVED_EPOCH=0; _CI_REPAIR_OBSERVED_AT=""
+    _ci_repair_registry_snapshot "$repo" "$branch" "$scratch" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        code="$(_ci_repair_http_error_code "$rc")"
+        [ "$rc" -eq 30 ] && code=malformed-registry-ref
+        [ "$rc" -eq 31 ] && code=malformed-registry-content
+        case "$rc" in 32) code=malformed-registry ;; 33) code=duplicate-registry-name ;; 34) code=duplicate-registry-repository ;; 35) code=canonicalization-failed ;; esac
+        _ci_repair_error evidence-error "$code"; return 2
+    fi
+    authority="$_CI_REGISTRY_AUTHORITY"
+
+    _ci_repair_read_stored_authority "$repo" "$branch" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -eq 41 ] && code=stored-authority-invalid || code=chain-read-failed
+        _ci_repair_error evidence-error "$code" "$authority"; return 2
+    fi
+    _ci_repair_validate_registry_descent "$scratch" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        code="$(_ci_repair_http_error_code "$rc")"
+        [ "$rc" -eq 42 ] && code=registry-compare-invalid
+        [ "$rc" -eq 43 ] && code=registry-rollback
+        _ci_repair_error evidence-error "$code" "$authority"; return 2
+    fi
+    if [ "$_CI_REGISTRY_MODE" = off ]; then
+        jq -cn --argjson authority "$authority" '{outcome:"off",authority:$authority}' \
+            || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+        return 0
+    fi
+
+    endpoint="repos/${repo}/git/ref/heads/$(_ci_repair_urlencode_component "$branch")"
+    _ci_repair_http_get "$endpoint" "$scratch" target-ref || rc=$?
+    if [ "$rc" -ne 0 ]; then _ci_repair_error evidence-error "$(_ci_repair_http_error_code "$rc")" "$authority"; return 2; fi
+    _ci_repair_note_date
+    head="$(jq -er 'select(.object.type == "commit") | .object.sha
+        | select(type == "string" and test("^[0-9a-f]{40,64}$"))' "$_CI_HTTP_BODY_FILE" 2>/dev/null)" \
+        || { _ci_repair_error evidence-error malformed-target-ref "$authority"; return 2; }
+
+    endpoint="repos/${repo}/contents/${_CI_REPAIR_POLICY_PATH}?ref=${head}"
+    _ci_repair_http_get "$endpoint" "$scratch" policy || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -eq 23 ] && [ "${_CI_HTTP_STATUS:-}" = 404 ] \
+            && code=policy-missing || code="$(_ci_repair_http_error_code "$rc")"
+        if [ "$code" = policy-missing ]; then _ci_repair_error policy-invalid "$code" "$authority"; else _ci_repair_error evidence-error "$code" "$authority"; fi
+        return 2
+    fi
+    _ci_repair_note_date
+    _ci_repair_decode_content "$_CI_HTTP_BODY_FILE" "$policy" "$_CI_REPAIR_MAX_POLICY_BYTES" || rc=$?
+    if [ "$rc" -ne 0 ] || ! _ci_repair_validate_policy "$policy"; then
+        _ci_repair_error policy-invalid malformed-policy "$authority"; return 2
+    fi
+    policy_digest="$(_ci_repair_sha256 <"$policy")" || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+
+    _ci_repair_collect_check_runs "$repo" "$head" "$scratch" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        code="$(_ci_repair_http_error_code "$rc")"
+        case "$rc" in 60) code=malformed-check-run ;; 61) code=inconsistent-pagination ;; 62) code=too-many-check-runs ;; 63) code=too-many-pages ;; 64) code=canonicalization-failed ;; esac
+        _ci_repair_error evidence-error "$code" "$authority"; return 2
+    fi
+    _ci_repair_build_evidence "$policy" "$_CI_REPAIR_RUNS_FILE" "$evidence" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+    local predicate_rc=0
+    jq -e 'any(.[]; has("error"))' "$evidence" >/dev/null || predicate_rc=$?
+    if [ "$predicate_rc" -eq 0 ]; then
+        _ci_repair_error policy-invalid identity-mismatch "$authority"; return 2
+    elif [ "$predicate_rc" -gt 1 ]; then
+        _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2
+    fi
+
+    # Stored monotonic timestamps are part of durable grace.  A malformed or
+    # regressed same-head record fails closed instead of silently extending it.
+    if [ "$_CI_REPAIR_STORED_HEAD" = "$head" ]; then
+        [ -n "$_CI_REPAIR_STORED_FIRST_SEEN" ] || { _ci_repair_error evidence-error stored-first-seen-invalid "$authority"; return 2; }
+        first_epoch="$(_cichain_timestamp_epoch "$_CI_REPAIR_STORED_FIRST_SEEN")" \
+            || { _ci_repair_error evidence-error stored-first-seen-invalid "$authority"; return 2; }
+        first_seen="$_CI_REPAIR_STORED_FIRST_SEEN"
+        if [ -n "$_CI_REPAIR_STORED_OBSERVED_AT" ]; then
+            local stored_observed_epoch
+            stored_observed_epoch="$(_cichain_timestamp_epoch "$_CI_REPAIR_STORED_OBSERVED_AT")" \
+                || { _ci_repair_error evidence-error stored-observed-at-invalid "$authority"; return 2; }
+            [ "$_CI_REPAIR_OBSERVED_EPOCH" -ge "$stored_observed_epoch" ] \
+                || { _ci_repair_error evidence-error clock-regression "$authority"; return 2; }
+        fi
+        [ "$_CI_REPAIR_OBSERVED_EPOCH" -ge "$first_epoch" ] \
+            || { _ci_repair_error evidence-error clock-regression "$authority"; return 2; }
+    else
+        first_seen="$_CI_REPAIR_OBSERVED_AT"; first_epoch="$_CI_REPAIR_OBSERVED_EPOCH"
+    fi
+    grace="$(jq -er '.missingGateGraceSeconds | select(type == "number" and floor == .)' "$policy")" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+    deadline_epoch=$((first_epoch + grace))
+    deadline="$(date -u -d "@$deadline_epoch" +'%Y-%m-%dT%H:%M:%SZ')" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+
+    local evidence_state
+    evidence_state="$(jq -er '
+      if any(.[]; . as $e | .status == "completed" and
+           ($e.acceptedConclusions | index($e.conclusion)) == null) then "nonaccepted"
+      elif all(.[]; . as $e | .status == "completed" and
+           ($e.acceptedConclusions | index($e.conclusion)) != null) then "all-accepted"
+      else "incomplete" end' "$evidence")" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+    if [ "$evidence_state" = nonaccepted ]; then
+        aggregate=red; reason=nonaccepted
+    elif [ "$evidence_state" = all-accepted ]; then
+        aggregate=green; reason=all-accepted
+    elif [ "$_CI_REPAIR_OBSERVED_EPOCH" -ge "$deadline_epoch" ]; then
+        aggregate=red; reason=grace-expired
+    else
+        aggregate=unknown; reason=grace-pending
+    fi
+
+    # acceptedConclusions is policy input used only for classification; it is
+    # omitted from the persisted source-evidence schema.
+    evidence_json="$(jq -cS 'map(del(.acceptedConclusions))' "$evidence")" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+    [ "${#evidence_json}" -le 131072 ] \
+        || { _ci_repair_error evidence-error evidence-too-large "$authority"; return 2; }
+    evidence_b64="$(printf '%s' "$evidence_json" | _ci_repair_base64url)" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+    evidence_key="$(jq -cnS --arg version ci-repair-evidence-v1 --arg head "$head" \
+        --arg policyDigest "$policy_digest" --argjson evidence "$evidence_json" \
+        '{version:$version,head:$head,policyDigest:$policyDigest,evidence:$evidence}' \
+        | _ci_repair_sha256)" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+    decision_key="$(jq -cnS --arg version ci-repair-decision-v1 --arg evidenceKey "$evidence_key" \
+        --arg firstSeen "$first_seen" --arg deadline "$deadline" --arg aggregate "$aggregate" \
+        --arg reason "$reason" --arg mode "$_CI_REGISTRY_MODE" \
+        '{version:$version,evidenceKey:$evidenceKey,firstSeen:$firstSeen,deadline:$deadline,
+          aggregate:$aggregate,reason:$reason,enrollmentMode:$mode}' | _ci_repair_sha256)" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+
+    jq -cn --argjson authority "$authority" --arg head "$head" \
+        --arg observedAt "$_CI_REPAIR_OBSERVED_AT" --arg firstSeen "$first_seen" \
+        --arg deadline "$deadline" --arg policyDigest "$policy_digest" \
+        --arg evidence "$evidence_b64" --arg evidenceKey "$evidence_key" \
+        --arg decisionKey "$decision_key" --arg aggregate "$aggregate" --arg reason "$reason" \
+        '{outcome:"observation",authority:$authority,head:$head,observedAt:$observedAt,
+          headFirstSeenAt:$firstSeen,deadline:$deadline,policyDigest:$policyDigest,
+          requiredEvidence:$evidence,evidenceKey:$evidenceKey,decisionKey:$decisionKey,
+          aggregate:$aggregate,reason:$reason}' \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
+}
+
+_ci_repair_collect_evidence() {
+    if [ "$#" -ne 2 ]; then
+        _ci_repair_error evidence-error caller-authority-rejected
+        return 2
+    fi
+    local scratch rc=0
+    scratch="$(mktemp -d)" || { _ci_repair_error evidence-error scratch-failure; return 2; }
+    _ci_repair_collect_evidence_impl "$1" "$2" "$scratch" || rc=$?
+    rm -rf "$scratch"
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # parse-tree-fix
 #
 # A repair worker marks its fix commit with trailers the classifier interprets:
