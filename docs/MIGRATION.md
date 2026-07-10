@@ -138,6 +138,36 @@ The preflight fails closed on drift in the event matrix, per-job permissions,
 required secrets, projection and graph-convergence backstop wiring,
 push-range inputs, and reusable workflow source (`virusdave/task-dag@master`).
 
+### Rollout authority for cross-repo completions
+
+As of the issue #15 repair window, **legacy `tasks/completions/*` refs remain
+the authoritative cross-repo completion signal**. Dependency-graph edges and
+mailbox messages are additive convergence aids until a caller workflow can
+prove foreign completions from authoritative peer `master` history in its own
+GitHub Actions environment.
+
+Why: `graph-converge` deliberately refuses to trust a foreign mailbox hint on
+its own. Foreign nodes require a configured local peer checkout
+(`taskdag.peer-path.<owner/repo>.path` or `TASKDAG_PEER_PATH_PREFIX`) so the
+completed task/issue can be verified from that peer's durable `master` history;
+the reusable workflow currently checks out only the caller repo. Retiring the
+legacy completion refs before provisioning peer verification would make the
+graph look newer without giving it equivalent authority.
+
+Per-repo rollout validation may proceed against the repaired caller template,
+but each validation leaf must record one of these two states before it can be
+marked ready:
+
+- **Legacy-authoritative (current default):** `completion-aggregate` and the
+  top-level `comment-sync` ingestion path still create/read
+  `tasks/completions/*`; graph convergence is additive only.
+- **Graph-authoritative:** the repo's workflow environment provisions the peer
+  access above and demonstrates that `graph-converge` can verify every required
+  foreign completion from the owning peer's `master` history.
+
+Do not close the fleet rollout gate by treating graph edges alone as foreign
+completion authority while the repo is still in the legacy-authoritative state.
+
 Pin `@master` while stabilising; cut a moving `task-dag-v1` tag once the
 fixture smoke test is green and pin peers to it so future patches need no
 peer edits. The workflow `ref` input (script fetch) defaults to the same
