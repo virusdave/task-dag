@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   nyAddDays,
   nyAddMonthsFromFirst,
+  nyDateTimeLocalInput,
+  nyDateTimeLocalInputToInstant,
   nyFloorToDay,
   nyFloorToHour,
   nyFloorToMonth,
@@ -59,6 +61,25 @@ describe('nyShortDateTime / nyLongDateTime', () => {
   it('rolls back a day when the UTC instant is already on the next NY day', () => {
     // 2026-05-19 03:30 UTC = 2026-05-18 23:30 NY
     expect(nyShortDateTime(Date.UTC(2026, 4, 19, 3, 30))).toBe('05-18 23:30')
+  })
+})
+
+describe('nyDateTimeLocalInput / nyDateTimeLocalInputToInstant', () => {
+  it('formats and parses datetime-local values as NY wall time in EDT', () => {
+    const instant = Date.UTC(2026, 4, 18, 14, 23)
+    expect(nyDateTimeLocalInput(instant)).toBe('2026-05-18T10:23')
+    expect(nyDateTimeLocalInputToInstant('2026-05-18T10:23')).toBe(instant)
+  })
+
+  it('formats and parses datetime-local values as NY wall time in EST', () => {
+    const instant = Date.UTC(2026, 0, 4, 18, 5)
+    expect(nyDateTimeLocalInput(instant)).toBe('2026-01-04T13:05')
+    expect(nyDateTimeLocalInputToInstant('2026-01-04T13:05')).toBe(instant)
+  })
+
+  it('rejects malformed or impossible datetime-local values', () => {
+    expect(nyDateTimeLocalInputToInstant('2026-02-31T10:00')).toBeNull()
+    expect(nyDateTimeLocalInputToInstant('2026-05-18 10:00')).toBeNull()
   })
 })
 

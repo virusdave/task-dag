@@ -82,7 +82,7 @@ import {
   Y_AXIS_BASELINE_PAGE_DEFAULT_LABEL,
   type YAxisBaselinePageDefault,
 } from './yAxisBaseline.js'
-import { RangeNudgeRow } from './RangeNudgeRow.js'
+import { MetricRangeControls, type MetricRangePresetOption } from './MetricRangeControls.js'
 import { TimeAxisProvider, useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -273,9 +273,9 @@ function userCanSeeMetricsTab(
   return userHasAnyMetricGrant(user, tab.grantAnyOf ?? [tab.grant])
 }
 
-/** In-tab nav between the GAds sub-pages that actually render today
- *  (landing-pages, evolution). Reserved-but-unbuilt slugs are not linked
- *  here — they still resolve to a coming-soon panel by direct URL. */
+/** In-tab nav between the GAds sub-pages that actually render today.
+ *  Reserved-but-unbuilt slugs still resolve to a coming-soon panel by
+ *  direct URL, but they stay out of the primary nav until useful. */
 function GAdsSubPageNav({
   tabId,
   activeSlug,
@@ -329,11 +329,14 @@ function GAdsTabRouter({
   }
   if (GADS_RESERVED_SUBPAGES.includes(slug)) {
     return (
-      <section className="gads-lp-tab">
-        <p className="subtle-copy">
-          The GAds &ldquo;{slug}&rdquo; sub-page is reserved but not built yet.
-        </p>
-      </section>
+      <>
+        <GAdsSubPageNav tabId={tabId} activeSlug={slug} />
+        <section className="gads-lp-tab">
+          <p className="subtle-copy">
+            The GAds &ldquo;{gadsSubPageLabel(slug)}&rdquo; sub-page is coming soon.
+          </p>
+        </section>
+      </>
     )
   }
   return (
@@ -1498,6 +1501,27 @@ function DashboardControls({
   catalogFilterCallbacks,
   catalogFilterDimensions,
 }: DashboardControlsProps) {
+  const axis = useTimeAxis()
+  const rangePresets = useMemo<ReadonlyArray<MetricRangePresetOption>>(
+    () =>
+      PRESETS.map((p) => {
+        const effectiveAgg = p.agg ?? pageAgg
+        const target = p.range(Date.now(), effectiveAgg)
+        const active =
+          Math.abs(axis.window.toMs - target.toMs) < DAY_MS &&
+          Math.abs(axis.window.fromMs - target.fromMs) < DAY_MS &&
+          (p.agg === undefined || pageAgg === p.agg)
+        return {
+          label: p.label,
+          active,
+          onSelect: () => {
+            if (p.agg !== undefined && p.agg !== pageAgg) onAggChange(p.agg)
+            axis.setWindow(p.range(Date.now(), p.agg ?? pageAgg))
+          },
+        }
+      }),
+    [axis, pageAgg, onAggChange],
+  )
   return (
     <div className="metrics-controls">
       <div className="metrics-control-group">
@@ -1605,16 +1629,11 @@ function DashboardControls({
         </div>
       ) : null}
 
-      <div className="metrics-control-group">
-        <span className="subtle-copy">range</span>
-        {PRESETS.map((p) => (
-          <PresetButton key={p.label} preset={p} pageAgg={pageAgg} setPageAgg={onAggChange} />
-        ))}
-        <details className="metrics-range-custom">
-          <summary>custom</summary>
-          <ManualRangeInputs />
-        </details>
-      </div>
+      <MetricRangeControls
+        presets={rangePresets}
+        range={{ fromMs: axis.window.fromMs, toMs: axis.window.toMs }}
+        setRange={(next) => axis.setWindow({ fromMs: next.fromMs, toMs: next.toMs })}
+      />
     </div>
   )
 }
@@ -1662,86 +1681,6 @@ function MetricsTabsNav({
       ))}
     </nav>
   )
-}
-
-function PresetButton({
-  preset,
-  pageAgg,
-  setPageAgg,
-}: {
-  preset: RangePreset
-  pageAgg: MetricAggregation
-  setPageAgg: (next: MetricAggregation) => void
-}) {
-  const axis = useTimeAxis()
-  // A chip is "active" when the current window matches the window this
-  // preset would produce (within a day's tolerance, since `now` drifts)
-  // AND — for presets that prescribe a grouping — the page is on that
-  // grouping. After the user types a custom range or changes grouping,
-  // no preset stays highlighted (matching the catalog tab).
-  const effectiveAgg = preset.agg ?? pageAgg
-  const target = preset.range(Date.now(), effectiveAgg)
-  const isExactPreset =
-    Math.abs(axis.window.toMs - target.toMs) < DAY_MS &&
-    Math.abs(axis.window.fromMs - target.fromMs) < DAY_MS &&
-    (preset.agg === undefined || pageAgg === preset.agg)
-  return (
-    <button
-      type="button"
-      className={isExactPreset ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-      onClick={() => {
-        if (preset.agg !== undefined && preset.agg !== pageAgg) setPageAgg(preset.agg)
-        axis.setWindow(preset.range(Date.now(), preset.agg ?? pageAgg))
-      }}
-      aria-pressed={isExactPreset}
-    >
-      {preset.label}
-    </button>
-  )
-}
-
-function ManualRangeInputs() {
-  const axis = useTimeAxis()
-  return (
-    <>
-      <div className="metrics-range-custom-inputs">
-        <label className="subtle-copy">
-          from{' '}
-          <input
-            type="datetime-local"
-            value={toLocalDtInput(axis.window.fromMs)}
-            onChange={(e) => {
-              const ms = Date.parse(e.target.value)
-              if (!Number.isNaN(ms)) axis.setWindow({ fromMs: ms, toMs: axis.window.toMs })
-            }}
-          />
-        </label>
-        <label className="subtle-copy">
-          to{' '}
-          <input
-            type="datetime-local"
-            value={toLocalDtInput(axis.window.toMs)}
-            onChange={(e) => {
-              const ms = Date.parse(e.target.value)
-              if (!Number.isNaN(ms)) axis.setWindow({ fromMs: axis.window.fromMs, toMs: ms })
-            }}
-          />
-        </label>
-      </div>
-      <RangeNudgeRow
-        range={{ fromMs: axis.window.fromMs, toMs: axis.window.toMs }}
-        setRange={(next) => axis.setWindow({ fromMs: next.fromMs, toMs: next.toMs })}
-      />
-    </>
-  )
-}
-
-function toLocalDtInput(ms: number): string {
-  const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
-    d.getMinutes(),
-  )}`
 }
 
 // ---------------------------------------------------------------------------

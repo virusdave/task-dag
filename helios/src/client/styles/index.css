@@ -10211,6 +10211,11 @@ span.metric-chart-legend-item {
   color: #5a3fa0;
 }
 
+.gads-lp-pill.is-warn {
+  background: #fff0d6;
+  color: #8a5a16;
+}
+
 /* ---------- Next-action card ---------- */
 
 .gads-lp-next-actions {
@@ -10240,6 +10245,25 @@ span.metric-chart-legend-item {
 .gads-lp-action-title {
   font-weight: 600;
   font-size: 0.85rem;
+}
+
+.gads-lp-action-button {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #244f8f;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.gads-lp-action-button:hover,
+.gads-lp-action-button:focus-visible {
+  background: #173a70;
 }
 
 /* ---------- Funnel waterfall ---------- */
@@ -10328,6 +10352,19 @@ span.metric-chart-legend-item {
 .gads-lp-table td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.gads-lp-table th.gads-lp-action-col,
+.gads-lp-table td.gads-lp-action-col {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: #fff;
+  box-shadow: -8px 0 10px -10px rgba(29, 41, 64, 0.45);
+}
+
+.gads-lp-table th.gads-lp-action-col {
+  z-index: 2;
 }
 
 .gads-lp-table tr.is-low-sample td {

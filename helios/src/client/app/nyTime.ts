@@ -84,6 +84,35 @@ export function nyLongDateTime(ms: number): string {
   return `${p.y}-${pad2(p.m)}-${pad2(p.day)} ${pad2(p.hour)}:${pad2(p.minute)}`
 }
 
+/** Value for an <input type="datetime-local"> that displays NY wall time. */
+export function nyDateTimeLocalInput(ms: number): string {
+  const p = nyParts(ms)
+  return `${p.y}-${pad2(p.m)}-${pad2(p.day)}T${pad2(p.hour)}:${pad2(p.minute)}`
+}
+
+/** Parse an <input type="datetime-local"> value as NY wall time. */
+export function nyDateTimeLocalInputToInstant(value: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value)
+  if (!match) return null
+  const [, y, m, day, hour, minute] = match
+  const parts = [y, m, day, hour, minute].map(Number)
+  if (parts.some((part) => !Number.isInteger(part))) return null
+  const [year, month, dayOfMonth, hourOfDay, minuteOfHour] = parts as [number, number, number, number, number]
+  if (month < 1 || month > 12 || dayOfMonth < 1 || dayOfMonth > 31) return null
+  if (hourOfDay < 0 || hourOfDay > 23 || minuteOfHour < 0 || minuteOfHour > 59) return null
+  const normalized = new Date(Date.UTC(year, month - 1, dayOfMonth, hourOfDay, minuteOfHour))
+  if (
+    normalized.getUTCFullYear() !== year ||
+    normalized.getUTCMonth() !== month - 1 ||
+    normalized.getUTCDate() !== dayOfMonth ||
+    normalized.getUTCHours() !== hourOfDay ||
+    normalized.getUTCMinutes() !== minuteOfHour
+  ) {
+    return null
+  }
+  return nyWallClockToInstant(year, month, dayOfMonth, hourOfDay, minuteOfHour)
+}
+
 /** "MM-DD HH:00" in NY time. Used by hour-grain X-axis tick labels. */
 export function nyHourTick(ms: number): string {
   const p = nyParts(ms)
@@ -261,12 +290,12 @@ const HOUR_MS = 60 * 60 * 1000
  * month / hour boundaries, none of which collide with the 01:00–03:00
  * window on a DST Sunday in NY).
  */
-function nyWallClockToInstant(y: number, m: number, day: number, hour: number): number {
+function nyWallClockToInstant(y: number, m: number, day: number, hour: number, minute = 0): number {
   // First guess: treat the wall-clock as UTC, then subtract the
   // offset at that guess. Iterate so the offset we use matches the
   // offset at the answer (it can differ across the spring-forward
   // boundary).
-  const wallAsUtc = Date.UTC(y, m - 1, day, hour, 0, 0)
+  const wallAsUtc = Date.UTC(y, m - 1, day, hour, minute, 0)
   let guess = wallAsUtc
   for (let i = 0; i < 4; i += 1) {
     const offset = nyOffsetMillisAt(guess)

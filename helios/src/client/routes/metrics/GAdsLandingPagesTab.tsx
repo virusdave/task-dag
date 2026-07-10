@@ -9,6 +9,8 @@ import {
 import { gadsScopeLabel, type GadsScope } from '../../../shared/domain/gadsSites.js'
 import { loadJson } from '../../app/fetchJson.js'
 
+import { MetricRangeControls, type MetricRangePresetOption } from './MetricRangeControls.js'
+
 // ---------------------------------------------------------------------------
 // GAds → Landing pages dashboard tab (V1).
 //
@@ -16,9 +18,9 @@ import { loadJson } from '../../app/fetchJson.js'
 // SINGLE /api/gads/<site-scope>/landing-pages fetch (see
 // gadsLandingPagesQueries.ts).
 // V1 is observed performance only — funnel + variant table computed
-// from the lp_events assignment cohort. Cost / revenue / ROAS are NOT
-// wired yet, so those KPIs render an explicit "pending" badge rather
-// than a misleading zero.
+// from the lp_events assignment cohort. Revenue / ROAS are unavailable
+// until conversions carry order attribution, so the UI says that
+// directly instead of rendering fake zeroes.
 //
 // Screen order (per issue #18 UI spec):
 //   1. Freshness + attribution status strip
@@ -44,8 +46,48 @@ function fmtInt(n: number): string {
 }
 
 function fmtPct(v: number | null): string {
-  if (v === null) return 'n/a'
+  if (v === null) return 'Unavailable'
   return `${(v * 100).toFixed(1)}%`
+}
+
+function fmtMoney(v: number | null): string {
+  if (v === null) return 'Unavailable'
+  return `$${fmtInt(Math.round(v))}`
+}
+
+function fmtRatio(v: number | null): string {
+  if (v === null) return 'Unavailable'
+  return v.toFixed(2)
+}
+
+function attributionStatusLabel(status: GadsLandingPagesResponse['attributionStatus']): string {
+  switch (status) {
+    case 'allocated':
+      return 'allocated'
+    case 'click-exact':
+      return 'click exact'
+    case 'incomplete':
+      return 'incomplete'
+    case 'not-wired':
+      return 'unavailable'
+  }
+}
+
+function costStripLabel(status: GadsLandingPagesResponse['attributionStatus']): string {
+  switch (status) {
+    case 'allocated':
+      return 'Cost allocated'
+    case 'click-exact':
+      return 'Cost click exact'
+    case 'incomplete':
+      return 'Cost attribution incomplete'
+    case 'not-wired':
+      return 'Cost attribution unavailable'
+  }
+}
+
+function moneyBadge(value: number | null, status: GadsLandingPagesResponse['attributionStatus']): string {
+  return value === null ? 'unavailable' : attributionStatusLabel(status)
 }
 
 function fmtAgo(iso: string): string {
@@ -61,6 +103,19 @@ function fmtAgo(iso: string): string {
 
 function scopeApiSegment(scope: GadsScope): `gads-${GadsScope}` {
   return `gads-${scope}`
+}
+
+function lastNDaysWindow(days: number, nowMs: number = Date.now()): { fromMs: number; toMs: number } {
+  return { fromMs: nowMs - days * DAY_MS, toMs: nowMs }
+}
+
+function rangeMatchesDays(range: { fromMs: number; toMs: number }, days: number): boolean {
+  const target = lastNDaysWindow(days)
+  return Math.abs(range.toMs - target.toMs) < DAY_MS && Math.abs(range.fromMs - target.fromMs) < DAY_MS
+}
+
+function isRightCensored(range: { fromMs: number; toMs: number }): boolean {
+  return range.toMs > Date.now() - 90 * DAY_MS
 }
 
 /** Stable key + readable label for a variant row. */
@@ -100,6 +155,7 @@ interface NextAction {
   readonly key: string
   readonly title: string
   readonly detail: string
+  readonly actionLabel: string
 }
 
 /**
@@ -135,6 +191,7 @@ function deriveNextActions(
   return scored.map((s) => ({
     key: variantKey(s.v),
     title: `Review variant: ${variantLabel(s.v)}`,
+    actionLabel: 'Review variant',
     detail:
       s.metric === 'redirect'
         ? `Redirect rate ${fmtPct(s.rate)} vs ${fmtPct(s.baseline)} cohort over ${fmtInt(s.v.assignments)} assignments.`
@@ -145,7 +202,7 @@ function deriveNextActions(
 type SortKey = 'priority' | 'assignments' | 'redirectRate' | 'conversionRate'
 
 export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Element {
-  const [windowDays, setWindowDays] = useState<number>(DEFAULT_WINDOW_DAYS)
+  const [range, setRange] = useState(() => lastNDaysWindow(DEFAULT_WINDOW_DAYS))
   const [showLowSample, setShowLowSample] = useState<boolean>(false)
   const [sortKey, setSortKey] = useState<SortKey>('priority')
 
@@ -153,16 +210,21 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
 
-  const { fromMs, toMs } = useMemo(() => {
-    const to = Date.now()
-    return { fromMs: to - windowDays * DAY_MS, toMs: to }
-  }, [windowDays])
+  const rangePresets = useMemo<ReadonlyArray<MetricRangePresetOption>>(
+    () =>
+      RANGE_PRESETS.map((p) => ({
+        label: p.label,
+        active: rangeMatchesDays(range, p.days),
+        onSelect: () => setRange(lastNDaysWindow(p.days)),
+      })),
+    [range],
+  )
 
   useEffect(() => {
     let cancelled = false
     const params = new URLSearchParams()
-    params.set('from', new Date(fromMs).toISOString())
-    params.set('to', new Date(toMs).toISOString())
+    params.set('from', new Date(range.fromMs).toISOString())
+    params.set('to', new Date(range.toMs).toISOString())
     setLoading(true)
     setError(null)
     loadJson(
@@ -184,7 +246,7 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
     return () => {
       cancelled = true
     }
-  }, [scope, fromMs, toMs])
+  }, [scope, range.fromMs, range.toMs])
 
   const nextActions = useMemo(
     () => (data ? deriveNextActions(data.variants, data.kpis) : []),
@@ -231,6 +293,9 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
     [data],
   )
 
+  const rightCensored = isRightCensored(range)
+  const attributionBadge = data ? attributionStatusLabel(data.attributionStatus) : 'unavailable'
+
   // The funnel's biggest single drop-off, called out inline.
   const biggestDrop = useMemo(() => {
     if (!data) return null
@@ -248,23 +313,7 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
       <header className="gads-lp-header">
         <h2 className="gads-lp-title">GAds · Landing pages · {gadsScopeLabel(scope)}</h2>
         <div className="metrics-controls gads-lp-controls">
-          <div className="metrics-control-group">
-            <span className="subtle-copy">range</span>
-            {RANGE_PRESETS.map((p) => {
-              const active = windowDays === p.days
-              return (
-                <button
-                  key={p.label}
-                  type="button"
-                  className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-                  onClick={() => setWindowDays(p.days)}
-                  aria-pressed={active}
-                >
-                  {p.label}
-                </button>
-              )
-            })}
-          </div>
+          <MetricRangeControls presets={rangePresets} range={range} setRange={setRange} />
         </div>
       </header>
 
@@ -276,11 +325,12 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
               ? `Rollup ${fmtAgo(data.freshness.lastCompletedAt)}`
               : data.freshness.message}
           </span>
-          <span className="gads-lp-badge is-pending">
-            {data.attributionStatus === 'not-wired'
-              ? 'Cost & revenue attribution not wired'
-              : `Attribution: ${data.attributionStatus}`}
+          <span className={data.attributionStatus === 'not-wired' ? 'gads-lp-badge is-pending' : 'gads-lp-badge'}>
+            {costStripLabel(data.attributionStatus)}
           </span>
+          <span className="gads-lp-badge is-pending">Revenue attribution unavailable</span>
+          <span className="gads-lp-badge">GAds-detected traffic only</span>
+          {rightCensored && <span className="gads-lp-badge is-warn">Recent cohorts right-censored</span>}
           <span className="gads-lp-badge">Observed performance, not causal lift</span>
           {data.dataQuality.unattributedStageEvents > 0 && (
             <span className="gads-lp-badge is-warn">
@@ -301,29 +351,31 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
       {data && !loading && (
         <>
           {/* 2. Profitability KPI strip (impression rate lives in the
-              funnel; cost / revenue / ROAS are pending in V1). */}
+              funnel; revenue / ROAS wait for V2 order attribution). */}
           <div className="gads-lp-kpi-strip">
-            <Kpi label="Assignments" value={fmtInt(data.kpis.assignments)} />
+            <Kpi
+              label="Ad spend"
+              value={fmtMoney(data.kpis.adSpend)}
+              badge={moneyBadge(data.kpis.adSpend, data.attributionStatus)}
+            />
             <Kpi label="Redirect rate" value={fmtPct(data.kpis.redirectRate)} />
             <Kpi label="Conversion rate" value={fmtPct(data.kpis.conversionRate)} />
             <Kpi
-              label="Ad spend"
-              value={data.kpis.adSpend === null ? 'n/a' : `$${fmtInt(Math.round(data.kpis.adSpend))}`}
-              pending={data.kpis.adSpend === null}
+              label="CPA"
+              value={fmtMoney(data.kpis.cpa)}
+              badge={data.kpis.cpa === null ? 'unavailable' : `${attributionBadge} / observed`}
             />
             <Kpi
               label="Revenue"
-              value={
-                data.kpis.attributedRevenue === null
-                  ? 'n/a'
-                  : `$${fmtInt(Math.round(data.kpis.attributedRevenue))}`
-              }
-              pending={data.kpis.attributedRevenue === null}
+              value={fmtMoney(data.kpis.attributedRevenue)}
+              badge="deferred"
+              hint="Deferred until conversions carry order attribution."
             />
             <Kpi
               label="ROAS"
-              value={data.kpis.roas === null ? 'n/a' : data.kpis.roas.toFixed(2)}
-              pending={data.kpis.roas === null}
+              value={fmtRatio(data.kpis.roas)}
+              badge="deferred"
+              hint="Deferred until conversions carry order attribution."
             />
           </div>
 
@@ -335,10 +387,11 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
               <ul className="gads-lp-action-list">
                 {nextActions.map((a) => (
                   <li key={a.key} className="gads-lp-action">
-                    <a className="gads-lp-action-title" href={`#${variantDomId(a.key)}`}>
-                      {a.title}
-                    </a>
+                    <span className="gads-lp-action-title">{a.title}</span>
                     <span className="subtle-copy">{a.detail}</span>
+                    <a className="gads-lp-action-button" href={`#${variantDomId(a.key)}`}>
+                      {a.actionLabel}
+                    </a>
                   </li>
                 ))}
               </ul>
@@ -357,7 +410,7 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
               {biggestDrop && (
                 <span className="subtle-copy gads-lp-funnel-note">
                   {' '}
-                  · biggest drop-off into {biggestDrop.label} ({fmtPct(biggestDrop.rate)} carried through)
+                  Biggest drop-off into {biggestDrop.label} ({fmtPct(biggestDrop.rate)} carried through).
                 </span>
               )}
             </h3>
@@ -426,7 +479,9 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
                       <th className="num" title="Redirect rate">Redirect</th>
                       <th className="num" title="Conversion rate">Conv.</th>
                       <th className="num" title="Average served probability (diagnostic)">Serve p</th>
-                      <th className="num">ROAS</th>
+                      <th className="num">CPA</th>
+                      <th>Quality</th>
+                      <th className="gads-lp-action-col">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -446,9 +501,22 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
                         <td className="num">{fmtPct(v.impressionRate)}</td>
                         <td className="num">{fmtPct(v.redirectRate)}</td>
                         <td className="num">{fmtPct(v.conversionRate)}</td>
-                        <td className="num">{v.avgServedProbability === null ? 'n/a' : v.avgServedProbability.toFixed(3)}</td>
+                        <td className="num">{v.avgServedProbability === null ? 'Unavailable' : v.avgServedProbability.toFixed(3)}</td>
                         <td className="num">
-                          <span className="gads-lp-pill is-pending">pending</span>
+                          {fmtMoney(v.cpa)}{' '}
+                          <span className={v.cpa === null ? 'gads-lp-pill is-pending' : 'gads-lp-pill'}>
+                            {moneyBadge(v.cpa, data.attributionStatus)}
+                          </span>
+                        </td>
+                        <td>
+                          {v.lowSample && <span className="gads-lp-pill is-warn">Low sample</span>}
+                          {rightCensored && <span className="gads-lp-pill is-warn">Right-censored</span>}
+                          {!v.lowSample && !rightCensored && <span className="gads-lp-pill">Observed</span>}
+                        </td>
+                        <td className="gads-lp-action-col">
+                          <a className="gads-lp-action-button" href={`#${variantDomId(variantKey(v))}`}>
+                            Review
+                          </a>
                         </td>
                       </tr>
                     ))}
@@ -463,13 +531,24 @@ export function GAdsLandingPagesTab({ scope }: { scope: GadsScope }): JSX.Elemen
   )
 }
 
-function Kpi({ label, value, pending }: { label: string; value: string; pending?: boolean }): JSX.Element {
+function Kpi({
+  label,
+  value,
+  badge,
+  hint,
+}: {
+  label: string
+  value: string
+  badge?: string
+  hint?: string
+}): JSX.Element {
+  const unavailable = value === 'Unavailable'
   return (
-    <div className={pending ? 'gads-lp-kpi is-pending' : 'gads-lp-kpi'}>
+    <div className={unavailable ? 'gads-lp-kpi is-pending' : 'gads-lp-kpi'} title={hint}>
       <div className="gads-lp-kpi-value">{value}</div>
       <div className="gads-lp-kpi-label">
         {label}
-        {pending && <span className="gads-lp-pill is-pending">pending</span>}
+        {badge && <span className={unavailable ? 'gads-lp-pill is-pending' : 'gads-lp-pill'}>{badge}</span>}
       </div>
     </div>
   )
