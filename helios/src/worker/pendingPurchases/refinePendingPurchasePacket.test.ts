@@ -24,13 +24,11 @@ const emptyDb = {
   query: async () => ({ rows: [] }),
 } as unknown as Queryable
 
-const ROW_HASH = 'a'.repeat(64)
 const SNAPSHOT_HASH = 'b'.repeat(64)
 
 function row(overrides: Partial<PendingPurchaseRefinementRowInput> = {}): PendingPurchaseRefinementRowInput {
   return {
     rowLineageId: 'pprline_1',
-    rowSnapshotSha256: ROW_HASH,
     lineageRevisionNumber: 1,
     distributorProductId: 'dist-1',
     distributorProductName: 'PNK RNTZ 3.5G',
@@ -69,7 +67,7 @@ function buildInput(overrides: Partial<RefinePendingPurchasePacketInput> = {}): 
 function patch(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     rowLineageId: 'pprline_1',
-    baseRowSnapshotSha256: ROW_HASH,
+    basePacketSnapshotSha256: SNAPSHOT_HASH,
     fields: {
       expectedCategory: 'Flower',
       targetBrand: 'Runtz',
@@ -143,8 +141,9 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
   })
 
   it('adds bounded optional evidence to the prompt without authorizing new product ids', async () => {
-    const fetchMock = stubFetch(modelResponse({ patches: [patch()] }))
-    await refinePendingPurchasePacketWithLlm(buildInput({ db: evidenceDb() }))
+    const optionalCitation = 'prior-outcome:pprline_1:91'
+    const fetchMock = stubFetch(modelResponse({ patches: [patch({ citedContextIds: [optionalCitation] })] }))
+    const result = await refinePendingPurchasePacketWithLlm(buildInput({ db: evidenceDb() }))
 
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
     const userPayload = JSON.parse((body.messages as Array<{ role: string; content: string }>)[1]!.content)
@@ -153,6 +152,7 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
     expect(contextIds).toContain('current-link:pprline_1:7001')
     expect(contextIds).toContain('litalerts-market:pprline_1:501')
     expect(userPayload.rows[0].productIdCandidates).toEqual([7001, 7002])
+    expect(result.patches[0]?.citedContextIds).toEqual([optionalCitation])
   })
 
   it('keeps malicious feedback and untrusted context out of the system prompt', async () => {
@@ -180,6 +180,27 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 })
 
 describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', () => {
+  it('allows a row to preserve its own legacy taxonomy value', async () => {
+    stubFetch(modelResponse({ patches: [patch({ fields: { expectedCategory: 'Retired Category' } })] }))
+
+    const result = await refinePendingPurchasePacketWithLlm(buildInput({
+      rows: [row({ current: { expectedCategory: 'Retired Category' } })],
+    }))
+
+    expect(result.patches[0]?.fields.expectedCategory).toBe('Retired Category')
+  })
+
+  it('does not authorize one row to copy another row’s legacy taxonomy value', async () => {
+    stubFetch(modelResponse({ patches: [patch({ fields: { expectedCategory: 'Retired Category' } })] }))
+
+    await expect(refinePendingPurchasePacketWithLlm(buildInput({
+      rows: [
+        row({ current: { expectedCategory: 'Flower' } }),
+        row({ current: { expectedCategory: 'Retired Category' }, rowLineageId: 'pprline_2' }),
+      ],
+    }))).rejects.toThrow(/not in the allowed taxonomy/)
+  })
+
   it('rejects a product id that was not offered for the row', async () => {
     stubFetch(modelResponse({ patches: [patch({ fields: { targetReuseProductId: 999999 } })] }))
 
@@ -212,6 +233,14 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
     )
   })
 
+  it('rejects changed taxonomy values when the allow-list is empty', async () => {
+    stubFetch(modelResponse({ patches: [patch({ fields: { expectedCategory: 'Concentrates' } })] }))
+
+    await expect(refinePendingPurchasePacketWithLlm(buildInput({
+      allowedTaxonomy: { categories: [], subcategories: [] },
+    }))).rejects.toThrow(/not in the allowed taxonomy/)
+  })
+
   it('rejects unknown context citations', async () => {
     stubFetch(modelResponse({ patches: [patch({ citedContextIds: ['ctx-missing'] })] }))
 
@@ -228,11 +257,11 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
     )
   })
 
-  it('rejects stale row snapshots', async () => {
-    stubFetch(modelResponse({ patches: [patch({ baseRowSnapshotSha256: 'c'.repeat(64) })] }))
+  it('rejects stale packet snapshots', async () => {
+    stubFetch(modelResponse({ patches: [patch({ basePacketSnapshotSha256: 'c'.repeat(64) })] }))
 
     await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /stale row snapshot/,
+      /stale packet snapshot/,
     )
   })
 

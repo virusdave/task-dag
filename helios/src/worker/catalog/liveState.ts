@@ -31,6 +31,7 @@ const SweedSizeSchema = z.object({
 }).passthrough()
 
 const SweedProductSchema = z.object({
+  enabled: z.boolean().nullable().optional(),
   externalBarcode: z.string().nullable().optional(),
   groupImages: z.array(SweedImageSchema).optional(),
   id: z.coerce.number().int(),
@@ -50,6 +51,7 @@ const SweedProductGroupDetailSchema = z.object({
   brand: SweedNamedValueSchema.nullable().optional(),
   category: SweedNamedValueSchema.nullable().optional(),
   description: z.string().nullable().optional(),
+  enabled: z.boolean().nullable().optional(),
   effects: z.array(SweedNamedValueSchema).optional(),
   flavorings: z.array(SweedNamedValueSchema).optional(),
   fullName: z.string().nullable().optional(),
@@ -70,6 +72,7 @@ export const NormalizedCatalogImageRefSchema = z.object({
 export type NormalizedCatalogImageRef = z.infer<typeof NormalizedCatalogImageRefSchema>
 
 export const NormalizedCatalogProductLiveStateSchema = z.object({
+  enabled: z.boolean().nullable().optional(),
   externalBarcode: z.string().nullable().default(null),
   gmPercent: z.number().nullable(),
   imageUrl: z.string().nullable(),
@@ -103,6 +106,7 @@ export const NormalizedCatalogGroupLiveStateSchema = z.object({
   category: z.string().nullable(),
   categoryId: z.number().int().nullable().default(null),
   currentDescription: z.string(),
+  enabled: z.boolean().nullable().optional(),
   effects: z.array(z.string()),
   flavorings: z.array(z.string()),
   groupFullName: z.string(),
@@ -147,6 +151,7 @@ export function normalizeCatalogGroupDetail(detail: unknown): NormalizedCatalogG
   const products = [...(parsed.products ?? [])]
     .sort((left, right) => compareProducts(left.id, left.tab, left.name, right.id, right.tab, right.name))
     .map((product) => ({
+      enabled: product.enabled ?? null,
       externalBarcode: normalizeOptionalInlineText(product.externalBarcode),
       gmPercent: calculateGrossMarginPercent(resolveProductPrice(product), product.wholesaleCost ?? null),
       imageUrl: firstImageUrl(product.images, product.groupImages, parsed.images),
@@ -168,6 +173,7 @@ export function normalizeCatalogGroupDetail(detail: unknown): NormalizedCatalogG
     category: normalizeOptionalInlineText(parsed.category?.name),
     categoryId: coerceOptionalIntId(parsed.category?.id),
     currentDescription: normalizeDescriptionText(parsed.description),
+    enabled: parsed.enabled ?? null,
     effects: normalizeNamedList(parsed.effects),
     flavorings: normalizeNamedList(parsed.flavorings),
     groupFullName: normalizeInlineText(parsed.fullName ?? parsed.name),
