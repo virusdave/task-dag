@@ -393,7 +393,9 @@ tasks/active/<short>         (leaf in flight)
 leaf landed → epic closes (close-completed-issues.sh deletes
               tasks/pending/<N>, any stale tasks/root-active/<N>, and any
               lingering tasks/blocked|blocked-meta|frontier for the issue
-              — via cleanup-closed-issue-task-refs.sh)
+              — via cleanup-closed-issue-task-refs.sh; schedule/manual runs
+              re-derive the same projection from master if the push path was
+              missed)
 ```
 
 ## Blocked-overlay cleanup on epic close
@@ -416,6 +418,13 @@ the same number survives — deletes each matching task's `frontier/<short>`
 re-dispatched), then its `blocked/<sha>` + `blocked-meta/<sha>`. It leaves
 `active/*` alone (the owning worker CAS-cleans that on `complete`). Fixture
 coverage: `tests/task-dag/close-issue-ref-cleanup.sh`.
+
+The same close script is also the master-derived projection backstop. With a
+push range it scans only the new commits for low-latency repair; with no
+`BEFORE_SHA` (schedule / `workflow_dispatch`) it scans the current master tip
+for sanctioned `Closes-Epic:` facts and re-applies the issue-close/ref-cleanup
+projection idempotently. This makes GitHub issue state and scheduling refs a
+repairable projection of `master`, not the source of task truth.
 
 ## Reconciling a CONFIRMED-CLOSED issue (`reconcile-closed-issue`)
 

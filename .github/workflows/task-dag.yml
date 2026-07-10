@@ -98,7 +98,10 @@ jobs:
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
 
   close-completed:
-    if: ${{ github.event_name == 'push' }}
+    # Push path is the low-latency projection update. Schedule/manual are the
+    # master-derived backstop for missed workflow triggers or semantic bot
+    # pushes whose close fact is already durable on master.
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
     permissions:
       # contents: write (not read) — the close script deletes the stale

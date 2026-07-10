@@ -63,11 +63,12 @@ jobs:
       # app_id: ${{ secrets.TASK_DAG_APP_ID }}
       # app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
   close-completed:
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
     # contents: write (not read) — the close script deletes the stale
     # tasks/pending/<N> + tasks/root-active/<N> refs after closing the issue;
-    # read-only silently orphans them (the deletes are `|| true`).
+    # schedule/manual provide the master-derived projection backstop when the
+    # push-range workflow was missed.
     permissions: { contents: write, issues: write }
     secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
   completion-aggregate:

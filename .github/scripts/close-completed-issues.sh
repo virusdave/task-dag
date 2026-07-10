@@ -41,16 +41,21 @@
 # close/delete failure (e.g. insufficient `contents` permission) fails the
 # run loudly via exit 1 — see ensure_issue_closed / delete_remote_ref_if_present.
 #
-# Invoked by .github/workflows/close-completed-issues.yml with these
-# env vars set:
-#   BEFORE_SHA  — push event's before SHA (40-zero string on first push)
-#   AFTER_SHA   — push event's after SHA
+# Invoked by .github/workflows/close-completed-issues.yml with:
+#   BEFORE_SHA  — optional push event's before SHA (40-zero on first push)
+#   AFTER_SHA   — optional push event's after SHA / current master tip
 #   GH_TOKEN    — workflow token, scoped issues:write
+#
+# If BEFORE_SHA is empty, the script runs as a projection backstop: it derives
+# every sanctioned `Closes-Epic:` fact reachable from the current master tip
+# and repairs the GitHub issue / task-ref projection idempotently. This is the
+# schedule/manual path for missed push workflows and bot pushes that did not
+# trigger the push-range close job.
 
 set -euo pipefail
 
-: "${BEFORE_SHA:?BEFORE_SHA is required}"
-: "${AFTER_SHA:?AFTER_SHA is required}"
+BEFORE_SHA="${BEFORE_SHA:-}"
+AFTER_SHA="${AFTER_SHA:-}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
 # Companion script that clears blocked/frontier overlay refs for a closed
@@ -114,10 +119,21 @@ delete_remote_ref_if_present() {
     return 1
 }
 
-# Walk every new commit landing on master in this push.  On the very
-# first push to a new branch BEFORE_SHA is all-zeros — fall back to
-# "just the head commit" in that case.
-if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+# Walk every new commit landing on master in a push. When no push range is
+# supplied (schedule / workflow_dispatch), derive from the current master tip
+# instead: the operation is idempotent, so scanning old close facts is safe and
+# is exactly how we repair a missed push-triggered projection update.
+if [ -z "$AFTER_SHA" ]; then
+    AFTER_SHA="$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
+        || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \
+        || git rev-parse --verify -q HEAD^{commit})" \
+        || { echo "ERROR: could not resolve master/HEAD to reconcile completed issues" >&2; exit 1; }
+fi
+
+if [ -z "$BEFORE_SHA" ]; then
+    echo "No BEFORE_SHA supplied; running full master-derived projection backstop at ${AFTER_SHA:0:12}."
+    mapfile -t new_commits < <(git rev-list --reverse "$AFTER_SHA")
+elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
     new_commits=("$AFTER_SHA")
 else
     mapfile -t new_commits < <(git rev-list --reverse "${BEFORE_SHA}..${AFTER_SHA}")
