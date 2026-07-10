@@ -165,6 +165,14 @@ ntar=$(printf '%s' "$js" | jq -r .counts.targets)
 [ "$ntar" = 4 ] && ok "D5: --json counts.targets=4 (cross-repo + other-issue excluded)" \
     || bad "D5: counts.targets=$ntar (want 4)"
 
+# ── TEST D2: --hint-sha must still resolve to THIS closed issue ────────────
+out=$(run_reconcile 42 --repo="$REPO" --yes --hint-sha="$LB" 2>&1); rc=$?
+[ "$rc" = 2 ] && ok "D6: wrong-issue --hint-sha is rejected before mutation" \
+    || { bad "D6: wrong-issue hint got rc=$rc"; echo "$out"; }
+remote_has "refs/heads/tasks/blocked/$LB" && remote_has "refs/heads/tasks/frontier/$LB_SHORT" \
+    && ok "D7: rejected wrong-issue hint left that task's refs untouched" \
+    || bad "D7: rejected wrong-issue hint deleted a ref"
+
 # ── TEST E: real run on CLOSED issue 42 (fresh clone == a real worker) ─────
 out=$(run_reconcile 42 --repo="$REPO" --yes 2>&1); rc=$?
 [ "$rc" = 0 ] && ok "E0: reconcile exited 0" || { bad "E0: exited $rc"; echo "$out"; }

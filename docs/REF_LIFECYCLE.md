@@ -483,10 +483,13 @@ the operator — `task-dag validate --closed-issue-audit [--repo=owner/repo]
 
 Fixture coverage: `tests/task-dag/validate-closed-issue-audit.sh`.
 
-**Follow-up (tracked as a frontier leaf under #12):** refactor
-`cleanup-closed-issue-task-refs.sh` onto `reconcile-closed-issue` for a
-single code path (preserving its hint-SHA belt-and-braces fallback). The
-`issues:[closed]` automation that invokes reconcile
+The bot epic-close sweep (`cleanup-closed-issue-task-refs.sh`) also delegates
+to `reconcile-closed-issue`, passing the matched epic-root parent as
+`--hint-sha` so the belt-and-braces root cleanup still runs by exact task SHA
+if candidate enumeration is incomplete. A hint is accepted only if the hinted
+task commit resolves back to the same `(repo, issue)`; an incomplete sweep
+remains a loud non-zero exit, and the hint only narrows the leftover debris.
+The `issues:[closed]` automation that invokes reconcile
 (`page-on-manual-issue-close.sh`) is child 3 of the parent epic
 top-level#48.
 

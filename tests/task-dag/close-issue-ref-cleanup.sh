@@ -33,6 +33,31 @@ export TASK_DAG_GIT_NAME=t TASK_DAG_GIT_EMAIL=t@t
 REPO="acme/widgets"            # matches GITHUB_REPOSITORY passed to the cleaner
 OTHER="other/thing"            # cross-repo referencing block; must survive
 
+# The cleanup script delegates to reconcile-closed-issue, which fails safe by
+# confirming the issue is CLOSED live. Keep the fixture hermetic with a fake
+# gh whose state map marks only the issues this test closes as CLOSED.
+GH_STATE_FILE="$ROOT/gh-state"
+mkdir "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+    n="$3"
+    st=$(awk -v n="$n" '$1==n{print $2; exit}' "$GH_STATE_FILE" 2>/dev/null)
+    [ -n "$st" ] || { echo "gh: issue $n not found" >&2; exit 1; }
+    echo "$st"
+    exit 0
+fi
+echo "gh: unsupported args: $*" >&2; exit 1
+SH
+chmod +x "$ROOT/bin/gh"
+export GH_STATE_FILE
+PATH="$ROOT/bin:$PATH"; export PATH
+
+cat > "$GH_STATE_FILE" <<EOF
+42 CLOSED
+55 CLOSED
+EOF
+
 git init -q --bare "$ROOT/origin.git"
 git clone -q "$ROOT/origin.git" "$ROOT/wc"; cd "$ROOT/wc"
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
