@@ -70,7 +70,7 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/blocked/<sha>` | parked task overlay (points **at the task commit itself**) | `block` |
    | `tasks/blocked-meta/<sha>` | parked-task side metadata (tree==task tree, first parent==task commit) | `block` |
    | `tasks/delegated/<N>/<owner>/<repo>/<peer>` | cross-repo delegation edge | `delegate` |
-   | `tasks/completions/<N>/…/<sha>` | recorded downstream completion | `ingest-completion` |
+   | `tasks/completions/<N>/…/<sha>` | recorded downstream completion | `ingest-comment` completion disposition |
    | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write` |
    | `tasks/v1/graph` | dependency-edge index branch — a data-in-tree ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
    | `tasks/v1/mailbox/00`..`0f` | cross-repo notification mailbox — 16 fixed data-in-tree shard branches, exempt from the empty-tree floor (see below) | the mailbox writer (issue #13) |
@@ -541,3 +541,16 @@ The remaining, genuinely-operator-facing question — whether *operator* prose
 CLI) should get an `ingest-comment` acknowledgement reply or opt-in markers —
 still changes operator workflow semantics and remains an **operator
 decision**, not an agent's to make unilaterally.
+### Durable GitHub comment receipts (v1)
+
+`refs/heads/gh/comments/<issue>/<comment-id>` is origin-authoritative. New
+entries point to an empty-tree commit titled `Record GitHub comment receipt`
+with `Receipt-Version: 1`, canonical repository and positive issue/comment
+identity, canonical UTC creation/observation timestamps, exact-body SHA-256,
+and one terminal disposition. `machine-skip` has no parent or effect fields.
+`human` and `completion` have exactly one parent, equal to `Effect-Commit`, and
+record `Effect-Ref-At-Creation`. The receipt and any newly-created effect ref
+are published in one create-only atomic push. Local refs are caches, never
+proof of ingestion. Recognised historical human and completion provenance is
+immutable and remains accepted; malformed or unsupported origin objects are
+fatal and are never replaced.

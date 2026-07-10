@@ -29,7 +29,8 @@ frontier_count(){ git ls-remote origin "refs/heads/tasks/frontier/*" 2>/dev/null
 ingest(){  # $1=issue $2=comment_id $3=body
   printf '%s' "$3" > "$ROOT/body.txt"
   "$TD" ingest-comment --issue "$1" --comment-id "$2" --author virusdave \
-    --comment-url "https://x/$2" --body-file "$ROOT/body.txt" >"$ROOT/out.txt" 2>&1
+    --comment-url "https://x/$2" --created-at 2026-01-02T03:04:05Z --updated-at 2026-01-02T03:04:05Z \
+    --body-file "$ROOT/body.txt" >"$ROOT/out.txt" 2>&1
 }
 
 # Backfill metadata comes from the env the comment workflow exports.
@@ -93,7 +94,8 @@ after_frontier=$(frontier_count)
 ( unset ISSUE_TITLE ISSUE_AUTHOR ISSUE_URL ISSUE_BODY
   printf 'x' > "$ROOT/body2.txt"
   "$TD" ingest-comment --issue 55 --comment-id 5001 --author virusdave \
-    --comment-url "https://x/5001" --body-file "$ROOT/body2.txt" >/dev/null 2>&1 )
+    --comment-url "https://x/5001" --created-at 2026-01-02T03:04:05Z --updated-at 2026-01-02T03:04:05Z \
+    --body-file "$ROOT/body2.txt" >/dev/null 2>&1 )
 rc=$?
 # In a fixture repo with no real GitHub remote, the gh fallback yields no
 # title, so the helper must die rather than write a junk epic.

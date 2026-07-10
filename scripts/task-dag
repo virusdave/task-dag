@@ -544,6 +544,20 @@ taskdag_ref_violations() {
                 *) echo "✗ ${ref} is under UNKNOWN gh namespace '${ns}' (hand-crafted ref? do NOT do ref surgery by hand — see docs/INVARIANTS.md). Known: ${TASKDAG_KNOWN_GH_NS}" ;;
             esac ;;
     esac
+    # Receipt v1 opts into a stronger shape contract. Historical comment
+    # provenance remains governed by the grandfather-safe floor above.
+    if [[ "$ref" = refs/heads/gh/comments/* ]] \
+        && git log -1 --format=%B "$sha" | grep -q '^Receipt-Version: '; then
+        if [[ ! "$ref" =~ ^refs/heads/gh/comments/([1-9][0-9]*)/([1-9][0-9]*)$ ]]; then
+            echo "✗ ${ref} → ${sha}: malformed comment-receipt ref; expected refs/heads/gh/comments/<issue>/<comment-id> with positive decimal IDs"
+            return 0
+        fi
+        local receipt_issue="${BASH_REMATCH[1]}" receipt_comment="${BASH_REMATCH[2]}" receipt_repo
+        receipt_repo=$(printf '%s' "$(_xrepo_current_repo_offline)" | tr '[:upper:]' '[:lower:]')
+        if ! _xrepo_validate_receipt "$sha" "$receipt_repo" "$receipt_issue" "$receipt_comment" >/dev/null; then
+            echo "✗ ${ref} → ${sha}: invalid GitHub comment receipt v1; expected Repository=${receipt_repo}, Issue=${receipt_issue}, Comment-ID=${receipt_comment}, and a valid receipt/effect shape"
+        fi
+    fi
     return 0
 }
 
@@ -1668,9 +1682,10 @@ CROSS-REPO COORDINATION:
     ingest-comment <issue> <comment-file> [--author=<login>]
                            Ingest a human comment from this repo's issue
                            (called by shared-workflows comment sync)
-    ingest-completion <epic-issue> <owner/repo@sha> [--message=<msg>]
-                           Record that a downstream repo's commit satisfies
-                           a delegated task on this epic
+    ingest-completion ...  Internal only; direct invocation is rejected.
+                           Process every completion comment with ingest-comment;
+                           it atomically publishes the durable comment receipt
+                           and completion fact to origin.
     close-epic <epic-issue>
                            Close the GitHub issue for an epic once all of
                            its tasks are complete

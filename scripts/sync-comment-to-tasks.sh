@@ -89,4 +89,6 @@ log "Delegating to task-dag ingest-comment (${TASK_DAG_REPO}@${TASK_DAG_REF})"
     --comment-id "$COMMENT_ID" \
     --author "$COMMENT_AUTHOR" \
     --comment-url "$COMMENT_URL" \
+    --created-at "$COMMENT_CREATED_AT" \
+    --updated-at "$COMMENT_UPDATED_AT" \
     --body-file "$BODY_FILE"

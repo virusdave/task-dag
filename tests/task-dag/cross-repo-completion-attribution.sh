@@ -35,7 +35,7 @@ REAL_GIT=$(command -v git)
 cat > "$BIN/gh" <<'GH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "repo" ] && [ "${2:-}" = "view" ]; then
-  echo "virusdave/top-level"; exit 0
+  echo "VirusDave/Top-Level"; exit 0
 fi
 exit 1
 GH
@@ -55,6 +55,10 @@ make_delegation(){ # $1=epic $2=owner $3=repo $4=peer_issue
   sha=$(git commit-tree "$EMPTY" -m "kind: delegated
 role: system
 intent: delegated-child
+
+issue:
+  repo: virusdave/top-level
+  number: $1
 
 delegated:
   repo: $2/$3
@@ -85,7 +89,8 @@ remote_completion(){ # $1=epic $2=owner $3=repo $4=peer_issue -> nonempty if any
 ingest(){ # $1=issue $2=comment_id $3=body
   printf '%s' "$3" > "$ROOT/body.txt"
   "$TD" ingest-comment --issue "$1" --comment-id "$2" --author virusdave \
-    --comment-url "https://x/$2" --body-file "$ROOT/body.txt" >"$ROOT/out.txt" 2>&1
+    --comment-url "https://x/$2" --created-at 2026-01-02T03:04:05Z --updated-at 2026-01-02T03:04:05Z \
+    --body-file "$ROOT/body.txt" >"$ROOT/out.txt" 2>&1
 }
 
 O=Nicponskis; R=github-worker
@@ -95,12 +100,32 @@ make_delegation 34 "$O" "$R" 101
 make_delegation 34 "$O" "$R" 102
 
 ingest 34 5001 "<!-- task-dag:completion --> Satisfies virusdave/top-level#34 via $O/$R@aaaaaaa peer-issue 102"
-[ -n "$(remote_completion 34 "$O" "$R" 102)" ] \
+COMPLETION_102=$(remote_completion 34 "$O" "$R" 102)
+[ -n "$COMPLETION_102" ] \
   && ok "A1: peer-issue 102 recorded a completion against delegated child #102" \
   || bad "A1: no completion ref for #102 ($(cat "$ROOT/out.txt"))"
 [ -z "$(remote_completion 34 "$O" "$R" 101)" ] \
   && ok "A2: sibling child #101 got NO completion (correct attribution)" \
   || bad "A2: completion wrongly attributed to #101"
+
+# The comment ref is now a dedicated receipt parented to the fact. A second
+# comment for the same source commit validates/reuses the existing fact and
+# creates only its own receipt.
+RECEIPT_5001=$(git ls-remote origin refs/heads/gh/comments/34/5001 | awk 'NR==1{print $1}')
+if [ "$(git log -1 --format=%B "$RECEIPT_5001" | git interpret-trailers --parse | awk -F': ' '$1=="Disposition"{print $2}')" = completion ] \
+  && [ "$(git rev-parse "$RECEIPT_5001^")" = "$COMPLETION_102" ]; then
+  ok "A2b: completion comment receipt is parented to the durable fact"
+else
+  bad "A2b: completion comment ref is not a fact-bound receipt"
+fi
+ingest 34 5011 "<!-- task-dag:completion --> Satisfies virusdave/top-level#34 via $O/$R@aaaaaaa peer-issue 102"
+RECEIPT_5011=$(git ls-remote origin refs/heads/gh/comments/34/5011 | awk 'NR==1{print $1}')
+if [ "$(remote_completion 34 "$O" "$R" 102)" = "$COMPLETION_102" ] \
+  && [ "$(git rev-parse "$RECEIPT_5011^")" = "$COMPLETION_102" ]; then
+  ok "A2c: an existing valid completion fact is reused by a new receipt"
+else
+  bad "A2c: existing completion fact was moved or not reused"
+fi
 
 # ── Case A': phase AND peer-issue suffixes together parse correctly ──
 ingest 34 5002 "<!-- task-dag:completion --> Satisfies virusdave/top-level#34 via $O/$R@bbbbbbb phase P2 peer-issue 101"

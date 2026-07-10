@@ -24,7 +24,8 @@ frontier_count(){ git ls-remote origin "refs/heads/tasks/frontier/*" 2>/dev/null
 ingest(){  # $1=comment_id $2=body
   printf '%s' "$2" > "$ROOT/body.txt"
   "$TD" ingest-comment --issue 999 --comment-id "$1" --author virusdave \
-    --comment-url "https://x/$1" --body-file "$ROOT/body.txt" >/dev/null 2>&1
+    --comment-url "https://x/$1" --created-at 2026-01-02T03:04:05Z \
+    --updated-at 2026-01-02T03:04:05Z --body-file "$ROOT/body.txt" >/dev/null 2>&1
 }
 
 before=$(frontier_count)

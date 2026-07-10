@@ -705,3 +705,13 @@ The host-local half of the mitigation (a decompose-only root prompt
 contract + same-host leaf suppression while a root claim is active) lives
 in the worker fleet; see
 `Nicponskis/github-worker:docs/DISPATCH_CONCURRENCY.md`.
+## GitHub comment receipt lifecycle
+
+Comment ingestion first probes `origin` for
+`gh/comments/<issue>/<comment-id>`. A valid winner is terminal even when a
+local ref is absent or stale. Otherwise one coherent observation is classified
+and a v1 receipt is prepared. Human receipts and frontiers, and completion
+receipts and absent completion facts, are created by a mandatory atomic push
+with create-only leases; skip receipts create no effect. Only origin readback
+permits local mirroring. Receipts are immutable and are never retired; an edit
+does not rewrite a receipt or mint another task.

@@ -25,7 +25,7 @@ scripts/
   task-dag                          canonical task-dag CLI (source of truth)
   validate-caller-workflow.sh        preflight for per-repo task-dag.yml callers
   task-dag.d/
-    cross-repo.sh                   cross-repo subcommands (delegate, ingest-completion, ...)
+    cross-repo.sh                   cross-repo subcommands (delegate, ingest-comment, ...)
     phase-gates.conf                multi-phase epics that need a final-phase Satisfies
   sync-comment-to-tasks.sh          comment → task ingestion (reusable-workflow helper)
   sync-tasks-to-github.sh           task message → issue comment (reusable-workflow helper)

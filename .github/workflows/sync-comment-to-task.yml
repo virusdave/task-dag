@@ -121,6 +121,8 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_URL: ${{ github.event.comment.html_url }}
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_CREATED_AT: ${{ github.event.comment.created_at }}
+          COMMENT_UPDATED_AT: ${{ github.event.comment.updated_at }}
           MAX_COMMENT_SIZE: ${{ inputs.max_comment_size }}
           ENABLE_AUTO_FRONTIER: ${{ inputs.enable_auto_frontier }}
         run: |

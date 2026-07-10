@@ -75,6 +75,16 @@ _xrepo_ensure_git_identity() {
 # Helper: get the current repo's owner/repo string. Tries `gh repo view`
 # first, falls back to parsing the origin URL.
 _xrepo_current_repo() {
+    if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+        printf '%s' "$GITHUB_REPOSITORY"
+        return 0
+    fi
+    local configured
+    configured="$(git config --get taskdag.current-repo 2>/dev/null || true)"
+    if [ -n "$configured" ]; then
+        printf '%s' "$configured"
+        return 0
+    fi
     if command -v gh >/dev/null 2>&1; then
         local r
         r="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
@@ -96,7 +106,28 @@ _xrepo_current_repo() {
     case "$raw" in
         *@*:*) printf '%s' "${raw#*:}" ;;
         *://*) printf '%s' "${raw#*://*/}" ;;
-        *) printf '%s' "$raw" ;;
+        *) raw="${raw%/}"; raw="${raw%.git}"; printf '%s/%s' "$(basename "$(dirname "$raw")")" "$(basename "$raw")" ;;
+    esac
+}
+
+# Network-free repository resolver for validators and other offline paths.
+_xrepo_current_repo_offline() {
+    if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+        printf '%s' "$GITHUB_REPOSITORY"
+        return 0
+    fi
+    local configured raw
+    configured="$(git config --get taskdag.current-repo 2>/dev/null || true)"
+    if [ -n "$configured" ]; then
+        printf '%s' "$configured"
+        return 0
+    fi
+    raw="$(git config --get remote.origin.url 2>/dev/null || true)"
+    raw="${raw%.git}"
+    case "$raw" in
+        *@*:*) printf '%s' "${raw#*:}" ;;
+        *://*) printf '%s' "${raw#*://*/}" ;;
+        *) raw="${raw%/}"; printf '%s/%s' "$(basename "$(dirname "$raw")")" "$(basename "$raw")" ;;
     esac
 }
 
@@ -231,13 +262,13 @@ _xrepo_parse_repo_issue() {
 # Helper: parse "owner/repo@sha" → exports XREPO_OWNER, XREPO_REPO, XREPO_SHA_PREFIX.
 _xrepo_parse_repo_sha() {
     local spec="$1"
-    if [[ ! "$spec" =~ ^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]+)$ ]]; then
+    if [[ ! "$spec" =~ ^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]{7,40})$ ]]; then
         _xrepo_die "expected <owner>/<repo>@<sha>, got: $spec"
         return 2
     fi
     XREPO_OWNER="${BASH_REMATCH[1]}"
     XREPO_REPO="${BASH_REMATCH[2]}"
-    XREPO_SHA_PREFIX="${BASH_REMATCH[3]}"
+    XREPO_SHA_PREFIX="$(printf '%s' "${BASH_REMATCH[3]}" | tr '[:upper:]' '[:lower:]')"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -609,20 +640,74 @@ _xrepo_upsert_delegated_block() {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# Helper: return 0 if a delegation ref exists (locally OR on origin) for
+# Helper: return 0 if a delegation ref exists on authoritative origin for
 # the given epic + peer repo + candidate peer issue. Used to validate a
 # comment-supplied --peer-issue before trusting it (Strategy 0).
 _xrepo_delegation_exists() {
     local top_issue="$1" owner="$2" repo="$3" peer_issue="$4"
     local ref="refs/heads/tasks/delegated/${top_issue}/${owner}/${repo}/${peer_issue}"
-    git rev-parse --verify "$ref" >/dev/null 2>&1 && return 0
-    git ls-remote origin "$ref" 2>/dev/null | grep -q .
+    local sha rc=0
+    sha="$(_xrepo_remote_sha "$ref")" || rc=$?
+    [ "$rc" -ne 3 ] || return 2
+    [ -n "$sha" ]
+}
+
+_xrepo_validate_delegation() {
+    local sha="$1" top_repo="$2" top_issue="$3" peer_repo="$4" peer_issue="$5" msg
+    [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] || return 2
+    [ "$(git rev-parse "$sha^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] || return 2
+    msg="$(git log -1 --format=%B "$sha")"
+    [ "$(grep -cx 'kind: delegated' <<<"$msg")" = 1 ] || return 2
+    [ "$(grep -cx 'role: system' <<<"$msg")" = 1 ] || return 2
+    [ "$(grep -cx 'intent: delegated-child' <<<"$msg")" = 1 ] || return 2
+    awk -v tr="$top_repo" -v ti="$top_issue" -v pr="$peer_repo" -v pi="$peer_issue" '
+        /^issue:$/ { section="issue"; next }
+        /^delegated:$/ { section="delegated"; next }
+        /^[^ ]/ { section="" }
+        section=="issue" && /^  repo: / { ir=substr($0,9) }
+        section=="issue" && /^  number: / { inum=substr($0,11) }
+        section=="delegated" && /^  repo: / { dr=substr($0,9) }
+        section=="delegated" && /^  number: / { dn=substr($0,11) }
+        END { exit !(tolower(ir)==tolower(tr) && inum==ti && tolower(dr)==tolower(pr) && dn==pi) }
+    ' <<<"$msg"
+}
+
+_xrepo_validate_completion_fact() {
+    local sha="$1" delegation_sha="$2" top_repo="$3" top_issue="$4"
+    local peer_repo="$5" peer_issue="$6" peer_commit="$7" msg
+    [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] || return 2
+    [ "$(git rev-parse "$sha^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] || return 2
+    [ "$(git rev-list --parents -n1 "$sha" | awk '{print NF-1}')" = 1 ] || return 2
+    [ "$(git rev-parse "$sha^")" = "$delegation_sha" ] || return 2
+    _xrepo_validate_delegation "$delegation_sha" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue" || return 2
+    msg="$(git log -1 --format=%B "$sha")"
+    [ "$(grep -cx 'kind: completion' <<<"$msg")" = 1 ] || return 2
+    [ "$(grep -cx 'role: system' <<<"$msg")" = 1 ] || return 2
+    [ "$(grep -cx 'intent: cross-repo-satisfied' <<<"$msg")" = 1 ] || return 2
+    awk -v tr="$top_repo" -v ti="$top_issue" -v pr="$peer_repo" \
+        -v pi="$peer_issue" -v pc="$peer_commit" '
+        /^issue:$/ { section="issue"; next }
+        /^delegated:$/ { section="delegated"; next }
+        /^source:$/ { section="source"; next }
+        /^[^ ]/ { section="" }
+        section=="issue" && /^  repo: / { ir=substr($0,9) }
+        section=="issue" && /^  number: / { inum=substr($0,11) }
+        section=="delegated" && /^  repo: / { dr=substr($0,9) }
+        section=="delegated" && /^  number: / { dn=substr($0,11) }
+        section=="source" && /^  repo: / { sr=substr($0,9) }
+        section=="source" && /^  commit: / { sc=substr($0,11) }
+        END { exit !(tolower(ir)==tolower(tr) && inum==ti && tolower(dr)==tolower(pr) && dn==pi && tolower(sr)==tolower(pr) && sc==pc) }
+    ' <<<"$msg"
 }
 
 # cmd_ingest_completion — record a peer-repo Satisfies: as completion
 # ─────────────────────────────────────────────────────────────────────
 
 cmd_ingest_completion() {
+    if [ "${_XREPO_PREPARE_COMPLETION:-false}" != true ]; then
+        _xrepo_die "ingest-completion is internal; direct invocation is rejected. Process every completion comment with ingest-comment so its durable receipt and completion fact are published atomically."
+        return 2
+    fi
     local top_issue="" comment_id="" comment_url="" from="" comment_phase="" comment_peer_issue=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -714,8 +799,13 @@ cmd_ingest_completion() {
     # ignored (not fatal) so it can never wedge a completion — we fall
     # through to Strategies 1–3.
     if [ -n "$comment_peer_issue" ]; then
-        if _xrepo_delegation_exists "$top_issue" "$XREPO_OWNER" "$XREPO_REPO" "$comment_peer_issue"; then
+        local delegation_probe_rc=0
+        _xrepo_delegation_exists "$top_issue" "$XREPO_OWNER" "$XREPO_REPO" "$comment_peer_issue" || delegation_probe_rc=$?
+        if [ "$delegation_probe_rc" -eq 0 ]; then
             peer_issue="$comment_peer_issue"
+        elif [ "$delegation_probe_rc" -eq 2 ]; then
+            _xrepo_die "ingest-completion: cannot authoritatively read delegation for peer issue ${comment_peer_issue}"
+            return 2
         else
             _xrepo_log "ingest-completion: comment-supplied peer-issue ${comment_peer_issue} has no delegation under #${top_issue} for ${XREPO_OWNER}/${XREPO_REPO}; ignoring it and falling back to commit/single-delegation resolution"
         fi
@@ -741,7 +831,7 @@ cmd_ingest_completion() {
     # Strategy 3: if exactly one delegated ref for this repo under this
     # epic, use it.
     if [ -z "$peer_issue" ]; then
-        # Enumerate delegated refs from BOTH origin and any local refs.
+        # Enumerate delegated refs from authoritative origin only.
         # On a fresh CI checkout (the issue-comment-sync runner) the
         # delegated refs are not present locally, so a local-only lookup
         # silently finds nothing — and when the peer API is unavailable
@@ -749,22 +839,21 @@ cmd_ingest_completion() {
         # also yield nothing, leaving the peer issue unresolvable. The
         # comment-supplied phase is enough to gate, but we still need the
         # peer issue number; the delegation ref on origin carries it.
-        local remote_refs local_refs all_refs count
-        remote_refs="$(git ls-remote origin \
+        local remote_listing remote_refs count
+        if ! remote_listing="$(git ls-remote origin \
             "refs/heads/tasks/delegated/${top_issue}/${XREPO_OWNER}/${XREPO_REPO}/*" \
-            2>/dev/null | awk '{ print $2 }')"
-        local_refs="$(git for-each-ref --format='%(refname)' \
-            "refs/heads/tasks/delegated/${top_issue}/${XREPO_OWNER}/${XREPO_REPO}/*" \
-            2>/dev/null)"
-        all_refs="$(printf '%s\n%s\n' "$remote_refs" "$local_refs" \
-            | sed '/^[[:space:]]*$/d' | sort -u)"
+            2>/dev/null)"; then
+            _xrepo_die "ingest-completion: cannot authoritatively enumerate delegations"
+            return 2
+        fi
+        remote_refs="$(printf '%s\n' "$remote_listing" | awk '{ print $2 }')"
         # `wc -l` exits 0 even on empty input (unlike `grep -c .`, which
         # exits 1 on zero matches and would trip `set -e`). The trailing
         # newline from `printf '%s\n'` is required so a single ref counts
         # as one line.
-        count="$(printf '%s\n' "$all_refs" | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+        count="$(printf '%s\n' "$remote_refs" | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
         if [ "$count" = "1" ]; then
-            peer_issue="${all_refs##*/}"
+            peer_issue="${remote_refs##*/}"
         fi
     fi
 
@@ -775,28 +864,35 @@ cmd_ingest_completion() {
 
     local delegated_ref="refs/heads/tasks/delegated/${top_issue}/${XREPO_OWNER}/${XREPO_REPO}/${peer_issue}"
 
-    # Try local then remote fetch.
-    local delegation_sha
-    delegation_sha="$(git rev-parse --verify "$delegated_ref" 2>/dev/null || true)"
-    if [ -z "$delegation_sha" ]; then
-        git fetch origin "$delegated_ref":"$delegated_ref" >/dev/null 2>&1 || true
-        delegation_sha="$(git rev-parse --verify "$delegated_ref" 2>/dev/null || true)"
-    fi
+    local delegation_sha delegation_rc=0
+    delegation_sha="$(_xrepo_remote_sha "$delegated_ref")" || delegation_rc=$?
+    [ "$delegation_rc" -ne 3 ] || {
+        _xrepo_die "ingest-completion: cannot authoritatively read ${delegated_ref}"
+        return 2
+    }
     [ -n "$delegation_sha" ] || {
         _xrepo_die "ingest-completion: no delegation ref ${delegated_ref} (must call 'task-dag delegate' first)"
         return 2
     }
+    git fetch -q origin "$delegated_ref" || return 2
 
     local completion_ref="refs/heads/tasks/completions/${top_issue}/${XREPO_OWNER}/${XREPO_REPO}/${peer_issue}/${peer_full_sha}"
 
-    local completion_sha
-    completion_sha="$(git rev-parse --verify "$completion_ref" 2>/dev/null || true)"
-    if [ -z "$completion_sha" ]; then
-        git fetch origin "$completion_ref":"$completion_ref" >/dev/null 2>&1 || true
-        completion_sha="$(git rev-parse --verify "$completion_ref" 2>/dev/null || true)"
-    fi
+    local completion_sha completion_rc=0 completion_exists=false
+    completion_sha="$(_xrepo_remote_sha "$completion_ref")" || completion_rc=$?
+    [ "$completion_rc" -ne 3 ] || {
+        _xrepo_die "ingest-completion: cannot authoritatively read ${completion_ref}"
+        return 2
+    }
 
     if [ -n "$completion_sha" ]; then
+        git fetch -q origin "$completion_ref" || return 2
+        _xrepo_validate_completion_fact "$completion_sha" "$delegation_sha" "$top_repo" \
+            "$top_issue" "${XREPO_OWNER}/${XREPO_REPO}" "$peer_issue" "$peer_full_sha" || {
+            _xrepo_die "ingest-completion: malformed completion fact at ${completion_ref}"
+            return 2
+        }
+        completion_exists=true
         _xrepo_log "completion ref already present for ${XREPO_OWNER}/${XREPO_REPO}@${peer_full_sha}"
     else
         local empty_tree msg_file
@@ -830,21 +926,15 @@ cmd_ingest_completion() {
         } > "$msg_file"
         completion_sha="$(git commit-tree "$empty_tree" -p "$delegation_sha" -F "$msg_file")"
         rm -f "$msg_file"
-        git update-ref "$completion_ref" "$completion_sha"
     fi
 
-    # Always (re-)point the comment-id mapping ref at the completion commit.
-    git update-ref "$comment_ref" "$completion_sha"
-
-    # Push both, ignore non-fast-forward on comment_ref since it can only
-    # change between distinct completion_sha values for the same comment_id
-    # (which should never happen).
-    git push origin "$completion_ref" "$comment_ref"
-
-    _xrepo_log "completion ${completion_sha} for ${XREPO_OWNER}/${XREPO_REPO}#${peer_issue}@${peer_full_sha:0:12}${peer_phase:+ (phase ${peer_phase})}"
-
-    # Report epic status (ready-to-close vs still-waiting).
-    _xrepo_epic_status "$top_issue"
+    # ingest-comment prepares the completion object here, then publishes it
+    # together with its receipt.  Do not create any local disposition ref.
+    XREPO_PREPARED_COMPLETION_SHA="$completion_sha"
+    XREPO_PREPARED_COMPLETION_REF="$completion_ref"
+    XREPO_PREPARED_COMPLETION_EXISTS="$completion_exists"
+    XREPO_PREPARED_DELEGATION_SHA="$delegation_sha"
+    return 0
 }
 
 # Helper: echo the required final phase for a phase-gated epic, or
@@ -943,7 +1033,7 @@ _xrepo_epic_status() {
 # ─────────────────────────────────────────────────────────────────────
 
 cmd_ingest_comment() {
-    local issue="" comment_id="" author="" comment_url="" body_file=""
+    local issue="" comment_id="" author="" comment_url="" body_file="" created_at="" updated_at=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --issue)        issue="$2";       shift 2 ;;
@@ -951,6 +1041,8 @@ cmd_ingest_comment() {
             --author)       author="$2";      shift 2 ;;
             --comment-url)  comment_url="$2"; shift 2 ;;
             --body-file)    body_file="$2";   shift 2 ;;
+            --created-at)   created_at="$2";  shift 2 ;;
+            --updated-at)   updated_at="$2";  shift 2 ;;
             *) _xrepo_die "ingest-comment: unknown arg: $1"; return 2 ;;
         esac
     done
@@ -960,144 +1052,279 @@ cmd_ingest_comment() {
     [ -n "$comment_url"  ] || { _xrepo_die "ingest-comment: --comment-url is required";  return 2; }
     [ -n "$body_file"    ] || { _xrepo_die "ingest-comment: --body-file is required";    return 2; }
     [ -r "$body_file"    ] || { _xrepo_die "ingest-comment: cannot read $body_file";     return 2; }
+    if { [ -n "$created_at" ] && [ -z "$updated_at" ]; } || { [ -z "$created_at" ] && [ -n "$updated_at" ]; }; then
+        _xrepo_die "ingest-comment: --created-at and --updated-at are required as a pair"; return 2
+    fi
+    # Offline/event fixtures may explicitly provide their coherent snapshot.
+    # Without timestamps obtain body and metadata from one direct API response.
+    if [ -z "$created_at" ]; then
+        local pre_ref pre_sha pre_rc=0 pre_repo
+        pre_ref="refs/heads/gh/comments/${issue}/${comment_id}"
+        pre_repo="$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')"
+        pre_sha="$(_xrepo_remote_sha "$pre_ref")" || pre_rc=$?
+        [ "$pre_rc" -ne 3 ] || { _xrepo_die "cannot authoritatively read $pre_ref"; return 2; }
+        if [ -n "$pre_sha" ]; then
+            git fetch -q origin "$pre_ref" || return 2
+            _xrepo_validate_origin_receipt "$pre_sha" "$pre_repo" "$issue" "$comment_id" >/dev/null || { _xrepo_die "origin has an invalid comment receipt: repo=${pre_repo} issue=${issue} comment-id=${comment_id} ref=${pre_ref} sha=${pre_sha}; refusing to overwrite it. Run 'task-dag validate --strict' and repair the receipt before retrying."; return 2; }
+            git update-ref "$pre_ref" "$pre_sha" || true
+            return 0
+        fi
+        _xrepo_need_cmd gh || return $?
+        _xrepo_need_cmd jq || return $?
+        local observation tmp rc
+        observation="$(gh api "repos/$(_xrepo_current_repo)/issues/comments/${comment_id}")" || return 2
+        created_at="$(printf '%s' "$observation" | jq -r .created_at)"
+        updated_at="$(printf '%s' "$observation" | jq -r .updated_at)"
+        tmp="$(mktemp)" || return 2
+        printf '%s' "$observation" | jq -j .body >"$tmp" || { rm -f "$tmp"; return 2; }
+        body_file="$tmp"
+        _xrepo_ensure_git_identity
+        _xrepo_ingest_observed_comment "$issue" "$comment_id" "$created_at" "$updated_at" "$author" "$comment_url" "$body_file"
+        rc=$?
+        rm -f "$tmp"
+        return "$rc"
+    fi
 
     _xrepo_ensure_git_identity
 
-    local comment_ref="refs/heads/gh/comments/${issue}/${comment_id}"
+    _xrepo_ingest_observed_comment "$issue" "$comment_id" "$created_at" "$updated_at" "$author" "$comment_url" "$body_file"
+}
 
-    # Idempotency: this comment was already ingested.
-    if git rev-parse --verify "$comment_ref" >/dev/null 2>&1; then
-        _xrepo_log "ingest-comment: ${comment_ref} already exists"
-        return 0
+_xrepo_remote_sha() {
+    local out
+    out="$(git ls-remote --refs origin "$1")" || return 3
+    printf '%s\n' "$out" | awk 'NR==1 {print $1}'
+}
+
+_xrepo_receipt_field() { git log -1 --format=%B "$1" | git interpret-trailers --parse | awk -F': ' -v k="$2" '$1==k {print substr($0,length(k)+3); exit}'; }
+
+_xrepo_valid_timestamp() {
+    local rendered
+    [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+    rendered="$(date -u -d "$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" || return 1
+    [ "$rendered" = "$1" ]
+}
+
+# Validate either the durable v1 receipt or a narrowly recognised historical
+# provenance commit.  For v1, echo its disposition, updated-at and body hash.
+_xrepo_validate_receipt() {
+    local sha="$1" repo="$2" issue="$3" cid="$4" tree parents msg version disposition effect
+    [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] || return 2
+    tree="$(git rev-parse "$sha^{tree}")"; [ "$tree" = "$(_xrepo_empty_tree)" ] || return 2
+    msg="$(git log -1 --format=%B "$sha")"
+    version="$(_xrepo_receipt_field "$sha" Receipt-Version)"
+    if [ -z "$version" ]; then
+        local li lc legacy_repo
+        li="$(awk '/^issue:/{f=1;next} f && /^  number: /{print $2;exit}' <<<"$msg")"
+        lc="$(awk '/^github:/{f=1;next} f && /^  comment_id: /{print $2;exit} /^source:/{f=1;next} f && /^  comment_id: /{print $2;exit}' <<<"$msg")"
+        [ "$li" = "$issue" ] || return 2
+        if [ "$(grep -cx 'kind: message' <<<"$msg")" = 1 ] && [ "$(grep -cx 'role: human' <<<"$msg")" = 1 ] && [ "$(grep -cx 'intent: comment' <<<"$msg")" = 1 ]; then
+            [ "$lc" = "$cid" ] || return 2
+            echo legacy-human
+            return 0
+        fi
+        if [ "$(grep -cx 'kind: completion' <<<"$msg")" = 1 ] && [ "$(grep -cx 'role: system' <<<"$msg")" = 1 ] && [ "$(grep -cx 'intent: cross-repo-satisfied' <<<"$msg")" = 1 ]; then
+            legacy_repo="$(awk '/^issue:/{f=1;next} f && /^  repo: /{print $2;exit}' <<<"$msg" | tr '[:upper:]' '[:lower:]')"
+            [ "$legacy_repo" = "$repo" ] || return 2
+            # Historical completion provenance may be shared by several
+            # comment refs, so its embedded source comment ID is not identity.
+            echo legacy-completion
+            return 0
+        fi
+        return 2
     fi
-    if git ls-remote origin "$comment_ref" | grep -q .; then
-        git fetch origin "$comment_ref":"$comment_ref" >/dev/null 2>&1
-        _xrepo_log "ingest-comment: ${comment_ref} already exists on origin"
-        return 0
+    [ "$version" = 1 ] || return 2
+    [ "$(git log -1 --format=%s "$sha")" = 'Record GitHub comment receipt' ] || return 2
+    local k
+    for k in Receipt-Version Repository Issue Comment-ID Disposition Created-At Observed-Updated-At Body-SHA256; do
+        [ "$(grep -c "^${k}: " <<<"$msg")" = 1 ] || return 2
+    done
+    [ "$(_xrepo_receipt_field "$sha" Repository)" = "$repo" ] || return 2
+    [ "$(_xrepo_receipt_field "$sha" Issue)" = "$issue" ] || return 2
+    [ "$(_xrepo_receipt_field "$sha" Comment-ID)" = "$cid" ] || return 2
+    disposition="$(_xrepo_receipt_field "$sha" Disposition)"
+    [[ "$disposition" =~ ^(human|completion|machine-skip)$ ]] || return 2
+    local ca ua bh
+    ca="$(_xrepo_receipt_field "$sha" Created-At)"; ua="$(_xrepo_receipt_field "$sha" Observed-Updated-At)"; bh="$(_xrepo_receipt_field "$sha" Body-SHA256)"
+    _xrepo_valid_timestamp "$ca" || return 2
+    _xrepo_valid_timestamp "$ua" || return 2
+    [ "$ca" \< "$ua" ] || [ "$ca" = "$ua" ] || return 2
+    [[ "$bh" =~ ^[0-9a-f]{64}$ ]] || return 2
+    parents="$(git rev-list --parents -n1 "$sha" | awk '{print NF-1}')"
+    effect="$(_xrepo_receipt_field "$sha" Effect-Commit)"
+    if [ "$disposition" = machine-skip ]; then
+        [ "$parents" = 0 ] \
+            && [ "$(grep -c '^Effect-Commit:' <<<"$msg")" = 0 ] \
+            && [ "$(grep -c '^Effect-Ref-At-Creation:' <<<"$msg")" = 0 ] || return 2
+    else
+        [ "$(grep -c '^Effect-Commit: ' <<<"$msg")" = 1 ] && [ "$(grep -c '^Effect-Ref-At-Creation: ' <<<"$msg")" = 1 ] || return 2
+        [ "$parents" = 1 ] && [ -n "$effect" ] && [ "$effect" = "$(git rev-parse "$sha^")" ] && [ -n "$(_xrepo_receipt_field "$sha" Effect-Ref-At-Creation)" ] || return 2
+        [ "$(git rev-parse "$effect^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] || return 2
+        local er em
+        er="$(_xrepo_receipt_field "$sha" Effect-Ref-At-Creation)"; em="$(git log -1 --format=%B "$effect")"
+        if [ "$disposition" = human ]; then
+            local recorded_short="${er#refs/heads/tasks/frontier/}"
+            [[ "$er" =~ ^refs/heads/tasks/frontier/[0-9a-f]{7,40}$ ]] || return 2
+            [[ "$effect" = "$recorded_short"* ]] || return 2
+            [ "$(grep -cx 'kind: message' <<<"$em")" = 1 ] && [ "$(grep -cx 'role: human' <<<"$em")" = 1 ] && [ "$(grep -cx 'intent: comment' <<<"$em")" = 1 ] || return 2
+            [ "$(awk '/^issue:/{f=1;next} f && /^  number: /{print $2;exit}' <<<"$em")" = "$issue" ] || return 2
+            [ "$(awk '/^github:/{f=1;next} f && /^  comment_id: /{print $2;exit}' <<<"$em")" = "$cid" ] || return 2
+        else
+            [[ "$er" =~ ^refs/heads/tasks/completions/${issue}/[^/]+/[^/]+/[1-9][0-9]*/[0-9a-f]{7,40}$ ]] || return 2
+            [ "$(grep -cx 'kind: completion' <<<"$em")" = 1 ] && [ "$(grep -cx 'role: system' <<<"$em")" = 1 ] && [ "$(grep -cx 'intent: cross-repo-satisfied' <<<"$em")" = 1 ] || return 2
+            local completion_tail completion_owner completion_repo completion_issue completion_commit
+            completion_tail="${er#refs/heads/tasks/completions/${issue}/}"
+            completion_owner="${completion_tail%%/*}"; completion_tail="${completion_tail#*/}"
+            completion_repo="${completion_tail%%/*}"; completion_tail="${completion_tail#*/}"
+            completion_issue="${completion_tail%%/*}"; completion_commit="${completion_tail#*/}"
+            _xrepo_validate_completion_fact "$effect" "$(git rev-parse "$effect^")" "$repo" "$issue" \
+                "${completion_owner}/${completion_repo}" "$completion_issue" "$completion_commit" || return 2
+        fi
     fi
+    printf '%s %s %s\n' "$disposition" "$ua" "$bh"
+}
 
-    local first_line
-    first_line="$(head -n1 "$body_file")"
+_xrepo_validate_origin_receipt() {
+    local sha="$1" repo="$2" issue="$3" cid="$4" info disposition effect effect_ref tail owner peer_repo peer_issue delegation_ref delegation_sha rc=0
+    info="$(_xrepo_validate_receipt "$sha" "$repo" "$issue" "$cid")" || return 2
+    disposition="${info%% *}"
+    if [ "$disposition" = completion ]; then
+        effect="$(_xrepo_receipt_field "$sha" Effect-Commit)"
+        effect_ref="$(_xrepo_receipt_field "$sha" Effect-Ref-At-Creation)"
+        tail="${effect_ref#refs/heads/tasks/completions/${issue}/}"
+        owner="${tail%%/*}"; tail="${tail#*/}"
+        peer_repo="${tail%%/*}"; tail="${tail#*/}"
+        peer_issue="${tail%%/*}"
+        delegation_ref="refs/heads/tasks/delegated/${issue}/${owner}/${peer_repo}/${peer_issue}"
+        delegation_sha="$(_xrepo_remote_sha "$delegation_ref")" || rc=$?
+        [ "$rc" -ne 3 ] && [ -n "$delegation_sha" ] || return 2
+        [ "$(git rev-parse "$effect^")" = "$delegation_sha" ] || return 2
+    fi
+    printf '%s\n' "$info"
+}
 
-    # Completion comment path:
-    #   <!-- task-dag:completion --> Satisfies <owner>/<repo>#<N> via <peer>@<short>
-    # Optionally followed by ` phase <P>` and/or ` peer-issue <M>` (in that
-    # order) — the peer-side aggregator appends the commit's `Phase:`
-    # trailer (so phase-gating works) and the peer repo's OWN issue number
-    # (so a completion is attributed to the right delegated child), both
-    # without the top-level workflow having to read the (often cross-org
-    # private) peer repo. Both suffixes are optional for backward
-    # compatibility with older completion comments.
+_xrepo_make_receipt() {
+    local repo="$1" issue="$2" cid="$3" disposition="$4" ca="$5" ua="$6" hash="$7" effect="$8" effect_ref="$9" f
+    f="$(mktemp)"
+    { printf 'Record GitHub comment receipt\n\nReceipt-Version: 1\nRepository: %s\nIssue: %s\nComment-ID: %s\nDisposition: %s\nCreated-At: %s\nObserved-Updated-At: %s\nBody-SHA256: %s\n' "$repo" "$issue" "$cid" "$disposition" "$ca" "$ua" "$hash"
+      [ -z "$effect" ] || printf 'Effect-Commit: %s\nEffect-Ref-At-Creation: %s\n' "$effect" "$effect_ref"; } >"$f"
+    if [ -n "$effect" ]; then git commit-tree "$(_xrepo_empty_tree)" -p "$effect" -F "$f"; else git commit-tree "$(_xrepo_empty_tree)" -F "$f"; fi
+    rm -f "$f"
+}
+
+_xrepo_ingest_observed_comment() {
+    local issue="$1" comment_id="$2" created_at="$3" updated_at="$4" author="$5" comment_url="$6" body_file="$7"
+    local repo comment_ref remote_sha existing hash disposition effect_sha="" effect_ref="" first_line first_nonblank
+    repo="$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')"; comment_ref="refs/heads/gh/comments/${issue}/${comment_id}"
+    [[ "$repo" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] || { _xrepo_die "cannot determine canonical owner/repository"; return 2; }
+    [[ "$issue" =~ ^[1-9][0-9]*$ && "$comment_id" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "invalid issue/comment identity"; return 2; }
+    local probe=0
+    remote_sha="$(_xrepo_remote_sha "$comment_ref")" || probe=$?
+    [ "$probe" -ne 3 ] || { _xrepo_die "cannot authoritatively read $comment_ref"; return 2; }
+    if [ -n "$remote_sha" ]; then git fetch -q origin "$comment_ref" || return 2; _xrepo_validate_origin_receipt "$remote_sha" "$repo" "$issue" "$comment_id" >/dev/null || { _xrepo_die "origin has an invalid comment receipt: repo=${repo} issue=${issue} comment-id=${comment_id} ref=${comment_ref} sha=${remote_sha}; refusing to overwrite it. Run 'task-dag validate --strict' and repair the receipt before retrying."; return 2; }; git update-ref "$comment_ref" "$remote_sha" || true; return 0; fi
+    _xrepo_valid_timestamp "$created_at" && _xrepo_valid_timestamp "$updated_at" \
+        && { [ "$created_at" \< "$updated_at" ] || [ "$created_at" = "$updated_at" ]; } \
+        || { _xrepo_die "invalid comment observation timestamps"; return 2; }
+    hash="$(sha256sum "$body_file" | awk '{print $1}')"
+    first_line="$(head -n1 "$body_file")"; first_nonblank="$(grep -m1 -v '^[[:space:]]*$' "$body_file" 2>/dev/null || true)"
     if [[ "$first_line" =~ ^[[:space:]]*\<\!--[[:space:]]*task-dag:completion[[:space:]]*--\>[[:space:]]+Satisfies[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)[[:space:]]+via[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]+)([[:space:]]+phase[[:space:]]+([A-Za-z0-9]+))?([[:space:]]+peer-issue[[:space:]]+([0-9]+))?[[:space:]]*$ ]]; then
-        local target_owner="${BASH_REMATCH[1]}"
-        local target_repo="${BASH_REMATCH[2]}"
-        local target_issue="${BASH_REMATCH[3]}"
-        local peer_owner="${BASH_REMATCH[4]}"
-        local peer_repo="${BASH_REMATCH[5]}"
-        local peer_sha="${BASH_REMATCH[6]}"
-        local peer_phase="${BASH_REMATCH[8]}"
-        local peer_issue="${BASH_REMATCH[10]}"
-
-        local top_repo
-        top_repo="$(_xrepo_current_repo)"
-        if [ "${target_owner}/${target_repo}" != "$top_repo" ]; then
-            _xrepo_die "ingest-comment: completion targets ${target_owner}/${target_repo} but we are ${top_repo}"
+        local target_repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" target_issue="${BASH_REMATCH[3]}"
+        local peer_from="${BASH_REMATCH[4]}/${BASH_REMATCH[5]}@${BASH_REMATCH[6]}"
+        local peer_phase="${BASH_REMATCH[8]}" peer_issue="${BASH_REMATCH[10]}"
+        [ "$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')" = "$repo" ] && [ "$target_issue" = "$issue" ] || return 2
+        disposition=completion
+        local _XREPO_PREPARE_COMPLETION=true
+        local completion_args=(--issue "$issue" --comment-id "$comment_id" --comment-url "$comment_url" --from "$peer_from")
+        [ -z "$peer_phase" ] || completion_args+=(--phase "$peer_phase")
+        [ -z "$peer_issue" ] || completion_args+=(--peer-issue "$peer_issue")
+        cmd_ingest_completion "${completion_args[@]}"
+        effect_sha="$XREPO_PREPARED_COMPLETION_SHA"; effect_ref="$XREPO_PREPARED_COMPLETION_REF"
+        local effect_exists="$XREPO_PREPARED_COMPLETION_EXISTS"
+        local expected_delegation="$XREPO_PREPARED_DELEGATION_SHA"
+    elif [[ "$first_nonblank" =~ ^[[:space:]]*\<\!-- ]] || grep -q '<!-- task-dag:' "$body_file"; then disposition=machine-skip
+    else
+        disposition=human; local epic msgf short nonce
+        epic="$(_xrepo_ensure_issue_epic "$issue")" || return $?; msgf="$(mktemp)"
+        nonce="$(printf '%s:%s:%s:%s\n' "$BASHPID" "$RANDOM" "$(date +%s%N)" "$comment_id" | git hash-object --stdin)" || return 2
+        { printf 'kind: message\nrole: human\nintent: comment\n\nissue:\n  number: %s\n\ngithub:\n  comment_id: %s\n  actor: %s\n  url: %s\n\nmessage_id: msg_%s\n\nbody: |\n' "$issue" "$comment_id" "$author" "$comment_url" "$nonce"; sed 's/^/  /' "$body_file"; } >"$msgf"
+        effect_sha="$(git commit-tree "$(_xrepo_empty_tree)" -p "$epic" -F "$msgf")"; rm -f "$msgf"; short="$(git rev-parse --short "$effect_sha")"; effect_ref="refs/heads/tasks/frontier/$short"
+    fi
+    local effect_exists="${effect_exists:-false}"
+    local receipt_sha
+    receipt_sha="$(_xrepo_make_receipt "$repo" "$issue" "$comment_id" "$disposition" "$created_at" "$updated_at" "$hash" "$effect_sha" "$effect_ref")" || return 2
+    _xrepo_validate_receipt "$receipt_sha" "$repo" "$issue" "$comment_id" >/dev/null || {
+        _xrepo_die "refusing to publish an internally invalid comment receipt"
+        return 2
+    }
+    local args=(--atomic "--force-with-lease=$comment_ref:")
+    if [ -n "$effect_ref" ] && [ "$effect_exists" != true ]; then
+        args+=("--force-with-lease=$effect_ref:" "$effect_sha:$effect_ref")
+    fi
+    args+=("$receipt_sha:$comment_ref")
+    if ! git push origin "${args[@]}"; then
+        remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2
+        if [ -z "$remote_sha" ] && [ "$disposition" = completion ] && [ "$effect_exists" != true ]; then
+            # A concurrent completion for another comment can win only the
+            # shared fact ref. Adopt that valid fact, then retry this
+            # comment's create-only receipt once.
+            local raced_effect raced_rc=0
+            raced_effect="$(_xrepo_remote_sha "$effect_ref")" || raced_rc=$?
+            [ "$raced_rc" -ne 3 ] && [ -n "$raced_effect" ] || return 2
+            git fetch -q origin "$effect_ref" || return 2
+            local raced_tail raced_owner raced_repo raced_issue raced_commit
+            raced_tail="${effect_ref#refs/heads/tasks/completions/${issue}/}"
+            raced_owner="${raced_tail%%/*}"; raced_tail="${raced_tail#*/}"
+            raced_repo="${raced_tail%%/*}"; raced_tail="${raced_tail#*/}"
+            raced_issue="${raced_tail%%/*}"; raced_commit="${raced_tail#*/}"
+            _xrepo_validate_completion_fact "$raced_effect" "$expected_delegation" \
+                "$repo" "$issue" "${raced_owner}/${raced_repo}" \
+                "$raced_issue" "$raced_commit" || return 2
+            effect_sha="$raced_effect"
+            receipt_sha="$(_xrepo_make_receipt "$repo" "$issue" "$comment_id" "$disposition" \
+                "$created_at" "$updated_at" "$hash" "$effect_sha" "$effect_ref")" || return 2
+            _xrepo_validate_receipt "$receipt_sha" "$repo" "$issue" "$comment_id" >/dev/null || return 2
+            git push origin --atomic "--force-with-lease=$comment_ref:" "$receipt_sha:$comment_ref" >/dev/null 2>&1 || true
+            remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2
+        fi
+        [ -n "$remote_sha" ] || return 2
+        git fetch -q origin "$comment_ref" || return 2
+        existing="$(_xrepo_validate_origin_receipt "$remote_sha" "$repo" "$issue" "$comment_id")" || return 2
+        local wd wu wh; read -r wd wu wh <<<"$existing"
+        if [ "$wu" = "$updated_at" ] && [ "$wh" = "$hash" ] && [ "$wd" != "$disposition" ]; then _xrepo_die "origin receipt conflict: repo=${repo} issue=${issue} comment-id=${comment_id} ref=${comment_ref} sha=${remote_sha}; the same updated-at/body hash is stored as '${wd}' but this run classified it as '${disposition}'. Inspect the origin receipt and comment before retrying."; return 2; fi
+        receipt_sha="$remote_sha"
+    else
+        remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2; [ "$remote_sha" = "$receipt_sha" ] || return 2
+    fi
+    local winner_info winner_disposition winner_effect winner_ref
+    winner_info="$(_xrepo_validate_origin_receipt "$receipt_sha" "$repo" "$issue" "$comment_id")" || return 2
+    read -r winner_disposition _ _ <<<"$winner_info"
+    winner_effect="$(_xrepo_receipt_field "$receipt_sha" Effect-Commit)"
+    winner_ref="$(_xrepo_receipt_field "$receipt_sha" Effect-Ref-At-Creation)"
+    local origin_effect="" origin_effect_rc=0 mirror_effect=false
+    if [ -n "$winner_ref" ]; then
+        origin_effect="$(_xrepo_remote_sha "$winner_ref")" || origin_effect_rc=$?
+        [ "$origin_effect_rc" -ne 3 ] || return 2
+        if [ -n "$origin_effect" ] && [ "$origin_effect" != "$winner_effect" ]; then
+            _xrepo_die "origin effect conflict: repo=${repo} issue=${issue} comment-id=${comment_id} receipt-ref=${comment_ref} receipt-sha=${receipt_sha} effect-ref=${winner_ref} expected-sha=${winner_effect} origin-sha=${origin_effect}; repair the conflicting origin effect ref before retrying ingest-comment."
             return 2
         fi
-        if [ "$target_issue" != "$issue" ]; then
-            _xrepo_die "ingest-comment: completion targets issue #${target_issue} but comment was on #${issue}"
-            return 2
+        [ -z "$origin_effect" ] || mirror_effect=true
+    fi
+    git update-ref "$comment_ref" "$receipt_sha" || _xrepo_log "warning: receipt is durable on origin, but the local mirror update failed: ref=${comment_ref} sha=${receipt_sha}; fetch the ref before relying on local state"
+    if [ -n "$winner_ref" ]; then
+        if [ "$mirror_effect" = true ]; then
+            git update-ref "$winner_ref" "$winner_effect" || _xrepo_log "warning: completion effect is durable on origin, but the local mirror update failed: ref=${winner_ref} sha=${winner_effect}; fetch the ref before relying on local state"
+        else
+            git update-ref -d "$winner_ref" >/dev/null 2>&1 || true
         fi
-
-        cmd_ingest_completion \
-            --issue "$issue" \
-            --comment-id "$comment_id" \
-            --comment-url "$comment_url" \
-            --from "${peer_owner}/${peer_repo}@${peer_sha}" \
-            ${peer_phase:+--phase "$peer_phase"} \
-            ${peer_issue:+--peer-issue "$peer_issue"}
-
-        # If now fully satisfied, emit the close commit so close-completed-issues.yml fires.
+    fi
+    if [ "$winner_disposition" = completion ]; then
         local status_line
         status_line="$(_xrepo_epic_status "$issue" | tail -n1)"
         if [[ "$status_line" =~ ^epic[[:space:]]ready-to-close: ]]; then
-            cmd_close_epic --issue "$issue"
+            cmd_close_epic --issue "$issue" || return $?
         fi
-        return 0
     fi
-
-    # Skip machine-generated / explicitly-marked comments so they are NOT
-    # minted as new pickable tasks (the comment->task dispatch loop, where
-    # one worker's status comment becomes the next worker's "task").
-    #
-    # Author cannot help here: agents post via the operator's `gh`
-    # credentials, so an agent status comment is indistinguishable by
-    # author from a genuine operator instruction. The reliable signal is a
-    # LEADING HTML marker: operators dispatch work by typing prose (no
-    # leading "<!--"), while every machine comment leads with one
-    # (`<!-- task-dag:status -->`, `<!-- post-comment:… -->`,
-    # `<!-- manual-close-page:… -->`, …). `task-dag:completion` is already
-    # handled above, before this skip. We also keep the legacy
-    # "task-dag: marker anywhere in the body" skip for back-compat.
-    local first_nonblank
-    first_nonblank="$(grep -m1 -v '^[[:space:]]*$' "$body_file" 2>/dev/null || true)"
-    if [[ "$first_nonblank" =~ ^[[:space:]]*\<\!-- ]] || grep -q "<!-- task-dag:" "$body_file"; then
-        _xrepo_log "ingest-comment: skipping machine/marked comment (leading HTML marker) — not minting a task"
-        return 0
-    fi
-
-    # Normal human comment path: create message task commit parented to
-    # the epic and a frontier ref so an agent can pick it up.
-    _xrepo_ingest_human_comment "$issue" "$comment_id" "$author" "$comment_url" "$body_file"
-}
-
-_xrepo_ingest_human_comment() {
-    local issue="$1" comment_id="$2" author="$3" comment_url="$4" body_file="$5"
-
-    local comment_ref="refs/heads/gh/comments/${issue}/${comment_id}"
-
-    # Resolve the epic, backfilling it (annotated) if it was never created
-    # — so a comment on an issue whose first-sighting run failed still
-    # mints a task instead of dying (virusdave/top-level#28). Whether the
-    # resulting task is actually dispatched (e.g. the issue is closed) is
-    # the dispatcher's call, not ours.
-    local epic_sha
-    epic_sha="$(_xrepo_ensure_issue_epic "$issue")" || return $?
-
-    local empty_tree msg_file message_sha
-    empty_tree="$(_xrepo_empty_tree)"
-    msg_file="$(mktemp)"
-    {
-        printf 'kind: message\n'
-        printf 'role: human\n'
-        printf 'intent: comment\n'
-        printf '\n'
-        printf 'issue:\n'
-        printf '  number: %s\n' "$issue"
-        printf '\n'
-        printf 'github:\n'
-        printf '  comment_id: %s\n' "$comment_id"
-        printf '  actor: %s\n' "$author"
-        printf '  url: %s\n' "$comment_url"
-        printf '\n'
-        printf 'message_id: msg_%s_%s\n' "$(date +%s)" "$comment_id"
-        printf '\n'
-        printf 'body: |\n'
-        sed 's/^/  /' "$body_file"
-    } > "$msg_file"
-
-    message_sha="$(git commit-tree "$empty_tree" -p "$epic_sha" -F "$msg_file")"
-    rm -f "$msg_file"
-
-    local short_sha frontier_ref
-    short_sha="$(git rev-parse --short "$message_sha")"
-    frontier_ref="refs/heads/tasks/frontier/${short_sha}"
-
-    git update-ref "$comment_ref" "$message_sha"
-    git update-ref "$frontier_ref" "$message_sha"
-    git push origin "$comment_ref" "$frontier_ref"
-
-    _xrepo_log "ingest-comment: created message ${message_sha} and pushed ${comment_ref} + ${frontier_ref}"
 }
 
 # ─────────────────────────────────────────────────────────────────────

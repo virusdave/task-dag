@@ -111,13 +111,16 @@ git push -q origin refs/heads/gh/issues/999
 ingest(){
   printf '%s' "$2" > "$ROOT/body.txt"
   "$TD" ingest-comment --issue 999 --comment-id "$1" --author virusdave \
-    --comment-url "https://x/$1" --body-file "$ROOT/body.txt" >/dev/null 2>&1
+    --comment-url "https://x/$1" --created-at 2026-01-02T03:04:05Z --updated-at 2026-01-02T03:04:05Z \
+    --body-file "$ROOT/body.txt" >/dev/null 2>&1
 }
 
+id=9000
 for kind in status operator-decision; do
   body=$("$TD" comment 999 --repo=acme/widgets --kind="$kind" --body="round trip $kind" --dry-run 2>/dev/null)
   before=$(frontier_count)
-  ingest "rt-$kind" "$body"
+  ingest "$id" "$body"
+  id=$((id+1))
   after=$(frontier_count)
   [ "$after" -eq "$before" ] \
     && ok "round-trip: $kind comment body is NOT ingested as a task" \
@@ -126,7 +129,7 @@ done
 
 # sanity: a plain comment (no marker) IS ingested — proves the counter works
 before=$(frontier_count)
-ingest plain "please add feature X"
+ingest 9002 "please add feature X"
 after=$(frontier_count)
 [ "$after" -eq $((before+1)) ] \
   && ok "sanity: plain prose still mints a task" \
