@@ -131,18 +131,26 @@ else
   bad "5: dispatch repo override ignored: $(cat "$GHLOG")"
 fi
 
-# TEST 6: complete of a BLOCKED task fires a dispatch (action=complete).
+# TEST 6: local complete is silent; post-push convergence fires the dispatch.
 T2=$(mk_task "complete blocked task")
 "$TD" block "$T2" --reason=temp >/dev/null 2>&1
 git clone -q "$ROOT/origin.git" "$ROOT/c2" 2>/dev/null
 cd "$ROOT/c2"; git checkout -q master
 echo w > w.txt; git add w.txt; git commit -qm "work T2" >/dev/null
 : > "$GHLOG"
+BEFORE=$(git ls-remote origin refs/heads/master | awk '{print $1}')
 TASK_DAG_DASHBOARD_DISPATCH_FORCE=1 "$TD" complete "$T2" >/dev/null 2>&1
-if [ "$(ghlines)" -ge 1 ] && grep -q "action]=complete" "$GHLOG"; then
-  ok "6: complete of a blocked task fires a dispatch (action=complete)"
+if [ "$(ghlines)" -eq 0 ]; then
+  ok "6: local complete does not dispatch before publication"
 else
-  bad "6: complete-of-blocked did not dispatch: $(cat "$GHLOG")"
+  bad "6: local complete dispatched before publication: $(cat "$GHLOG")"
+fi
+git push -q origin HEAD:master
+TASK_DAG_DASHBOARD_DISPATCH_FORCE=1 "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
+if [ "$(ghlines)" -ge 1 ] && grep -q "action]=complete" "$GHLOG"; then
+  ok "6: convergence of a blocked completion fires a dispatch"
+else
+  bad "6: blocked-completion convergence did not dispatch: $(cat "$GHLOG")"
 fi
 cd "$ROOT/wc"
 

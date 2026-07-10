@@ -315,11 +315,11 @@ Safety gates (all enforced before any ref moves):
   task or an earlier leaf **in graft order** (the dependency's impl must
   be stacked below the dependent's).
 - **Idempotent**: if all named leaves are already completed on `HEAD`, it
-  runs ref cleanup only (rc 0); a partial state (some completed) is
-  refused so the caller re-runs with only the not-yet-completed leaves.
+  makes no new commits and repeats the explicit push instruction (rc 0); a
+  partial state (some completed) is refused so the caller re-runs with only
+  the not-yet-completed leaves.
 - A single CAS `update-ref HEAD` advance (never `git reset --hard`) after a
-  backup ref is written; ref cleanup uses `--force-with-lease` so it can
-  never clobber a concurrent worker's claim.
+  backup ref is written. No remote ref is changed by `complete`.
 
 Completion is still detected purely by the task commit appearing as a
 non-primary parent reachable from `HEAD` (`is_task_completed` /
@@ -421,9 +421,9 @@ leaf landed → epic closes (close-completed-issues.sh deletes
 
 ## Blocked-overlay cleanup on epic close
 
-`task-dag complete <sha>` clears a task's own `blocked`/`blocked-meta`
-overlay in lockstep (see `cleanup_completed_task_refs`), so completed
-**leaves** self-heal. But an epic **root** is closed by the additive
+After the explicit master push, `graph-converge` clears a completed task's own
+`blocked`/`blocked-meta` overlay together with its other scheduling refs, so
+completed **leaves** self-heal. An epic **root** is closed by the additive
 `Closes-Epic: #<N>` merge — `close-completed-issues.sh` — and is *never*
 `complete`d, so if the root (or a stray leaf) was parked (e.g.
 github-worker's `autopark_unprogressed_task` when an agent abandoned a
@@ -449,15 +449,15 @@ repairable projection of `master`, not the source of task truth.
 
 ## Completed-leaf scheduling refs are a repairable projection
 
-Completion parentage on `origin/master` must be durable **before** any leaf's
-`tasks/frontier`, `tasks/active`, `tasks/blocked`, or `tasks/blocked-meta` ref
-is deleted. All live completion paths (`complete`, batch `complete --leaves`,
-`complete-ops`, and `complete-historical`) therefore publish their completion
-tip first, then remove the scheduling refs in one leased atomic push. A failed
-or racing master push leaves the scheduling refs live and returns an error.
+Completion commands (`complete`, batch `complete --leaves`, `complete-ops`, and
+`complete-historical`) mutate only local `HEAD`. They neither publish master nor
+delete local or remote scheduling refs; each prints the canonical next action,
+`git push origin HEAD:master`. That explicit push makes completion parentage
+durable. `graph-converge`, triggered by the push and by scheduled/manual repair,
+is the sole owner of completed-leaf scheduling-ref cleanup. Thus a crash or
+rejected push leaves the task visible and claim state intact, while a successful
+push followed by failed convergence remains repairable from durable master.
 
-The inverse failure — master published, then the worker died before cleanup —
-is repaired by `graph-converge` on both push events and scheduled/manual runs.
 The reconciler takes one strict, pruned snapshot of `origin/master` and the
 four scheduling namespaces. It treats a task as completed for cleanup only
 when a tree-equal completion merge on master's **first-parent spine** names the
@@ -553,18 +553,19 @@ task-dag complete-ops <task-sha> \
   --yes
 ```
 
-`complete-ops` emits a **tree-equal completion merge** on `master`: first
+`complete-ops` emits a **tree-equal completion merge** on local `HEAD`: first
 parent is the freshly-fetched `origin/master` tip, second parent is the leaf
 task commit, and the tree equals the first parent's tree. That parent edge is
-the durable completion fact consumed by dependency/readiness/facts readers. The
-message carries the existing completion trailers (`Task-Commit:` and
+the candidate completion fact; it becomes durable when the caller runs exactly
+`git push origin HEAD:master`. The server reconciler then removes scheduling
+refs. The message carries the existing completion trailers (`Task-Commit:` and
 `Status: completed`) plus mandatory `Ops-*` audit trailers for evidence,
 authorization, actor, host, and time.
 
 Guard rails fail closed:
 
 - `HEAD` must equal freshly-fetched `origin/master` before a new ops completion
-  is minted, so the command cannot accidentally publish unrelated local commits;
+  is minted, so the explicit push cannot include unrelated local commits;
 - `--evidence` must be an `https://` URL and `--authorization` must be explicit;
   user-supplied trailer values are single-line only;
 - pending epic roots, `Type: epic` tasks, and any node with DAG children are

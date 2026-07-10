@@ -195,8 +195,7 @@ else
   ok "10: drop cleared the blocked-meta ref (local + origin)"
 fi
 
-# TEST 11: complete clears the meta ref. Use a fresh task, claim, block, then
-# complete from a clone checked out at master (complete advances HEAD).
+# TEST 11: completion leaves meta until explicit push + server convergence.
 T2=$(mk_task "complete clears meta task")
 T2_FULL=$(git rev-parse "refs/heads/tasks/frontier/$T2")
 "$TD" claim "$T2" >/dev/null 2>&1
@@ -205,12 +204,19 @@ git clone -q "$ROOT/origin.git" "$ROOT/completer" 2>/dev/null
 cd "$ROOT/completer"
 git checkout -q master
 echo "work for $T2" > work.txt; git add work.txt; git commit -qm "do the work" >/dev/null
+BEFORE=$(git ls-remote origin refs/heads/master | awk '{print $1}')
 "$TD" complete "$T2" >/dev/null 2>&1
-if git show-ref --verify --quiet "$(meta_ref "$T2_FULL")" \
-   || [ "$(git ls-remote origin "$(meta_ref "$T2_FULL")" | wc -l)" -ne 0 ]; then
-  bad "11: complete left a blocked-meta ref (local or origin)"
+if [ "$(git ls-remote origin "$(meta_ref "$T2_FULL")" | wc -l)" -eq 1 ]; then
+  ok "11: local completion leaves blocked-meta projection unchanged"
 else
-  ok "11: complete cleared the blocked-meta ref (local + origin)"
+  bad "11: local completion deleted blocked-meta before publication"
+fi
+git push -q origin HEAD:master
+"$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
+if [ "$(git ls-remote origin "$(meta_ref "$T2_FULL")" | wc -l)" -eq 0 ]; then
+  ok "11: convergence cleared blocked-meta after durable completion"
+else
+  bad "11: convergence left blocked-meta ref"
 fi
 cd "$ROOT/wc"
 

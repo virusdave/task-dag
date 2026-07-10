@@ -109,26 +109,26 @@ guard me h upstream <<<"refs/heads/master $L1 refs/heads/master $BASE"
 TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T1" >/dev/null 2>&1
 CM=$(git rev-parse HEAD)   # completion merge
 guard me h origin <<<"refs/heads/master $CM refs/heads/master $BASE"
-[ $? -eq 0 ] && ok "ALLOW: tip is a completion merge (active ref cleaned)" \
+[ $? -eq 0 ] && ok "ALLOW: tip is a completion merge (active ref still live)" \
              || bad "wrongly blocked a properly-completed push"
 git push -q origin HEAD:master 2>/dev/null
 BASE=$(git rev-parse HEAD)
 
-# ── ALLOW: --no-cleanup leaves an active ref, but tip resolved in history
-T2=$(mk_task "t2 nocleanup")
+# ── ALLOW: completion leaves an active ref, but tip resolves it in history
+T2=$(mk_task "t2 local cleanup")
 TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$T2" >/dev/null 2>&1
 echo work2 > impl2.txt; git add impl2.txt; git commit -qm "Implement thing two"
-TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T2" --no-cleanup >/dev/null 2>&1
+TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T2" >/dev/null 2>&1
 CM2=$(git rev-parse HEAD)
-# active ref should still be present locally (proves the guard doesn't rely on it)
+# active ref remains present until server reconciliation
 if git show-ref --verify --quiet "refs/heads/tasks/active/$T2"; then
-  ok "setup: --no-cleanup left the active ref present"
+  ok "setup: local completion left the active ref present"
 else
-  bad "setup: expected active ref to linger after --no-cleanup"
+  bad "setup: expected active ref to linger until reconciliation"
 fi
 guard me h origin <<<"refs/heads/master $CM2 refs/heads/master $BASE"
-[ $? -eq 0 ] && ok "ALLOW: --no-cleanup active ref, tip is completion merge" \
-             || bad "wrongly blocked a --no-cleanup completion push"
+[ $? -eq 0 ] && ok "ALLOW: live active ref, tip is completion merge" \
+             || bad "wrongly blocked a local completion push"
 # and a later PLAIN commit stacked on top still passes (task already linked)
 echo more2 > more2.txt; git add more2.txt; git commit -qm "Add more thing two"
 L2b=$(git rev-parse HEAD)

@@ -71,6 +71,7 @@ complete_regular_leaf() {
   echo "work $file" > "$file"; git add "$file"; git commit -qm "impl $file"
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=myhost TASK_DAG_CLAIMER_PID=$$ \
     "$TD" complete "$short" >/dev/null 2>&1
+  git push -q origin HEAD:master
 }
 
 complete_ops_leaf() {
@@ -80,6 +81,7 @@ complete_ops_leaf() {
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=myhost TASK_DAG_CLAIMER_PID=$$ \
     "$TD" complete-ops "$short" --evidence https://example.test/evidence \
       --authorization "fixture authorization" --yes >/dev/null 2>&1
+  git push -q origin HEAD:master
   git fetch -q origin master
   git reset --hard -q origin/master
 }

@@ -111,8 +111,10 @@ the safety canon (no `--force`/reset of published refs). The task itself is
 still linked in the DAG (the link commit carries the task as a non-primary
 parent), so completion detection stays a parent-edge query; only the
 *impl-commit provenance* is message-borne, and only because the DAG cannot
-carry it after the fact. This exception is admin-recovery only and pages
-the operator on every use.
+carry it after the fact. This exception is admin-recovery only. It creates the
+link locally and pages the operator once, explicitly saying the link is not
+authoritative until the caller runs `git push origin HEAD:master`; an
+idempotent rerun does not page.
 
 ### The no-implementation sanctioned path: `complete-ops`
 
@@ -129,6 +131,17 @@ audited with mandatory `Ops-*` trailers (`Ops-Evidence:`, `Ops-Authorization:`,
 who/host/time). Those trailers distinguish a sanctioned no-code operations
 completion from `drop`/irrelevant work, but readers must not use them as the
 authoritative done fact.
+
+### Completion publication and projection ownership
+
+Every completion command creates only a local candidate on `HEAD`. It never
+pushes `master`, removes scheduling refs, or posts a completion status comment.
+The caller publishes the candidate with exactly `git push origin HEAD:master`.
+Only then is completion parentage authoritative. Server-side `graph-converge`
+derives and lease-cleans `frontier`, `active`, `blocked`, and `blocked-meta`
+projections from durable master. A crash or rejected push therefore leaves work
+dispatchable and recoverable; a convergence failure leaves conservative stale
+refs that scheduled reconciliation can repair.
 
 ## Commit-message guard (stop accidental hand-crafted task commits)
 

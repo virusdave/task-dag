@@ -101,11 +101,13 @@ echo "$MSG" | grep -q "^Retroactive: true$" && ok "happy: Retroactive: true trai
 echo "$MSG" | grep -q "^Task-Commit: $TASK1$" && ok "happy: Task-Commit trailer present" || bad "happy: missing Task-Commit trailer"
 echo "$MSG" | grep -q "^Status: completed$" && ok "happy: Status: completed trailer present" || bad "happy: missing Status trailer"
 
-# frontier ref must be gone on origin
-if [ "$(git ls-remote origin "refs/heads/tasks/frontier/$T1" | wc -l)" -eq 0 ]; then ok "happy: frontier ref cleaned on origin"; else bad "happy: frontier ref lingered"; fi
-grep -q "^$TASK1 " "$ROOT/origin.git/completion-order.log" \
-  && ok "happy: historical link reached master before ref deletion" \
-  || bad "happy: completion-order hook did not observe historical cleanup"
+# command is local-only: origin and scheduling refs are unchanged
+if [ "$(git ls-remote origin "refs/heads/tasks/frontier/$T1" | wc -l)" -eq 1 ] \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$OLD_TIP" ]; then
+  ok "happy: origin/master and frontier ref remain unchanged"
+else
+  bad "happy: complete-historical mutated origin"
+fi
 
 # LOUD banner on stderr
 if echo "$err" | grep -qi "ONLY" && echo "$err" | grep -qi "missed" && echo "$err" | grep -qi "normal workflow"; then
@@ -133,7 +135,7 @@ git push -q origin HEAD:master
 # ---------------------------------------------------------------------------
 P0=$(page_count)
 out=$("$TD" complete-historical "$T1" --commit="$HSHA" 2>"$ROOT/err2"); rc=$?
-if [ $rc -eq 0 ] && grep -qi "already linked" "$ROOT/err2"; then ok "idempotent: rc=0 + 'already linked'"; else bad "idempotent: rc=$rc err=$(cat "$ROOT/err2")"; fi
+if [ $rc -eq 0 ] && grep -qi "already has a local completion" "$ROOT/err2"; then ok "idempotent: rc=0 + local completion message"; else bad "idempotent: rc=$rc err=$(cat "$ROOT/err2")"; fi
 if [ "$(page_count)" -eq "$P0" ]; then ok "idempotent: no extra page sent"; else bad "idempotent: extra page sent"; fi
 
 # ---------------------------------------------------------------------------
@@ -174,8 +176,9 @@ if [ $rc -eq 2 ] && echo "$out" | grep -qi "claimed by alice"; then ok "claim: f
 if git ls-remote --exit-code origin "refs/heads/tasks/active/$T6" >/dev/null 2>&1; then ok "claim: alice's active claim left intact"; else bad "claim: alice's claim was deleted"; fi
 out=$(TASK_DAG_CLAIMER=bob TASK_DAG_CLAIMER_HOST=hostB "$TD" complete-historical "$T6" --commit="$HSHA" --force 2>"$ROOT/err6"); rc=$?
 if [ $rc -eq 0 ]; then ok "claim: --force overrides foreign claim (rc=0)"; else bad "claim: --force rc=$rc: $(cat "$ROOT/err6")"; fi
-if [ "$(git ls-remote origin "refs/heads/tasks/active/$T6" | wc -l)" -eq 0 ]; then ok "claim: --force cleaned the active claim"; else bad "claim: active ref lingered after force"; fi
 git push -q origin HEAD:master
+"$TD" graph-converge --range "$OLD_TIP..HEAD" >/dev/null 2>&1
+if [ "$(git ls-remote origin "refs/heads/tasks/active/$T6" | wc -l)" -eq 0 ]; then ok "claim: convergence cleaned the forced active claim"; else bad "claim: active ref lingered after convergence"; fi
 
 # ---------------------------------------------------------------------------
 # TEST 7: a no-tree-change (empty) historical commit is refused
@@ -216,7 +219,7 @@ if [ $rc -eq 2 ] && echo "$out" | grep -qi "AHEAD of origin/master"; then ok "au
 if [ "$(page_count)" -eq "$P0" ]; then ok "authority: HEAD-ahead refusal sent no page"; else bad "authority: HEAD-ahead unexpectedly paged"; fi
 
 # ---------------------------------------------------------------------------
-# TEST 10: a final historical leaf publishes its local epic-close before cleanup
+# TEST 10: a final historical leaf prepares its epic close locally for explicit push
 # ---------------------------------------------------------------------------
 git init -q --bare "$ROOT/origin-close.git"
 git clone -q "$ROOT/origin-close.git" "$ROOT/wc-close"
@@ -242,10 +245,18 @@ CLOSE_HIST=$(git rev-parse HEAD)
 git push -q origin HEAD:master
 out=$("$TD" complete-historical "$CLOSE_LEAF" --commit="$CLOSE_HIST" 2>&1); rc=$?
 git fetch -q origin master
-if [ $rc -eq 0 ] && git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$'; then
-  ok "historical final leaf publishes the Closes-Epic commit before returning"
+if [ $rc -eq 0 ] && git log HEAD --format='%B' | grep -q '^Closes-Epic: #5252$' \
+   && ! git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$' \
+   && echo "$out" | grep -q '^git push origin HEAD:master$'; then
+  ok "historical final leaf prepares Closes-Epic locally and prints explicit push"
 else
-  bad "historical final leaf did not publish close merge (rc=$rc out=$out)"
+  bad "historical final leaf violated local publication contract (rc=$rc out=$out)"
+fi
+git push -q origin HEAD:master
+if git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$'; then
+  ok "explicit push publishes the prepared historical close"
+else
+  bad "explicit push did not publish historical close"
 fi
 
 echo "-----"

@@ -275,8 +275,6 @@ Mailbox-Message-Id: ${mid}"
     git fetch --quiet --no-tags origin '+refs/heads/master:refs/remotes/origin/master' 2>/dev/null || true
     git update-ref refs/heads/master "$new_commit" 2>/dev/null || true
     TASKDAG_FACTS_TIP_OID="" # invalidate facts cache after master moved
-    cleanup_completed_task_refs "$task" "$short" "" "$new_commit" false >&2 || rc=$?
-    [ "$rc" -eq 0 ] || return "$rc"
     printf "${GREEN}✓ Synth-completed superseded task %s${RESET}\n" "$short" >&2
     printf '%s\n' "$new_commit"
 }

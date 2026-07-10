@@ -206,11 +206,26 @@ deps_satisfied_at_commit() {
 # message only for audit/idempotency notes.
 completion_merge_for_task_at_commit() {
     local tip="$1" task_sha="$2"
-    git rev-list "$tip" --parents 2>/dev/null |
-        awk -v sha="$task_sha" '
-            { for (i = 2; i <= NF; i++) if ($i == sha && first == "") first = $1 }
-            END { if (first != "") print first }
-        '
+    local commit first parent commit_tree first_tree
+    while read -r commit first parent; do
+        [ -n "$commit" ] && [ -n "$first" ] && [ -n "$parent" ] || continue
+        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
+        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
+        [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ] || continue
+        for parent in $parent; do
+            if [ "$parent" = "$task_sha" ]; then
+                printf '%s\n' "$commit"
+                return 0
+            fi
+        done
+    done < <(git rev-list --first-parent --parents "$tip" 2>/dev/null)
+    return 1
+}
+
+print_completion_push_instruction() {
+    echo "Completion prepared locally; origin/master and task scheduling refs are unchanged."
+    echo "Run exactly:"
+    echo "git push origin HEAD:master"
 }
 
 # Helper: is <sha> a task commit? Every task commit (epic/task/leaf, and
@@ -1142,7 +1157,7 @@ All child tasks of this epic have completed.
 Closes-Epic: #${issue}"
     close_sha=$(git commit-tree "$head_tree" -p "$head_sha" -p "$root_sha" -m "$close_msg") || return 0
     git update-ref -m 'task-dag: local epic close commit' HEAD "$close_sha" "$head_sha" || return 0
-    printf "${GREEN}🎉 Epic #%s complete — appended Closes-Epic commit %s. Push HEAD:master to close the issue.${RESET}\n" \
+    printf "${GREEN}🎉 Epic #%s complete — appended local Closes-Epic commit %s.${RESET}\n" \
         "$issue" "$(git rev-parse --short "$close_sha")"
 }
 
@@ -4402,135 +4417,10 @@ verify_task_claim_ownership() {
     return 0
 }
 
-# Helper: CAS-clean a completed task's remote refs (frontier/active/
-# blocked/blocked-meta). Extracted from cmd_complete so BOTH `complete`
-# and `complete-historical` clean dispatch state identically. Every remote
-# delete is leased to the EXACT sha we verified, so a concurrent worker's
-# fresh claim/task can never be clobbered. Any lease mismatch (the remote
-# changed under us) is FATAL: the completion/link commit is already local,
-# but we must not leave the DAG in a state that can dispatch duplicate
-# work, so we stop (return 3) and let the caller resolve it before pushing.
-#   $1 = task_sha (full)   $2 = short_sha   $3 = verified_active_sha
-#   $4 = completion/link commit (for messages)   $5 = no_cleanup (true|false)
-# Sets the global TASK_DAG_COMPLETED_WAS_BLOCKED=true iff it cleared a
-# blocked overlay (so the caller can refresh the operator #29 dashboard).
-# Returns 0 on success, 3 on a fatal lease/race conflict.
-TASK_DAG_COMPLETED_WAS_BLOCKED=false
-cleanup_completed_task_refs() {
-    local task_sha="$1" short_sha="$2" verified_active_sha="$3" new_commit="$4" no_cleanup="$5"
-    TASK_DAG_COMPLETED_WAS_BLOCKED=false
-    [ "$no_cleanup" = false ] || return 0
-
-    local frontier_ref="refs/heads/tasks/frontier/$short_sha"
-    local active_ref="refs/heads/tasks/active/$short_sha"
-    local blocked_ref meta_ref
-    blocked_ref=$(blocked_ref_for "$task_sha")
-    meta_ref=$(blocked_meta_ref_for "$task_sha")
-
-    # Delete local refs (purely local bookkeeping; harmless if absent).
-    git update-ref -d "$frontier_ref" 2>/dev/null && echo "Deleted local $frontier_ref" || true
-    git update-ref -d "$active_ref" 2>/dev/null && echo "Deleted local $active_ref" || true
-    git update-ref -d "$blocked_ref" 2>/dev/null && echo "Deleted local $blocked_ref" || true
-    git update-ref -d "$meta_ref" 2>/dev/null && echo "Deleted local $meta_ref" || true
-
-    # ── CAS-clean remote refs ──────────────────────────────────────
-    local lease_args=() refspecs=()
-
-    # Active: delete only the claim authorised by the ownership guard,
-    # and only if it is still exactly that claim right now. Tri-state read:
-    # an indeterminate origin read is FATAL (return 3) — we must not report
-    # "cleaned" when we could not confirm the remote state.
-    local active_now="" active_rc=0
-    active_now=$(remote_ref_sha_checked "$active_ref") || active_rc=$?
-    if [ "$active_rc" = 3 ]; then
-        echo "Error: cannot read $active_ref on origin (indeterminate); not cleaning refs." >&2
-        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
-        return 3
-    fi
-    if [ -n "$verified_active_sha" ]; then
-        if [ "$active_now" != "$verified_active_sha" ]; then
-            echo "Error: active claim for $short_sha changed during completion (authorised $verified_active_sha, now ${active_now:-<gone>}). Not cleaning refs." >&2
-            echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
-            return 3
-        fi
-        lease_args+=("--force-with-lease=$active_ref:$verified_active_sha")
-        refspecs+=(":$active_ref")
-    elif [ -n "$active_now" ]; then
-        # No claim at guard time, but one exists now → claimed mid-flight.
-        echo "Error: a new active claim ($active_now) appeared for $short_sha during completion. Not cleaning refs." >&2
-        echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
-        return 3
-    fi
-
-    # Frontier: delete only if it still points at THIS task commit.
-    local frontier_now="" frontier_rc=0
-    frontier_now=$(remote_ref_sha_checked "$frontier_ref") || frontier_rc=$?
-    if [ "$frontier_rc" = 3 ]; then
-        echo "Error: cannot read $frontier_ref on origin (indeterminate); not cleaning refs." >&2
-        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
-        return 3
-    fi
-    if [ -n "$frontier_now" ]; then
-        if [ "$frontier_now" != "$task_sha" ]; then
-            echo "Error: tasks/frontier/$short_sha points at $frontier_now, not task $task_sha (possible short-SHA collision). Not deleting." >&2
-            return 3
-        fi
-        lease_args+=("--force-with-lease=$frontier_ref:$frontier_now")
-        refspecs+=(":$frontier_ref")
-    fi
-
-    # Blocked (full-SHA overlay ref): delete only if present at the task.
-    local blocked_now="" blocked_rc=0
-    blocked_now=$(remote_ref_sha_checked "$blocked_ref") || blocked_rc=$?
-    if [ "$blocked_rc" = 3 ]; then
-        echo "Error: cannot read $blocked_ref on origin (indeterminate); not cleaning refs." >&2
-        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
-        return 3
-    fi
-    if [ -n "$blocked_now" ]; then
-        if [ "$blocked_now" != "$task_sha" ]; then
-            echo "Error: $blocked_ref points at $blocked_now, not task $task_sha. Not deleting." >&2
-            return 3
-        fi
-        lease_args+=("--force-with-lease=$blocked_ref:$blocked_now")
-        refspecs+=(":$blocked_ref")
-        TASK_DAG_COMPLETED_WAS_BLOCKED=true
-    fi
-
-    # Blocked-meta (full-SHA side ref): a side-commit, not the task
-    # commit, so we lease to whatever it currently points at and just
-    # require it to be present. Completing a task clears its "why
-    # parked" metadata in lockstep with the overlay ref above.
-    local meta_now="" meta_rc=0
-    meta_now=$(remote_ref_sha_checked "$meta_ref") || meta_rc=$?
-    if [ "$meta_rc" = 3 ]; then
-        echo "Error: cannot read $meta_ref on origin (indeterminate); not cleaning refs." >&2
-        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
-        return 3
-    fi
-    if [ -n "$meta_now" ]; then
-        lease_args+=("--force-with-lease=$meta_ref:$meta_now")
-        refspecs+=(":$meta_ref")
-    fi
-
-    if [ "${#refspecs[@]}" -gt 0 ]; then
-        if git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" >/dev/null 2>&1; then
-            echo "Cleaned remote task refs for $short_sha"
-        else
-            echo "Error: failed to CAS-clean remote task refs for $short_sha (a lease failed — remote changed under us)." >&2
-            echo "Completion commit is local ($new_commit); do NOT push until the task refs are resolved." >&2
-            return 3
-        fi
-    fi
-    return 0
-}
-
 # Reconcile stale scheduling refs from the only durable completion authority:
 # canonical completion parentage on origin/master's first-parent spine. This is
-# deliberately separate from cleanup_completed_task_refs(): live completion
-# must protect claim ownership, while this backstop repairs projection state
-# only after master already proves the task done (including an active claim
-# created after that fact landed).
+# where server reconciliation owns cleanup after durable master completion,
+# including an active claim created after that fact landed.
 #
 # The strict fetch is one atomic local snapshot of master plus all scheduling
 # namespaces. Exact observed ref names/OIDs become the cleanup leases; never
@@ -4758,43 +4648,22 @@ Related: $issue_url"
     printf '%s' "$m"
 }
 
-# Publish the local completion tip before deleting any remote scheduling refs.
-# The durable completion fact is master parentage; frontier/active/blocked refs
-# are only the dispatch surface. If a worker dies after ref cleanup but before
-# its later manual `git push origin HEAD:master`, downstream tasks can be
-# permanently hidden behind a dependency that is neither completed nor
-# claimable. Therefore normal cleanup first proves the completion tip is on
-# origin/master. A non-fast-forward/race is safe: keep the scheduling refs live
-# and ask the worker to sync/retry rather than losing the task.
-publish_head_to_master_before_cleanup() {
-    local commit_sha="$1" short_sha="$2"
-    if git push origin "$commit_sha:refs/heads/master" >/dev/null 2>&1; then
-        echo "Published completion tip $(git rev-parse --short "$commit_sha") to origin/master before task-ref cleanup"
-        return 0
-    fi
-    echo "Error: could not publish completion tip $(git rev-parse --short "$commit_sha") to origin/master before cleaning refs for $short_sha." >&2
-    echo "Task scheduling refs were left intact; fetch/rebase, rerun complete, and do not delete refs manually." >&2
-    return 3
-}
-
 # Command: complete - mark task as complete
 cmd_complete() {
     local task_sha=""
     local commit_sha=""
     local leaves_spec=""
-    local no_cleanup=false
     local do_force=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --commit=*) commit_sha="${1#*=}"; shift ;;
             --leaves=*) leaves_spec="${1#*=}"; shift ;;
-            --no-cleanup) no_cleanup=true; shift ;;
             --force) do_force=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag complete <task-sha> [--commit=SHA] [--no-cleanup] [--force]
-       task-dag complete --leaves=<leaf>:<impl>[,<leaf>:<impl>...] [--no-cleanup] [--force]
+Usage: task-dag complete <task-sha> [--commit=SHA] [--force]
+       task-dag complete --leaves=<leaf>:<impl>[,<leaf>:<impl>...] [--force]
 
 Mark a task (or several stacked sibling leaves) complete by creating a
 completion merge whose FIRST parent is the leaf's implementation commit and
@@ -4822,17 +4691,15 @@ Batch form (--leaves): complete several sibling leaves implemented as a
   the subsequent 'git push origin HEAD:master' is still a fast-forward.
 
 Options:
-  --no-cleanup     Don't delete frontier/active refs
   --force          Complete even if a task's active claim is held by
                    another worker (use only if that claim is known dead).
 
 Safety: 'complete' advances HEAD with 'git update-ref' CAS (never
 'git reset --hard'), so uncommitted work is preserved; the batch form only
 rewrites commits proven unpushed against a freshly-fetched origin/master;
-it refuses to complete a task another live worker has claimed; and it
-publishes the completion tip to origin/master before it removes remote task
-refs with --force-with-lease, so it can never clobber a concurrent worker's
-claim or hide an unpublished completion behind deleted scheduling refs.
+and it refuses to complete a task another live worker has claimed. It changes
+only local HEAD. Publish with exactly 'git push origin HEAD:master'; the
+server-side reconciler removes scheduling refs after master proves completion.
 EOF
                 return 0
                 ;;
@@ -4855,7 +4722,7 @@ EOF
             echo "       Use EITHER 'complete <sha> [--commit=..]' OR 'complete --leaves=l:i,l:i'." >&2
             return 1
         fi
-        cmd_complete_batch "$leaves_spec" "$no_cleanup" "$do_force"
+        cmd_complete_batch "$leaves_spec" "$do_force"
         return $?
     fi
     
@@ -4865,6 +4732,23 @@ EOF
     fi
     
     task_sha=$(resolve_sha "$task_sha") || return 1
+    local short_sha existing_completion
+    short_sha=$(git rev-parse --short "$task_sha")
+    existing_completion=$(completion_merge_for_task_at_commit HEAD "$task_sha" 2>/dev/null || true)
+    if [ -n "$existing_completion" ]; then
+        echo "Task $short_sha already has a local completion at ${existing_completion:0:12}; no new commit created."
+        print_completion_push_instruction
+        return 0
+    fi
+    if git fetch --quiet --no-tags origin \
+            '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1; then
+        existing_completion=$(completion_merge_for_task_at_commit origin/master "$task_sha" 2>/dev/null || true)
+        if [ -n "$existing_completion" ]; then
+            echo "Task $short_sha is already completed on origin/master at ${existing_completion:0:12}; no new commit created."
+            print_completion_push_instruction
+            return 0
+        fi
+    fi
 
     # ── root-completion guard (issue #2) ─────────────────────────────
     # A decomposed epic root must NOT be completed as if it were an
@@ -4923,9 +4807,6 @@ EOF
         echo "Error: --commit cannot be the task commit itself; complete against your implementation commit." >&2
         return 1
     fi
-
-    local short_sha
-    short_sha=$(git rev-parse --short "$task_sha")
 
     # ── Ownership guard (do not complete a task another worker holds) ──
     # Honour the cross-host active-claim mutex (shared with
@@ -5050,14 +4931,6 @@ EOF
         return 1
     fi
 
-    # Task metadata (issue_num/issue_url are reused by the completion-comment
-    # post below; task_title by both the comment and the success line).
-    local task_msg issue_num issue_url task_title
-    task_msg=$(parse_commit_metadata "$task_sha")
-    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
-    issue_url=$(extract_field "$task_msg" "URL")
-    task_title=$(get_task_title "$task_sha")
-
     # Build the completion merge message (Task-Commit/Issue/URL/Status/
     # Related trailers), then create the merge: first parent == impl base,
     # second parent == task commit. Tree == base tree (an empty merge).
@@ -5085,49 +4958,13 @@ EOF
     # GITHUB_TOKEN that worker agents don't carry, so it almost never
     # fired. Instead, maybe_emit_local_epic_close appends the canonical
     # additive Closes-Epic commit to local HEAD for a purely-local,
-    # fully-complete epic; publishing before cleanup below lets the server
-    # workflow close the issue and clean the refs. Epics with cross-repo
+    # fully-complete epic; the caller's explicit push lets the server workflow
+    # close the issue and clean the refs. Epics with cross-repo
     # delegated children still close via `close-epic`.
     maybe_emit_local_epic_close "$task_sha"
 
-    if [ "$no_cleanup" = false ]; then
-        publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "$short_sha" || return $?
-    fi
-    
-    # Clean up dispatch refs (frontier/active/blocked/blocked-meta) with
-    # the same CAS discipline used by complete-historical. Sets
-    # TASK_DAG_COMPLETED_WAS_BLOCKED iff it cleared a block.
-    cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "$new_commit" "$no_cleanup" || return $?
-
     printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "$task_sha")"
-
-    # If this completion cleared a block, refresh the operator #29 dashboard.
-    if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
-        emit_operator_blocked_dispatch complete "$short_sha"
-    fi
-
-    # Post progress update to GitHub issue (best-effort; token resolved via
-    # _post_issue_comment = GITHUB_TOKEN/GH_TOKEN/`gh auth token`). A failed
-    # post must NEVER fail `complete`: the completion commit/ref work already
-    # happened, so failing here would leave agents re-running complete. Gate on
-    # a real GitHub origin so fixture tests (local bare-repo origin) stay
-    # hermetic — the same seam the #29 dashboard dispatch uses.
-    if [ -n "$issue_num" ] && [ -n "$issue_url" ] && _is_real_github_origin; then
-        local repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
-        local short_task_sha=$(git rev-parse --short "$task_sha")
-        # Marker on physical line 1; REAL newlines (jq-encoded downstream).
-        local comment_body
-        comment_body=$(printf '%s\n%s\n\n%s\n%s' \
-            "<!-- task-dag:status -->" \
-            "✅ Task **${task_title}** completed!" \
-            "Task SHA: \`${short_task_sha}\`" \
-            "Completion commit: \`$(git rev-parse --short "$new_commit")\`")
-        if _post_issue_comment "$repo" "$issue_num" "$comment_body" >/dev/null; then
-            printf "${GREEN}✓ Posted completion update to issue #$issue_num${RESET}\n"
-        else
-            printf "${YELLOW}⚠ Could not post completion comment to issue #$issue_num (continuing; completion itself succeeded)${RESET}\n" >&2
-        fi
-    fi
+    print_completion_push_instruction
 
     return 0
 }
@@ -5160,36 +4997,6 @@ recommit_onto() {
         git commit-tree "$c^{tree}" -p "$parent" -F <(git show -s --format=%B "$c")
 }
 
-# Helper: post the best-effort GitHub "task completed" status comment for a
-# leaf (same body/marker as single `complete`). Gated on a real GitHub
-# origin so fixture tests stay hermetic. Never fails the caller.
-#   $1 = task_sha (full)   $2 = completion commit sha (for the message)
-post_completion_comment() {
-    local task_sha="$1" completion_sha="$2"
-    local task_msg issue_num issue_url task_title
-    task_msg=$(parse_commit_metadata "$task_sha")
-    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
-    issue_url=$(extract_field "$task_msg" "URL")
-    task_title=$(get_task_title "$task_sha")
-    if [ -z "$issue_num" ] || [ -z "$issue_url" ] || ! _is_real_github_origin; then
-        return 0
-    fi
-    local repo short_task_sha comment_body
-    repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
-    short_task_sha=$(git rev-parse --short "$task_sha")
-    comment_body=$(printf '%s\n%s\n\n%s\n%s' \
-        "<!-- task-dag:status -->" \
-        "✅ Task **${task_title}** completed!" \
-        "Task SHA: \`${short_task_sha}\`" \
-        "Completion commit: \`$(git rev-parse --short "$completion_sha")\`")
-    if _post_issue_comment "$repo" "$issue_num" "$comment_body" >/dev/null; then
-        printf "${GREEN}✓ Posted completion update to issue #$issue_num${RESET}\n"
-    else
-        printf "${YELLOW}⚠ Could not post completion comment to issue #$issue_num (continuing; completion itself succeeded)${RESET}\n" >&2
-    fi
-    return 0
-}
-
 validate_ops_trailer_value() {
     local label="$1" value="$2"
     if [ -z "$value" ]; then
@@ -5209,41 +5016,13 @@ validate_ops_trailer_value() {
     return 0
 }
 
-post_ops_completion_comment() {
-    local task_sha="$1" completion_sha="$2" evidence="$3" authorization="$4"
-    local task_msg issue_num issue_url task_title
-    task_msg=$(parse_commit_metadata "$task_sha")
-    issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
-    issue_url=$(extract_field "$task_msg" "URL")
-    task_title=$(get_task_title "$task_sha")
-    if [ -z "$issue_num" ] || [ -z "$issue_url" ] || ! _is_real_github_origin; then
-        return 0
-    fi
-    local repo short_task_sha comment_body
-    repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
-    short_task_sha=$(git rev-parse --short "$task_sha")
-    comment_body=$(printf '%s\n%s\n\n%s\n%s\n%s\n%s' \
-        "<!-- task-dag:status -->" \
-        "✅ Ops-only task **${task_title}** completed without an implementation commit." \
-        "Task SHA: \`${short_task_sha}\`" \
-        "Completion commit: \`$(git rev-parse --short "$completion_sha")\`" \
-        "Evidence: ${evidence}" \
-        "Authorization: ${authorization}")
-    if _post_issue_comment "$repo" "$issue_num" "$comment_body" >/dev/null; then
-        printf "${GREEN}✓ Posted ops-completion update to issue #$issue_num${RESET}\n"
-    else
-        printf "${YELLOW}⚠ Could not post ops-completion comment to issue #$issue_num (continuing; completion itself succeeded)${RESET}\n" >&2
-    fi
-    return 0
-}
-
 # Command: complete-ops - mark an operations-only leaf complete without an
 # implementation commit. This is deliberately separate from `complete`: normal
 # task completion still requires a real implementation commit. The durable done
 # fact remains git parentage (the task commit is a non-primary parent of a
 # master merge); the Ops-* trailers are audit metadata only.
 cmd_complete_ops() {
-    local task_sha="" evidence="" authorization="" reason="" no_cleanup=false do_force=false assume_yes=false
+    local task_sha="" evidence="" authorization="" reason="" do_force=false assume_yes=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -5254,13 +5033,12 @@ cmd_complete_ops() {
             --reason) reason="$2"; shift 2 ;;
             --reason=*) reason="${1#*=}"; shift ;;
             --yes|-y) assume_yes=true; shift ;;
-            --no-cleanup) no_cleanup=true; shift ;;
             --force) do_force=true; shift ;;
             --help|-h)
                 cat <<'EOF'
 Usage: task-dag complete-ops <task-sha> --evidence <https-url> \
                              --authorization <text-or-url> --yes
-                             [--reason "..."] [--no-cleanup] [--force]
+                             [--reason "..."] [--force]
 
 Complete an operations-only LEAF whose real work happened out of band and has
 no honest implementation commit to link. This command does NOT relax normal
@@ -5277,10 +5055,10 @@ irrelevant work.
 
 Guards fail closed: requires explicit --evidence https://... and
 --authorization, refuses pending roots / epic tasks / decomposed nodes, checks
-dependencies, enforces active-claim ownership (unless --force), and publishes
-the completion to origin/master before cleaning frontier/active/blocked refs.
-Blocked leaves are allowed; completing them clears their blocked overlays after
-the master publish succeeds.
+dependencies, and enforces active-claim ownership (unless --force). The command
+changes only local HEAD. Publish with exactly 'git push origin HEAD:master'; the
+server-side reconciler then removes frontier/active/blocked refs. Blocked leaves
+are allowed and remain blocked until that durable-master reconciliation.
 EOF
                 return 0
                 ;;
@@ -5370,29 +5148,33 @@ EOF
         return 2
     fi
 
-    # Idempotency is parentage-first and works even when the caller's local
-    # HEAD has not yet caught up to the already-pushed completion. It must run
-    # AFTER the structural guards above: completed child task commits make their
-    # structural parents reachable as parent tokens too, and those parents must
-    # still be refused rather than mistaken for completable leaves.
-    local verified_active_sha
-    verified_active_sha=$(verify_task_claim_ownership "$task_sha" "$short_sha" "$do_force") || return $?
-    if task_is_completed_at_commit "$origin_master" "$task_sha"; then
-        local existing
-        existing=$(completion_merge_for_task_at_commit "$origin_master" "$task_sha")
-        if [ -n "$existing" ] && ! git log -1 --format='%B' "$existing" \
+    # A strict first-parent completion witness is an idempotent local recovery
+    # token. Check it before claim ownership so a replacement claim cannot make
+    # an already-prepared local completion fail.
+    local local_existing
+    local_existing=$(completion_merge_for_task_at_commit HEAD "$task_sha" 2>/dev/null || true)
+    if [ -n "$local_existing" ]; then
+        echo "Task $short_sha already has a local completion at ${local_existing:0:12}; no new commit created."
+        print_completion_push_instruction
+        return 0
+    fi
+
+    local existing
+    existing=$(completion_merge_for_task_at_commit "$origin_master" "$task_sha" 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+        if ! git log -1 --format='%B' "$existing" \
             | git interpret-trailers --parse 2>/dev/null \
             | grep -qE '^Ops-Completion:[[:space:]]*true$'; then
             echo "Task $short_sha is already completed on origin/master by a non-ops completion (${existing:0:12}); not minting another completion."
         else
-            echo "Task $short_sha already has an ops completion on origin/master; cleaning stale refs only."
+            echo "Task $short_sha already has an ops completion on origin/master; no new commit created."
         fi
-        cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "${existing:-$origin_master}" "$no_cleanup" || return $?
-        if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
-            emit_operator_blocked_dispatch complete "$short_sha"
-        fi
+        print_completion_push_instruction
         return 0
     fi
+
+    local verified_active_sha
+    verified_active_sha=$(verify_task_claim_ownership "$task_sha" "$short_sha" "$do_force") || return $?
 
     if [ "$current_head" != "$origin_master" ]; then
         echo "Error: HEAD must equal freshly-fetched origin/master for complete-ops." >&2
@@ -5456,16 +5238,8 @@ EOF
 
     maybe_emit_local_epic_close "$task_sha"
 
-    if [ "$no_cleanup" = false ]; then
-        publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "$short_sha" || return $?
-    fi
-
-    cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "$new_commit" "$no_cleanup" || return $?
     printf "${GREEN}✓ Ops task completed: %s${RESET}\n" "$task_title"
-    if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
-        emit_operator_blocked_dispatch complete "$short_sha"
-    fi
-    post_ops_completion_comment "$task_sha" "$new_commit" "$evidence" "$authorization"
+    print_completion_push_instruction
     return 0
 }
 
@@ -5482,9 +5256,9 @@ EOF
 # index are untouched, the old tip stays in the reflog + a backup ref, and
 # the later `git push origin HEAD:master` is still a fast-forward.
 #   $1 = leaves spec ("<leaf>:<impl>,<leaf>:<impl>,…")
-#   $2 = no_cleanup (true|false)   $3 = do_force (true|false)
+#   $2 = do_force (true|false)
 cmd_complete_batch() {
-    local spec="$1" no_cleanup="$2" do_force="$3"
+    local spec="$1" do_force="$2"
 
     # ── parse the spec into parallel arrays ──────────────────────────
     local -a leaves=() impls=()
@@ -5518,10 +5292,6 @@ cmd_complete_batch() {
     origin_master=$(git rev-parse --verify origin/master 2>/dev/null) || {
         echo "Error: origin/master not resolvable; refusing batch graft." >&2; return 2; }
     old_head=$(git rev-parse --verify HEAD^{commit}) || return 1
-    if ! git merge-base --is-ancestor "$origin_master" "$old_head"; then
-        echo "Error: HEAD is not ahead of origin/master; rebase onto origin/master first." >&2
-        return 2
-    fi
 
     # ── resolve leaves + impls to full shas ──────────────────────────
     local -a task_shas=() impl_shas=() short_shas=()
@@ -5548,6 +5318,37 @@ cmd_complete_batch() {
             fi
         done
     done
+
+    # Strict local/durable completion witnesses make reruns no-op before claim
+    # checks or stale-HEAD guards. A partial batch remains fail-closed.
+    local local_done=0 durable_done=0
+    for (( i=0; i<n; i++ )); do
+        completion_merge_for_task_at_commit HEAD "${task_shas[i]}" >/dev/null 2>&1 \
+            && local_done=$((local_done+1))
+        completion_merge_for_task_at_commit "$origin_master" "${task_shas[i]}" >/dev/null 2>&1 \
+            && durable_done=$((durable_done+1))
+    done
+    if [ "$local_done" -eq "$n" ]; then
+        echo "All ${n} leaves already have local completions; no new commits created."
+        print_completion_push_instruction
+        return 0
+    elif [ "$local_done" -gt 0 ]; then
+        echo "Error: ${local_done}/${n} leaves already have local completions; refusing a partial batch." >&2
+        return 2
+    fi
+    if [ "$durable_done" -eq "$n" ]; then
+        echo "All ${n} leaves are already completed on origin/master; no new commits created."
+        print_completion_push_instruction
+        return 0
+    elif [ "$durable_done" -gt 0 ]; then
+        echo "Error: ${durable_done}/${n} leaves are already completed on origin/master; refusing a partial batch." >&2
+        return 2
+    fi
+
+    if ! git merge-base --is-ancestor "$origin_master" "$old_head"; then
+        echo "Error: HEAD is not ahead of origin/master; rebase onto origin/master first." >&2
+        return 2
+    fi
 
     # ── commit-subject style backstop for EVERY impl before mutation ──
     # Same canon rule as single-leaf complete (rules/WORKFLOW.md). Report
@@ -5583,33 +5384,6 @@ cmd_complete_batch() {
         va=$(verify_task_claim_ownership "${task_shas[i]}" "${short_shas[i]}" "$do_force") || return $?
         verified_active+=("$va")
     done
-
-    # ── idempotency gate: how many are already completed on HEAD? ─────
-    local done_count=0
-    for (( i=0; i<n; i++ )); do
-        if is_task_completed "${task_shas[i]}"; then done_count=$((done_count+1)); fi
-    done
-    if [ "$done_count" -eq "$n" ]; then
-        echo "All ${n} leaves already completed on HEAD; running ref cleanup only (idempotent rerun)."
-        for (( i=0; i<n; i++ )); do maybe_emit_local_epic_close "${task_shas[i]}"; done
-        if [ "$no_cleanup" = false ]; then
-            publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "batch" || return $?
-        fi
-        local rc=0
-        for (( i=0; i<n; i++ )); do
-            cleanup_completed_task_refs "${task_shas[i]}" "${short_shas[i]}" "${verified_active[i]}" "$old_head" "$no_cleanup" || rc=$?
-            if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
-                emit_operator_blocked_dispatch complete "${short_shas[i]}"
-            fi
-        done
-        [ "$rc" -eq 0 ] || return "$rc"
-        return 0
-    elif [ "$done_count" -gt 0 ]; then
-        echo "Error: ${done_count}/${n} of these leaves are already completed on HEAD (partial state)." >&2
-        echo "Refusing a partial batch. Re-run 'complete --leaves' with ONLY the not-yet-completed" >&2
-        echo "leaves (each against its impl), or resolve the state manually." >&2
-        return 2
-    fi
 
     # ── the replay range origin/master..HEAD must be LINEAR ──────────
     if [ -n "$(git rev-list --min-parents=2 "$origin_master..$old_head" 2>/dev/null)" ]; then
@@ -5732,29 +5506,10 @@ cmd_complete_batch() {
     printf "  Old tip %s saved at %s (also recoverable via 'git reflog').\n" "${old_head:0:12}" "$backup_ref"
 
     for (( i=0; i<n; i++ )); do maybe_emit_local_epic_close "${task_shas[i]}"; done
-    if [ "$no_cleanup" = false ]; then
-        publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "batch" || return $?
-    fi
-
-    # ── per-leaf ref cleanup (each CAS-leased to its own claim) ──────
-    local rc=0
     for (( i=0; i<n; i++ )); do
-        cleanup_completed_task_refs "${task_shas[i]}" "${short_shas[i]}" "${verified_active[i]}" "${merge_for[i]}" "$no_cleanup" || rc=$?
         printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "${task_shas[i]}")"
-        if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
-            emit_operator_blocked_dispatch complete "${short_shas[i]}"
-        fi
     done
-    if [ "$rc" -ne 0 ]; then
-        echo "Error: a task-ref cleanup hit a lease/race conflict; HEAD already has the completions." >&2
-        echo "Resolve the conflicting ref, then re-run the SAME 'complete --leaves' (idempotent)." >&2
-        return "$rc"
-    fi
-
-    # ── best-effort completion comments ──────────────────────────────
-    for (( i=0; i<n; i++ )); do
-        post_completion_comment "${task_shas[i]}" "${merge_for[i]}"
-    done
+    print_completion_push_instruction
     return 0
 }
 
@@ -5792,7 +5547,7 @@ page_retroactive_link() {
 
     local msg="RETROACTIVE ADMIN LINK (NOT normal task completion). Repo ${repo:-unknown}: historical commit ${hist_short} was linked after-the-fact to task ${short_sha} \"${task_title}\""
     [ -n "$issue_num" ] && msg="${msg} on issue #${issue_num}"
-    msg="${msg}. The link commit ${link_commit:0:12} was published to origin/master before task-ref cleanup. Historical commit: ${hist_link}."
+    msg="${msg}. The link commit ${link_commit:0:12} was created locally and is not yet authoritative or published; scheduling refs are unchanged. The caller was instructed to run git push origin HEAD:master. Historical commit: ${hist_link}."
     [ -n "$issue_url" ] && msg="${msg} Issue: ${issue_url}."
 
     # Flags BEFORE the message (ntfy stops parsing flags after the first
@@ -5841,8 +5596,9 @@ How it works:
   Creates an empty (no file change) link commit on top of CURRENT HEAD
   with the task as its 2nd parent (so the DAG marks the task done) and a
   Historical-Commit: <sha> trailer recording the real work. master history
-  is preserved; the link is published to origin/master before task refs are
-  cleaned so a recovery link cannot be stranded locally after ref deletion.
+  is preserved. The command changes only local HEAD; publish with exactly
+  'git push origin HEAD:master'. The server reconciler cleans task refs only
+  after the link is durable on master.
 
 Required:
   <task-sha>        the pending task to mark done
@@ -5856,7 +5612,8 @@ Guards: HEAD must be at origin/master; the historical commit must be a
 real (non-empty) commit that is an ancestor of origin/master; the task
 must not already be completed; an undecomposed epic root is refused.
 
-Every successful use pages the operator at priority 2 for audit.
+The first successful link creation pages the operator at priority 2 for audit;
+idempotent reruns do not page again.
 EOF
                 return 0 ;;
             *)
@@ -5952,6 +5709,23 @@ EOF
     local origin_master head_sha
     origin_master=$(git rev-parse FETCH_HEAD) || return 1
     head_sha=$(git rev-parse HEAD) || return 1
+
+    local local_existing
+    local_existing=$(completion_merge_for_task_at_commit HEAD "$task_sha" 2>/dev/null || true)
+    if [ -n "$local_existing" ]; then
+        echo "Task ${task_sha:0:12} already has a local completion at ${local_existing:0:12}; no new link created." >&2
+        print_completion_push_instruction
+        return 0
+    fi
+
+    local durable_existing
+    durable_existing=$(completion_merge_for_task_at_commit "$origin_master" "$task_sha" 2>/dev/null || true)
+    if [ -n "$durable_existing" ]; then
+        echo "Task ${task_sha:0:12} is already completed on origin/master at ${durable_existing:0:12}; no new link created." >&2
+        print_completion_push_instruction
+        return 0
+    fi
+
     if [ "$head_sha" != "$origin_master" ]; then
         if git merge-base --is-ancestor "$origin_master" "$head_sha" 2>/dev/null; then
             echo "Error: HEAD ($head_sha) is AHEAD of origin/master ($origin_master)." >&2
@@ -5967,12 +5741,6 @@ EOF
     if ! git merge-base --is-ancestor "$hist_sha" "$origin_master" 2>/dev/null; then
         echo "Error: --commit=$hist_sha is not an ancestor of origin/master; it is not landed historical work on master." >&2
         return 2
-    fi
-
-    # ── Idempotency: already linked/completed → nothing to do, no page. ──
-    if is_task_completed "$task_sha"; then
-        echo "Task ${task_sha:0:12} is already linked/completed on origin/master; nothing to do." >&2
-        return 0
     fi
 
     local short_sha
@@ -6024,19 +5792,9 @@ Related: $issue_url"
     # history and any dirty worktree; no master rewrite.
     advance_head_to_completion "$head_sha" "$new_commit" || return 1
 
-    # If this link finished a purely-local epic, append the Closes-Epic
-    # commit before publishing and before task-ref cleanup. No completion or
-    # close fact may remain local-only after scheduling refs are deleted.
+    # If this link finished a purely-local epic, append the local Closes-Epic
+    # commit so the explicit push publishes both facts together.
     maybe_emit_local_epic_close "$task_sha"
-
-    publish_head_to_master_before_cleanup "$(git rev-parse HEAD)" "$short_sha" || return $?
-
-    # Clean dispatch refs with the same CAS discipline as complete.
-    cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "$new_commit" false || return $?
-
-    if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
-        emit_operator_blocked_dispatch complete "$short_sha"
-    fi
 
     # ── LOUD audit banner ──
     printf '%b\n' "${YELLOW}" >&2
@@ -6050,7 +5808,7 @@ Related: $issue_url"
     echo "" >&2
     echo "   task:               $short_sha  ($task_title)" >&2
     echo "   historical commit:  $hist_short  ($hist_sha)" >&2
-    echo "   link commit:        $(git rev-parse --short "$new_commit")  (published to origin/master before ref cleanup)" >&2
+    echo "   link commit:        $(git rev-parse --short "$new_commit")  (local; not yet published)" >&2
     [ -n "$issue_url" ] && echo "   issue:              $issue_url" >&2
     echo "════════════════════════════════════════════════════════════════════" >&2
     printf '%b' "${RESET}" >&2
@@ -6061,6 +5819,7 @@ Related: $issue_url"
     page_retroactive_link "$task_sha" "$short_sha" "$hist_sha" "$hist_short" \
         "$new_commit" "$issue_num" "$issue_url" "$task_title"
 
+    print_completion_push_instruction
     return 0
 }
 

@@ -125,14 +125,20 @@ fi
 if [ -n "$CLAIMED_SHORT" ]; then
   echo impl > impl.txt; git add impl.txt; git commit -qm "implement claimed child"
   git push -q origin HEAD:master
+  BEFORE=$(git rev-parse HEAD)
   if TASK_DAG_CLAIMER=rootworker TASK_DAG_CLAIMER_HOST=hostA \
        "$TD" complete "$CLAIMED_SHORT" >/dev/null 2>&1; then
     still=$(git ls-remote origin "refs/heads/tasks/active/$CLAIMED_SHORT" | wc -l | tr -d ' ')
-    if [ "$still" = 0 ]; then
-      ok "6: claiming worker completes the born-claimed child (active ref cleared)"
+    if [ "$still" = 1 ]; then
+      ok "6: local completion preserves the born-claimed active ref"
     else
-      bad "6: complete succeeded but active ref remains ($still)"
+      bad "6: local completion unexpectedly changed the active ref ($still)"
     fi
+    git push -q origin HEAD:master
+    "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
+    still=$(git ls-remote origin "refs/heads/tasks/active/$CLAIMED_SHORT" | wc -l | tr -d ' ')
+    [ "$still" = 0 ] && ok "6: convergence clears the born-claimed active ref" \
+                       || bad "6: convergence left the active ref ($still)"
   else
     bad "6: complete failed for the born-claimed child"
   fi

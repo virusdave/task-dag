@@ -99,26 +99,30 @@ if [ -n "$T2" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# TEST 3 (C2): owned completion cleans remote refs (active+frontier gone)
+# TEST 3 (C2): completion is local; push publishes; convergence cleans refs
 # ---------------------------------------------------------------------------
 T3=$(mk_task "t3 cleanup")
 if [ -n "$T3" ]; then
   TASK3=$(git rev-parse "refs/heads/tasks/frontier/$T3")
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$T3" >/dev/null 2>&1
   echo work3 > impl3.txt; git add impl3.txt; git commit -qm "impl t3"
-  touch "$ROOT/origin.git/enforce-completion-order"
-  TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T3" >/dev/null 2>&1
-  rm -f "$ROOT/origin.git/enforce-completion-order"
+  BEFORE=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+  out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T3" 2>&1)
   a=$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)
-  f=$(git ls-remote origin "refs/heads/tasks/frontier/$T3" | wc -l)
-  if [ "$a" -eq 0 ] && [ "$f" -eq 0 ]; then
-    ok "C2: owned complete CAS-cleaned active+frontier refs"
+  AFTER=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+  if [ "$a" -eq 1 ] && [ "$BEFORE" = "$AFTER" ] && echo "$out" | grep -q '^git push origin HEAD:master$'; then
+    ok "C2: complete leaves origin/master and active claim unchanged and prints explicit push"
   else
-    bad "C2: refs lingered (active=$a frontier=$f)"
+    bad "C2: complete mutated origin or omitted push instruction (active=$a before=$BEFORE after=$AFTER out=$out)"
   fi
-  grep -q "^$TASK3 " "$ROOT/origin.git/completion-order.log" \
-    && ok "C2: single completion published master before ref deletion" \
-    || bad "C2: completion-order hook did not observe the single cleanup"
+  git push -q origin HEAD:master
+  [ "$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)" -eq 1 ] \
+    && ok "C2: explicit push publishes without deleting scheduling refs" \
+    || bad "C2: explicit push unexpectedly deleted scheduling refs"
+  "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
+  [ "$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)" -eq 0 ] \
+    && ok "C2: graph-converge cleans scheduling refs from durable master" \
+    || bad "C2: graph-converge left completed active ref"
 fi
 
 # ---------------------------------------------------------------------------
@@ -136,15 +140,28 @@ if [ -n "$T3B" ]; then
   echo work3b > impl3b.txt; git add impl3b.txt; git commit -qm "impl t3b"
   out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T3B" 2>&1)
   rc=$?
+  push_rc=0; git push -q origin HEAD:master >/dev/null 2>&1 || push_rc=$?
   a=$(git ls-remote origin "refs/heads/tasks/active/$T3B" | wc -l)
-  f=$(git ls-remote origin "refs/heads/tasks/frontier/$T3B" | wc -l)
-  if [ "$rc" -eq 3 ] && [ "$a" -eq 1 ] && [ "$f" -eq 0 ] && echo "$out" | grep -qi "left intact"; then
-    ok "C2b: publish failure leaves the owned active claim intact"
+  if [ "$rc" -eq 0 ] && [ "$push_rc" -ne 0 ] && [ "$a" -eq 1 ]; then
+    ok "C2b: rejected explicit push leaves the owned active claim intact"
   else
-    bad "C2b: expected rc=3 and intact active claim (rc=$rc active=$a frontier=$f out=$out)"
+    bad "C2b: expected local success, push rejection, and intact claim (rc=$rc push=$push_rc active=$a out=$out)"
   fi
   git fetch -q origin master
   git reset --hard -q origin/master
+fi
+
+# The old worker-side cleanup escape hatch is gone; completion cleanup is
+# exclusively a durable-master server projection.
+if "$TD" complete --no-cleanup >/dev/null 2>&1; then
+  bad "C2c: obsolete --no-cleanup option was accepted"
+else
+  ok "C2c: obsolete --no-cleanup option is rejected"
+fi
+if "$TD" complete --help | grep -q -- '--no-cleanup'; then
+  bad "C2c: complete help still advertises --no-cleanup"
+else
+  ok "C2c: complete help omits --no-cleanup"
 fi
 
 # ---------------------------------------------------------------------------
@@ -234,15 +251,13 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
   fi
 
   # (b) batch --leaves completes BOTH stacked siblings in one shot
-  touch "$ROOT/origin.git/enforce-completion-order"
   out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$S_LEAF:$S,$C_LEAF:$C" 2>&1); rc=$?
-  rm -f "$ROOT/origin.git/enforce-completion-order"
   if [ $rc -eq 0 ]; then ok "7: complete --leaves completes both stacked siblings (rc=0)"; else bad "7: complete --leaves failed (rc=$rc): $out"; fi
-  if grep -q "^$SLEAF_SHA " "$ROOT/origin.git/completion-order.log" \
-     && grep -q "^$CLEAF_SHA " "$ROOT/origin.git/completion-order.log"; then
-    ok "7: batch published all completion parentage before ref deletion"
+  if echo "$out" | grep -q '^git push origin HEAD:master$' \
+     && git ls-remote --exit-code origin "refs/heads/tasks/active/$S_LEAF" >/dev/null 2>&1; then
+    ok "7: batch remains local and prints the explicit push"
   else
-    bad "7: completion-order hook did not observe both batch cleanups"
+    bad "7: batch mutated scheduling refs or omitted push instruction"
   fi
 
   # both task commits reachable as completion parents
@@ -303,10 +318,11 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
     bad "7: no batch backup ref created"
   fi
 
-  # idempotent rerun (all already completed) → cleanup-only, rc 0
+  # idempotent local rerun creates no new commit and repeats the push action
+  TIP_BEFORE=$(git rev-parse HEAD)
   out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$S_LEAF:$S,$C_LEAF:$C" 2>&1); rc=$?
-  if [ $rc -eq 0 ] && echo "$out" | grep -qi 'already completed'; then
-    ok "7: idempotent rerun of a fully-completed batch (cleanup-only, rc=0)"
+  if [ $rc -eq 0 ] && [ "$(git rev-parse HEAD)" = "$TIP_BEFORE" ] && echo "$out" | grep -qi 'already have local completions'; then
+    ok "7: idempotent rerun of a fully-completed local batch is a no-op"
   else
     bad "7: idempotent rerun not handled (rc=$rc): $out"
   fi

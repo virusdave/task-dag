@@ -62,13 +62,16 @@ LEAF=$(breakdown_spec "$EPIC" '[{"title":"ops blocked leaf","type":"leaf"}]' for
 if [ -n "$LEAF" ]; then
   LEAF_SHA=$(git rev-parse "refs/heads/tasks/frontier/$LEAF")
   "$TD" block "$LEAF" --reason="ops evidence exists; waiting for no-code primitive" >/dev/null 2>&1
-  touch "$ROOT/origin.git/enforce-completion-order"
+  BEFORE=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
-  rm -f "$ROOT/origin.git/enforce-completion-order"
   if [ "$rc" -eq 0 ]; then ok "1a: complete-ops succeeds on a blocked leaf"; else bad "1a: complete-ops failed (rc=$rc): $out"; fi
-  git fetch -q origin master
-  CM=$(git log origin/master --merges --format='%H %P' | awk -v t="$LEAF_SHA" '{for(i=2;i<=NF;i++) if($i==t){print $1; exit}}')
-  if [ -n "$CM" ]; then ok "1b: master has a completion merge with the task as non-primary parent"; else bad "1b: missing task-parent completion merge"; fi
+  CM=$(git log HEAD --merges --format='%H %P' | awk -v t="$LEAF_SHA" '{for(i=2;i<=NF;i++) if($i==t){print $1; exit}}')
+  REMOTE_AFTER=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+  if [ -n "$CM" ] && [ "$BEFORE" = "$REMOTE_AFTER" ] && echo "$out" | grep -q '^git push origin HEAD:master$'; then
+    ok "1b: local completion merge created without moving origin/master"
+  else
+    bad "1b: completion was not local-only or omitted explicit push"
+  fi
   if [ -n "$CM" ] && [ "$(git rev-parse "$CM^{tree}")" = "$(git rev-parse "$CM^1^{tree}")" ]; then
     ok "1c: ops completion merge is tree-equal to its first parent"
   else
@@ -87,26 +90,35 @@ if [ -n "$LEAF" ]; then
   f=$(git ls-remote origin "refs/heads/tasks/frontier/$LEAF" | wc -l)
   b=$(git ls-remote origin "refs/heads/tasks/blocked/$LEAF_SHA" | wc -l)
   bm=$(git ls-remote origin "refs/heads/tasks/blocked-meta/$LEAF_SHA" | wc -l)
-  if [ "$f" -eq 0 ] && [ "$b" -eq 0 ] && [ "$bm" -eq 0 ]; then
-    ok "1e: frontier and blocked overlays are cleaned after publish"
+  if [ "$f" -eq 1 ] && [ "$b" -eq 1 ] && [ "$bm" -eq 1 ]; then
+    ok "1e: local completion leaves all scheduling refs unchanged"
   else
-    bad "1e: stale refs remain after ops completion (frontier=$f blocked=$b meta=$bm)"
+    bad "1e: local completion mutated scheduling refs (frontier=$f blocked=$b meta=$bm)"
   fi
-  grep -q "^$LEAF_SHA " "$ROOT/origin.git/completion-order.log" \
-    && ok "1f: ops completion published master before ref deletion" \
-    || bad "1f: completion-order hook did not observe ops cleanup"
+  git push -q origin HEAD:master
+  if [ "$(git ls-remote origin "refs/heads/tasks/blocked/$LEAF_SHA" | wc -l)" -eq 1 ]; then
+    ok "1f: explicit push publishes without deleting scheduling refs"
+  else
+    bad "1f: explicit push unexpectedly cleaned scheduling refs"
+  fi
+  "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
+  if [ "$(git ls-remote origin "refs/heads/tasks/blocked/$LEAF_SHA" | wc -l)" -eq 0 ]; then
+    ok "1g: graph-converge cleans blocked scheduling refs after publication"
+  else
+    bad "1g: graph-converge left blocked scheduling refs"
+  fi
   AFTER1=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
   AFTER2=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   if [ "$rc" -eq 0 ] && [ "$AFTER1" = "$AFTER2" ] && echo "$out" | grep -qi 'already'; then
-    ok "1g: idempotent rerun does not mint a duplicate completion"
+    ok "1h: idempotent rerun does not mint a duplicate completion"
   else
-    bad "1g: idempotent rerun moved master or failed (rc=$rc before=$AFTER1 after=$AFTER2 out=$out)"
+    bad "1h: idempotent rerun moved master or failed (rc=$rc before=$AFTER1 after=$AFTER2 out=$out)"
   fi
   if git log origin/master --merges --format='%B' | grep -q '^Closes-Epic: #901$'; then
-    ok "1h: final ops leaf triggers the normal local epic close"
+    ok "1i: explicit push carries the normal local epic close"
   else
-    bad "1h: final ops leaf did not append a Closes-Epic merge"
+    bad "1i: explicit push omitted the local Closes-Epic merge"
   fi
   git clone -q --no-local "$ROOT/origin.git" "$ROOT/keepalive"
   (
@@ -126,9 +138,9 @@ if [ -n "$LEAF" ]; then
   out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
   AFTER_LONG2=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   if [ "$rc" -eq 0 ] && [ "$AFTER_LONG" = "$AFTER_LONG2" ] && echo "$out" | grep -qi 'already'; then
-    ok "1i: long-history idempotent rerun scans without SIGPIPE failure"
+    ok "1j: long-history idempotent rerun scans without SIGPIPE failure"
   else
-    bad "1i: long-history idempotent rerun failed or moved master (rc=$rc out=$out)"
+    bad "1j: long-history idempotent rerun failed or moved master (rc=$rc out=$out)"
   fi
 fi
 
