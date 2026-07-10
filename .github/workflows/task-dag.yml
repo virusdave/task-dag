@@ -81,6 +81,9 @@ jobs:
       group: task-dag-issue-${{ github.event.issue.number }}
       cancel-in-progress: false
     uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@master
+    with:
+      # Runtime and reusable workflow must resolve from the same ref.
+      ref: master
     permissions:
       contents: write
       issues: write

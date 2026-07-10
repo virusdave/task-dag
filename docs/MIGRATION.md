@@ -59,6 +59,10 @@ jobs:
   comment-sync:
     if: ${{ github.event_name == 'issue_comment' }}
     uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@master
+    with:
+      # Keep this equal to the ref in `uses:` so the reusable workflow and
+      # its checked-out task-dag runtime are one coherent revision.
+      ref: master
     permissions:
       contents: write
       issues: write
@@ -136,7 +140,8 @@ scripts/validate-caller-workflow.sh .github/workflows/task-dag.yml
 
 The preflight fails closed on drift in the event matrix, per-job permissions,
 required secrets, projection and graph-convergence backstop wiring,
-push-range inputs, and reusable workflow source (`virusdave/task-dag@master`).
+push-range inputs, reusable workflow source (`virusdave/task-dag@master`), and
+a comment runtime ref that differs from the reusable workflow ref.
 
 ### Rollout authority for cross-repo completions
 
@@ -170,8 +175,11 @@ completion authority while the repo is still in the legacy-authoritative state.
 
 Pin `@master` while stabilising; cut a moving `task-dag-v1` tag once the
 fixture smoke test is green and pin peers to it so future patches need no
-peer edits. The workflow `ref` input (script fetch) defaults to the same
-branch the workflow is pinned to — keep them aligned.
+peer edits. The comment workflow checks out its helper, CLI, modules, and
+config together at `with.ref`; callers must set that input explicitly to the
+same ref used by `uses:`. Roll back by repinning both values to the same
+known-good tag or SHA. Existing durable comment receipts and task refs remain
+valid and must not be deleted during rollback.
 
 The caller is the **only** per-repo file (a logic-free shim). The single
 canonical implementation is the set of reusable workflows + scripts + CLI in

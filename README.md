@@ -58,8 +58,9 @@ Each peer repo carries **one** logic-free caller workflow,
 scripts, and config live here once; the caller is pure wiring. See
 `docs/MIGRATION.md` for the caller template and rollout sequence.
 
-Helper scripts are fetched at job time from this repo's public raw URLs,
-pinned to the same `ref` the caller pins the workflow to.
+Comment ingestion checks out its helper, CLI, modules, and config together at
+the same explicit `ref` that pins the reusable workflow. This prevents mixed
+moving-ref observations while retaining one logic-free caller.
 
 Cross-repo child-epic materialisation (the `Materialise-Child-Epic:` commit
 trailer that mints an issue in a peer repo and registers the delegation) is

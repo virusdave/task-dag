@@ -102,11 +102,19 @@ jobs:
           # ops only), so only the git push credential changes.
           token: ${{ steps.mint.outputs.token || secrets.token }}
 
-      - name: Download task-dag scripts
-        run: |
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-comment-to-tasks.sh" \
-            -o /tmp/sync-comment-to-tasks.sh
-          chmod +x /tmp/sync-comment-to-tasks.sh
+      # Resolve the helper, CLI, modules, and config in one git checkout. A
+      # single checkout cannot mix files from different moving-ref revisions,
+      # unlike the former sequence of raw-file downloads. Do not persist this
+      # public read credential: the caller checkout above retains the App or
+      # GITHUB_TOKEN credential used by close-epic pushes.
+      - name: Checkout coherent task-dag runtime
+        uses: actions/checkout@v4
+        with:
+          repository: virusdave/task-dag
+          ref: ${{ inputs.ref }}
+          path: .task-dag-runtime
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Sync comment to task-dag
         env:
@@ -125,5 +133,6 @@ jobs:
           COMMENT_UPDATED_AT: ${{ github.event.comment.updated_at }}
           MAX_COMMENT_SIZE: ${{ inputs.max_comment_size }}
           ENABLE_AUTO_FRONTIER: ${{ inputs.enable_auto_frontier }}
+        working-directory: ${{ github.workspace }}
         run: |
-          /tmp/sync-comment-to-tasks.sh
+          .task-dag-runtime/scripts/sync-comment-to-tasks.sh

@@ -11,7 +11,9 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/task-dag.yml'
+      - '.github/workflows/sync-comment-to-task.yml'
       - 'scripts/task-dag'
+      - 'scripts/sync-comment-to-tasks.sh'
       - 'scripts/validate-caller-workflow.sh'
       - 'scripts/task-dag.d/**'
       - 'tests/**'
@@ -21,7 +23,9 @@ on:
   pull_request:
     paths:
       - '.github/workflows/task-dag.yml'
+      - '.github/workflows/sync-comment-to-task.yml'
       - 'scripts/task-dag'
+      - 'scripts/sync-comment-to-tasks.sh'
       - 'scripts/validate-caller-workflow.sh'
       - 'scripts/task-dag.d/**'
       - 'tests/**'

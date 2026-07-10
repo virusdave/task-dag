@@ -182,6 +182,7 @@ check_secret(errors, jobs, 'reopen-notice', 'token', '${{ secrets.GITHUB_TOKEN }
 
 check_uses(errors, jobs, 'comment-sync', 'sync-comment-to-task.yml', expected_ref)
 expect_contains(errors, 'jobs.comment-sync.if', job(errors, jobs, 'comment-sync')['if'], "github.event_name == 'issue_comment'")
+check_with(errors, jobs, 'comment-sync', 'ref', expected_ref)
 check_permissions(errors, jobs, 'comment-sync', { 'contents' => 'write', 'issues' => 'write' })
 check_secret(errors, jobs, 'comment-sync', 'token', '${{ secrets.GITHUB_TOKEN }}')
 comment_secrets = fetch_map(job(errors, jobs, 'comment-sync'), 'secrets')

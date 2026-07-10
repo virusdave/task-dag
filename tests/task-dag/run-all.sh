@@ -32,6 +32,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/../.github/scripts/post-reopen-notice.sh" \
         "$(dirname "$TD")/../.github/scripts/materialise-child-epics.sh" \
         "$(dirname "$TD")/../.github/scripts/materialise-child-epics.test.sh" \
+        "$(dirname "$TD")/sync-comment-to-tasks.sh" \
         "$(dirname "$TD")/validate-caller-workflow.sh" \
         "$here/ci-repair-ticket.sh" "$here/ci-tree-fix-outcome.sh" \
         "$here/ci-race-stale.sh" "$here/delegated-block-json.sh" \
@@ -61,6 +62,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/../.github/scripts/create-task-commit.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/post-reopen-notice.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/materialise-child-epics.sh" \
+    && bash -n "$(dirname "$TD")/sync-comment-to-tasks.sh" \
     && bash -n "$(dirname "$TD")/validate-caller-workflow.sh" \
     && bash -n "$here/install-completion-order-hook.sh" \
     && bash -n "$here/reconcile-comments.sh" || exit 1
