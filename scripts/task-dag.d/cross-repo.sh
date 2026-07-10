@@ -1117,51 +1117,57 @@ cmd_close_epic() {
     _xrepo_ensure_git_identity
 
     local pending_ref="refs/heads/tasks/pending/${top_issue}"
+    local gh_issue_ref="refs/heads/gh/issues/${top_issue}"
 
-    local epic_sha
-    epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
-    if [ -z "$epic_sha" ]; then
-        git fetch origin "$pending_ref":"$pending_ref" >/dev/null 2>&1 || true
-        epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
-    fi
-    [ -n "$epic_sha" ] || {
-        _xrepo_die "close-epic: no epic ref ${pending_ref}"
+    # Refresh the durable close facts before consulting the live pending ref.
+    # close-completed-issues legitimately retires tasks/pending/<N> after a
+    # close, while gh/issues/<N> remains as the immutable structural identity.
+    # A late delegated completion must therefore observe the existing close
+    # and succeed without recreating the retired dispatch root.
+    git fetch --quiet --no-tags origin \
+        '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1 || {
+        _xrepo_die "close-epic: cannot sync origin/master to check durable close facts"
         return 2
     }
 
-    # Idempotency: a *trailer-bearing* close merge for this epic already
-    # on master?  We must check the epic SHA as a parent AND a matching
-    # `Closes-Epic: #<N>` trailer — the exact pair that
-    # close-completed-issues.yml requires to actually close the issue.
-    # Checking parentage alone is wrong: an ordinary `task-dag complete`
-    # merge also lists the epic SHA as a parent but carries no trailer,
-    # so a parent-only check reports "already closed" and never emits the
-    # closing trailer, silently leaving the GitHub issue open forever.
-    # See docs/task_dag/EPIC_CLOSURE.md.
-    git fetch origin master >/dev/null 2>&1 || true
-    local _master_ref
-    if git rev-parse --verify origin/master >/dev/null 2>&1; then
-        _master_ref="origin/master"
-    else
-        _master_ref="master"
+    local gh_epic_sha="" pending_epic_sha="" gh_rc=0 pending_rc=0 epic_sha=""
+    gh_epic_sha="$(remote_ref_sha_checked "$gh_issue_ref")" || gh_rc=$?
+    pending_epic_sha="$(remote_ref_sha_checked "$pending_ref")" || pending_rc=$?
+    if [ "$gh_rc" -eq 3 ] || [ "$pending_rc" -eq 3 ]; then
+        _xrepo_die "close-epic: cannot read epic #${top_issue} identity refs on origin (indeterminate transport/auth)"
+        return 2
     fi
-    local _existing_close="" _mc _mparents
-    while read -r _mc _mparents; do
-        case " $_mparents " in
-            *" $epic_sha "*) ;;
-            *) continue ;;
-        esac
-        if git log -1 --format='%B' "$_mc" \
-            | git interpret-trailers --parse 2>/dev/null \
-            | grep -qE "^Closes-Epic:[[:space:]]*#?${top_issue}([^0-9]|\$)"; then
-            _existing_close="$_mc"
-            break
-        fi
-    done < <(git log "$_master_ref" --merges --format='%H %P' 2>/dev/null)
-    if [ -n "$_existing_close" ]; then
-        _xrepo_log "close-epic: epic ${top_issue} already closed on master (${_existing_close})"
+    if [ -n "$gh_epic_sha" ] && [ -n "$pending_epic_sha" ] \
+        && [ "$gh_epic_sha" != "$pending_epic_sha" ]; then
+        _xrepo_die "close-epic: ${gh_issue_ref} and ${pending_ref} disagree; refusing to choose an epic identity"
+        return 2
+    fi
+    epic_sha="${gh_epic_sha:-$pending_epic_sha}"
+    [ -n "$epic_sha" ] || {
+        _xrepo_die "close-epic: no durable epic identity ${gh_issue_ref} or live root ${pending_ref}"
+        return 2
+    }
+
+    # Idempotency requires the exact root-parent + Closes-Epic trailer pair,
+    # not a trailer-only match or ordinary completion merge parentage.
+    if epic_already_closed_on "$top_issue" "$epic_sha" "origin/master"; then
+        _xrepo_log "close-epic: epic ${top_issue} already closed on master"
         return 0
     fi
+
+    # No durable close exists, so creating one still requires the authoritative
+    # live pending root. gh/issues preserves identity but is never permission to
+    # resurrect or operate on a retired root.
+    [ -n "$pending_epic_sha" ] || {
+        _xrepo_die "close-epic: no live epic root ${pending_ref} on origin"
+        return 2
+    }
+    epic_sha="$pending_epic_sha"
+    git fetch --quiet origin \
+        "+${pending_ref}:${pending_ref}" >/dev/null 2>&1 || {
+        _xrepo_die "close-epic: cannot fetch live epic root ${pending_ref}"
+        return 2
+    }
 
     # Enumerate delegated children and confirm each has at least one completion.
     git fetch origin \
@@ -1204,9 +1210,23 @@ cmd_close_epic() {
     #   parent2 = epic SHA
     # That mirrors what `scripts/task-dag complete` does for ordinary
     # tasks, which is what close-completed-issues.yml expects to see.
-    git fetch origin master >/dev/null 2>&1 || true
+    git fetch --quiet --no-tags origin \
+        '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1 || {
+        _xrepo_die "close-epic: cannot refresh origin/master before close"
+        return 2
+    }
     local master_tip master_tree
-    master_tip="$(git rev-parse --verify origin/master 2>/dev/null || git rev-parse --verify master)"
+    master_tip="$(git rev-parse --verify origin/master)" || return 2
+
+    # A concurrent closer may have landed since the initial idempotency check.
+    # Re-check the exact tip we will parent on: if the close landed before this
+    # fetch, observe it here; if it lands after, our push rejects non-FF and a
+    # retry observes it. Either case prevents duplicate close facts.
+    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip"; then
+        _xrepo_log "close-epic: epic ${top_issue} already closed on master (concurrent close)"
+        return 0
+    fi
+
     if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
         _xrepo_die "close-epic: child-epic materialisation intent for #${top_issue} is not durably delegated yet"
         return 3
