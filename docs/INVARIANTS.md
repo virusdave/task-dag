@@ -71,7 +71,7 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/blocked-meta/<sha>` | parked-task side metadata (tree==task tree, first parent==task commit) | `block` |
    | `tasks/delegated/<N>/<owner>/<repo>/<peer>` | cross-repo delegation edge | `delegate` |
    | `tasks/completions/<N>/…/<sha>` | recorded downstream completion | `ingest-comment` completion disposition |
-   | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write`, `reconcile-lease` |
+   | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write`, `reconcile-lease`, `repair-retire` |
    | `tasks/repair-superseded/<64-hex>` | immutable, non-scheduling repair-retirement audit | `repair-retire` |
    | `tasks/v1/graph` | dependency-edge index branch — a data-in-tree ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
    | `tasks/v1/mailbox/00`..`0f` | cross-repo notification mailbox — 16 fixed data-in-tree shard branches, exempt from the empty-tree floor (see below) | the mailbox writer (issue #13) |
@@ -89,9 +89,13 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    CI repair-chain messages are a typed line protocol. `Current-Head` is
    derived only from `chain-write --for-sha`; the legacy classifier writer can
    mutate only its classifier fields. Evidence, registry authority,
-   diagnostics, and `Reconcile-Lease-*` / `Reconcile-Fence` are protected
-   fields written by their owning typed operations. Every serializer rejects
-   CR/LF-bearing values before creating a commit.
+   diagnostics, `Reconcile-Lease-*` / `Reconcile-Fence`, and
+   `Reconcile-Operation-ID` are protected fields written by their owning typed
+   operations. `repair-retire` assigns a fresh SHA-256 operation ID and makes a
+   real first-parent chain advance in every destructive atomic transaction;
+   this prevents git from optimizing an unchanged refspec away before its
+   lease reaches the server. Every serializer rejects CR/LF-bearing values
+   before creating a commit.
 
    A repair-retirement audit uses the exact ref
    `tasks/repair-superseded/<identity>`, where `identity` is lowercase SHA-256
@@ -114,6 +118,14 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    must satisfy `Updated-At <= Retired-At < Reconcile-Lease-Until`. This
    namespace is audit-only and is never frontier,
    pending, active, blocked, or otherwise discoverable as scheduling work.
+   Initial retirement atomically creates this audit, advances the live chain,
+   and deletes the classifier's exact ref/OID candidates. Replay never rewrites
+   the audit: its parent remains the historical authorization, while the
+   current owner, unexpired trusted-time lease, fence, and exact chain token
+   independently authorize late cleanup. Every outcome is decided by an
+   unconditional fresh origin snapshot and reclassification; a landed
+   transaction followed by new projections or newer authority is reported as
+   incomplete or stale rather than as current success.
 
 `validate --strict` is **read-only** and **race-tolerant**: it snapshots
 refs in a single `for-each-ref` and skips any ref whose object vanished

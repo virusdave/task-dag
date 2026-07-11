@@ -1314,6 +1314,385 @@ taskdag_repair_superseded_violations() { # <commit> <full-ref>
     return 0
 }
 
+# Take one isolated origin snapshot of every namespace that can project repair
+# scheduling state. The classifier rejects alternates, shallow repositories,
+# and partial clones, so this repository receives the complete reachable
+# objects in the same fetch that advertises the refs.
+_ci_repair_projection_snapshot_from_origin() { # <empty-directory>
+    local destination="$1" remote_url
+    remote_url="$(git remote get-url origin 2>/dev/null)" || return 1
+    git init -q --bare "$destination" || return 1
+    git --git-dir="$destination" fetch --quiet --atomic --no-tags "$remote_url" \
+        '+refs/heads/gh/issues/*:refs/heads/gh/issues/*' \
+        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
+        '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
+        '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
+        '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
+        '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
+        '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*'
+}
+
+_ci_repair_audit_field() { # <commit> <field>
+    _cichain_field "$1" "$2"
+}
+
+_ci_repair_validate_chain_shape() { # <commit> <repo> <branch> <allow-legacy-operation-id>
+    local commit="$1" repo="$2" branch="$3" allow_legacy="$4" field count operation_id
+    git cat-file -e "${commit}^{commit}" 2>/dev/null || return 1
+    [ "$(git rev-parse "${commit}^{tree}" 2>/dev/null || true)" = "$EMPTY_TREE" ] || return 1
+    [ "$(git rev-list --parents -n 1 "$commit" 2>/dev/null | awk '{print NF - 1}')" -le 1 ] || return 1
+    [ "$(git log -1 --format=%s "$commit" 2>/dev/null || true)" = "CI-Chain: ${repo}@${branch}" ] || return 1
+    for field in "${_REPAIR_SUPERSEDED_V1_PARENT_FIELDS[@]}" Updated-At; do
+        count="$(_cichain_field_count "$commit" "$field")"
+        [ "$count" -eq 1 ] || return 1
+    done
+    count="$(_cichain_field_count "$commit" Reconcile-Operation-ID)"
+    if [ "$allow_legacy" = true ]; then
+        if [ "$count" -eq 0 ]; then
+            return 0
+        fi
+        if [ "$count" -eq 1 ] && [ -z "$(_cichain_field "$commit" Reconcile-Operation-ID)" ]; then
+            return 0
+        fi
+    fi
+    [ "$count" -eq 1 ] || return 1
+    operation_id="$(_cichain_field "$commit" Reconcile-Operation-ID)"
+    [[ "$operation_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
+# Validate current execution authority. The exact chain commit is the caller's
+# semantic token; --now is a GitHub-Date value already checked against host
+# time by evidence collection and is the only clock used here.
+_ci_repair_validate_retire_authority() { # <repo> <branch> <owner> <now> <fence> <token> <first-red>
+    local repo="$1" branch="$2" owner="$3" now="$4" fence="$5" token="$6" first_red="$7"
+    local ref remote now_epoch updated_epoch until_epoch registry_commit registry_blob decision_key
+    ref="$(_cichain_ref "$repo" "$branch")"
+    remote="$(_cichain_remote_sha "$ref")" || return 4
+    [ "$remote" = "$token" ] || return 5
+    _cichain_fetch "$ref"
+    [ "$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)" = "$token" ] || return 4
+    _ci_repair_validate_chain_shape "$token" "$repo" "$branch" true || return 8
+    [ "$(_cichain_field "$token" First-Red)" = "$first_red" ] || return 7
+    [ "$(_cichain_field "$token" Reconcile-Lease-Owner)" = "$owner" ] || return 7
+    [ "$(_cichain_field "$token" Reconcile-Fence)" = "$fence" ] || return 7
+    registry_commit="$(_cichain_field "$token" Registry-Commit)"
+    registry_blob="$(_cichain_field "$token" Registry-Blob)"
+    decision_key="$(_cichain_field "$token" Decision-Key)"
+    [[ "$registry_commit" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 8
+    [[ "$registry_blob" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 8
+    [[ "$decision_key" =~ ^sha256:[0-9a-f]{64}$ ]] || return 8
+
+    now_epoch="$(_cichain_timestamp_epoch "$now")" || return 1
+    updated_epoch="$(_cichain_timestamp_epoch "$(_cichain_field "$token" Updated-At)")" || return 8
+    until_epoch="$(_cichain_timestamp_epoch "$(_cichain_field "$token" Reconcile-Lease-Until)")" || return 8
+    [ "$updated_epoch" -le "$now_epoch" ] || return 7
+    [ "$now_epoch" -lt "$until_epoch" ] || return 7
+    return 0
+}
+
+_ci_repair_validate_existing_audit() { # <oid> <ref> <repo> <branch> <issue> <first-red> <canonical> <reason>
+    local oid="$1" ref="$2" repo="$3" branch="$4" issue="$5" first_red="$6" canonical="$7" reason="$8"
+    local violations
+    git fetch --quiet --no-tags origin "+${ref}:${ref}" 2>/dev/null || return 4
+    [ "$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)" = "$oid" ] || return 4
+    violations="$(taskdag_repair_superseded_violations "$oid" "$ref")"
+    [ -z "$violations" ] || return 8
+    [ "$(_ci_repair_audit_field "$oid" Repository)" = "$repo" ] \
+        && [ "$(_ci_repair_audit_field "$oid" Branch)" = "$branch" ] \
+        && [ "$(_ci_repair_audit_field "$oid" Issue)" = "#${issue}" ] \
+        && [ "$(_ci_repair_audit_field "$oid" First-Red)" = "$first_red" ] \
+        && [ "$(_ci_repair_audit_field "$oid" Canonical-Issue)" = "$canonical" ] \
+        && [ "$(_ci_repair_audit_field "$oid" Reason)" = "$reason" ] || return 8
+    return 0
+}
+
+# Fenced retirement of one repair issue's scheduling projections. Historical
+# authorization lives in an immutable audit; every initial or replay cleanup
+# independently requires the current live lease and advances the chain with a
+# unique operation id in the same atomic push as the exact leased deletions.
+cmd_repair_retire() {
+    local repo="" branch="" observation="" owner="" now="" fence="" token=""
+    local reason="" canonical_issue=none json=false
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --observation=*) observation="${1#*=}"; shift ;;
+            --owner=*) owner="${1#*=}"; shift ;;
+            --now=*) now="${1#*=}"; shift ;;
+            --fence=*) fence="${1#*=}"; shift ;;
+            --chain-token=*) token="${1#*=}"; shift ;;
+            --reason=*) reason="${1#*=}"; shift ;;
+            --canonical-issue=*) canonical_issue="${1#*=}"; shift ;;
+            --json) json=true; shift ;;
+            --help|-h)
+                cat <<'EOF'
+Usage: task-dag repair-retire <owner/repo> <branch> \
+         --observation=<issue.json> --owner=<pass-id> \
+         --now=<YYYY-MM-DDTHH:MM:SSZ> --fence=<n> \
+         --chain-token=<full-chain-commit> --reason=<reason> \
+         [--canonical-issue=none|<number>] [--json]
+
+Atomically retire every validated scheduling ref for one superseded repair
+issue and retain an immutable repair-superseded audit. The observation uses
+the strict projection-classifier schema. The caller must pass the exact live
+chain commit, matching lease owner/fence, and a canonical trusted UTC time.
+
+Reasons: duplicate, stale-chain, green, downgrade, non-fast-forward
+
+Exit codes:
+  0  clean-current | already-clean
+  1  invalid-argument
+  2  invalid-observation | ambiguous-projection
+  4  unconfirmed transport/readback
+  5  authority-token-changed
+  7  lease-lost
+  8  stored-invalid | audit-conflict
+ 10  stale-accepted (transaction landed, authority advanced)
+ 11  accepted-incomplete (transaction landed, late projections remain)
+ 12  conflict (transaction not proven or replacement state observed)
+EOF
+                return 0 ;;
+            -*) echo "Error: unknown repair-retire option '$1'" >&2; return 1 ;;
+            *)
+                if [ -z "$repo" ]; then repo="$1"
+                elif [ -z "$branch" ]; then branch="$1"
+                else echo "Error: unexpected repair-retire argument '$1'" >&2; return 1
+                fi
+                shift ;;
+        esac
+    done
+
+    local report_reason="" audit_ref="" audit_oid="" chain_after="" candidate_count=0
+    _repair_retire_report() {
+        local rc="$1" outcome="$2" detail="${3:-}"
+        if [ "$json" = true ]; then
+            jq -cn --arg outcome "$outcome" --arg detail "$detail" --arg repo "$repo" \
+                --arg branch "$branch" --arg auditRef "$audit_ref" --arg auditOid "$audit_oid" \
+                --arg chain "$chain_after" --argjson candidates "$candidate_count" --argjson rc "$rc" \
+                '{ok:($rc==0),outcome:$outcome,detail:$detail,repository:$repo,branch:$branch,
+                  auditRef:(if $auditRef=="" then null else $auditRef end),
+                  auditOid:(if $auditOid=="" then null else $auditOid end),
+                  chainCommit:(if $chain=="" then null else $chain end),
+                  remainingCandidates:$candidates,rc:$rc}'
+        elif [ "$rc" -eq 0 ]; then
+            printf "${GREEN}✓ Repair projection retirement: %s (%s@%s)${RESET}\n" "$outcome" "$repo" "$branch"
+        else
+            printf "${RED}Repair projection retirement %s: %s${RESET}\n" "$outcome" "$detail" >&2
+        fi
+        return "$rc"
+    }
+
+    if ! [[ "$repo" =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]] \
+        || [ -z "$branch" ] || ! _cichain_single_line "$branch" \
+        || [ ! -f "$observation" ] \
+        || ! [[ "$owner" =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$ ]] \
+        || ! [[ "$fence" =~ ^[1-9][0-9]{0,17}$ ]] || [ "$fence" -gt 999999999999999999 ] \
+        || ! [[ "$token" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+        _repair_retire_report 1 invalid-argument "repo, branch, observation, owner, fence, and full chain token are required"
+        return $?
+    fi
+    _cichain_timestamp_epoch "$now" >/dev/null 2>&1 || {
+        _repair_retire_report 1 invalid-argument "--now must be canonical UTC"; return $?; }
+    case "$reason" in duplicate|stale-chain|green|downgrade|non-fast-forward) ;;
+        *) _repair_retire_report 1 invalid-argument "unrecognised retirement reason"; return $? ;;
+    esac
+    if [ "$canonical_issue" != none ]; then
+        [[ "$canonical_issue" =~ ^[1-9][0-9]*$ ]] || {
+            _repair_retire_report 1 invalid-argument "canonical issue must be none or a positive integer"; return $?; }
+        canonical_issue="#${canonical_issue}"
+    fi
+
+    local tmp initial_snapshot initial_result classify_rc=0 first_red issue obs_repo obs_branch
+    tmp="$(mktemp -d)" || { _repair_retire_report 4 unconfirmed "cannot create scratch space"; return $?; }
+    initial_snapshot="$tmp/initial.git"
+    if ! _ci_repair_projection_snapshot_from_origin "$initial_snapshot"; then
+        rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot take authoritative projection snapshot"; return $?
+    fi
+    initial_result="$(_ci_repair_classify_projection_snapshot "$initial_snapshot" "$observation")" || classify_rc=$?
+    if [ "$classify_rc" -ne 0 ]; then
+        report_reason="$(jq -r .reason <<<"$initial_result" 2>/dev/null || printf invalid-observation)"
+        rm -rf "$tmp"; _repair_retire_report 2 "$report_reason" "projection snapshot refused"; return $?
+    fi
+    obs_repo="$(jq -r .repository "$observation")"; obs_branch="$(jq -r .branch "$observation")"
+    first_red="$(jq -r .firstRed "$observation")"; issue="$(jq -r '.issue.number|tostring' "$observation")"
+    if [ "$obs_repo" != "$repo" ] || [ "$obs_branch" != "$branch" ]; then
+        rm -rf "$tmp"; _repair_retire_report 1 invalid-argument "observation does not match requested repository and branch"; return $?
+    fi
+
+    local authority_rc=0
+    _ci_repair_validate_retire_authority "$repo" "$branch" "$owner" "$now" "$fence" "$token" "$first_red" \
+        || authority_rc=$?
+    if [ "$authority_rc" -ne 0 ]; then
+        rm -rf "$tmp"
+        case "$authority_rc" in
+            4) _repair_retire_report 4 unconfirmed "cannot read current chain authority" ;;
+            5) _repair_retire_report 5 authority-token-changed "current chain no longer matches --chain-token" ;;
+            7) _repair_retire_report 7 lease-lost "owner, fence, identity, or trusted lease time no longer matches" ;;
+            *) _repair_retire_report 8 stored-invalid "current chain authority is malformed" ;;
+        esac
+        return $?
+    fi
+
+    local identity existing_audit="" existing_rc=0 audit_new=false audit_parent
+    identity="$(printf 'repair-superseded-v1\0%s\0%s\0%s\0%s' \
+        "$repo" "$branch" "$first_red" "$issue" | sha256sum | awk '{print $1}')"
+    audit_ref="refs/heads/tasks/repair-superseded/${identity}"
+    existing_audit="$(_cichain_remote_sha "$audit_ref")" || existing_rc=$?
+    if [ "$existing_rc" -ne 0 ]; then
+        rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot read audit ref"; return $?
+    fi
+    if [ -n "$existing_audit" ]; then
+        _ci_repair_validate_existing_audit "$existing_audit" "$audit_ref" "$repo" "$branch" \
+            "$issue" "$first_red" "$canonical_issue" "$reason" || existing_rc=$?
+        if [ "$existing_rc" -ne 0 ]; then
+            rm -rf "$tmp"
+            [ "$existing_rc" -eq 4 ] \
+                && _repair_retire_report 4 unconfirmed "cannot fetch existing audit" \
+                || _repair_retire_report 8 audit-conflict "existing audit is malformed or has different semantics"
+            return $?
+        fi
+        audit_oid="$existing_audit"
+        audit_parent="$(git rev-parse "${audit_oid}^" 2>/dev/null || true)"
+        git rev-list --first-parent "$token" 2>/dev/null \
+            | awk -v wanted="$audit_parent" '$0 == wanted { found=1 } END { exit !found }' || {
+            rm -rf "$tmp"; _repair_retire_report 8 audit-conflict "audit authority is not in the current chain history"; return $?; }
+    else
+        local audit_message
+        audit_message="Repair-Superseded: v1
+
+Repository: ${repo}
+Branch: ${branch}
+Issue: #${issue}
+First-Red: ${first_red}
+Canonical-Issue: ${canonical_issue}
+Reason: ${reason}
+Registry-Commit: $(_cichain_field "$token" Registry-Commit)
+Registry-Blob: $(_cichain_field "$token" Registry-Blob)
+Decision-Key: $(_cichain_field "$token" Decision-Key)
+Reconcile-Fence: ${fence}
+Retired-At: ${now}"
+        audit_oid="$(GIT_AUTHOR_NAME=task-dag GIT_AUTHOR_EMAIL=task-dag@localhost \
+            GIT_COMMITTER_NAME=task-dag GIT_COMMITTER_EMAIL=task-dag@localhost \
+            GIT_AUTHOR_DATE="$now" GIT_COMMITTER_DATE="$now" \
+            git commit-tree "$EMPTY_TREE" -p "$token" -m "$audit_message")" || {
+                rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot construct audit commit"; return $?; }
+        audit_new=true
+    fi
+
+    candidate_count="$(jq '.candidates|length' <<<"$initial_result")"
+    if [ "$audit_new" = false ] && [ "$candidate_count" -eq 0 ]; then
+        local final_clean_chain="" final_clean_audit=""
+        final_clean_chain="$(_cichain_remote_sha "$(_cichain_ref "$repo" "$branch")")" \
+            && final_clean_audit="$(_cichain_remote_sha "$audit_ref")" || {
+                rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "final already-clean readback failed"; return $?; }
+        if [ "$final_clean_chain" != "$token" ] || [ "$final_clean_audit" != "$audit_oid" ]; then
+            chain_after="$final_clean_chain"
+            rm -rf "$tmp"; _repair_retire_report 12 conflict "authority or audit changed during already-clean verification"; return $?
+        fi
+        chain_after="$final_clean_chain"
+        rm -rf "$tmp"; _repair_retire_report 0 already-clean "valid audit exists and fresh snapshot has no scheduling projections"; return $?
+    fi
+
+    # Recheck live authority immediately before constructing the transaction.
+    authority_rc=0
+    _ci_repair_validate_retire_authority "$repo" "$branch" "$owner" "$now" "$fence" "$token" "$first_red" \
+        || authority_rc=$?
+    if [ "$authority_rc" -ne 0 ]; then
+        rm -rf "$tmp"
+        case "$authority_rc" in
+            4) _repair_retire_report 4 unconfirmed "cannot re-read chain authority before mutation" ;;
+            5) _repair_retire_report 5 authority-token-changed "chain token changed after classification" ;;
+            7) _repair_retire_report 7 lease-lost "lease authority changed after classification" ;;
+            *) _repair_retire_report 8 stored-invalid "chain authority became malformed after classification" ;;
+        esac
+        return $?
+    fi
+
+    local operation_id child field
+    operation_id="sha256:$(head -c 32 /dev/urandom | sha256sum | awk '{print $1}')"
+    declare -A next_state=()
+    for field in "${_CICHAIN_FIELDS[@]}"; do
+        next_state["$field"]="$(_cichain_field "$token" "$field")"
+    done
+    next_state[Reconcile-Operation-ID]="$operation_id"
+    child="$(_cichain_build_state_commit "$repo" "$branch" "$token" "$now" next_state)" || {
+        rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot construct fenced chain transition"; return $?; }
+
+    local chain_ref push_rc=0 ref oid
+    local -a leases refspecs
+    chain_ref="$(_cichain_ref "$repo" "$branch")"
+    leases=("--force-with-lease=${chain_ref}:${token}")
+    refspecs=("${child}:${chain_ref}")
+    if [ "$audit_new" = true ]; then
+        leases+=("--force-with-lease=${audit_ref}:")
+        refspecs+=("${audit_oid}:${audit_ref}")
+    fi
+    while IFS=$'\t' read -r ref oid; do
+        [ -n "$ref" ] || continue
+        leases+=("--force-with-lease=${ref}:${oid}")
+        refspecs+=(":${ref}")
+    done < <(jq -r '.candidates[] | [.ref,.expectedOid] | @tsv' <<<"$initial_result")
+    git push --atomic origin "${leases[@]}" "${refspecs[@]}" >/dev/null 2>&1 || push_rc=$?
+
+    # Push status is advisory. Always read back the audit, chain, and a newly
+    # classified full namespace snapshot before deciding whether effects landed.
+    local read_audit="" read_chain="" read_rc=0 fresh_snapshot="$tmp/fresh.git" fresh_result fresh_rc=0
+    read_audit="$(_cichain_remote_sha "$audit_ref")" || read_rc=1
+    read_chain="$(_cichain_remote_sha "$chain_ref")" || read_rc=1
+    if [ "$read_rc" -ne 0 ] || ! _ci_repair_projection_snapshot_from_origin "$fresh_snapshot"; then
+        rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "post-mutation origin readback failed"; return $?
+    fi
+    chain_after="$read_chain"
+    if [ "$read_audit" != "$audit_oid" ]; then
+        rm -rf "$tmp"; _repair_retire_report 12 conflict "audit ref is absent or was replaced"; return $?
+    fi
+    fresh_result="$(_ci_repair_classify_projection_snapshot "$fresh_snapshot" "$observation")" || fresh_rc=$?
+    if [ "$fresh_rc" -ne 0 ]; then
+        rm -rf "$tmp"; _repair_retire_report 12 conflict "fresh projection snapshot is malformed or ambiguous"; return $?
+    fi
+    candidate_count="$(jq '.candidates|length' <<<"$fresh_result")"
+
+    # The projection fetch may take long enough for authority to advance. Read
+    # chain and audit one final time, then fetch the exact advertised chain
+    # object with checked transport before making any ancestry claim.
+    read_chain="$(_cichain_remote_sha "$chain_ref")" || {
+        rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "final chain readback failed"; return $?; }
+    read_audit="$(_cichain_remote_sha "$audit_ref")" || {
+        rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "final audit readback failed"; return $?; }
+    chain_after="$read_chain"
+    [ "$read_audit" = "$audit_oid" ] || {
+        rm -rf "$tmp"; _repair_retire_report 12 conflict "audit changed during final readback"; return $?; }
+    git fetch --quiet --no-tags origin "+${chain_ref}:${chain_ref}" 2>/dev/null \
+        && git cat-file -e "${read_chain}^{commit}" 2>/dev/null || {
+            rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "final chain object is unavailable"; return $?; }
+    local landed=false
+    if [ "$read_chain" = "$child" ]; then
+        landed=true
+    elif [ -n "$read_chain" ] && git rev-list --first-parent "$read_chain" 2>/dev/null \
+        | awk -v wanted="$child" '$0 == wanted { found=1 } END { exit !found }'; then
+        landed=true
+    fi
+    if [ "$landed" != true ]; then
+        rm -rf "$tmp"
+        _repair_retire_report 12 conflict "fenced chain transition did not land (push rc ${push_rc})"
+        return $?
+    fi
+    if [ "$read_chain" != "$child" ] \
+        && ! _ci_repair_validate_chain_shape "$read_chain" "$repo" "$branch" false; then
+        rm -rf "$tmp"; _repair_retire_report 12 conflict "newer chain authority is malformed"; return $?
+    fi
+    if [ "$candidate_count" -ne 0 ]; then
+        rm -rf "$tmp"; _repair_retire_report 11 accepted-incomplete "transaction landed but fresh classification found late projections"; return $?
+    fi
+    if [ "$read_chain" != "$child" ]; then
+        rm -rf "$tmp"; _repair_retire_report 10 stale-accepted "transaction landed and cleaned projections, but chain authority advanced"; return $?
+    fi
+    # Exact child means the preserved owner/fence and supplied trusted time are
+    # still the authority represented by this readback; no host-time claim is made.
+    rm -rf "$tmp"
+    _repair_retire_report 0 clean-current "$([ "$push_rc" -eq 0 ] && printf 'atomic push and readback confirmed' || printf 'effects confirmed by readback after push rc %s' "$push_rc")"
+}
+
 # ---------------------------------------------------------------------------
 # parse-tree-fix
 #

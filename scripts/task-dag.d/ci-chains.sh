@@ -75,6 +75,7 @@ _CICHAIN_FIELDS=(
     Registry-Commit Registry-Blob Enrollment-Mode
     Reconcile-Status Reconcile-Error
     Reconcile-Lease-Owner Reconcile-Lease-Until Reconcile-Fence
+    Reconcile-Operation-ID
 )
 
 # `chain-write` is the legacy classifier writer. Authority, evidence,
@@ -170,35 +171,25 @@ _cichain_field_count() {
 
 _cichain_now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
-# Serialize and compare-and-set a fully materialized chain state. This is the
-# one mutation primitive shared by classifier writes and metadata-only lease
-# writes. Callers own all semantic validation and must provide every canonical
-# field; this helper enforces the line-oriented storage boundary again before
-# creating a commit.
-#
-# Result globals:
-#   _CICHAIN_PUSH_COMMIT  new commit on success
-#   _CICHAIN_PUSH_REASON  race-lost | push-failed | not-confirmed on failure
-_cichain_push_state() { # <repo> <branch> <ref> <old> <updated-at> <map-name>
-    local repo="$1" branch="$2" ref="$3" old="$4" updated_at="$5" map_name="$6"
+# Serialize a fully materialized chain state without moving a ref. Keeping the
+# canonical message builder separate lets a multi-ref transaction (notably
+# repair-retire) include a real chain advance in the same atomic push as its
+# other effects instead of relying on an unenforced no-op refspec lease.
+_cichain_build_state_commit() { # <repo> <branch> <old> <updated-at> <map-name>
+    local repo="$1" branch="$2" old="$3" updated_at="$4" map_name="$5"
     local -n state="$map_name"
-    local field msg new_commit lease push_output readback
-
-    _CICHAIN_PUSH_COMMIT=""
-    _CICHAIN_PUSH_REASON=""
+    local field msg
 
     if [ -z "$repo" ] || [ -z "$branch" ] \
         || ! _cichain_single_line "$repo" \
         || ! _cichain_single_line "$branch" \
         || ! _cichain_single_line "$updated_at"; then
-        _CICHAIN_PUSH_REASON="push-failed"
-        return 4
+        return 1
     fi
     for field in "${_CICHAIN_FIELDS[@]}"; do
         if [ -z "${state[$field]+present}" ] \
             || ! _cichain_single_line "${state[$field]}"; then
-            _CICHAIN_PUSH_REASON="push-failed"
-            return 4
+            return 1
         fi
     done
 
@@ -213,16 +204,32 @@ ${field}: ${state[$field]}"
 Updated-At: ${updated_at}"
 
     if [ -n "$old" ]; then
-        new_commit="$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE" -p "$old")" || {
-            _CICHAIN_PUSH_REASON="push-failed"
-            return 4
-        }
+        printf '%s' "$msg" | git commit-tree "$EMPTY_TREE" -p "$old"
     else
-        new_commit="$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE")" || {
-            _CICHAIN_PUSH_REASON="push-failed"
-            return 4
-        }
+        printf '%s' "$msg" | git commit-tree "$EMPTY_TREE"
     fi
+}
+
+# Serialize and compare-and-set a fully materialized chain state. This is the
+# one mutation primitive shared by classifier writes and metadata-only lease
+# writes. Callers own all semantic validation and must provide every canonical
+# field; this helper enforces the line-oriented storage boundary again before
+# creating a commit.
+#
+# Result globals:
+#   _CICHAIN_PUSH_COMMIT  new commit on success
+#   _CICHAIN_PUSH_REASON  race-lost | push-failed | not-confirmed on failure
+_cichain_push_state() { # <repo> <branch> <ref> <old> <updated-at> <map-name>
+    local repo="$1" branch="$2" ref="$3" old="$4" updated_at="$5" map_name="$6"
+    local new_commit lease push_output readback
+
+    _CICHAIN_PUSH_COMMIT=""
+    _CICHAIN_PUSH_REASON=""
+
+    new_commit="$(_cichain_build_state_commit "$repo" "$branch" "$old" "$updated_at" "$map_name")" || {
+        _CICHAIN_PUSH_REASON="push-failed"
+        return 4
+    }
 
     lease="--force-with-lease=${ref}:${old}"
     if ! push_output=$(git push --atomic origin "$lease" "${new_commit}:${ref}" 2>&1); then

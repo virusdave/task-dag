@@ -1727,6 +1727,9 @@ CI BROKEN-MASTER AUTO-REPAIR:
     reconcile-lease <owner/repo> <branch> --owner=<id> --now=<UTC>
                            Acquire or renew the repair reconciler's five-minute
                            metadata-only lease with a monotonic fencing token
+    repair-retire <owner/repo> <branch> --observation=<json> ...
+                           Fenced, atomic retirement of one validated repair
+                           scheduling projection with an immutable audit
     classify <owner/repo> <branch> --for-sha=<commit> (--result|--gate ...)
                            Classify a commit's aggregate required-gate
                            result green/red/unknown and drive the repair
@@ -7750,6 +7753,7 @@ main() {
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;
         reconcile-lease) cmd_reconcile_lease "$@" ;;
+        repair-retire) cmd_repair_retire "$@" ;;
         comment) cmd_comment "$@" ;;
         issue-update) cmd_issue_update "$@" ;;
         check-workflow) cmd_check_workflow "$@" ;;

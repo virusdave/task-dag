@@ -124,8 +124,9 @@ CI-driven broken-master auto-repair subsystem (`chain-read` /
 whose *message* holds the desired repair state, bounded observation/evidence,
 accepted registry generation and enrollment mode, reconciliation diagnostics,
 and the `Reconcile-Lease-Owner`, `Reconcile-Lease-Until`, and monotonically
-increasing `Reconcile-Fence` coordination tuple. The complete field list and
-canonical order live in `_CICHAIN_FIELDS` in `ci-chains.sh`;
+increasing `Reconcile-Fence` coordination tuple. `Reconcile-Operation-ID`
+uniquely identifies the most recent multi-ref retirement transaction. The
+complete field list and canonical order live in `_CICHAIN_FIELDS` in `ci-chains.sh`;
 each write's first parent is the prior chain commit, so the ref is the
 chain's audit history. `<branch>` is percent-encoded to one ref-safe
 path component so a slashed branch (`release/v1`) can't D/F-conflict with
@@ -142,6 +143,16 @@ fence and retains that fence. The five-minute deadline and `Updated-At` derive
 from the caller's canonical, already clock-skew-validated `--now`; host time is
 not lease authority. Partial, duplicate, noncanonical, or exhausted stored
 tuples fail closed without a ref mutation.
+
+`repair-retire` validates one coherent origin snapshot against an authenticated
+repair-issue observation, then rechecks the exact chain token and live
+owner/fence/deadline. Its destructive push advances the chain to a unique
+operation child while creating the absent audit and deleting every classified
+projection with exact leases, all atomically. A replay validates but never
+rewrites the historical audit, and uses a new current chain transition to clean
+late projections. Push status is advisory: an unconditional fresh origin
+snapshot and classification distinguish current clean success from
+stale-accepted, accepted-incomplete, conflict, and unconfirmed outcomes.
 
 ## Epic-root orchestration is cross-host claimable (CAS)
 
