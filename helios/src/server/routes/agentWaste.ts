@@ -23,7 +23,11 @@ import {
 } from '../agentWasteRepo.js'
 import { promoteAdvisory } from '../agentWaste/promoteAdvisory.js'
 import { callClusterModel, ClusterModelError } from '../agentWaste/clusterModel.js'
-import { MAX_CLUSTER_OBSERVATIONS, rehydrateClusters } from '../agentWaste/clusterBacklog.js'
+import {
+  CLUSTER_BATCH_SIZE,
+  compareClustersByWaste,
+  rehydrateClusters,
+} from '../agentWaste/clusterBacklog.js'
 import { getServerEnv } from '../config/env.js'
 import { getPool } from '../db/pool.js'
 import { resolveBedrockModel } from '../llm/bedrockModelConfig.js'
@@ -31,7 +35,6 @@ import {
   AgentWasteClustersRequestSchema,
   PromoteAdvisoryRequestSchema,
   type AgentWasteBacklogResponse,
-  type AgentWasteClusterInputTooLargeResponse,
   type AgentWasteClustersResponse,
   type PromoteAdvisoryErrorResponse,
   type PromoteAdvisoryFailureCode,
@@ -220,23 +223,6 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
         return handleAgentWasteError(server, reply, error, 'Failed to fetch agent-waste backlog')
       }
 
-      // Guardrail FIRST — before any model-config DB lookup: refuse (don't
-      // silently truncate) an oversized backlog so a partial clustering is
-      // never presented as complete, and so this fails deterministically even
-      // if resolving the operator model-override would error.
-      if (observations.length > MAX_CLUSTER_OBSERVATIONS) {
-        const body: AgentWasteClusterInputTooLargeResponse = {
-          error: 'agent_waste_cluster_input_too_large',
-          message:
-            `The pending backlog has ${observations.length} observations, over the ` +
-            `${MAX_CLUSTER_OBSERVATIONS}-observation single-shot clustering cap. ` +
-            'Review and dismiss/promote some rows, then cluster again.',
-          observationCount: observations.length,
-          maxObservations: MAX_CLUSTER_OBSERVATIONS,
-        }
-        return reply.status(413).send(body)
-      }
-
       const model = await resolveBedrockModel(getPool(), 'agent_waste_clusterer')
 
       // Empty backlog: nothing to cluster; skip the LLM call entirely.
@@ -250,9 +236,21 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
         return reply.send(body)
       }
 
-      let raw
+      const clusters: AgentWasteClustersResponse['clusters'] = []
+      const unclustered: AgentWasteClustersResponse['unclustered'] = []
       try {
-        raw = await callClusterModel(observations, model, { env: getServerEnv() })
+        // Keep each model prompt within the proven single-call budget while
+        // covering the entire backlog. Calls are deliberately sequential to
+        // avoid a large backlog creating an unbounded burst at the gateway.
+        // If any batch fails, the whole request fails rather than returning a
+        // partial result that looks complete.
+        for (let offset = 0; offset < observations.length; offset += CLUSTER_BATCH_SIZE) {
+          const batch = observations.slice(offset, offset + CLUSTER_BATCH_SIZE)
+          const raw = await callClusterModel(batch, model, { env: getServerEnv() })
+          const result = rehydrateClusters(batch, raw)
+          clusters.push(...result.clusters)
+          unclustered.push(...result.unclustered)
+        }
       } catch (error) {
         if (error instanceof ClusterModelError) {
           // Note: the ClusterModelError message never contains the prompt
@@ -269,7 +267,9 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
         return handleAgentWasteError(server, reply, error, 'Failed to cluster agent-waste backlog')
       }
 
-      const { clusters, unclustered } = rehydrateClusters(observations, raw)
+      // Each batch is ranked independently during rehydration; restore one
+      // global aggregate-waste ordering after combining them.
+      clusters.sort(compareClustersByWaste)
       const body: AgentWasteClustersResponse = {
         source: getBacklogSourceStatus(),
         model,

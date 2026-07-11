@@ -25,12 +25,11 @@ import type {
 } from '../../shared/contracts/api/agentWaste.js'
 
 /**
- * Single-shot prompt budget. The pending backlog is "tiny and rare" by
- * design, so one cluster call should always fit; this cap is a guardrail
- * against a pathological backlog blowing the model's context, and the route
- * degrades with a structured 413 rather than silently clustering a prefix.
+ * Per-call prompt budget. Larger backlogs are split into batches of this
+ * size; every batch must succeed before the route returns a result, so the
+ * operator never sees a silently truncated clustering.
  */
-export const MAX_CLUSTER_OBSERVATIONS = 200
+export const CLUSTER_BATCH_SIZE = 200
 
 /** Server-side cap on the model-authored `label` (display-only text). */
 export const MAX_CLUSTER_LABEL_CHARS = 80

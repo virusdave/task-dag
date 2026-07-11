@@ -60,10 +60,8 @@ import {
 } from '../agentWasteRepo.js'
 import { callClusterModel, ClusterModelError } from '../agentWaste/clusterModel.js'
 import type { RawClusterModelOutput } from '../agentWaste/clusterBacklog.js'
-import { resolveBedrockModel } from '../llm/bedrockModelConfig.js'
 
 const callClusterModelMock = vi.mocked(callClusterModel)
-const resolveBedrockModelMock = vi.mocked(resolveBedrockModel)
 
 let server: FastifyInstance
 
@@ -222,35 +220,47 @@ describe('POST /api/agent-waste/clusters', () => {
     expect(callClusterModelMock).not.toHaveBeenCalled()
   })
 
-  it('refuses an oversized backlog with a structured 413', async () => {
-    const many = Array.from({ length: 201 }, (_, i) => ({ time: 't', kind: 'k', id: `id-${i}` }))
+  it('clusters every observation in a backlog larger than one model-call batch', async () => {
+    const many = Array.from({ length: 201 }, (_, i) => ({
+      time: 't',
+      kind: 'k',
+      id: `id-${i}`,
+      estimated_wasted_tokens: i === 200 ? 1_000 : 1,
+    }))
     setBacklogReader(readerFor(many))
+    callClusterModelMock
+      .mockResolvedValueOnce({
+        clusters: [{ label: 'first batch', primaryKey: 0, memberKeys: Array.from({ length: 200 }, (_, i) => i) }],
+      })
+      .mockResolvedValueOnce({
+        clusters: [{ label: 'second batch', primaryKey: 0, memberKeys: [0] }],
+      })
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
-    expect(res.statusCode).toBe(413)
+    expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.error).toBe('agent_waste_cluster_input_too_large')
-    expect(body.observationCount).toBe(201)
-    expect(body.maxObservations).toBe(200)
-    expect(callClusterModelMock).not.toHaveBeenCalled()
+    expect(body.clusters.flatMap((cluster: { members: Array<{ id: string }> }) => cluster.members)).toHaveLength(201)
+    expect(body.clusters.map((cluster: { label: string }) => cluster.label)).toEqual([
+      'second batch',
+      'first batch',
+    ])
+    expect(body.unclustered).toEqual([])
+    expect(callClusterModelMock).toHaveBeenCalledTimes(2)
+    expect(callClusterModelMock.mock.calls[0][0]).toHaveLength(200)
+    expect(callClusterModelMock.mock.calls[1][0]).toHaveLength(1)
   })
 
-  it('returns 413 for an oversized backlog even if resolving the model would error', async () => {
+  it('fails the whole request when a later batch fails instead of returning a partial result', async () => {
     const many = Array.from({ length: 201 }, (_, i) => ({ time: 't', kind: 'k', id: `id-${i}` }))
     setBacklogReader(readerFor(many))
-    // Make model resolution throw; scoped + restored so it can't leak into
-    // other tests (clearAllMocks does not restore implementations).
-    const base = resolveBedrockModelMock.getMockImplementation()
-    resolveBedrockModelMock.mockImplementation(async () => {
-      throw new Error('app_settings unreachable')
-    })
-    try {
-      const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
-      expect(res.statusCode).toBe(413)
-      expect(res.json().error).toBe('agent_waste_cluster_input_too_large')
-      expect(resolveBedrockModelMock).not.toHaveBeenCalled()
-    } finally {
-      if (base) resolveBedrockModelMock.mockImplementation(base)
-    }
+    callClusterModelMock
+      .mockResolvedValueOnce({
+        clusters: [{ label: 'first batch', primaryKey: 0, memberKeys: [0] }],
+      })
+      .mockRejectedValueOnce(new ClusterModelError('bedrock_http_error', 'HTTP 500'))
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(502)
+    expect(res.json().error).toBe('bedrock_http_error')
+    expect(callClusterModelMock).toHaveBeenCalledTimes(2)
   })
 
   it('clusters, ranks, and returns the 200 shape on success', async () => {
