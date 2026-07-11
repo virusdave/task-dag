@@ -40,6 +40,7 @@ export const LowInventoryPackageSchema = z.object({
   currentQty: z.number().nullable(),
   holdQty: z.number().nullable(),
   internalTrackCode: z.string().nullable(),
+  inventoryBarcode: z.string().nullable(),
   inventoryItemId: z.string().min(1),
   metrcTag: z.string().nullable(),
   observedAt: z.string().datetime(),
@@ -90,3 +91,67 @@ export const LowInventoryResponseSchema = z.object({
   }),
 })
 export type LowInventoryResponse = z.infer<typeof LowInventoryResponseSchema>
+
+export const LowInventoryCountClassificationSchema = z.enum([
+  'equal',
+  'short',
+  'zero',
+  'zero-held',
+  'over',
+])
+export type LowInventoryCountClassification = z.infer<
+  typeof LowInventoryCountClassificationSchema
+>
+
+export const LowInventoryCountResolutionStatusSchema = z.enum(['not-needed', 'pending'])
+export type LowInventoryCountResolutionStatus = z.infer<
+  typeof LowInventoryCountResolutionStatusSchema
+>
+
+export const LowInventoryCountCaptureBodySchema = z
+  .object({
+    dealerId: z.coerce.number().int().positive(),
+    inventoryItemId: z.string().trim().min(1).max(128),
+    physicalQty: z.number().finite().min(0).max(1_000_000).multipleOf(0.001),
+    requestId: z.string().uuid(),
+  })
+  .strict()
+export type LowInventoryCountCaptureBody = z.infer<typeof LowInventoryCountCaptureBodySchema>
+
+export const LowInventoryCountRecordSchema = z.object({
+  id: z.string().uuid(),
+  requestId: z.string().uuid(),
+  dealerId: z.number().int().positive(),
+  inventoryItemId: z.string().min(1),
+  productId: z.number().int().positive(),
+  productSku: z.string().nullable(),
+  productName: z.string().nullable(),
+  physicalQty: z.number(),
+  classification: LowInventoryCountClassificationSchema,
+  resolutionStatus: LowInventoryCountResolutionStatusSchema,
+  actor: z.object({
+    userId: z.number().int().positive(),
+    email: z.string().email(),
+    name: z.string().min(1),
+  }),
+  capturedAt: z.string().datetime(),
+  sweedSnapshot: z.object({
+    currentQty: z.number(),
+    holdQty: z.number().nullable(),
+    availableQty: z.number().nullable(),
+    stockLocation: z.string().min(1),
+    internalTrackCode: z.string().nullable(),
+    metrcTag: z.string().nullable(),
+    observedAt: z.string().datetime(),
+  }),
+})
+export type LowInventoryCountRecord = z.infer<typeof LowInventoryCountRecordSchema>
+
+export const LowInventoryCountCaptureResponseSchema = z.object({
+  count: LowInventoryCountRecordSchema,
+  inventoryChanged: z.literal(false),
+  notificationSent: z.literal(false),
+})
+export type LowInventoryCountCaptureResponse = z.infer<
+  typeof LowInventoryCountCaptureResponseSchema
+>

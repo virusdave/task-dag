@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useRouteLoaderData } from 'react-router-dom'
 
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   LowInventoryResponseSchema,
   type HeliosPendingPurchaseSiteDealer,
+  type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
@@ -17,13 +18,31 @@ function siteForKey(siteKey: string | undefined): HeliosPendingPurchaseSiteDeale
 export function LowInventoryPage() {
   const { siteKey } = useParams<{ siteKey: string }>()
   const site = useMemo(() => siteForKey(siteKey), [siteKey])
+  const session = useRouteLoaderData('root') as SessionEnvelope | undefined
+  const countMigrationPending = session?.pendingMigrations.some(
+    (migration) => migration.migrationId === '103_low_inventory_physical_counts',
+  ) ?? true
+  const isEditor = session?.permissions.canEditProposals === true
+  const canCaptureCounts = isEditor && !countMigrationPending
 
   useRegisterCatalogSidebarSubtree()
 
-  return <LowInventorySitePage key={site?.siteKey ?? siteKey ?? 'missing'} site={site} />
+  return (
+    <LowInventorySitePage
+      key={site?.siteKey ?? siteKey ?? 'missing'}
+      site={site}
+      canCaptureCounts={canCaptureCounts}
+      countMigrationPending={isEditor && countMigrationPending}
+    />
+  )
 }
 
-function LowInventorySitePage({ site }: { site: HeliosPendingPurchaseSiteDealer | null }) {
+function LowInventorySitePage(props: {
+  site: HeliosPendingPurchaseSiteDealer | null
+  canCaptureCounts: boolean
+  countMigrationPending: boolean
+}) {
+  const { canCaptureCounts, countMigrationPending, site } = props
   const [cannabisOnly, setCannabisOnly] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
   const [state, setState] = useState<LowInventoryViewState>(() => site === null
@@ -65,6 +84,8 @@ function LowInventorySitePage({ site }: { site: HeliosPendingPurchaseSiteDealer 
       onCannabisOnlyChange={setCannabisOnly}
       siteLabel={site?.siteLabel ?? 'Low inventory'}
       state={state}
+      canCaptureCounts={canCaptureCounts}
+      countMigrationPending={countMigrationPending}
       onRetry={site === null ? undefined : () => setReloadKey((current) => current + 1)}
     />
   )

@@ -4,6 +4,8 @@ import {
   getHeliosPendingPurchaseSiteDealer,
   LOW_INVENTORY_DEFAULT_THRESHOLD,
   LOW_INVENTORY_STALE_AFTER_MINUTES,
+  LowInventoryCountCaptureBodySchema,
+  LowInventoryCountCaptureResponseSchema,
   LowInventoryConfigPutBodySchema,
   LowInventoryConfigResponseSchema,
   LowInventoryRequestSchema,
@@ -13,10 +15,16 @@ import {
 } from '../../shared/contracts/index.js'
 import { requireMetricsGrant, requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
+import { isMigrationAppliedLive } from '../db/pendingMigrations.js'
 import { getAppSetting, upsertAppSetting } from '../db/queries/appSettingsQueries.js'
+import {
+  captureLowInventoryCount,
+  LowInventoryCountCaptureError,
+} from '../lowInventory/lowInventoryCounts.js'
 import { queryLowInventoryReadModel } from '../lowInventory/lowInventoryQueries.js'
 
 const LOW_INVENTORY_CONFIG_KEY = 'low_inventory_config'
+const LOW_INVENTORY_COUNTS_MIGRATION_ID = '103_low_inventory_physical_counts'
 
 async function getLowInventoryConfig(): Promise<LowInventoryConfigResponse> {
   const row = await getAppSetting(getPool(), LOW_INVENTORY_CONFIG_KEY)
@@ -95,5 +103,46 @@ export async function registerLowInventoryRoutes(server: FastifyInstance): Promi
         updatedBy: row.updatedBy,
       }),
     )
+  })
+
+  server.post('/api/low-inventory/counts', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) return
+    const parsedBody = LowInventoryCountCaptureBodySchema.safeParse(request.body ?? {})
+    if (!parsedBody.success) {
+      return reply.status(400).send({ error: 'A valid site, package, and non-negative physical count are required.' })
+    }
+    const site = getHeliosPendingPurchaseSiteDealer(parsedBody.data.dealerId)
+    if (site === null) {
+      return reply.status(400).send({ error: `Unknown dealerId ${parsedBody.data.dealerId}.` })
+    }
+    const pool = getPool()
+    if (!(await isMigrationAppliedLive(pool, LOW_INVENTORY_COUNTS_MIGRATION_ID))) {
+      return reply.status(503).send({
+        error: 'Physical-count capture is not available until its reviewed database migration is applied.',
+      })
+    }
+    try {
+      const count = await captureLowInventoryCount({
+        actor: user,
+        dealerId: site.dealerId,
+        inventoryItemId: parsedBody.data.inventoryItemId,
+        physicalQty: parsedBody.data.physicalQty,
+        requestId: parsedBody.data.requestId,
+        db: pool,
+      })
+      return reply.status(201).send(
+        LowInventoryCountCaptureResponseSchema.parse({
+          count,
+          inventoryChanged: false,
+          notificationSent: false,
+        }),
+      )
+    } catch (error) {
+      if (error instanceof LowInventoryCountCaptureError) {
+        return reply.status(error.statusCode).send({ error: error.message })
+      }
+      throw error
+    }
   })
 }

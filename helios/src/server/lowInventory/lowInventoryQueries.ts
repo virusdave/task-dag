@@ -15,6 +15,7 @@ interface LowInventoryRow {
   current_qty: number | string | null
   hold_qty: number | string | null
   internal_track_code: string | null
+  inventory_barcode: string | null
   inventory_item_id: string
   metrc_tag: string | null
   observed_at_max: Date | string
@@ -37,6 +38,7 @@ const LOW_INVENTORY_SQL = `
     c.hold_qty,
     c.available_qty,
     c.metrc_tag,
+    nullif(btrim(c.raw_json->>'inventoryBarcode'), '') as inventory_barcode,
     c.internal_track_code,
     c.stock_location,
     c.observed_at_max
@@ -241,6 +243,7 @@ export function buildLowInventoryReadModel(args: {
       currentQty: nullableNumeric(row.current_qty, 'current_qty'),
       holdQty: nullableNumeric(row.hold_qty, 'hold_qty'),
       internalTrackCode: row.internal_track_code,
+      inventoryBarcode: row.inventory_barcode,
       inventoryItemId: row.inventory_item_id,
       metrcTag: row.metrc_tag,
       observedAt,

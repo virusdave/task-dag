@@ -55,6 +55,7 @@ interface Props {
   open: boolean
   onDetected: (value: string) => void
   onCancel: () => void
+  onPickPhoto?: () => void
 }
 
 interface DetectionOverlay {
@@ -79,7 +80,80 @@ interface NativeBarcodeDetectorCtor {
   getSupportedFormats?: () => Promise<string[]>
 }
 
-export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
+interface BarcodeImageDetectionResult {
+  rawValue?: string
+}
+
+interface BarcodeImageDetectorCtor {
+  new (options?: { formats?: string[] }): {
+    detect: (source: CanvasImageSource | ImageBitmap | Blob | ImageData) => Promise<BarcodeImageDetectionResult[]>
+  }
+}
+
+/**
+ * Canonical still-photo fallback shared by every Helios package scanner.
+ * Native BarcodeDetector gets the fast path; the lazy zxing decoder gets a
+ * second chance for glare, blur, and tight aisle photos.
+ */
+export async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
+  const native = await tryNativeBarcodeDetector(file)
+  if (native !== null && native.length > 0) return native
+  const zxing = await tryZxingDecode(file)
+  return zxing !== null && zxing.length > 0 ? zxing : null
+}
+
+async function tryNativeBarcodeDetector(file: File): Promise<string | null> {
+  const Detector = (
+    window as unknown as { BarcodeDetector?: BarcodeImageDetectorCtor }
+  ).BarcodeDetector
+  if (!Detector) return null
+  let bitmap: ImageBitmap | null = null
+  try {
+    const detector = new Detector({
+      formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar', 'qr_code'],
+    })
+    bitmap = await createImageBitmap(file)
+    const detections = await detector.detect(bitmap)
+    return detections[0]?.rawValue?.trim() ?? null
+  } catch (error) {
+    console.warn('[barcode-scan] native BarcodeDetector threw, falling back to zxing', error)
+    return null
+  } finally {
+    bitmap?.close?.()
+  }
+}
+
+async function tryZxingDecode(file: File): Promise<string | null> {
+  const { BrowserMultiFormatReader } = await importChunkOrReload(
+    () => import('@zxing/browser'),
+    '@zxing/browser (tryZxingDecode)',
+  )
+  const objectUrl = URL.createObjectURL(file)
+  const image = new Image()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve()
+      image.onerror = () => reject(new Error('Failed to load image for barcode decode.'))
+      image.src = objectUrl
+    })
+    const reader = new BrowserMultiFormatReader()
+    try {
+      const result = await reader.decodeFromImageElement(image)
+      return result.getText().trim()
+    } catch (error) {
+      const name = (error as { name?: string } | null)?.name ?? ''
+      if (name !== 'NotFoundException' && name !== 'NotFoundException2') {
+        console.warn('[barcode-scan] zxing decoder threw', error)
+      }
+      return null
+    }
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+export function LiveBarcodeScanner({ open, onDetected, onCancel, onPickPhoto }: Props) {
+  const dialogRef = useRef<HTMLDivElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -95,24 +169,36 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   const streamRef = useRef<MediaStream | null>(null)
   const controlsStopRef = useRef<(() => void) | null>(null)
   const rafHandleRef = useRef<number | null>(null)
+  const detectionTimeoutRef = useRef<number | null>(null)
   const startBusyRef = useRef<boolean>(false)
+  const lifecycleTokenRef = useRef(0)
 
   // Keep the latest callbacks reachable from async paths without
   // forcing the effect/start handler to re-run on prop churn.
   const onDetectedRef = useRef(onDetected)
   const onCancelRef = useRef(onCancel)
+  const onPickPhotoRef = useRef(onPickPhoto)
   useEffect(() => {
     onDetectedRef.current = onDetected
   }, [onDetected])
   useEffect(() => {
     onCancelRef.current = onCancel
   }, [onCancel])
+  useEffect(() => {
+    onPickPhotoRef.current = onPickPhoto
+  }, [onPickPhoto])
 
   const [stage, setStage] = useState<ScannerStage>('idle')
   const [status, setStatus] = useState<string>('Tap to start camera')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const tearDown = useCallback(() => {
+    lifecycleTokenRef.current += 1
+    startBusyRef.current = false
+    if (detectionTimeoutRef.current !== null) {
+      window.clearTimeout(detectionTimeoutRef.current)
+      detectionTimeoutRef.current = null
+    }
     if (controlsStopRef.current) {
       try {
         controlsStopRef.current()
@@ -153,15 +239,45 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   // Reset/teardown only — never auto-starts the camera.
   useEffect(() => {
     if (!open) return
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
     lockedRef.current = false
     detectionRef.current = null
     setStage('idle')
     setStatus('Tap to start camera')
     setErrorMessage(null)
+    window.requestAnimationFrame(() => {
+      dialogRef.current?.querySelector<HTMLElement>('button:not([disabled])')?.focus()
+    })
     return () => {
       tearDown()
+      document.body.style.overflow = previousOverflow
+      opener?.focus()
     }
   }, [open, tearDown])
+
+  const handleDialogKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      tearDown()
+      onCancelRef.current()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )
+    if (!focusables || focusables.length === 0) return
+    const first = focusables[0]!
+    const last = focusables[focusables.length - 1]!
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }, [tearDown])
 
   const runRafLoop = useCallback(() => {
     const paint = () => {
@@ -228,6 +344,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
       return
     }
     startBusyRef.current = true
+    const lifecycleToken = ++lifecycleTokenRef.current
     lockedRef.current = false
     detectionRef.current = null
     setErrorMessage(null)
@@ -252,9 +369,15 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
           },
         })
       } catch (primaryErr) {
+        if (lifecycleToken !== lifecycleTokenRef.current) return
         stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true })
         // eslint-disable-next-line no-console
         console.warn('[live-barcode-scanner] rear camera unavailable, using default', primaryErr)
+      }
+
+      if (lifecycleToken !== lifecycleTokenRef.current) {
+        for (const track of stream.getTracks()) track.stop()
+        return
       }
 
       streamRef.current = stream
@@ -271,6 +394,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
       setStage('starting')
       setStatus('Starting decoder…')
       await video.play()
+      if (lifecycleToken !== lifecycleTokenRef.current) return
 
       runRafLoop()
 
@@ -293,13 +417,15 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         'data_matrix',
       ]
       const handleDecodedValue = (value: string, points: Array<{ x: number; y: number }>) => {
+        if (lifecycleToken !== lifecycleTokenRef.current) return
         if (lockedRef.current) return
         if (value.length === 0) return
         detectionRef.current = { points, value }
         lockedRef.current = true
         setStatus(`✓ ${value}`)
         playConfirmBeep()
-        window.setTimeout(() => {
+        detectionTimeoutRef.current = window.setTimeout(() => {
+          detectionTimeoutRef.current = null
           onDetectedRef.current(value)
         }, 350)
       }
@@ -313,6 +439,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         let nativeFormats: string[] = productFormats
         try {
           const supported = (await nativeDetectorCtor.getSupportedFormats?.()) ?? []
+          if (lifecycleToken !== lifecycleTokenRef.current) return
           if (supported.length > 0) {
             const supportedSet = new Set(supported)
             const filtered = productFormats.filter((f) => supportedSet.has(f))
@@ -321,6 +448,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         } catch {
           /* getSupportedFormats is optional; ignore */
         }
+        if (lifecycleToken !== lifecycleTokenRef.current) return
         const detector = new nativeDetectorCtor({ formats: nativeFormats })
         let nativeRunning = true
         controlsStopRef.current = () => {
@@ -371,10 +499,12 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
           () => import('@zxing/browser'),
           '@zxing/browser (LiveBarcodeScanner)',
         )
+        if (lifecycleToken !== lifecycleTokenRef.current) return
         const { BarcodeFormat, DecodeHintType } = await importChunkOrReload(
           () => import('@zxing/library'),
           '@zxing/library (LiveBarcodeScanner)',
         )
+        if (lifecycleToken !== lifecycleTokenRef.current) return
         const zxingFormats = [
           BarcodeFormat.UPC_A,
           BarcodeFormat.UPC_E,
@@ -422,12 +552,18 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
           )
           handleDecodedValue(value, points)
         })
+        if (lifecycleToken !== lifecycleTokenRef.current) {
+          controls.stop()
+          return
+        }
         controlsStopRef.current = () => controls.stop()
       }
 
+      if (lifecycleToken !== lifecycleTokenRef.current) return
       setStage('active')
       setStatus('Point the camera at a barcode…')
     } catch (error) {
+      if (lifecycleToken !== lifecycleTokenRef.current) return
       const message = error instanceof Error ? error.message : String(error)
       // eslint-disable-next-line no-console
       console.warn('[live-barcode-scanner] camera/decoder failed', error)
@@ -436,7 +572,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
       setErrorMessage(humanizeCameraError(message))
       tearDown()
     } finally {
-      startBusyRef.current = false
+      if (lifecycleToken === lifecycleTokenRef.current) startBusyRef.current = false
     }
   }, [runRafLoop, tearDown])
 
@@ -470,9 +606,11 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
 
   const overlay = (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Live barcode scanner"
+      onKeyDown={handleDialogKeyDown}
       style={{
         position: 'fixed',
         top: 0,
@@ -610,9 +748,24 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         }}
       >
         {errorMessage ? (
-          <span style={{ color: '#ff7a7a' }}>{errorMessage}</span>
+          <div role="alert" style={{ display: 'grid', justifyItems: 'center', gap: '0.5rem' }}>
+            <span style={{ color: '#ff7a7a' }}>{errorMessage}</span>
+            {onPickPhotoRef.current ? (
+              <button
+                type="button"
+                className="ghost-button"
+                style={{ color: '#fff', borderColor: 'rgba(255,255,255,0.5)' }}
+                onClick={() => {
+                  tearDown()
+                  onPickPhotoRef.current?.()
+                }}
+              >
+                Use a photo instead
+              </button>
+            ) : null}
+          </div>
         ) : (
-          <span>{status}</span>
+          <span role="status" aria-live="polite">{status}</span>
         )}
       </div>
     </div>

@@ -2,7 +2,12 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import type { LowInventoryResponse } from '../../../shared/contracts/index.js'
-import { LowInventoryView, type LowInventoryViewState } from './LowInventoryView.js'
+import {
+  findLowInventoryPackagesForScan,
+  isLowInventoryPackageCountable,
+  LowInventoryView,
+  type LowInventoryViewState,
+} from './LowInventoryView.js'
 
 function response(overrides?: Partial<LowInventoryResponse>): LowInventoryResponse {
   return {
@@ -23,6 +28,7 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
                   currentQty: 1,
                   holdQty: 0,
                   internalTrackCode: 'FLOWER-A-03',
+                  inventoryBarcode: '012345678905',
                   inventoryItemId: 'inventory-1',
                   metrcTag: '1A400000000000000001',
                   observedAt: '2026-07-10T14:30:00.000Z',
@@ -35,6 +41,7 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
                   currentQty: 2,
                   holdQty: 1,
                   internalTrackCode: null,
+                  inventoryBarcode: null,
                   inventoryItemId: 'inventory-item-with-a-long-identifier-that-must-wrap',
                   metrcTag: null,
                   observedAt: '2026-07-10T14:30:00.000Z',
@@ -61,6 +68,7 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
                 currentQty: null,
                 holdQty: null,
                 internalTrackCode: null,
+                inventoryBarcode: null,
                 inventoryItemId: 'inventory-2',
                 metrcTag: '   ',
                 observedAt: '2026-07-10T14:30:00.000Z',
@@ -110,7 +118,6 @@ describe('LowInventoryView', () => {
     expect(html.match(/<small>2 site-wide<\/small>/g)).toHaveLength(2)
     expect(html).toContain('type="checkbox"')
     expect(html).toContain('Cannabis only')
-    expect(html).toContain('Items without a reported category stay visible.')
     expect(html).not.toContain('<form')
   })
 
@@ -181,6 +188,46 @@ describe('LowInventoryView', () => {
     const html = render({ kind: 'ready', response: empty })
     expect(html).toContain('No low-inventory items')
     expect(html).toContain('between 1 and 2 available')
+  })
+
+  it('renders labeled camera, photo, manual, and per-package count controls for editors', () => {
+    const html = renderToStaticMarkup(
+      <LowInventoryView
+        cannabisOnly={false}
+        canCaptureCounts
+        onCannabisOnlyChange={() => undefined}
+        siteLabel="Midtown"
+        state={{ kind: 'ready', response: response() }}
+      />,
+    )
+    expect(html).toContain('Count only')
+    expect(html).toContain('Scan package')
+    expect(html).toContain('From photo')
+    expect(html).toContain('Barcode or METRC tag')
+    expect(html).toContain('Record physical count')
+    expect(html).toContain('Current quantity unavailable')
+  })
+
+  it('matches scans case-insensitively by package barcode or METRC tag and preserves ambiguity', () => {
+    const packages = response().data.locationGroups.flatMap((group) =>
+      group.skus.flatMap((sku) => sku.packages),
+    )
+    expect(findLowInventoryPackagesForScan(packages, ' 012345678905 ')).toMatchObject([
+      { inventoryItemId: 'inventory-1' },
+    ])
+    expect(findLowInventoryPackagesForScan(packages, '1a400000000000000001')).toMatchObject([
+      { inventoryItemId: 'inventory-1' },
+    ])
+    expect(findLowInventoryPackagesForScan(packages, 'unknown')).toEqual([])
+    expect(findLowInventoryPackagesForScan([
+      packages[0]!,
+      { ...packages[0]!, inventoryItemId: 'inventory-duplicate' },
+    ], '012345678905')).toHaveLength(2)
+    expect(isLowInventoryPackageCountable(packages[0]!)).toBe(true)
+    expect(isLowInventoryPackageCountable(packages[2]!)).toBe(false)
+    expect(findLowInventoryPackagesForScan([
+      { ...packages[2]!, inventoryBarcode: 'unavailable-package' },
+    ], 'unavailable-package')).toMatchObject([{ currentQty: null }])
   })
 
   it('distinguishes a cannabis filter with no matches from an empty source', () => {

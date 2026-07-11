@@ -19,7 +19,6 @@ import {
 } from '../../../shared/contracts/index.js'
 import { buildAppPath } from '../../app/paths.js'
 import { isJobTerminal, loadJobStatus } from '../../app/jobPolling.js'
-import { importChunkOrReload } from '../../app/dynamicImport.js'
 import { Pill } from '../../components/Pill.js'
 import {
   buildMaintenanceIndexPath,
@@ -27,7 +26,7 @@ import {
   useRegisterCatalogSidebarSubtree,
   type ImagesAndBarcodesSiteEntry,
 } from './catalogSidebarSubtree.js'
-import { LiveBarcodeScanner } from './LiveBarcodeScanner.js'
+import { decodeBarcodeFromImageFile, LiveBarcodeScanner } from './LiveBarcodeScanner.js'
 import {
   LocationPicker,
   postAssign,
@@ -2363,107 +2362,6 @@ function BarcodeLine(props: BarcodeLineProps) {
       </button>
     </span>
   )
-}
-
-interface BarcodeDetectionResult {
-  rawValue?: string
-  format?: string
-}
-
-interface BarcodeDetectorCtor {
-  new (options?: { formats?: string[] }): {
-    detect: (source: CanvasImageSource | ImageBitmap | Blob | ImageData) => Promise<BarcodeDetectionResult[]>
-  }
-}
-
-/**
- * Decode a barcode value from an image file taken/picked by the user.
- *
- * Tries the native `BarcodeDetector` API first (fast, zero-bundle on
- * Chrome / Android). If that misses OR throws, falls back to a
- * lazily-imported `@zxing/browser` decoder which is slower but
- * dramatically more tolerant of motion blur, off-axis angles, glare,
- * and tight crops — the exact conditions an operator hits standing in
- * a store aisle one-handing their phone at a package.
- *
- * This double-tap was previously either/or based on API availability,
- * which made scanning brittle on Chrome / Android (the common case):
- * any single BarcodeDetector miss surfaced as a hard "no barcode
- * detected" toast even when zxing would have happily decoded the
- * exact same image. Now both decoders get a shot before we give up.
- *
- * Returns the decoded string on success, or `null` if BOTH decoders
- * came up empty. Never throws for routine misses or decoder hiccups —
- * the caller treats `null` as "ask the operator to retake the photo".
- */
-async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
-  const native = await tryNativeBarcodeDetector(file)
-  if (native !== null && native.length > 0) return native
-  const zxing = await tryZxingDecode(file)
-  if (zxing !== null && zxing.length > 0) return zxing
-  return null
-}
-
-async function tryNativeBarcodeDetector(file: File): Promise<string | null> {
-  const Detector = (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector
-  if (!Detector) return null
-  let bitmap: ImageBitmap | null = null
-  try {
-    const detector = new Detector({
-      formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar', 'qr_code'],
-    })
-    bitmap = await createImageBitmap(file)
-    const detections = await detector.detect(bitmap)
-    if (detections.length === 0) return null
-    return detections[0]?.rawValue?.trim() ?? null
-  } catch (error) {
-    // Some Android Chrome builds advertise BarcodeDetector but throw
-    // NotSupportedError or hit codec issues on certain JPEG profiles.
-    // Treat any failure as a miss and let zxing have a go.
-    // eslint-disable-next-line no-console
-    console.warn('[barcode-scan] native BarcodeDetector threw, falling back to zxing', error)
-    return null
-  } finally {
-    bitmap?.close?.()
-  }
-}
-
-async function tryZxingDecode(file: File): Promise<string | null> {
-  // Dynamic-import keeps the ~200 KB zxing bundle out of the main
-  // chunk; it's only paid for when a scan actually happens.
-  // importChunkOrReload defends against stale-bundle scenarios:
-  // an open tab whose old chunk hash has been deleted by a redeploy
-  // would otherwise blow up with "Importing a module script failed"
-  // here; we instead force a clean cache-busted reload.
-  const { BrowserMultiFormatReader } = await importChunkOrReload(
-    () => import('@zxing/browser'),
-    '@zxing/browser (tryZxingDecode)',
-  )
-  const objectUrl = URL.createObjectURL(file)
-  const img = new Image()
-  try {
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve()
-      img.onerror = () => reject(new Error('Failed to load image for barcode decode.'))
-      img.src = objectUrl
-    })
-    const reader = new BrowserMultiFormatReader()
-    try {
-      const result = await reader.decodeFromImageElement(img)
-      return result.getText().trim()
-    } catch (error) {
-      // NotFoundException is a clean miss.
-      const name = (error as { name?: string } | null)?.name ?? ''
-      if (name === 'NotFoundException' || name === 'NotFoundException2') return null
-      // Unexpected throw: log and treat as miss. Showing the operator
-      // a stack-y zxing message is worse than telling them to retake.
-      // eslint-disable-next-line no-console
-      console.warn('[barcode-scan] zxing decoder threw', error)
-      return null
-    }
-  } finally {
-    URL.revokeObjectURL(objectUrl)
-  }
 }
 
 function displayGroupName(group: CatalogMaintenanceSiteGroup): string {

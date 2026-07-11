@@ -12,11 +12,13 @@ const mockState = vi.hoisted(() => ({
     value: unknown
   } | null,
   metricsGranted: false,
+  countMigrationApplied: false,
 }))
 
 const getAppSettingMock = vi.hoisted(() => vi.fn())
 const upsertAppSettingMock = vi.hoisted(() => vi.fn())
 const queryLowInventoryReadModelMock = vi.hoisted(() => vi.fn())
+const captureLowInventoryCountMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../auth/requireSession.js', () => ({
   requireMetricsGrant: vi.fn(
@@ -63,6 +65,10 @@ vi.mock('../db/pool.js', () => ({
   getPool: vi.fn(() => ({ query: vi.fn() })),
 }))
 
+vi.mock('../db/pendingMigrations.js', () => ({
+  isMigrationAppliedLive: vi.fn(async () => mockState.countMigrationApplied),
+}))
+
 vi.mock('../db/queries/appSettingsQueries.js', () => ({
   getAppSetting: getAppSettingMock,
   upsertAppSetting: upsertAppSettingMock,
@@ -70,6 +76,13 @@ vi.mock('../db/queries/appSettingsQueries.js', () => ({
 
 vi.mock('../lowInventory/lowInventoryQueries.js', () => ({
   queryLowInventoryReadModel: queryLowInventoryReadModelMock,
+}))
+
+vi.mock('../lowInventory/lowInventoryCounts.js', () => ({
+  captureLowInventoryCount: captureLowInventoryCountMock,
+  LowInventoryCountCaptureError: class extends Error {
+    readonly statusCode = 404
+  },
 }))
 
 import { registerLowInventoryRoutes } from './lowInventory.js'
@@ -90,6 +103,7 @@ beforeEach(async () => {
   mockState.admin = false
   mockState.appSetting = null
   mockState.metricsGranted = false
+  mockState.countMigrationApplied = false
   getAppSettingMock.mockImplementation(async () => mockState.appSetting)
   upsertAppSettingMock.mockImplementation(
     async (_db: unknown, key: string, value: unknown, updatedBy: string) => ({
@@ -103,6 +117,29 @@ beforeEach(async () => {
     async (args: { dealerId: number; threshold: number }) =>
       model({ dealerId: args.dealerId, threshold: args.threshold }),
   )
+  captureLowInventoryCountMock.mockResolvedValue({
+    id: '20c4a7fe-ea9f-45ad-98d2-437d7378579d',
+    requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
+    dealerId: 210705,
+    inventoryItemId: 'package-1',
+    productId: 101,
+    productSku: 'SKU-1',
+    productName: 'Product',
+    physicalQty: 1,
+    classification: 'short',
+    resolutionStatus: 'pending',
+    actor: { userId: 2, email: 'admin@example.com', name: 'Admin' },
+    capturedAt: '2026-07-11T14:00:00.000Z',
+    sweedSnapshot: {
+      currentQty: 2,
+      holdQty: 0,
+      availableQty: 2,
+      stockLocation: 'FOR SALE - Midtown',
+      internalTrackCode: 'PRE-A-1',
+      metrcTag: 'TAG-1',
+      observedAt: '2026-07-11T13:55:00.000Z',
+    },
+  })
   server = Fastify()
   server.setErrorHandler((error, _request, reply) =>
     reply.status(500).send({ error: error.message }),
@@ -238,5 +275,58 @@ describe('low-inventory routes', () => {
       { threshold: 3 },
       'admin@example.com',
     )
+  })
+
+  it('requires editor authorization and an applied migration before capturing a count', async () => {
+    const denied = await server.inject({
+      method: 'POST',
+      url: '/api/low-inventory/counts',
+      payload: {
+        dealerId: 210705,
+        inventoryItemId: 'package-1',
+        physicalQty: 1,
+        requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
+      },
+    })
+    expect(denied.statusCode).toBe(403)
+    expect(captureLowInventoryCountMock).not.toHaveBeenCalled()
+
+    mockState.admin = true
+    const migrationPending = await server.inject({
+      method: 'POST',
+      url: '/api/low-inventory/counts',
+      payload: {
+        dealerId: 210705,
+        inventoryItemId: 'package-1',
+        physicalQty: 1,
+        requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
+      },
+    })
+    expect(migrationPending.statusCode).toBe(503)
+    expect(captureLowInventoryCountMock).not.toHaveBeenCalled()
+
+    mockState.countMigrationApplied = true
+    const captured = await server.inject({
+      method: 'POST',
+      url: '/api/low-inventory/counts',
+      payload: {
+        dealerId: 210705,
+        inventoryItemId: 'package-1',
+        physicalQty: 1,
+        requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
+      },
+    })
+    expect(captured.statusCode).toBe(201)
+    expect(captured.json()).toMatchObject({
+      count: { classification: 'short', resolutionStatus: 'pending' },
+      inventoryChanged: false,
+      notificationSent: false,
+    })
+    expect(captureLowInventoryCountMock).toHaveBeenCalledWith(expect.objectContaining({
+      dealerId: 210705,
+      inventoryItemId: 'package-1',
+      physicalQty: 1,
+      requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
+    }))
   })
 })

@@ -234,6 +234,100 @@ async function hypertableExists(db: Queryable, hypertableName: string): Promise<
   return result.rows[0]?.exists === true
 }
 
+async function lowInventoryPhysicalCountsSchemaApplied(db: Queryable): Promise<boolean> {
+  // One bounded catalog round-trip verifies the exact application contract.
+  // Keep the definitions synchronized with schema/lowInventoryPhysicalCounts.sql.
+  const result = await db.query<{ applied: boolean }>(`
+    with expected_columns(name, type, not_null, default_expr) as (values
+      ('id', 'uuid', true, 'gen_random_uuid()'),
+      ('request_id', 'uuid', true, null),
+      ('dealer_id', 'bigint', true, null),
+      ('inventory_item_id', 'text', true, null),
+      ('product_id', 'bigint', true, null),
+      ('product_sku', 'text', false, null),
+      ('product_name', 'text', false, null),
+      ('physical_qty', 'numeric(12,3)', true, null),
+      ('classification', 'text', true, null),
+      ('resolution_status', 'text', true, null),
+      ('actor_user_id', 'bigint', true, null),
+      ('actor_email', 'text', true, null),
+      ('actor_name', 'text', true, null),
+      ('captured_at', 'timestamp with time zone', true, 'now()'),
+      ('sweed_current_qty', 'numeric(12,3)', true, null),
+      ('sweed_hold_qty', 'numeric(12,3)', false, null),
+      ('sweed_available_qty', 'numeric(12,3)', false, null),
+      ('sweed_stock_location', 'text', true, null),
+      ('sweed_internal_track_code', 'text', false, null),
+      ('sweed_metrc_tag', 'text', false, null),
+      ('sweed_observed_at', 'timestamp with time zone', true, null)
+    ), actual_columns as (
+      select
+        a.attname as name,
+        format_type(a.atttypid, a.atttypmod) as type,
+        a.attnotnull as not_null,
+        pg_get_expr(d.adbin, d.adrelid) as default_expr
+      from pg_attribute a
+      join pg_class t on t.oid = a.attrelid
+      join pg_namespace n on n.oid = t.relnamespace
+      left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+      where n.nspname = 'public'
+        and t.relname = 'low_inventory_physical_counts'
+        and a.attnum > 0
+        and not a.attisdropped
+    ), expected_constraints(name, type, definition) as (values
+      ('low_inventory_physical_counts_pkey', 'p', 'PRIMARY KEY (id)'),
+      ('low_inventory_physical_counts_request_id_key', 'u', 'UNIQUE (request_id)'),
+      ('low_inventory_physical_counts_actor_user_id_fkey', 'f', 'FOREIGN KEY (actor_user_id) REFERENCES users(id)'),
+      ('low_inventory_physical_counts_physical_qty_ok', 'c', 'CHECK (((physical_qty >= (0)::numeric) AND (physical_qty <= (1000000)::numeric)))'),
+      ('low_inventory_physical_counts_classification_ok', 'c', 'CHECK ((classification = ANY (ARRAY[''equal''::text, ''short''::text, ''zero''::text, ''zero-held''::text, ''over''::text])))'),
+      ('low_inventory_physical_counts_resolution_status_ok', 'c', 'CHECK ((resolution_status = ANY (ARRAY[''not-needed''::text, ''pending''::text])))'),
+      ('low_inventory_physical_counts_resolution_matches_classification', 'c', 'CHECK ((((classification = ''equal''::text) AND (resolution_status = ''not-needed''::text)) OR ((classification <> ''equal''::text) AND (resolution_status = ''pending''::text))))'),
+      ('low_inventory_physical_counts_classification_matches_snapshot', 'c', 'CHECK ((((classification = ''equal''::text) AND (physical_qty = sweed_current_qty)) OR ((classification = ''zero-held''::text) AND (physical_qty = (0)::numeric) AND (physical_qty <> sweed_current_qty) AND (COALESCE(sweed_hold_qty, (0)::numeric) > (0)::numeric)) OR ((classification = ''zero''::text) AND (physical_qty = (0)::numeric) AND (physical_qty <> sweed_current_qty) AND (COALESCE(sweed_hold_qty, (0)::numeric) <= (0)::numeric)) OR ((classification = ''short''::text) AND (physical_qty > (0)::numeric) AND (physical_qty < sweed_current_qty)) OR ((classification = ''over''::text) AND (physical_qty > sweed_current_qty))))')
+    ), actual_constraints as (
+      select c.conname as name, c.contype::text as type, pg_get_constraintdef(c.oid) as definition, c.convalidated
+      from pg_constraint c
+      join pg_class t on t.oid = c.conrelid
+      join pg_namespace n on n.oid = t.relnamespace
+      where n.nspname = 'public' and t.relname = 'low_inventory_physical_counts'
+    ), expected_indexes(name, definition) as (values
+      ('low_inventory_physical_counts_package_history_idx', 'CREATE INDEX low_inventory_physical_counts_package_history_idx ON public.low_inventory_physical_counts USING btree (dealer_id, inventory_item_id, captured_at DESC)'),
+      ('low_inventory_physical_counts_pending_idx', 'CREATE INDEX low_inventory_physical_counts_pending_idx ON public.low_inventory_physical_counts USING btree (dealer_id, captured_at DESC) WHERE (resolution_status = ''pending''::text)')
+    ), actual_indexes as (
+      select i.relname as name, pg_get_indexdef(i.oid) as definition, x.indisvalid, x.indisready
+      from pg_class i
+      join pg_namespace n on n.oid = i.relnamespace
+      join pg_index x on x.indexrelid = i.oid
+      where n.nspname = 'public'
+        and i.relname in (
+          'low_inventory_physical_counts_package_history_idx',
+          'low_inventory_physical_counts_pending_idx'
+        )
+    )
+    select
+      not exists (
+        select 1 from expected_columns e
+        left join actual_columns a
+          on a.name = e.name
+         and a.type = e.type
+         and a.not_null = e.not_null
+         and a.default_expr is not distinct from e.default_expr
+        where a.name is null
+      )
+      and (select count(*) from actual_columns) = (select count(*) from expected_columns)
+      and not exists (
+        select 1 from expected_constraints e
+        left join actual_constraints a using (name, type, definition)
+        where a.name is null or not a.convalidated
+      )
+      and not exists (
+        select 1 from expected_indexes e
+        left join actual_indexes a using (name, definition)
+        where a.name is null or not a.indisvalid or not a.indisready
+      ) as applied
+  `)
+  return result.rows[0]?.applied === true
+}
+
 const SENTINELS: MigrationSentinel[] = [
   {
     migrationId: '007_pending_purchases',
@@ -1549,6 +1643,14 @@ const SENTINELS: MigrationSentinel[] = [
         hasActiveTurnIndex
       )
     },
+  },
+  {
+    migrationId: '103_low_inventory_physical_counts',
+    label:
+      'low_inventory_physical_counts immutable audit table for editor-entered ' +
+      'per-package floor counts (automation#73). Until applied, Helios keeps ' +
+      'the low-inventory review page read-only and refuses count capture.',
+    check: lowInventoryPhysicalCountsSchemaApplied,
   },
   // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and
   // 101_migration_flow_smoketest_drop were a throwaway create+drop PAIR used to

@@ -11516,6 +11516,88 @@ span.metric-chart-legend-item {
   font-size: 0.85rem;
 }
 
+.low-inventory-scan {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: rgba(255, 250, 241, 0.8);
+}
+
+.low-inventory-scan > div:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.low-inventory-scan > div:first-child span,
+.low-inventory-manual-scan label,
+.low-inventory-count-form span,
+.low-inventory-count-form small,
+.low-inventory-count-result span,
+.low-inventory-count-result small {
+  color: var(--text-muted-strong);
+  font-size: 0.78rem;
+}
+
+.low-inventory-scan-actions,
+.low-inventory-count-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.low-inventory-scan-actions button,
+.low-inventory-count-actions button,
+.low-inventory-count-button,
+.low-inventory-count-result button {
+  min-height: 44px;
+}
+
+.low-inventory-manual-scan {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.low-inventory-manual-scan > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+}
+
+.low-inventory-manual-scan input,
+.low-inventory-count-form input {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--control-border);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.low-inventory-scan-status {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-scan-status p {
+  margin: 0;
+}
+
+.low-inventory-scan-candidates {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.low-inventory-scan-candidates button {
+  min-height: 44px;
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .low-inventory-locations,
 .low-inventory-location,
 .low-inventory-skus {
@@ -11665,6 +11747,53 @@ span.metric-chart-legend-item {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
+}
+
+.low-inventory-count-button {
+  width: 100%;
+}
+
+.low-inventory-count-form,
+.low-inventory-count-result {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.7rem;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.low-inventory-count-form > div:first-child,
+.low-inventory-count-result {
+  min-width: 0;
+}
+
+.low-inventory-count-form label,
+.low-inventory-count-result strong {
+  display: block;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-count-form input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 1rem;
+}
+
+.low-inventory-count-error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.low-inventory-count-result.is-pending {
+  border-color: var(--warning);
+  background: rgba(199, 154, 46, 0.14);
+}
+
+.low-inventory-count-result.is-equal {
+  border-color: var(--success);
+  background: rgba(61, 137, 85, 0.1);
 }
 
 .low-inventory-empty {
