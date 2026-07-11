@@ -238,14 +238,22 @@ erases. B is heavier for no added benefit here.
 
 - `GET /api/admin/pending-migrations` → `{ migrations: [{ migrationId, label,
   sentinelState: 'pending'|'applied', eligible: boolean, ineligibleReason:
-  string|null, blessing: {ref,note,transactionMode}|null, artifactDigestMatch:
-  boolean, lastAttempt: { jobId, state, error, startedAt, finishedAt,
+  string|null, blessing: {ref,note,transactionMode,operatorExplanation}|null,
+  artifactDigestMatch: boolean, artifactSha256: string|null, lastAttempt:
+  { jobId, state, error, startedAt, finishedAt,
   requestedBy } | null }] }` (sentinel/eligibility computed **live**).
-- `POST /api/admin/pending-migrations/:id/apply` body `{ confirmMigrationId }`
-  → validates id ∈ registry, `confirmMigrationId === id`, eligible (blessing +
-  live digest match), still (live) pending; enqueues the URGENT job; returns
-  `{ jobId }`. `409` if not eligible / already applied; the dedupe index means
-  a repeat click while one is in flight returns the in-flight `jobId`.
+- `GET /api/admin/pending-migrations/:id/details` → current single-migration
+  state plus the digest-bound explanation and the exact captured UTF-8 text of
+  the main SQL file and complete `\i`/`\ir` closure. The response is
+  `Cache-Control: no-store`, contains relative paths only, and fails the
+  artifact closed (without partial files) above 64 files / 1 MiB.
+- `POST /api/admin/pending-migrations/:id/apply` body
+  `{ confirmMigrationId, expectedArtifactSha256 }` → validates id ∈ registry,
+  `confirmMigrationId === id`, eligible (blessing + live digest match), the
+  deployed digest still equals the operator-reviewed digest, and still (live)
+  pending; enqueues the URGENT job; returns `{ jobId }`. `409` if not eligible,
+  changed, or already applied; the dedupe index means a repeat click while one
+  is in flight returns the in-flight `jobId`.
 - Live progress reuses the existing `GET /api/jobs/:jobId`.
 - Optional (nice-to-have): `POST /api/admin/pending-migrations/:id/preflight`
   — validates eligibility, artifact digest, psql availability, and advisory-lock
@@ -261,6 +269,14 @@ click it POSTs, then polls `GET /api/jobs/:jobId` (reusing
 `loadJobStatus`/`isJobTerminal`, 1.5 s like `JobDetailPage`) to show live
 running → success (sentinel now applied; row drops) / failure (error surfaced,
 safe to retry).
+
+Each row also opens `/config/pending-migrations/:id` in a new tab. That mobile-
+friendly review page keeps the digest, eligibility, blessing, latest job, and
+return-to-Apply action visible, while collapsing the digest-bound plain-English
+explanation above the collapsed SQL artifact. `MigrationBlessing` owns the
+required explanation alongside `artifactSha256`; an edited artifact therefore
+makes both the prose and Apply action stale together rather than allowing a
+second description source to drift.
 
 ## Banner retirement
 

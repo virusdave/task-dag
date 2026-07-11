@@ -44,9 +44,9 @@ export type MigrationTransactionMode = 'transactional' | 'nontransactional-cic' 
  * edit to a shared `schema/*.sql` include changes the recomputed digest and
  * invalidates the stale blessing rather than silently running unblessed SQL.
  * The blessing is recorded in git by the migration author when it lands, so
- * provenance is version-controlled, not a mutable DB flag. This is intentionally
- * absent from every migration until leaf 9 blesses `097` (+ operator approval),
- * so the apply engine fails closed on everything today.
+ * provenance is version-controlled, not a mutable DB flag. It is intentionally
+ * absent until a migration has completed that review, so the apply engine fails
+ * closed for every unreviewed artifact.
  */
 export interface MigrationBlessing {
   /** Human-referenceable Oracle blessing ref (thread URL / review id). */
@@ -61,6 +61,8 @@ export interface MigrationBlessing {
   readonly artifactSha256: string
   /** How the artifact handles transactions (recorded onto the attempt row). */
   readonly transactionMode: MigrationTransactionMode
+  /** Digest-bound, Oracle-reviewed explanation shown before the raw SQL. */
+  readonly operatorExplanation: string
   /** Optional free-text note (non-transactional caveats, etc). */
   readonly note?: string
 }
@@ -1507,6 +1509,8 @@ const SENTINELS: MigrationSentinel[] = [
       reviewedSha: 'cc147f13a2c34902679f6ce656db10ac9ffd4755',
       artifactSha256: 'fb9c15eff6d26d78ed95fe9fb7dd8fd324d5f4d155986cafaa66e0b160564b4b',
       transactionMode: 'transactional',
+      operatorExplanation:
+        'This migration adds the durable lineage needed to refine a pending-purchase packet over multiple turns without losing its history. It creates root and refinement-turn tables, links packets and rows to stable lineage identifiers, records snapshot hashes and provenance, and adds indexes that allow only one active refinement per root. It also backfills the small existing packet and row population so old records participate in the same model. It does not enable any LLM, user-interface, or automatic apply behavior; it only adds the schema foundation those later changes require.',
       note:
         'Oracle-approved schema-only expand migration for pending-purchase refinement ' +
         'lineage; no includes and no CREATE INDEX CONCURRENTLY. Self-wrapped in ' +

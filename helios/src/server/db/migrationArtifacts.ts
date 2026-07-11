@@ -58,6 +58,9 @@ export type MigrationArtifactErrorCode =
   | 'unsafe-include-arg'
   | 'unsupported-meta-command'
   | 'include-cycle'
+  | 'review-artifact-changed'
+  | 'review-artifact-too-large'
+  | 'review-artifact-invalid-utf8'
 
 /**
  * A fail-closed rejection while resolving a migration artifact. Callers (the
@@ -101,6 +104,31 @@ export interface ResolvedMigrationArtifact {
   readonly schemaRoot: string
 }
 
+export interface MigrationArtifactReviewFile {
+  readonly role: 'main' | 'include'
+  readonly relPath: string
+  readonly byteLength: number
+  readonly text: string
+}
+
+export interface MigrationArtifactReview {
+  readonly sha256: string
+  readonly totalBytes: number
+  readonly files: readonly MigrationArtifactReviewFile[]
+}
+
+interface CapturedArtifactFile extends ResolvedArtifactFile {
+  readonly content: Buffer
+}
+
+interface CapturedMigrationArtifact {
+  readonly artifact: ResolvedMigrationArtifact
+  readonly files: readonly CapturedArtifactFile[]
+}
+
+const MAX_REVIEW_FILES = 64
+const MAX_REVIEW_BYTES = 1024 * 1024
+
 export interface ResolveOptions {
   /**
    * The deployed DB artifact root that contains `migrations/` and `schema/`.
@@ -113,6 +141,8 @@ export interface ResolveOptions {
    * live sentinel registry. Tests override it for fixtures.
    */
   readonly allowedMigrationIds?: ReadonlySet<string>
+  /** Injected only by deterministic filesystem-race tests. */
+  readonly readFile?: (absPath: string) => Buffer
 }
 
 /** The DB artifact root as shipped alongside this compiled module. */
@@ -220,10 +250,10 @@ function parseIncludes(
  * Fail-closed: any allowlist / filename / containment / include violation
  * throws a {@link MigrationArtifactError}. Does not execute anything.
  */
-export function resolveMigrationArtifact(
+function captureMigrationArtifact(
   migrationId: string,
   options: ResolveOptions = {},
-): ResolvedMigrationArtifact {
+): CapturedMigrationArtifact {
   const allowed = options.allowedMigrationIds ?? MIGRATION_SENTINEL_IDS
   const dbRoot = realDir(options.dbRoot ?? defaultDbArtifactRoot())
   const migrationsRoot = realDir(path.join(dbRoot, 'migrations'))
@@ -263,9 +293,12 @@ export function resolveMigrationArtifact(
   const visited = new Set<string>([mainAbs])
   const onStack = new Set<string>([mainAbs])
   const includeAbsPaths = new Set<string>()
+  const contentByAbsPath = new Map<string, Buffer>()
+  const readFile = options.readFile ?? fs.readFileSync
 
   const walk = (fileAbsPath: string): void => {
-    const contents = fs.readFileSync(fileAbsPath)
+    const contents = readFile(fileAbsPath)
+    contentByAbsPath.set(fileAbsPath, contents)
     const fileDir = path.dirname(fileAbsPath)
     const directIncludes = parseIncludes(
       fileAbsPath,
@@ -298,19 +331,71 @@ export function resolveMigrationArtifact(
     .map((absPath) => ({ absPath, relPath: toPosix(path.relative(dbRoot, absPath)) }))
     .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0))
 
-  const sha256 = digestClosure([
-    { absPath: mainAbs, relPath: mainRel },
-    ...includes,
-  ])
+  const files: CapturedArtifactFile[] = [
+    { absPath: mainAbs, relPath: mainRel, content: contentByAbsPath.get(mainAbs)! },
+    ...includes.map((file) => ({ ...file, content: contentByAbsPath.get(file.absPath)! })),
+  ]
+  const sha256 = digestCapturedClosure(files)
 
   return {
-    migrationId,
-    main: { absPath: mainAbs, relPath: mainRel },
-    includes,
-    sha256,
-    migrationsRoot,
-    schemaRoot,
+    artifact: {
+      migrationId,
+      main: { absPath: mainAbs, relPath: mainRel },
+      includes,
+      sha256,
+      migrationsRoot,
+      schemaRoot,
+    },
+    files,
   }
+}
+
+export function resolveMigrationArtifact(
+  migrationId: string,
+  options: ResolveOptions = {},
+): ResolvedMigrationArtifact {
+  return captureMigrationArtifact(migrationId, options).artifact
+}
+
+/**
+ * Capture the exact reviewed bytes for display. Include parsing, digesting,
+ * and text decoding all use the same single-read buffers, so the response can
+ * never combine directives from one file version with bytes from another.
+ */
+export function readMigrationArtifactForReview(
+  migrationId: string,
+  options: ResolveOptions = {},
+): MigrationArtifactReview {
+  const capturedArtifact = captureMigrationArtifact(migrationId, options)
+  if (capturedArtifact.files.length > MAX_REVIEW_FILES) {
+    throw new MigrationArtifactError(
+      'review-artifact-too-large',
+      `Artifact closure has ${capturedArtifact.files.length} files; review display allows at most ${MAX_REVIEW_FILES}.`,
+    )
+  }
+
+  const totalBytes = capturedArtifact.files.reduce((total, file) => total + file.content.length, 0)
+  if (totalBytes > MAX_REVIEW_BYTES) {
+    throw new MigrationArtifactError(
+      'review-artifact-too-large',
+      `Artifact closure is ${totalBytes} bytes; review display allows at most ${MAX_REVIEW_BYTES}.`,
+    )
+  }
+
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  const files = capturedArtifact.files.map(({ relPath, content }, index) => {
+    let text: string
+    try {
+      text = decoder.decode(content)
+    } catch {
+      throw new MigrationArtifactError(
+        'review-artifact-invalid-utf8',
+        `Artifact file is not valid UTF-8: ${relPath}`,
+      )
+    }
+    return { role: index === 0 ? 'main' as const : 'include' as const, relPath, byteLength: content.length, text }
+  })
+  return { sha256: capturedArtifact.artifact.sha256, totalBytes, files }
 }
 
 function toPosix(p: string): string {
@@ -323,18 +408,19 @@ function toPosix(p: string): string {
  * the raw file bytes are hashed exactly as deployed (no CRLF/whitespace
  * normalisation).
  */
-function digestClosure(files: readonly ResolvedArtifactFile[]): string {
+function digestCapturedClosure(
+  files: readonly (ResolvedArtifactFile & { readonly content: Buffer })[],
+): string {
   const sorted = [...files].sort((a, b) =>
     a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0,
   )
   const hash = createHash('sha256')
   for (const file of sorted) {
-    const content = fs.readFileSync(file.absPath)
     const relBuf = Buffer.from(file.relPath, 'utf8')
     hash.update(`${relBuf.length}\0`)
     hash.update(relBuf)
-    hash.update(`\0${content.length}\0`)
-    hash.update(content)
+    hash.update(`\0${file.content.length}\0`)
+    hash.update(file.content)
   }
   return hash.digest('hex')
 }

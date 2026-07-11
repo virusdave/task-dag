@@ -27,6 +27,8 @@ const mockState = vi.hoisted(() => ({
   pending: [] as LivePendingMigration[],
   attempts: new Map<string, LatestMigrationApplyAttempt>(),
   eligibilityById: new Map<string, MigrationApplyEligibility>(),
+  sentinels: new Map<string, { migrationId: string; label: string }>(),
+  reviews: new Map<string, unknown>(),
   // POST-apply mocks (leaf 6).
   appliedLiveById: new Map<string, boolean>(),
   enqueuedJobId: 4242,
@@ -59,11 +61,40 @@ vi.mock('../db/pool.js', () => ({
 }))
 
 vi.mock('../db/pendingMigrations.js', () => ({
+  getMigrationSentinel: vi.fn((migrationId: string) => {
+    const sentinel = mockState.sentinels.get(migrationId)
+    if (!sentinel) {
+      return null
+    }
+    const eligibility = mockState.eligibilityById.get(migrationId)
+    return eligibility?.blessing ? { ...sentinel, blessing: eligibility.blessing } : sentinel
+  }),
   listPendingMigrationsLive: vi.fn(async () => mockState.pending),
   isMigrationAppliedLive: vi.fn(
     async (_db: unknown, migrationId: string) => mockState.appliedLiveById.get(migrationId) ?? false,
   ),
 }))
+
+vi.mock('../db/migrationArtifacts.js', () => {
+  class MockMigrationArtifactError extends Error {
+    constructor(readonly code: string, message: string) {
+      super(message)
+    }
+  }
+  return {
+    MigrationArtifactError: MockMigrationArtifactError,
+    readMigrationArtifactForReview: vi.fn((migrationId: string) => {
+      const review = mockState.reviews.get(migrationId)
+      if (review instanceof Error) {
+        throw review
+      }
+      if (review === undefined) {
+        throw new MockMigrationArtifactError('missing-include', 'Migration artifact is missing.')
+      }
+      return review
+    }),
+  }
+})
 
 vi.mock('../jobs/enqueueJob.js', () => ({
   enqueueJob: vi.fn(async () => mockState.enqueuedJobId),
@@ -92,7 +123,12 @@ vi.mock('../db/migrationApplyEligibility.js', () => ({
 }))
 
 import { registerPendingMigrationsAdminRoutes } from './pendingMigrationsAdmin.js'
-import { isMigrationAppliedLive, listPendingMigrationsLive } from '../db/pendingMigrations.js'
+import {
+  getMigrationSentinel,
+  isMigrationAppliedLive,
+  listPendingMigrationsLive,
+} from '../db/pendingMigrations.js'
+import { MigrationArtifactError, readMigrationArtifactForReview } from '../db/migrationArtifacts.js'
 import { getLatestMigrationApplyAttemptsByMigrationIds } from '../db/queries/migrationApplyAttemptsQueries.js'
 import { resolveMigrationApplyEligibility } from '../db/migrationApplyEligibility.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
@@ -106,6 +142,8 @@ beforeEach(async () => {
   mockState.pending = []
   mockState.attempts = new Map()
   mockState.eligibilityById = new Map()
+  mockState.sentinels = new Map()
+  mockState.reviews = new Map()
   mockState.appliedLiveById = new Map()
   mockState.enqueuedJobId = 4242
   server = Fastify()
@@ -164,6 +202,7 @@ describe('GET /api/admin/pending-migrations body', () => {
         reviewedSha: 'deadbeef',
         artifactSha256: 'a'.repeat(64),
         transactionMode: 'transactional',
+        operatorExplanation: 'Creates the parse-feedback table for operator corrections.',
         note: 'wraps its own begin/commit',
       },
       artifact: { sha256: 'a'.repeat(64) },
@@ -192,8 +231,10 @@ describe('GET /api/admin/pending-migrations body', () => {
         ref: 'https://ampcode.com/threads/T-abc',
         note: 'wraps its own begin/commit',
         transactionMode: 'transactional',
+        operatorExplanation: 'Creates the parse-feedback table for operator corrections.',
       },
       artifactDigestMatch: true,
+      artifactSha256: 'a'.repeat(64),
       lastAttempt: {
         jobId: 42,
         state: 'failed',
@@ -231,6 +272,7 @@ describe('GET /api/admin/pending-migrations body', () => {
         reviewedSha: 'sha-1',
         artifactSha256: 'a'.repeat(64),
         transactionMode: 'nontransactional-cic',
+        operatorExplanation: 'Adds an index without blocking writes.',
       },
       artifact: { sha256: 'b'.repeat(64) },
     } as unknown as MigrationApplyEligibility)
@@ -244,8 +286,10 @@ describe('GET /api/admin/pending-migrations body', () => {
       ref: 'ref-1',
       note: null,
       transactionMode: 'nontransactional-cic',
+      operatorExplanation: 'Adds an index without blocking writes.',
     })
-    expect(row.ineligibleReason).toContain('does not match')
+    expect(row.artifactSha256).toBe('b'.repeat(64))
+    expect(row.ineligibleReason).toContain('no longer matches')
   })
 
   it('sorts rows by migrationId', async () => {
@@ -275,6 +319,7 @@ function setEligible(migrationId: string, artifactSha256 = 'a'.repeat(64)): void
       reviewedSha: 'deadbeef',
       artifactSha256,
       transactionMode: 'transactional',
+      operatorExplanation: 'Creates the reviewed schema objects.',
       note: 'wraps its own begin/commit',
     },
     artifact: { sha256: artifactSha256 },
@@ -282,6 +327,144 @@ function setEligible(migrationId: string, artifactSha256 = 'a'.repeat(64)): void
 }
 
 const APPLY_URL = (id: string) => `/api/admin/pending-migrations/${id}/apply`
+const DETAILS_URL = (id: string) => `/api/admin/pending-migrations/${id}/details`
+const EXPECTED_ARTIFACT_SHA = 'a'.repeat(64)
+const applyPayload = (confirmMigrationId: string, expectedArtifactSha256 = EXPECTED_ARTIFACT_SHA) => ({
+  confirmMigrationId,
+  expectedArtifactSha256,
+})
+
+describe('GET /api/admin/pending-migrations/:id/details', () => {
+  it('rejects before reading registry, database, or artifact state', async () => {
+    mockState.role = 'viewer'
+    const res = await server.inject({ method: 'GET', url: DETAILS_URL('102_x') })
+    expect(res.statusCode).toBe(403)
+    expect(getMigrationSentinel).not.toHaveBeenCalled()
+    expect(isMigrationAppliedLive).not.toHaveBeenCalled()
+    expect(readMigrationArtifactForReview).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 for an unknown registered id without touching the database or filesystem', async () => {
+    const res = await server.inject({ method: 'GET', url: DETAILS_URL('999_unknown') })
+    expect(res.statusCode).toBe(404)
+    expect(isMigrationAppliedLive).not.toHaveBeenCalled()
+    expect(readMigrationArtifactForReview).not.toHaveBeenCalled()
+  })
+
+  it('returns no-store, digest-bound explanation, and exact closure text without absolute paths', async () => {
+    const migrationId = '102_x'
+    mockState.sentinels.set(migrationId, { migrationId, label: 'lineage schema' })
+    setEligible(migrationId)
+    mockState.reviews.set(migrationId, {
+      sha256: EXPECTED_ARTIFACT_SHA,
+      totalBytes: 26,
+      files: [
+        {
+          role: 'main',
+          relPath: 'migrations/102_x.sql',
+          byteLength: 10,
+          text: 'select 1;\n',
+        },
+        {
+          role: 'include',
+          relPath: 'schema/x.sql',
+          byteLength: 16,
+          text: 'create table x;\n',
+        },
+      ],
+    })
+
+    const res = await server.inject({ method: 'GET', url: DETAILS_URL(migrationId) })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    const body = res.json()
+    expect(body.migration.sentinelState).toBe('pending')
+    expect(body.explanation).toEqual({
+      status: 'current',
+      text: 'Creates the reviewed schema objects.',
+    })
+    expect(body.artifact).toMatchObject({
+      status: 'available',
+      sha256: EXPECTED_ARTIFACT_SHA,
+      files: [
+        { role: 'main', relPath: 'migrations/102_x.sql', text: 'select 1;\n' },
+        { role: 'include', relPath: 'schema/x.sql', text: 'create table x;\n' },
+      ],
+    })
+    expect(JSON.stringify(body)).not.toContain('/tmp/')
+  })
+
+  it('reports applied state when the sentinel changes after the list was opened', async () => {
+    const migrationId = '102_x'
+    mockState.sentinels.set(migrationId, { migrationId, label: 'lineage schema' })
+    setEligible(migrationId)
+    mockState.appliedLiveById.set(migrationId, true)
+    mockState.reviews.set(migrationId, {
+      sha256: EXPECTED_ARTIFACT_SHA,
+      totalBytes: 10,
+      files: [
+        { role: 'main', relPath: 'migrations/102_x.sql', byteLength: 10, text: 'select 1;\n' },
+      ],
+    })
+
+    const res = await server.inject({ method: 'GET', url: DETAILS_URL(migrationId) })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().migration).toMatchObject({
+      sentinelState: 'applied',
+      eligible: false,
+    })
+  })
+
+  it('marks a blessing explanation stale when the displayed artifact digest differs', async () => {
+    const migrationId = '102_x'
+    mockState.sentinels.set(migrationId, { migrationId, label: 'lineage schema' })
+    mockState.eligibilityById.set(migrationId, {
+      eligible: false,
+      migrationId,
+      reason: 'digest-mismatch',
+      detail: 'internal mismatch detail',
+      blessing: {
+        ref: 'review-ref',
+        reviewedSha: 'reviewed-sha',
+        artifactSha256: 'a'.repeat(64),
+        transactionMode: 'transactional',
+        operatorExplanation: 'Explanation for artifact A.',
+      },
+      artifact: { sha256: 'b'.repeat(64) },
+    } as unknown as MigrationApplyEligibility)
+    mockState.reviews.set(migrationId, {
+      sha256: 'b'.repeat(64),
+      totalBytes: 10,
+      files: [
+        { role: 'main', relPath: 'migrations/102_x.sql', byteLength: 10, text: 'select 2;\n' },
+      ],
+    })
+
+    const res = await server.inject({ method: 'GET', url: DETAILS_URL(migrationId) })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().explanation).toEqual({
+      status: 'stale',
+      text: 'Explanation for artifact A.',
+    })
+  })
+
+  it('does not expose absolute paths from artifact failures', async () => {
+    const migrationId = '102_x'
+    mockState.sentinels.set(migrationId, { migrationId, label: 'lineage schema' })
+    mockState.reviews.set(
+      migrationId,
+      new MigrationArtifactError('missing-include', '/srv/helios/dist/server/db/schema/secret.sql'),
+    )
+
+    const res = await server.inject({ method: 'GET', url: DETAILS_URL(migrationId) })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().artifact).toMatchObject({
+      status: 'unavailable',
+      code: 'missing-include',
+    })
+    expect(res.body).not.toContain('/srv/helios')
+  })
+})
 
 describe('POST /api/admin/pending-migrations/:id/apply auth gate', () => {
   for (const role of ['viewer', 'editor', 'approver'] as const) {
@@ -291,7 +474,7 @@ describe('POST /api/admin/pending-migrations/:id/apply auth gate', () => {
       const res = await server.inject({
         method: 'POST',
         url: APPLY_URL('097_x'),
-        payload: { confirmMigrationId: '097_x' },
+        payload: applyPayload('097_x'),
       })
       expect(res.statusCode).toBe(403)
       // Fail closed: no eligibility read, no live sentinel, no enqueue.
@@ -307,7 +490,7 @@ describe('POST /api/admin/pending-migrations/:id/apply auth gate', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('097_x'),
-      payload: { confirmMigrationId: '097_x' },
+      payload: applyPayload('097_x'),
     })
     expect(res.statusCode).toBe(401)
     expect(resolveMigrationApplyEligibility).not.toHaveBeenCalled()
@@ -324,7 +507,7 @@ describe('POST /api/admin/pending-migrations/:id/apply auth gate', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('097_litalerts_parse_feedback'),
-      payload: { confirmMigrationId: '097_litalerts_parse_feedback' },
+      payload: applyPayload('097_litalerts_parse_feedback'),
     })
 
     expect(res.statusCode).toBe(200)
@@ -354,7 +537,7 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('097_x'),
-      payload: { confirmMigrationId: '097_WRONG' },
+      payload: applyPayload('097_WRONG'),
     })
     expect(res.statusCode).toBe(400)
     // Mismatch is checked before any eligibility / enqueue work.
@@ -390,7 +573,7 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('999_nope'),
-      payload: { confirmMigrationId: '999_nope' },
+      payload: applyPayload('999_nope'),
     })
     expect(res.statusCode).toBe(404)
     expect(enqueueJob).not.toHaveBeenCalled()
@@ -401,7 +584,7 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('099_migration_apply_attempts'),
-      payload: { confirmMigrationId: '099_migration_apply_attempts' },
+      payload: applyPayload('099_migration_apply_attempts'),
     })
     expect(res.statusCode).toBe(409)
     expect(res.json().error).toContain('no Oracle blessing')
@@ -420,6 +603,7 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
         reviewedSha: 'sha-1',
         artifactSha256: 'a'.repeat(64),
         transactionMode: 'transactional',
+        operatorExplanation: 'Creates the reviewed schema objects.',
       },
       artifact: null,
     } as unknown as MigrationApplyEligibility)
@@ -427,10 +611,11 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('097_x'),
-      payload: { confirmMigrationId: '097_x' },
+      payload: applyPayload('097_x'),
     })
     expect(res.statusCode).toBe(409)
-    expect(res.json().error).toContain('ARTIFACT_NOT_FOUND')
+    expect(res.json().error).toContain('could not be resolved safely')
+    expect(res.body).not.toContain('ARTIFACT_NOT_FOUND')
     expect(isMigrationAppliedLive).not.toHaveBeenCalled()
     expect(enqueueJob).not.toHaveBeenCalled()
   })
@@ -446,6 +631,7 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
         reviewedSha: 'sha-1',
         artifactSha256: 'a'.repeat(64),
         transactionMode: 'transactional',
+        operatorExplanation: 'Creates the reviewed schema objects.',
       },
       artifact: { sha256: 'b'.repeat(64) },
     } as unknown as MigrationApplyEligibility)
@@ -453,10 +639,10 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('097_x'),
-      payload: { confirmMigrationId: '097_x' },
+      payload: applyPayload('097_x'),
     })
     expect(res.statusCode).toBe(409)
-    expect(res.json().error).toContain('does not match')
+    expect(res.json().error).toContain('no longer matches')
     expect(enqueueJob).not.toHaveBeenCalled()
   })
 
@@ -467,10 +653,23 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
     const res = await server.inject({
       method: 'POST',
       url: APPLY_URL('097_x'),
-      payload: { confirmMigrationId: '097_x' },
+      payload: applyPayload('097_x'),
     })
     expect(res.statusCode).toBe(409)
     expect(res.json().error).toContain('already applied')
+    expect(enqueueJob).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when the deployed digest differs from the reviewed digest', async () => {
+    setEligible('097_x', 'b'.repeat(64))
+    const res = await server.inject({
+      method: 'POST',
+      url: APPLY_URL('097_x'),
+      payload: applyPayload('097_x', 'a'.repeat(64)),
+    })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toContain('changed after it was reviewed')
+    expect(isMigrationAppliedLive).not.toHaveBeenCalled()
     expect(enqueueJob).not.toHaveBeenCalled()
   })
 })

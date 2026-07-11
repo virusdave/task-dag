@@ -59,7 +59,10 @@ import {
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
 import { AgentWasteReviewPage } from '../routes/config/AgentWasteReviewPage.js'
-import { PendingMigrationsPage } from '../routes/config/PendingMigrationsPage.js'
+import {
+  PendingMigrationDetailsPage,
+  PendingMigrationsPage,
+} from '../routes/config/PendingMigrationsPage.js'
 import {
   ConfigBedrockModelsPage,
   configBedrockModelsLoader,
@@ -590,6 +593,10 @@ export const router = createBrowserRouter([
         // see AppShell.tsx).
         element: <PendingMigrationsPage />,
         path: 'config/pending-migrations',
+      },
+      {
+        element: <PendingMigrationDetailsPage />,
+        path: 'config/pending-migrations/:id',
       },
       {
         element: <SweedAuthLogPage />,

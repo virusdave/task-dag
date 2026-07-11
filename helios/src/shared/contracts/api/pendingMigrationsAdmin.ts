@@ -46,6 +46,7 @@ export const AdminPendingMigrationBlessingSchema = z.object({
   ref: z.string(),
   note: z.string().nullable(),
   transactionMode: AdminMigrationTransactionModeSchema,
+  operatorExplanation: z.string().min(1),
 })
 export type AdminPendingMigrationBlessing = z.infer<
   typeof AdminPendingMigrationBlessingSchema
@@ -80,6 +81,9 @@ export const AdminPendingMigrationRowSchema = z.object({
   // Whether the runtime-recomputed artifact-closure digest equals the blessing
   // digest. False whenever there is no blessing / the artifact is unresolvable.
   artifactDigestMatch: z.boolean(),
+  // Current deployed closure digest when it resolved, else null. Apply binds
+  // the operator's request to this exact value and rejects a later deploy.
+  artifactSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   lastAttempt: AdminPendingMigrationAttemptSchema.nullable(),
 })
 export type AdminPendingMigrationRow = z.infer<typeof AdminPendingMigrationRowSchema>
@@ -98,6 +102,7 @@ export type AdminPendingMigrationsResponse = z.infer<
 // "Gating / safety model" item 3.
 export const AdminPendingMigrationApplyRequestSchema = z.object({
   confirmMigrationId: z.string().min(1),
+  expectedArtifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
 })
 export type AdminPendingMigrationApplyRequest = z.infer<
   typeof AdminPendingMigrationApplyRequestSchema
@@ -111,4 +116,39 @@ export const AdminPendingMigrationApplyResponseSchema = z.object({
 })
 export type AdminPendingMigrationApplyResponse = z.infer<
   typeof AdminPendingMigrationApplyResponseSchema
+>
+
+export const AdminPendingMigrationArtifactFileSchema = z.object({
+  role: z.enum(['main', 'include']),
+  relPath: z.string(),
+  byteLength: z.number().int().nonnegative(),
+  text: z.string(),
+})
+
+export const AdminPendingMigrationArtifactSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('available'),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    totalBytes: z.number().int().nonnegative(),
+    files: z.array(AdminPendingMigrationArtifactFileSchema),
+  }),
+  z.object({
+    status: z.literal('unavailable'),
+    code: z.string(),
+    message: z.string(),
+  }),
+])
+
+export const AdminPendingMigrationDetailsResponseSchema = z.object({
+  migration: AdminPendingMigrationRowSchema,
+  explanation: z.discriminatedUnion('status', [
+    z.object({ status: z.literal('current'), text: z.string().min(1) }),
+    z.object({ status: z.literal('stale'), text: z.string().min(1) }),
+    z.object({ status: z.literal('unavailable'), text: z.null() }),
+  ]),
+  artifact: AdminPendingMigrationArtifactSchema,
+  checkedAt: z.iso.datetime(),
+})
+export type AdminPendingMigrationDetailsResponse = z.infer<
+  typeof AdminPendingMigrationDetailsResponseSchema
 >

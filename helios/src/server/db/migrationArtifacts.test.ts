@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
   MigrationArtifactError,
+  readMigrationArtifactForReview,
   resolveMigrationArtifact,
 } from './migrationArtifacts.js'
 import { MIGRATION_SENTINEL_IDS } from './pendingMigrations.js'
@@ -45,6 +46,10 @@ afterEach(() => {
 
 function resolve(id: string) {
   return resolveMigrationArtifact(id, { dbRoot: root, allowedMigrationIds: ALLOWED })
+}
+
+function review(id: string) {
+  return readMigrationArtifactForReview(id, { dbRoot: root, allowedMigrationIds: ALLOWED })
 }
 
 /**
@@ -142,6 +147,64 @@ describe('digest sensitivity', () => {
     const before = resolve(ID).sha256
     write('schema/thing.sql', 'create table if not exists thing (id int);\n')
     expect(resolve(ID).sha256).not.toBe(before)
+  })
+})
+
+describe('readMigrationArtifactForReview', () => {
+  it('returns the main file then sorted include files with exact text and digest', () => {
+    write('schema/z.sql', 'create table z ();\n')
+    write('schema/a.sql', 'create table a ();\n')
+    write(`migrations/${ID}.sql`, '\\ir ../schema/z.sql\n\\ir ../schema/a.sql\n')
+
+    const result = review(ID)
+    expect(result.sha256).toBe(resolve(ID).sha256)
+    expect(result.files.map(({ role, relPath }) => ({ role, relPath }))).toEqual([
+      { role: 'main', relPath: `migrations/${ID}.sql` },
+      { role: 'include', relPath: 'schema/a.sql' },
+      { role: 'include', relPath: 'schema/z.sql' },
+    ])
+    expect(result.files[1]?.text).toBe('create table a ();\n')
+    expect(result.totalBytes).toBe(result.files.reduce((sum, file) => sum + file.byteLength, 0))
+  })
+
+  it('parses and hashes one captured main-file version when the file changes mid-read', () => {
+    write('schema/a.sql', 'create table a ();\n')
+    write('schema/b.sql', 'create table b ();\n')
+    const mainPath = join(migrationsRoot, `${ID}.sql`)
+    write(`migrations/${ID}.sql`, '\\ir ../schema/a.sql\n')
+    const originalDigest = resolve(ID).sha256
+    let mainReads = 0
+    const result = readMigrationArtifactForReview(ID, {
+      dbRoot: root,
+      allowedMigrationIds: ALLOWED,
+      readFile: (filePath) => {
+        const content = readFileSync(filePath)
+        if (filePath === mainPath) {
+          mainReads++
+          write(`migrations/${ID}.sql`, '\\ir ../schema/b.sql\n')
+        }
+        return content
+      },
+    })
+
+    expect(result.files.map((file) => file.relPath)).toEqual([
+      `migrations/${ID}.sql`,
+      'schema/a.sql',
+    ])
+    expect(result.files[0]?.text).toBe('\\ir ../schema/a.sql\n')
+    expect(result.sha256).toBe(originalDigest)
+    expect(mainReads).toBe(1)
+  })
+
+  it('rejects invalid UTF-8 rather than displaying replacement characters', () => {
+    const abs = join(migrationsRoot, `${ID}.sql`)
+    writeFileSync(abs, Buffer.from([0xff, 0xfe]))
+    expectRejects(() => review(ID), 'review-artifact-invalid-utf8')
+  })
+
+  it('rejects a review payload over one MiB', () => {
+    write(`migrations/${ID}.sql`, 'x'.repeat(1024 * 1024 + 1))
+    expectRejects(() => review(ID), 'review-artifact-too-large')
   })
 })
 
@@ -251,6 +314,24 @@ describe('the real committed migration corpus', () => {
     }
     // Sanity: we actually exercised a meaningful chunk of the corpus.
     expect(resolvedCount).toBeGreaterThan(20)
+  })
+
+  it('can display every registered migration that has a committed .sql file', () => {
+    let reviewableCount = 0
+    for (const id of MIGRATION_SENTINEL_IDS) {
+      try {
+        const artifact = readMigrationArtifactForReview(id, { dbRoot })
+        expect(artifact.files[0]?.role).toBe('main')
+        expect(artifact.sha256).toMatch(/^[0-9a-f]{64}$/)
+        reviewableCount++
+      } catch (error) {
+        if (error instanceof MigrationArtifactError && error.code === 'missing-include') {
+          continue
+        }
+        throw new Error(`migration ${id} cannot be displayed: ${String(error)}`)
+      }
+    }
+    expect(reviewableCount).toBeGreaterThan(20)
   })
 
   it('resolves 097_litalerts_parse_feedback and its schema include', () => {

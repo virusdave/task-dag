@@ -3,15 +3,81 @@ import type { FastifyInstance } from 'fastify'
 import {
   AdminPendingMigrationApplyRequestSchema,
   AdminPendingMigrationApplyResponseSchema,
+  AdminPendingMigrationDetailsResponseSchema,
   AdminPendingMigrationsResponseSchema,
   type AdminPendingMigrationRow,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
+import { MigrationArtifactError, readMigrationArtifactForReview } from '../db/migrationArtifacts.js'
 import { getPool } from '../db/pool.js'
-import { resolveMigrationApplyEligibility } from '../db/migrationApplyEligibility.js'
-import { isMigrationAppliedLive, listPendingMigrationsLive } from '../db/pendingMigrations.js'
-import { getLatestMigrationApplyAttemptsByMigrationIds } from '../db/queries/migrationApplyAttemptsQueries.js'
+import {
+  resolveMigrationApplyEligibility,
+  type MigrationApplyEligibility,
+} from '../db/migrationApplyEligibility.js'
+import {
+  getMigrationSentinel,
+  isMigrationAppliedLive,
+  listPendingMigrationsLive,
+  type MigrationSentinel,
+} from '../db/pendingMigrations.js'
+import {
+  getLatestMigrationApplyAttemptsByMigrationIds,
+  type LatestMigrationApplyAttempt,
+} from '../db/queries/migrationApplyAttemptsQueries.js'
 import { enqueueJob, JOB_PRIORITY_URGENT } from '../jobs/enqueueJob.js'
+
+function operatorEligibilityDetail(eligibility: MigrationApplyEligibility): string | null {
+  if (eligibility.eligible) {
+    return null
+  }
+  switch (eligibility.reason) {
+    case 'unknown-migration-id':
+      return `Migration ${eligibility.migrationId} is not registered.`
+    case 'not-blessed':
+      return `Migration ${eligibility.migrationId} has no Oracle blessing in the registry.`
+    case 'artifact-unresolvable':
+      console.warn(
+        `[pendingMigrationsAdmin] artifact for ${eligibility.migrationId} is not safely resolvable: ${eligibility.detail}`,
+      )
+      return `Migration ${eligibility.migrationId}'s deployed artifact could not be resolved safely.`
+    case 'digest-mismatch':
+      return `Migration ${eligibility.migrationId}'s deployed artifact no longer matches its Oracle blessing.`
+  }
+}
+
+function buildAdminRow(
+  sentinel: Pick<MigrationSentinel, 'migrationId' | 'label'>,
+  sentinelState: 'pending' | 'applied',
+  lastAttempt: LatestMigrationApplyAttempt | null,
+): AdminPendingMigrationRow {
+  const { migrationId, label } = sentinel
+  const eligibility = resolveMigrationApplyEligibility(migrationId)
+  const blessing = eligibility.blessing
+  return {
+    migrationId,
+    label,
+    sentinelState,
+    eligible: sentinelState === 'pending' && eligibility.eligible,
+    ineligibleReason:
+      sentinelState === 'applied'
+        ? `Migration ${migrationId} is already applied; nothing to do.`
+        : eligibility.eligible
+          ? null
+            : operatorEligibilityDetail(eligibility),
+    blessing:
+      blessing === null
+        ? null
+        : {
+            ref: blessing.ref,
+            note: blessing.note ?? null,
+            transactionMode: blessing.transactionMode,
+            operatorExplanation: blessing.operatorExplanation,
+          },
+    artifactDigestMatch: eligibility.eligible,
+    artifactSha256: eligibility.artifact?.sha256 ?? null,
+    lastAttempt,
+  }
+}
 
 // Admin pending-migrations read/list API (automation#62, leaf 5).
 //
@@ -41,40 +107,73 @@ export async function registerPendingMigrationsAdminRoutes(
       pending.map((migration) => migration.migrationId),
     )
 
-    const migrations: AdminPendingMigrationRow[] = pending.map(({ migrationId, label }) => {
-      // Static (registry + artifact) eligibility. Because the row is already
-      // live-pending, this static verdict is the full apply-eligibility.
-      const eligibility = resolveMigrationApplyEligibility(migrationId)
-      const blessing = eligibility.blessing
-      // The digest is only recomputed-and-matched on the eligible path; any
-      // ineligible reason (no blessing, unresolvable artifact, mismatch) means
-      // the deployed artifact did not verify against a blessing.
-      const artifactDigestMatch = eligibility.eligible
-      const lastAttempt = lastAttempts.get(migrationId) ?? null
-
-      return {
-        migrationId,
-        label,
-        sentinelState: 'pending',
-        eligible: eligibility.eligible,
-        ineligibleReason: eligibility.eligible ? null : eligibility.detail,
-        blessing:
-          blessing === null
-            ? null
-            : {
-                ref: blessing.ref,
-                note: blessing.note ?? null,
-                transactionMode: blessing.transactionMode,
-              },
-        artifactDigestMatch,
-        lastAttempt,
-      }
-    })
+    const migrations = pending.map((migration) =>
+      buildAdminRow(migration, 'pending', lastAttempts.get(migration.migrationId) ?? null),
+    )
 
     // Stable, deterministic order (zero-padded NNN_ prefix sorts naturally).
     migrations.sort((a, b) => a.migrationId.localeCompare(b.migrationId))
 
     return reply.send(AdminPendingMigrationsResponseSchema.parse({ migrations }))
+  })
+
+  server.get('/api/admin/pending-migrations/:id/details', async (request, reply) => {
+    const actor = await requireSessionUser(request, reply, 'admin')
+    if (!actor) {
+      return
+    }
+    reply.header('Cache-Control', 'no-store')
+
+    const migrationId = (request.params as { id: string }).id
+    const sentinel = getMigrationSentinel(migrationId)
+    if (sentinel === null) {
+      return reply.status(404).send({ error: `Unknown migration id: ${migrationId}` })
+    }
+
+    const pool = getPool()
+    const [isApplied, attempts] = await Promise.all([
+      isMigrationAppliedLive(pool, migrationId),
+      getLatestMigrationApplyAttemptsByMigrationIds(pool, [migrationId]),
+    ])
+    const migration = buildAdminRow(
+      sentinel,
+      isApplied ? 'applied' : 'pending',
+      attempts.get(migrationId) ?? null,
+    )
+
+    let artifact: ReturnType<typeof readMigrationArtifactForReview> | null = null
+    let artifactError: { code: string; message: string } | null = null
+    try {
+      artifact = readMigrationArtifactForReview(migrationId)
+    } catch (error) {
+      console.warn(
+        `[pendingMigrationsAdmin] failed to capture review artifact for ${migrationId}:`,
+        error,
+      )
+      artifactError = {
+        code: error instanceof MigrationArtifactError ? error.code : 'artifact-read-failed',
+        message: `Migration ${migrationId}'s deployed artifact could not be displayed safely.`,
+      }
+    }
+
+    const explanation =
+      migration.blessing === null
+        ? { status: 'unavailable' as const, text: null }
+        : artifact !== null && artifact.sha256 === sentinel.blessing?.artifactSha256
+          ? { status: 'current' as const, text: migration.blessing.operatorExplanation }
+          : { status: 'stale' as const, text: migration.blessing.operatorExplanation }
+
+    return reply.send(
+      AdminPendingMigrationDetailsResponseSchema.parse({
+        migration,
+        explanation,
+        artifact:
+          artifact === null
+            ? { status: 'unavailable', ...artifactError }
+            : { status: 'available', ...artifact },
+        checkedAt: new Date().toISOString(),
+      }),
+    )
   })
 
   // POST /api/admin/pending-migrations/:id/apply — enqueue the worker-driven
@@ -105,7 +204,8 @@ export async function registerPendingMigrationsAdminRoutes(
     const migrationId = (request.params as { id: string }).id
     // ZodError from a malformed body is turned into a 400 by the global error
     // handler in buildServer.ts.
-    const { confirmMigrationId } = AdminPendingMigrationApplyRequestSchema.parse(request.body)
+    const { confirmMigrationId, expectedArtifactSha256 } =
+      AdminPendingMigrationApplyRequestSchema.parse(request.body)
 
     // Type-to-confirm: the operator must have typed the exact id. The worker
     // re-checks this too (defense in depth).
@@ -123,7 +223,14 @@ export async function registerPendingMigrationsAdminRoutes(
       // mismatch, unresolvable artifact) is a 409 conflict with the deployed
       // state.
       const status = eligibility.reason === 'unknown-migration-id' ? 404 : 409
-      return reply.status(status).send({ error: eligibility.detail })
+      return reply.status(status).send({ error: operatorEligibilityDetail(eligibility) })
+    }
+    if (expectedArtifactSha256 !== eligibility.artifact.sha256) {
+      return reply.status(409).send({
+        error:
+          `The deployed artifact changed after it was reviewed ` +
+          `(${expectedArtifactSha256} → ${eligibility.artifact.sha256}). Refresh and review it again.`,
+      })
     }
 
     // Live pending state (cache-bypassed) — never enqueue an apply for a

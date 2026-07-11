@@ -14,13 +14,15 @@
 // is discoverability, not access control.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, Navigate, useRouteLoaderData } from 'react-router-dom'
+import { Link, Navigate, useParams, useRouteLoaderData } from 'react-router-dom'
 
 import {
   AdminPendingMigrationApplyResponseSchema,
+  AdminPendingMigrationDetailsResponseSchema,
   AdminPendingMigrationsResponseSchema,
   buildHeliosModulePath,
   type AdminPendingMigrationRow,
+  type AdminPendingMigrationDetailsResponse,
   type AdminPendingMigrationsResponse,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
@@ -48,9 +50,18 @@ async function loadPendingMigrations(): Promise<AdminPendingMigrationsResponse> 
   return loadJson(LIST_PATH, AdminPendingMigrationsResponseSchema)
 }
 
+async function loadPendingMigrationDetails(
+  migrationId: string,
+): Promise<AdminPendingMigrationDetailsResponse> {
+  return loadJson(
+    `${LIST_PATH}/${encodeURIComponent(migrationId)}/details`,
+    AdminPendingMigrationDetailsResponseSchema,
+  )
+}
+
 function formatTimestamp(iso: string | null): string {
   if (iso === null) {
-    return '—'
+    return 'Not available'
   }
   const ms = Date.parse(iso)
   return Number.isNaN(ms) ? iso : nyShortDateTime(ms)
@@ -187,7 +198,7 @@ export function PendingMigrationsPage() {
   const handleApply = useCallback(
     async (row: AdminPendingMigrationRow) => {
       const typed = confirmText[row.migrationId] ?? ''
-      if (typed !== row.migrationId) {
+      if (typed !== row.migrationId || row.artifactSha256 === null) {
         return
       }
       setRowApply(row.migrationId, { phase: 'submitting', jobId: null, jobStatus: null, error: null })
@@ -198,7 +209,10 @@ export function PendingMigrationsPage() {
           {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ confirmMigrationId: typed }),
+            body: JSON.stringify({
+              confirmMigrationId: typed,
+              expectedArtifactSha256: row.artifactSha256,
+            }),
           },
         )
         if (!mountedRef.current) {
@@ -241,11 +255,6 @@ export function PendingMigrationsPage() {
         <div>
           <p className="eyebrow">Config / Database</p>
           <h2>Pending migrations</h2>
-          <p className="subtle-copy">
-            Live-pending Helios SQL migrations. <strong>Apply Now</strong> enqueues a worker-driven,
-            gated, audited apply (no hand-run <code>psql</code>) and verifies the sentinel before
-            reporting success.
-          </p>
         </div>
         <div className="inline-row wrap-row">
           <Pill tone={migrations.length > 0 ? 'warning' : 'success'}>
@@ -279,7 +288,7 @@ export function PendingMigrationsPage() {
         ) : migrations.length === 0 ? (
           <article className="history-card">
             <p className="subtle-copy">
-              No pending migrations — the deployed schema matches the shipped code. 🎉
+              No pending migrations. The deployed schema matches the shipped code. 🎉
             </p>
           </article>
         ) : (
@@ -297,7 +306,7 @@ export function PendingMigrationsPage() {
             const statusLine = applyStatusLine(row, apply)
 
             return (
-              <article className="history-card" key={row.migrationId}>
+              <article className="history-card" id={row.migrationId} key={row.migrationId}>
                 <div className="history-card-topline">
                   <div>
                     <strong>{row.migrationId}</strong>
@@ -329,7 +338,7 @@ export function PendingMigrationsPage() {
                   </p>
                 ) : (
                   <p className="subtle-copy" style={{ marginTop: 6 }}>
-                    No Oracle blessing recorded in the registry — apply is disabled until one lands.
+                    No Oracle blessing recorded in the registry. Apply is disabled until one lands.
                   </p>
                 )}
 
@@ -351,6 +360,23 @@ export function PendingMigrationsPage() {
                   </p>
                 ) : null}
 
+                <div className="inline-row wrap-row" style={{ marginTop: 8 }}>
+                  <Link
+                    className="ghost-button like-button"
+                    rel="noopener noreferrer"
+                    target="_blank"
+                    to={buildHeliosModulePath(
+                      'config',
+                      `pending-migrations/${encodeURIComponent(row.migrationId)}`,
+                    )}
+                  >
+                    Review details ↗
+                  </Link>
+                  {row.artifactSha256 ? (
+                    <code style={{ overflowWrap: 'anywhere' }}>{row.artifactSha256}</code>
+                  ) : null}
+                </div>
+
                 <div className="filter-row" style={{ marginTop: 10, flexWrap: 'wrap' }}>
                   <input
                     value={typed}
@@ -358,7 +384,7 @@ export function PendingMigrationsPage() {
                       setConfirmText((prev) => ({ ...prev, [row.migrationId]: event.target.value }))
                     }
                     placeholder={`Type "${row.migrationId}" to confirm`}
-                    style={{ minWidth: 320, flex: '1 1 320px' }}
+                    style={{ minWidth: 0, flex: '1 1 16rem' }}
                     autoComplete="off"
                     spellCheck={false}
                     disabled={!button.enabled}
@@ -433,6 +459,163 @@ export function PendingMigrationsPage() {
             prerequisite, not the approval.
           </p>
         </div>
+      </details>
+    </section>
+  )
+}
+
+export function PendingMigrationDetailsPage() {
+  useRegisterConfigSidebarSubtree()
+  const session = useRouteLoaderData('root') as SessionEnvelope | undefined
+  const { id } = useParams<{ id: string }>()
+  const [data, setData] = useState<AdminPendingMigrationDetailsResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!id) {
+      setError('Missing migration id.')
+      return
+    }
+    let active = true
+    void loadPendingMigrationDetails(id)
+      .then((response) => {
+        if (active) {
+          setData(response)
+          setError(null)
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setError(cause instanceof Error ? cause.message : 'Failed to load migration details.')
+        }
+      })
+    return () => {
+      active = false
+    }
+  }, [id])
+
+  if (session && session.user && !session.permissions.canManageUsers) {
+    return <Navigate to="/" replace />
+  }
+
+  if (error) {
+    return (
+      <section>
+        <h2>Migration details</h2>
+        <p className="subtle-copy">{error}</p>
+        <Link to={buildHeliosModulePath('config', 'pending-migrations')}>Pending migrations</Link>
+      </section>
+    )
+  }
+  if (data === null) {
+    return <p className="subtle-copy">Loading migration details…</p>
+  }
+
+  const { migration, artifact, explanation } = data
+  const listPath = `${buildHeliosModulePath('config', 'pending-migrations')}#${migration.migrationId}`
+  return (
+    <section>
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Config / Database / Migration review</p>
+          <h2 style={{ overflowWrap: 'anywhere' }}>{migration.migrationId}</h2>
+          <p className="subtle-copy">{migration.label}</p>
+        </div>
+        <div className="inline-row wrap-row">
+          <Pill tone={migration.sentinelState === 'pending' ? 'warning' : 'success'}>
+            {migration.sentinelState}
+          </Pill>
+          <Pill tone={eligibilityTone(migration)}>{eligibilityLabel(migration)}</Pill>
+          <Link className="ghost-button like-button" to={listPath}>
+            Apply from pending list
+          </Link>
+          <button className="ghost-button" type="button" onClick={() => window.location.reload()}>
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <article className="history-card" style={{ marginTop: 12 }}>
+        <div className="inline-row wrap-row">
+          {migration.blessing ? (
+            <>
+              <span>
+                blessing <a href={migration.blessing.ref}>{migration.blessing.ref}</a>
+              </span>
+              <Pill tone="muted">{migration.blessing.transactionMode}</Pill>
+            </>
+          ) : (
+            <span className="subtle-copy">No Oracle blessing recorded.</span>
+          )}
+        </div>
+        {migration.ineligibleReason ? (
+          <p className="subtle-copy" style={{ marginTop: 6 }}>{migration.ineligibleReason}</p>
+        ) : null}
+        {artifact.status === 'available' ? (
+          <p className="subtle-copy" style={{ marginTop: 6, overflowWrap: 'anywhere' }}>
+            artifact sha256 <code>{artifact.sha256}</code>
+          </p>
+        ) : null}
+        {migration.lastAttempt ? (
+          <p className="subtle-copy" style={{ marginTop: 6 }}>
+            Last attempt {formatTimestamp(migration.lastAttempt.startedAt)} ·{' '}
+            {attemptStateLabel(migration.lastAttempt.state)}
+            {migration.lastAttempt.jobId === null ? null : (
+              <> · <Link to={`/jobs/${migration.lastAttempt.jobId}`}>job #{migration.lastAttempt.jobId}</Link></>
+            )}
+          </p>
+        ) : null}
+        <p className="subtle-copy" style={{ marginTop: 6 }}>
+          Checked {formatTimestamp(data.checkedAt)}
+        </p>
+      </article>
+
+      <details style={{ marginTop: 16 }}>
+        <summary><strong>What this migration changes and why</strong></summary>
+        <div className="history-card" style={{ marginTop: 8 }}>
+          {explanation.status === 'unavailable' ? (
+            <p className="subtle-copy">
+              No digest-bound, Oracle-reviewed explanation is available; this migration cannot be
+              applied from Helios.
+            </p>
+          ) : (
+            <>
+              {explanation.status === 'stale' ? (
+                <Pill tone="danger">stale: artifact changed</Pill>
+              ) : null}
+              <p style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{explanation.text}</p>
+            </>
+          )}
+        </div>
+      </details>
+
+      <details style={{ marginTop: 16 }}>
+        <summary>
+          <strong>
+            {artifact.status === 'available'
+              ? `SQL artifact · ${artifact.files.length} file${artifact.files.length === 1 ? '' : 's'} · ${artifact.totalBytes.toLocaleString('en-US')} bytes`
+              : 'SQL artifact unavailable'}
+          </strong>
+        </summary>
+        {artifact.status === 'unavailable' ? (
+          <div className="history-card" style={{ marginTop: 8 }}>
+            <Pill tone="danger">{artifact.code}</Pill>
+            <p className="subtle-copy" style={{ marginTop: 6 }}>{artifact.message}</p>
+          </div>
+        ) : (
+          artifact.files.map((file) => (
+            <article className="history-card" key={file.relPath} style={{ marginTop: 8 }}>
+              <div className="inline-row wrap-row">
+                <strong>{file.relPath}</strong>
+                <Pill tone="muted">{file.role}</Pill>
+                <span className="subtle-copy">{file.byteLength.toLocaleString('en-US')} bytes</span>
+              </div>
+              <pre style={{ marginTop: 8, overflowX: 'auto', whiteSpace: 'pre' }}>
+                <code>{file.text}</code>
+              </pre>
+            </article>
+          ))
+        )}
       </details>
     </section>
   )

@@ -172,6 +172,7 @@ function blessing(): MigrationBlessing {
     reviewedSha: 'deadbeef',
     artifactSha256: DIGEST,
     transactionMode: 'transactional',
+    operatorExplanation: 'Creates the schema objects used by this test migration.',
     note: 'test blessing',
   }
 }

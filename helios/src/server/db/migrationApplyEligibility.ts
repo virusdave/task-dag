@@ -22,6 +22,7 @@
 
 import {
   MigrationArtifactError,
+  readMigrationArtifactForReview,
   resolveMigrationArtifact,
   type ResolveOptions,
   type ResolvedMigrationArtifact,
@@ -98,6 +99,16 @@ export function resolveMigrationApplyEligibility(
   let artifact: ResolvedMigrationArtifact
   try {
     artifact = resolveMigrationArtifact(migrationId, options)
+    // Apply eligibility also requires that the operator-facing review endpoint
+    // can capture the entire exact artifact. Oversized or non-UTF-8 SQL must
+    // never remain runnable while being impossible to inspect in Helios.
+    const review = readMigrationArtifactForReview(migrationId, options)
+    if (review.sha256 !== artifact.sha256) {
+      throw new MigrationArtifactError(
+        'review-artifact-changed',
+        'Artifact changed while apply eligibility was being evaluated.',
+      )
+    }
   } catch (error) {
     const detail =
       error instanceof MigrationArtifactError
