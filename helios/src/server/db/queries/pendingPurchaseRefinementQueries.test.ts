@@ -95,6 +95,8 @@ describe('createPendingPurchaseCandidateRevision', () => {
     expect(insertPacket?.text).toMatch(/'candidate'/)
     expect(insertPacket?.text).toMatch(/false,\s*id,\s*\$1/s)
     expect(insertPacket?.text).toMatch(/'superseded'/)
+    expect(insertPacket?.text).toMatch(/summary_json \|\| jsonb_build_object/)
+    expect(insertPacket?.text).not.toMatch(/summary_json\s*->\s*'classifier'/)
     const insertRows = db.calls.find((call) => /insert into pending_purchase_rows/i.test(call.text))
     expect(insertRows?.text).toMatch(/row_lineage_id,\s*id,\s*packet_id,\s*\$2/s)
     expect(insertRows?.text).toMatch(/lineage_revision_number \+ 1/)

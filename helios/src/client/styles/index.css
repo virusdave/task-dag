@@ -1077,6 +1077,34 @@ pre {
   gap: 0.6rem;
 }
 
+.pp-generation-notes {
+  background: rgba(255, 250, 241, 0.5);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 0.75rem;
+}
+
+.pp-generation-notes > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  font-weight: 700;
+  min-height: 44px;
+}
+
+.pp-generation-note p {
+  margin: 0.5rem 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pp-generation-notes-error {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .pp-filter-bar {
   display: grid;
   gap: 0.6rem;

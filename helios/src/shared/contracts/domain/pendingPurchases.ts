@@ -137,6 +137,15 @@ export const PendingPurchaseRevisionRowDiffSchema = z.object({
 })
 export type PendingPurchaseRevisionRowDiff = z.infer<typeof PendingPurchaseRevisionRowDiffSchema>
 
+export const PendingPurchaseOperatorNoteDocumentSchema = z.object({
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  hintDocumentId: z.string().min(1),
+  sourceLabel: z.string().nullable(),
+})
+export type PendingPurchaseOperatorNoteDocument = z.infer<
+  typeof PendingPurchaseOperatorNoteDocumentSchema
+>
+
 export const PendingPurchasePacketSummarySchema = z.object({
   createdAt: z.iso.datetime(),
   generatedAt: z.iso.datetime(),
@@ -148,7 +157,18 @@ export const PendingPurchasePacketSummarySchema = z.object({
   // a `threeWayComparison`); false on legacy / imported packets so the ETL
   // details link only appears where there is data behind it.
   hasEtlDetails: z.boolean(),
+  // The operator-note bundle attached when this packet was generated. The
+  // packet detail uses this stable reference to make the original guidance
+  // available again without copying its potentially-large text into every
+  // packet response. Imported and generated-without-notes packets use null.
+  hintBundleId: z.string().min(1).nullable(),
   importFileName: z.string().nullable(),
+  // Immutable generation-time snapshot of the exact operator-note documents
+  // consumed by the classifier. Refinements copy packet summary provenance,
+  // so every revision keeps pointing at the same notes.
+  // null identifies packets created before generation-time snapshots existed;
+  // [] means a newer packet definitively consumed no operator notes.
+  operatorNoteDocuments: z.array(PendingPurchaseOperatorNoteDocumentSchema).nullable(),
   packetId: z.number().int().positive(),
   packetTitle: z.string().min(1),
   rowCount: z.number().int().min(0),

@@ -1265,12 +1265,17 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         return
       }
       const params = PendingPurchaseHintDocumentRouteParamsSchema.parse(request.params)
-      const deleted = await deletePendingPurchaseHintDocument(
+      const deleteResult = await deletePendingPurchaseHintDocument(
         getPool(),
         params.hintBundleId,
         params.hintDocumentId,
       )
-      if (!deleted) {
+      if (deleteResult === 'retained_operator_note') {
+        return reply.status(409).send({
+          error: 'Operator notes are retained as packet-generation history and cannot be deleted.',
+        })
+      }
+      if (deleteResult === 'not_found') {
         return reply.status(404).send({ error: 'Hint document not found in this bundle.' })
       }
       const detail = await getPendingPurchaseHintBundleDetail(getPool(), params.hintBundleId)

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { Queryable } from '../pool.js'
 import {
+  deletePendingPurchaseHintDocument,
   loadExtractedPendingPurchaseHintFactsForBundle,
   loadExtractedPendingPurchaseHintGlossaryForBundle,
   loadPendingPurchaseHintOperatorNotesForBundle,
@@ -192,5 +193,32 @@ describe('loadPendingPurchaseHintOperatorNotesForBundle', () => {
     const db = fakeDb([])
     const result = await loadPendingPurchaseHintOperatorNotesForBundle(db, 'pphbndl_demo')
     expect(result).toEqual([])
+  })
+})
+
+describe('deletePendingPurchaseHintDocument', () => {
+  it('retains operator notes as immutable packet-generation history', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rows: [{ kind: 'operator_note' }] })
+    const result = await deletePendingPurchaseHintDocument(
+      { query } as unknown as Queryable,
+      'pphbndl_demo',
+      'pphdoc_demo',
+    )
+    expect(result).toBe('retained_operator_note')
+    expect(query.mock.calls[0]![0]).toMatch(/d\.kind <> 'operator_note'/)
+  })
+
+  it('still deletes external hint documents', async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rowCount: 1, rows: [] })
+    const result = await deletePendingPurchaseHintDocument(
+      { query } as unknown as Queryable,
+      'pphbndl_demo',
+      'pphdoc_demo',
+    )
+    expect(result).toBe('deleted')
+    expect(query).toHaveBeenCalledOnce()
   })
 })

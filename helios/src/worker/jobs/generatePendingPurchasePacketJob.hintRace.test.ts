@@ -175,7 +175,12 @@ describe('buildClassifierHintFacts hint-extraction race handling', () => {
 
   it('returns empty evidence when no bundle is attached', async () => {
     const evidence = await buildClassifierHintFacts(stubDb([], []), null)
-    expect(evidence).toEqual({ hintFacts: [], glossaryEntries: [], operatorGuidance: [] })
+    expect(evidence).toEqual({
+      hintFacts: [],
+      glossaryEntries: [],
+      operatorGuidance: [],
+      operatorNoteDocuments: [],
+    })
   })
 
   it('defers (RetryableWorkerError) while any document is still extracting', async () => {
@@ -221,7 +226,12 @@ describe('buildClassifierHintFacts hint-extraction race handling', () => {
     // generation proceeds without hint evidence.
     const db = stubDb([progressRow({ total: 1, pending: 0, failed: 1 })], [])
     const evidence = await buildClassifierHintFacts(db, 'pphint_2026-07-07_224300_accfaf')
-    expect(evidence).toEqual({ hintFacts: [], glossaryEntries: [], operatorGuidance: [] })
+    expect(evidence).toEqual({
+      hintFacts: [],
+      glossaryEntries: [],
+      operatorGuidance: [],
+      operatorNoteDocuments: [],
+    })
   })
 
   it('feeds verbatim operator-note guidance even with zero facts and zero glossary (issue #69)', async () => {
@@ -236,7 +246,7 @@ describe('buildClassifierHintFacts hint-extraction race handling', () => {
       [],
       [operatorNoteRow({ sha, sourceLabel: 'operator note' })],
     )
-    const { hintFacts, glossaryEntries, operatorGuidance } = await buildClassifierHintFacts(
+    const { hintFacts, glossaryEntries, operatorGuidance, operatorNoteDocuments } = await buildClassifierHintFacts(
       db,
       'pphint_2026-07-07_224300_accfaf',
     )
@@ -246,6 +256,11 @@ describe('buildClassifierHintFacts hint-extraction race handling', () => {
     expect(operatorGuidance[0]?.text).toBe(noteText)
     expect(operatorGuidance[0]?.sourceLabel).toBe('operator note')
     expect(operatorGuidance[0]?.hintDocumentId).toMatch(/^pphdoc_/)
+    expect(operatorNoteDocuments).toEqual([{
+      contentSha256: sha,
+      hintDocumentId: operatorGuidance[0]?.hintDocumentId,
+      sourceLabel: 'operator note',
+    }])
   })
 
   it('carries operator guidance alongside extracted product facts', async () => {

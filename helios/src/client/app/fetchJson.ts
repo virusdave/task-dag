@@ -47,6 +47,25 @@ export async function mutateJson<TSchema extends z.ZodType>(
   return loadJson(path, schema, init)
 }
 
+export async function loadText(path: string): Promise<string> {
+  const response = await fetch(buildAppPath(path), {
+    credentials: 'same-origin',
+    headers: { Accept: 'text/plain' },
+  })
+
+  if (response.status === 401) {
+    const returnTo = getCurrentInAppReturnTo()
+    throw redirect(returnTo === '/' ? '/login' : `/login?returnTo=${encodeURIComponent(returnTo)}`)
+  }
+
+  if (!response.ok) {
+    const errorPayload = await maybeReadErrorPayload(response)
+    throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+  }
+
+  return response.text()
+}
+
 async function maybeReadErrorPayload(response: Response): Promise<string | null> {
   // Try to surface as much useful diagnostic information as the
   // server gave us. Most helios routes return

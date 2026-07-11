@@ -14,6 +14,7 @@
 import type { Pool, QueryResultRow } from 'pg'
 
 import {
+  PendingPurchaseOperatorNoteDocumentSchema,
   PendingPurchaseThreeWayComparisonSchema,
 } from '../../../shared/contracts/index.js'
 import type {
@@ -28,6 +29,7 @@ import type {
   PendingPurchasePacketSource,
   PendingPurchasePacketStatus,
   PendingPurchasePacketSummary,
+  PendingPurchaseOperatorNoteDocument,
   PendingPurchaseRow,
   PendingPurchaseRowApplyStatus,
   PendingPurchaseSuggestionCandidate,
@@ -478,6 +480,28 @@ function summaryJsonHasClassifier(value: JsonValue): boolean {
   return classifier !== undefined && classifier !== null
 }
 
+export function readPendingPurchaseHintBundleId(value: JsonValue): string | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const classifier = (value as Record<string, JsonValue>).classifier
+  if (classifier === null || typeof classifier !== 'object' || Array.isArray(classifier)) return null
+  return readOptionalString((classifier as Record<string, JsonValue>).hintBundleId)
+}
+
+export function readPendingPurchaseOperatorNoteDocuments(
+  value: JsonValue,
+): PendingPurchaseOperatorNoteDocument[] | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const classifier = (value as Record<string, JsonValue>).classifier
+  if (classifier === null || typeof classifier !== 'object' || Array.isArray(classifier)) return null
+  const documents = (classifier as Record<string, JsonValue>).operatorNoteDocuments
+  if (documents === undefined) return null
+  const parsed = PendingPurchaseOperatorNoteDocumentSchema.array().safeParse(documents)
+  if (!parsed.success) {
+    throw new Error('Pending-purchase packet has malformed operator-note provenance.')
+  }
+  return parsed.data
+}
+
 function readOptionalString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
 }
@@ -706,7 +730,9 @@ export async function getPendingPurchasePacketSummary(
     createdAt: toIso(row.created_at),
     generatedAt: toIso(row.generated_at),
     hasEtlDetails: summaryJsonHasClassifier(row.summary_json),
+    hintBundleId: readPendingPurchaseHintBundleId(row.summary_json),
     importFileName: row.import_file_name,
+    operatorNoteDocuments: readPendingPurchaseOperatorNoteDocuments(row.summary_json),
     packetId: readIntFromString(row.id),
     packetTitle: row.packet_title,
     rowCount: Number.parseInt(row.row_count, 10),
@@ -827,8 +853,10 @@ export interface PendingPurchasePacketListItemRow {
   createdAt: string
   generatedAt: string
   hasEtlDetails: boolean
+  hintBundleId: string | null
   importFileName: string | null
   latestApplyRequest: PendingPurchaseApplyRequestSummary | null
+  operatorNoteDocuments: PendingPurchaseOperatorNoteDocument[] | null
   packetId: number
   packetTitle: string
   rowCount: number
@@ -1068,8 +1096,10 @@ function mapPendingPurchasePacketListItem(row: PendingPurchasePacketListDbRow): 
     createdAt: toIso(row.created_at),
     generatedAt: toIso(row.generated_at),
     hasEtlDetails: summaryJsonHasClassifier(row.summary_json),
+    hintBundleId: readPendingPurchaseHintBundleId(row.summary_json),
     importFileName: row.import_file_name,
     latestApplyRequest,
+    operatorNoteDocuments: readPendingPurchaseOperatorNoteDocuments(row.summary_json),
     packetId: readIntFromString(row.id),
     packetTitle: row.packet_title,
     rowCount: Number.parseInt(row.row_count, 10),

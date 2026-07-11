@@ -1,6 +1,58 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { parseThreeWayComparison, readLlmClassification } from './pendingPurchaseQueries.js'
+import {
+  parseThreeWayComparison,
+  readLlmClassification,
+  readPendingPurchaseHintBundleId,
+  readPendingPurchaseOperatorNoteDocuments,
+} from './pendingPurchaseQueries.js'
+
+describe('readPendingPurchaseHintBundleId', () => {
+  it('reads the attached bundle from classifier provenance', () => {
+    expect(readPendingPurchaseHintBundleId({
+      classifier: { hintBundleId: 'pphint_2026-07-11_010203_abcdef' },
+    })).toBe('pphint_2026-07-11_010203_abcdef')
+  })
+
+  it('returns null when a packet has no valid attached bundle', () => {
+    expect(readPendingPurchaseHintBundleId({})).toBeNull()
+    expect(readPendingPurchaseHintBundleId({ classifier: { hintBundleId: null } })).toBeNull()
+    expect(readPendingPurchaseHintBundleId({ classifier: { hintBundleId: 42 } })).toBeNull()
+  })
+})
+
+describe('readPendingPurchaseOperatorNoteDocuments', () => {
+  it('reads valid generation-time note snapshots', () => {
+    expect(readPendingPurchaseOperatorNoteDocuments({
+      classifier: {
+        operatorNoteDocuments: [
+          {
+            contentSha256: 'a'.repeat(64),
+            hintDocumentId: 'pphdoc_2026-07-11_010203_abcdef',
+            sourceLabel: 'Operator context',
+          },
+        ],
+      },
+    })).toEqual([{
+      contentSha256: 'a'.repeat(64),
+      hintDocumentId: 'pphdoc_2026-07-11_010203_abcdef',
+      sourceLabel: 'Operator context',
+    }])
+  })
+
+  it('distinguishes legacy absence from an explicit empty snapshot', () => {
+    expect(readPendingPurchaseOperatorNoteDocuments({ classifier: {} })).toBeNull()
+    expect(readPendingPurchaseOperatorNoteDocuments({
+      classifier: { operatorNoteDocuments: [] },
+    })).toEqual([])
+  })
+
+  it('fails loudly rather than substituting current bundle contents for malformed provenance', () => {
+    expect(() => readPendingPurchaseOperatorNoteDocuments({
+      classifier: { operatorNoteDocuments: [{ hintDocumentId: 'malformed' }] },
+    })).toThrow(/malformed operator-note provenance/)
+  })
+})
 
 // readLlmClassification parses the prospective-classifier provenance block the
 // generate job (C8) stores under raw_row_json.llmClassification and the review

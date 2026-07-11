@@ -27,8 +27,10 @@ import {
   type EditedStructuredFields,
   type JobStatusResponse,
   type PendingPurchaseListResponse,
+  type PendingPurchaseHintDocumentRecord,
   type PendingPurchaseMarketListing,
   type PendingPurchasePacketListItem,
+  type PendingPurchaseOperatorNoteDocument,
   type PendingPurchasePacketRevisionSummary,
   type PendingPurchaseRefinementHistoryResponse,
   type PendingPurchaseRevisionRowDiff,
@@ -36,7 +38,7 @@ import {
   type PendingPurchaseRowSnapshotRef,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
-import { loadJson, mutateJson } from '../../app/fetchJson.js'
+import { loadJson, loadText, mutateJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus, waitForJob } from '../../app/jobPolling.js'
 import { nyLongDateTime } from '../../app/nyTime.js'
 import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
@@ -966,6 +968,7 @@ export function PendingPurchasesPage() {
           canEdit={session.permissions.canEditProposals}
           canApplyCurrentRevision={activePacketIsCurrentRevision}
           data={data}
+          canViewGenerationNotes={isAdmin}
           isApplying={isApplying}
           isRefining={isRefining}
           isSwitchingRevision={isSwitchingRevision}
@@ -1141,6 +1144,7 @@ interface PendingPurchasesRowsViewProps {
   canApplyCurrentRevision: boolean
   canApprove: boolean
   canEdit: boolean
+  canViewGenerationNotes: boolean
   data: PendingPurchaseListResponse
   isApplying: boolean
   isRefining: boolean
@@ -1165,6 +1169,7 @@ function PendingPurchasesRowsView({
   canApplyCurrentRevision,
   canApprove,
   canEdit,
+  canViewGenerationNotes,
   data,
   isApplying,
   isRefining,
@@ -1203,6 +1208,14 @@ function PendingPurchasesRowsView({
           <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(activePacket.packetId)}>ETL details</Link>
         ) : null}
       </div>
+
+      {activePacket?.hintBundleId && canViewGenerationNotes ? (
+        <PendingPurchaseGenerationNotes
+          hintBundleId={activePacket.hintBundleId}
+          key={activePacket.packetId}
+          operatorNoteDocuments={activePacket.operatorNoteDocuments}
+        />
+      ) : null}
 
       {activePacket ? (
         <PendingPurchaseRefinementPanel
@@ -1298,6 +1311,99 @@ function PendingPurchasesRowsView({
       ) : null}
     </PendingPurchaseOverrideOptionsContext.Provider>
     </PendingPurchaseDraftPriceRegistryContext.Provider>
+  )
+}
+
+interface LoadedPendingPurchaseGenerationNote {
+  hintDocumentId: string
+  sourceLabel: string | null
+  text: string
+}
+
+function PendingPurchaseGenerationNotes({
+  hintBundleId,
+  operatorNoteDocuments,
+}: {
+  hintBundleId: string
+  operatorNoteDocuments: readonly PendingPurchaseOperatorNoteDocument[] | null
+}) {
+  const [notes, setNotes] = useState<LoadedPendingPurchaseGenerationNote[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const isMountedRef = useRef(true)
+
+  useEffect(() => () => {
+    isMountedRef.current = false
+  }, [])
+
+  async function loadGenerationNotes() {
+    setIsLoading(true)
+    setError(null)
+    try {
+      const response = await loadJson(
+        `/api/catalog/pending-purchases/hint-bundles/${hintBundleId}`,
+        PendingPurchaseHintBundleDetailResponseSchema,
+      )
+      const currentOperatorNotes = response.bundle.documents.filter(
+        (document): document is PendingPurchaseHintDocumentRecord => document.kind === 'operator_note',
+      )
+      const operatorNotes = operatorNoteDocuments === null
+        ? currentOperatorNotes
+        : operatorNoteDocuments.map((snapshot) => {
+            const document = currentOperatorNotes.find(
+              (candidate) => candidate.hintDocumentId === snapshot.hintDocumentId,
+            )
+            if (!document || document.contentSha256 !== snapshot.contentSha256) {
+              throw new Error(`Original generation note ${snapshot.hintDocumentId} is unavailable or changed.`)
+            }
+            return document
+          })
+      const loaded = await Promise.all(operatorNotes.map(async (document) => ({
+        hintDocumentId: document.hintDocumentId,
+        sourceLabel: document.sourceLabel,
+        text: await loadText(
+          `/api/catalog/pending-purchases/hint-bundles/${hintBundleId}/documents/${document.hintDocumentId}/content`,
+        ),
+      })))
+      if (isMountedRef.current) {
+        setNotes(loaded)
+      }
+    } catch (loadError) {
+      if (isMountedRef.current) {
+        setError(loadError instanceof Error ? loadError.message : 'Could not load the original generation notes.')
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setIsLoading(false)
+      }
+    }
+  }
+
+  return (
+    <details
+      className="pp-generation-notes"
+      onToggle={(event) => {
+        if (event.currentTarget.open && notes === null && !isLoading && error === null) {
+          void loadGenerationNotes()
+        }
+      }}
+    >
+      <summary>Original generation notes</summary>
+      {isLoading ? <p aria-live="polite" className="subtle-copy" role="status">Loading notes…</p> : null}
+      {error ? (
+        <div className="pp-generation-notes-error" role="alert">
+          <p className="error-text">{error}</p>
+          <button className="ghost-button" onClick={() => void loadGenerationNotes()} type="button">Retry</button>
+        </div>
+      ) : null}
+      {notes?.length === 0 ? <p className="subtle-copy">No operator notes were retained in this bundle.</p> : null}
+      {notes?.map((note) => (
+        <article className="pp-generation-note" key={note.hintDocumentId}>
+          {note.sourceLabel ? <strong>{note.sourceLabel}</strong> : null}
+          <p>{note.text}</p>
+        </article>
+      ))}
+    </details>
   )
 }
 

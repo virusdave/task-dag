@@ -780,6 +780,11 @@ interface PendingPurchaseClassifierProvenance {
   reconcilerVersion: string | null
   hintBundleId: string | null
   hintFactCount: number
+  operatorNoteDocuments: Array<{
+    contentSha256: string
+    hintDocumentId: string
+    sourceLabel: string | null
+  }>
   glossaryEntryCount: number
   catalogCandidateCount: number
   classifierCalls: number
@@ -895,6 +900,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
     reconcilerVersion: null,
     hintBundleId,
     hintFactCount: 0,
+    operatorNoteDocuments: [],
     glossaryEntryCount: 0,
     catalogCandidateCount: 0,
     classifierCalls: 0,
@@ -914,8 +920,19 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
 
   if (totalGroups === 0) {
     // Nothing to classify — skip C4/C5 (both throw on zero rows) and ship the
-    // empty packet exactly like the legacy path did.
-    return { rows: [], provenance: emptyProvenance() }
+    // empty packet exactly like the legacy path did. Still load the attached
+    // evidence so its exact operator-note snapshot remains available from the
+    // resulting packet even though no row needed classification.
+    const evidence = await buildClassifierHintFacts(db, hintBundleId)
+    return {
+      rows: [],
+      provenance: {
+        ...emptyProvenance(),
+        glossaryEntryCount: evidence.glossaryEntries.length,
+        hintFactCount: evidence.hintFacts.length,
+        operatorNoteDocuments: evidence.operatorNoteDocuments,
+      },
+    }
   }
 
   // ── Phase A: per-group context (parallel) ───────────────────────────────
@@ -924,7 +941,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
   )
 
   // ── Phase B: hint facts + allowed taxonomy ──────────────────────────────
-  const { hintFacts, glossaryEntries, operatorGuidance } = await buildClassifierHintFacts(
+  const { hintFacts, glossaryEntries, operatorGuidance, operatorNoteDocuments } = await buildClassifierHintFacts(
     db,
     hintBundleId,
   )
@@ -1023,6 +1040,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       reconcilerVersion: reconcileResult.reconcilerVersion,
       hintBundleId,
       hintFactCount: hintFacts.length,
+      operatorNoteDocuments,
       glossaryEntryCount: glossaryEntries.length,
       catalogCandidateCount: candidatePool.size,
       classifierCalls,
@@ -1388,6 +1406,11 @@ export interface ClassifierHintEvidence {
   readonly hintFacts: ClassifierHintFact[]
   readonly glossaryEntries: ClassifierGlossaryEntry[]
   readonly operatorGuidance: ClassifierOperatorGuidance[]
+  readonly operatorNoteDocuments: Array<{
+    contentSha256: string
+    hintDocumentId: string
+    sourceLabel: string | null
+  }>
 }
 
 export async function buildClassifierHintFacts(
@@ -1395,7 +1418,7 @@ export async function buildClassifierHintFacts(
   hintBundleId: string | null,
 ): Promise<ClassifierHintEvidence> {
   if (hintBundleId === null) {
-    return { hintFacts: [], glossaryEntries: [], operatorGuidance: [] }
+    return { hintFacts: [], glossaryEntries: [], operatorGuidance: [], operatorNoteDocuments: [] }
   }
 
   // Close the enqueue race: the generate job is frequently queued by the same
@@ -1460,7 +1483,7 @@ export async function buildClassifierHintFacts(
         `(documents: ${progress.total}, extracted: ${progress.extracted}, failed: ${progress.failed}, ` +
         `skipped: ${progress.skipped}); generating without hint evidence.`,
     )
-    return { hintFacts: [], glossaryEntries: [], operatorGuidance: [] }
+    return { hintFacts: [], glossaryEntries: [], operatorGuidance: [], operatorNoteDocuments: [] }
   }
   if (bundleFacts.length > MAX_CLASSIFIER_HINT_FACTS) {
     throw new Error(
@@ -1490,6 +1513,11 @@ export async function buildClassifierHintFacts(
       note: bundleEntry.entry.note,
     })),
     operatorGuidance,
+    operatorNoteDocuments: operatorNotePointers.map((note) => ({
+      contentSha256: note.pointer.contentSha256,
+      hintDocumentId: note.hintDocumentId,
+      sourceLabel: note.sourceLabel,
+    })),
   }
 }
 

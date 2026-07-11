@@ -428,15 +428,15 @@ export async function getPendingPurchaseHintDocumentPointer(
 }
 
 /**
- * Hard-delete a single document, scoped by BOTH the bundle and document
- * public ids so a mismatched URL can never delete an unrelated document.
- * Returns true iff a row was removed.
+ * Hard-delete a single external hint document, scoped by BOTH the bundle and
+ * document public ids so a mismatched URL can never delete an unrelated
+ * document. Operator notes are immutable generation history and are retained.
  */
 export async function deletePendingPurchaseHintDocument(
   db: Queryable,
   hintBundleId: string,
   hintDocumentId: string,
-): Promise<boolean> {
+): Promise<'deleted' | 'not_found' | 'retained_operator_note'> {
   const result = await db.query(
     `
       delete from pending_purchase_hint_documents d
@@ -444,10 +444,23 @@ export async function deletePendingPurchaseHintDocument(
        where d.bundle_id = b.id
          and b.hint_bundle_id = $1
          and d.hint_document_id = $2
+         and d.kind <> 'operator_note'
     `,
     [hintBundleId, hintDocumentId],
   )
-  return (result.rowCount ?? 0) > 0
+  if ((result.rowCount ?? 0) > 0) {
+    return 'deleted'
+  }
+  const existing = await db.query<{ kind: string }>(
+    `
+      select d.kind
+      from pending_purchase_hint_documents d
+      join pending_purchase_hint_bundles b on b.id = d.bundle_id
+      where b.hint_bundle_id = $1 and d.hint_document_id = $2
+    `,
+    [hintBundleId, hintDocumentId],
+  )
+  return existing.rows[0]?.kind === 'operator_note' ? 'retained_operator_note' : 'not_found'
 }
 
 // ── extraction (C3) ───────────────────────────────────────────────────
