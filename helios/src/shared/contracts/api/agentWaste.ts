@@ -315,6 +315,9 @@ export type PromoteAdvisoryErrorResponse = z.infer<typeof PromoteAdvisoryErrorRe
 export const AgentWasteClustersRequestSchema = z.object({}).strict()
 export type AgentWasteClustersRequest = z.infer<typeof AgentWasteClustersRequestSchema>
 
+/** Must stay aligned with the server-side label sanitizer. */
+export const MAX_CLUSTER_LABEL_CHARS = 80
+
 /**
  * One clustered group, ready to render and already ranked server-side.
  * `members` includes `primary` and is non-empty; `count === members.length`
@@ -362,6 +365,40 @@ export const AgentWasteClustersResponseSchema = z
   })
   .strict()
 export type AgentWasteClustersResponse = z.infer<typeof AgentWasteClustersResponseSchema>
+
+// ─────────────────────────────────────────────────────────────────────────
+// Draft a GitHub ticket from a reviewed cluster (issue #76).
+//
+// This request identifies the source reports only. The server verifies the
+// exact report multiset against the current backlog before it asks a model to
+// draft anything, then derives a stable filing key from those reports. The
+// model-authored label and later operator edits are deliberately excluded
+// from that key so a retry cannot mint another identity for the same reports.
+
+/** Large enough for today's backlog while still bounding request work. */
+export const AGENT_WASTE_TICKET_MAX_REPORTS = 2_000
+
+/** Bound strings that otherwise inherit the producer's permissive schema. */
+export const AGENT_WASTE_TICKET_MAX_REQUEST_BYTES = 512 * 1024
+
+/** Ticket identity must reject, not silently strip, unknown source fields. */
+export const AgentWasteTicketReportSchema = AgentWasteObservationSchema.strict()
+
+export const AgentWasteTicketDraftRequestSchema = z
+  .object({
+    /** Display-only cluster theme; not part of the stable filing identity. */
+    clusterLabel: z.string().trim().min(1).max(MAX_CLUSTER_LABEL_CHARS),
+    /** Exact cluster members, including duplicate events when present. */
+    reports: z.array(AgentWasteTicketReportSchema).min(1).max(AGENT_WASTE_TICKET_MAX_REPORTS),
+  })
+  .strict()
+  .refine(
+    (value) => new TextEncoder().encode(JSON.stringify(value)).length <= AGENT_WASTE_TICKET_MAX_REQUEST_BYTES,
+    {
+      message: `ticket draft request must be at most ${AGENT_WASTE_TICKET_MAX_REQUEST_BYTES} bytes`,
+    },
+  )
+export type AgentWasteTicketDraftRequest = z.infer<typeof AgentWasteTicketDraftRequestSchema>
 
 /** Structured failure codes for the cluster path. */
 export const AGENT_WASTE_CLUSTER_FAILURE_CODES = [

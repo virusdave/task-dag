@@ -23,6 +23,8 @@ import type {
   AgentWasteCluster,
   AgentWasteObservation,
 } from '../../shared/contracts/api/agentWaste.js'
+import { MAX_CLUSTER_LABEL_CHARS } from '../../shared/contracts/api/agentWaste.js'
+export { MAX_CLUSTER_LABEL_CHARS } from '../../shared/contracts/api/agentWaste.js'
 
 /**
  * Per-call prompt budget. Larger backlogs are split into batches of this
@@ -30,9 +32,6 @@ import type {
  * operator never sees a silently truncated clustering.
  */
 export const CLUSTER_BATCH_SIZE = 200
-
-/** Server-side cap on the model-authored `label` (display-only text). */
-export const MAX_CLUSTER_LABEL_CHARS = 80
 
 /**
  * The per-observation shape sent to the model. We deliberately OMIT
@@ -101,7 +100,7 @@ function sanitizeLabel(label: string): string {
 }
 
 /** Sum the members' real waste estimates (missing/invalid count as 0). */
-function aggregateWaste(members: readonly AgentWasteObservation[]): {
+export function aggregateWaste(members: readonly AgentWasteObservation[]): {
   aggregateWastedTokens: number
   aggregateWastedSeconds: number
 } {
