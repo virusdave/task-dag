@@ -51,6 +51,7 @@ function makeAgentKeyPair() {
 async function buildSignedAgentGateHarness(options: { maxResponseBytes?: number } = {}) {
   const keys = makeAgentKeyPair()
   const logs: string[] = []
+  const now = Date.now()
   process.env = {
     ...process.env,
     APP_BASE_URL: 'http://helios.test',
@@ -59,8 +60,8 @@ async function buildSignedAgentGateHarness(options: { maxResponseBytes?: number 
       id: AGENT_RULE_ID,
       owner: 'test',
       reason: 'auth gate integration coverage',
-      not_before: '2026-07-10T00:00:00Z',
-      not_after: '2026-07-11T00:00:00Z',
+      not_before: new Date(now - 60 * 60 * 1_000).toISOString(),
+      not_after: new Date(now + 60 * 60 * 1_000).toISOString(),
       max_response_bytes: options.maxResponseBytes ?? 256,
       paths: [
         {
