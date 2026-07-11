@@ -111,6 +111,26 @@ says, and a hint can never make the classifier emit an output that violates it.
 - An operator-note blob that cannot be read fails loud — generating without the
   operator's guidance would silently recreate the #69 incident.
 
+## Packet 65 recovery verification
+
+Read-only production verification on July 11, 2026 confirmed the recovery at
+the pending-purchase review boundary:
+
+- Packet 65, generated July 8 at 8:31 PM New York time, had no hint bundle
+  attached and proposed two `J&H` rows as catalog creates.
+- The first hinted rerun, packet 66, used an older schema-v1 extraction with no
+  glossary entries and did not fully correct the result.
+- Recovery packet 67, generated July 9 at 3:02 AM New York time, used schema-v2
+  bundle `pphint_2026-07-09_070124_da099a` with two glossary entries. Both rows
+  resolved `J&H` to the existing `Jekyll & Hyde` brand and stopped at
+  `needs-review` because no offered catalog candidate matched. Generation made
+  no catalog changes; it persisted both rows for human review.
+
+The original packet therefore could not literally have its attached bundle
+force-reextracted: packet 65 had no bundle association. The operator completed
+the equivalent recovery by generating packet 67 with a fresh schema-v2 bundle.
+Any later approval or apply activity is outside this review-stage verification.
+
 ## Tests
 
 - Per-layer: [`hintFactExtraction.test.ts`](../../../helios/src/worker/pendingPurchases/hintFactExtraction.test.ts)
