@@ -572,6 +572,374 @@ _ci_repair_collect_evidence() {
 }
 
 # ---------------------------------------------------------------------------
+# Repair scheduling-projection snapshot classification
+#
+# This is deliberately a private, read-only boundary.  A reconciler supplies
+# an isolated bare repository containing one coherent advertised-origin
+# snapshot plus one authenticated GitHub issue observation.  This function
+# validates internal consistency only: the future mutating caller must still
+# re-check live GitHub and chain/lease authority before retiring any ref.
+# ---------------------------------------------------------------------------
+
+_ci_repair_projection_result() { # <status> <reason> <root-or-empty> <rows-file>
+    local status="$1" reason="$2" root="$3" rows="$4"
+    jq -cn --arg status "$status" --arg reason "$reason" --arg root "$root" \
+        --rawfile rows "$rows" '
+        {status:$status, reason:$reason,
+         rootOid:(if $root == "" then null else $root end),
+         candidates:(if $status == "ready" then
+           [$rows | split("\n")[] | select(length > 0) | split("\t") |
+             {ref:.[0], expectedOid:.[1], kind:.[2], taskOid:.[3]}]
+         else [] end)}'
+}
+
+_ci_repair_projection_indeterminate() { # <reason> <rows-file>
+    _ci_repair_projection_result indeterminate "$1" "" "$2"
+    # Callers return 2 after cleaning their scratch directory. Keep this
+    # renderer successful so task-dag's top-level `set -e` cannot bypass that
+    # cleanup merely because an expected classification was indeterminate.
+    return 0
+}
+
+_ci_repair_snapshot_git() {
+    env -u GIT_NAMESPACE -u GIT_OBJECT_DIRECTORY \
+        -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_COMMON_DIR \
+        -u GIT_WORK_TREE -u GIT_SHALLOW_FILE -u GIT_GRAFT_FILE \
+        GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1 \
+        git --git-dir="$_CI_REPAIR_SNAPSHOT_GIT_DIR" "$@"
+}
+
+_ci_repair_snapshot_empty_commit() {
+    local sha="$1"
+    [ "$(_ci_repair_snapshot_git cat-file -t "$sha" 2>/dev/null || true)" = commit ] \
+        && [ "$(_ci_repair_snapshot_git rev-parse "${sha}^{tree}" 2>/dev/null || true)" = "$_CI_REPAIR_SNAPSHOT_EMPTY_TREE" ]
+}
+
+_ci_repair_snapshot_parent() {
+    local sha="$1" line
+    line="$(_ci_repair_snapshot_git rev-list --parents -n 1 "$sha" 2>/dev/null)" || return 1
+    [ "$(awk '{print NF}' <<<"$line")" -ge 2 ] || return 1
+    awk '{print $2}' <<<"$line"
+}
+
+_ci_repair_snapshot_one_parent() {
+    local sha="$1" line
+    line="$(_ci_repair_snapshot_git rev-list --parents -n 1 "$sha" 2>/dev/null)" || return 1
+    [ "$(awk '{print NF}' <<<"$line")" -eq 2 ] || return 1
+    awk '{print $2}' <<<"$line"
+}
+
+_ci_repair_snapshot_field_once() { # <message> <field>
+    local message="$1" field="$2"
+    [ "$(awk -v p="${field}: " 'index($0,p)==1 {n++} END {print n+0}' <<<"$message")" -eq 1 ] || return 1
+    sed -n "s/^${field}: //p" <<<"$message"
+}
+
+_ci_repair_snapshot_root() { # <sha> <issue> <repo> [require-repair-markers]
+    local sha="$1" issue="$2" repo="$3" markers="${4:-false}" message parent body_at=7
+    local -a lines=()
+    _ci_repair_snapshot_empty_commit "$sha" || return 1
+    parent="$(_ci_repair_snapshot_one_parent "$sha")" || return 1
+    [ -n "$parent" ] || return 1
+    message="$(_ci_repair_snapshot_git log -1 --format=%B "$sha" 2>/dev/null)" || return 1
+    mapfile -t lines <<<"$message"
+    [[ "${lines[0]:-}" = "Task: "* ]] && [ -n "${lines[0]#Task: }" ] \
+        && [ -z "${lines[1]:-}" ] \
+        && [ "${lines[2]:-}" = "Issue: #${issue}" ] \
+        && [[ "${lines[3]:-}" = "Author: "* ]] && [ -n "${lines[3]#Author: }" ] \
+        && [ "${lines[4]:-}" = "URL: https://github.com/${repo}/issues/${issue}" ] \
+        && [ "${lines[5]:-}" = "Status: pending" ] \
+        && [ "${lines[6]:-}" = "Type: epic" ] || return 1
+    if [ "${lines[7]:-}" = "Backfilled: true" ]; then
+        [ "${lines[8]:-}" = "Backfill-Reason: epic ref was missing and was recreated on demand by task-dag; the first-sighting issue-to-task run never created it (workflow broken/mid-migration at open time, or issue predates task-dag). See virusdave/top-level#28." ] \
+            && [ -z "${lines[9]:-}" ] || return 1
+        body_at=10
+    else
+        [ -z "${lines[7]:-}" ] || return 1
+        body_at=8
+    fi
+    if [ "$markers" = true ]; then
+        [ "${lines[$body_at]:-}" = "$_CI_REPAIR_EXPECTED_SLOT" ] \
+            && [ "${lines[$((body_at + 1))]:-}" = "$_CI_REPAIR_EXPECTED_FIRST_RED" ] \
+            && [ -z "${lines[$((body_at + 2))]:-}" ] || return 1
+    fi
+}
+
+_ci_repair_snapshot_task() { # <sha>; root is accepted separately by ancestry
+    local sha="$1" message type idx value
+    local -a lines=()
+    _ci_repair_snapshot_empty_commit "$sha" || return 1
+    message="$(_ci_repair_snapshot_git log -1 --format=%B "$sha" 2>/dev/null)" || return 1
+    mapfile -t lines <<<"$message"
+    if [ "${lines[0]:-}" = "kind: message" ]; then
+        [ "${lines[1]:-}" = "role: human" ] && [ "${lines[2]:-}" = "intent: comment" ] \
+            && [ -z "${lines[3]:-}" ] && [ "${lines[4]:-}" = issue: ] \
+            && [[ "${lines[5]:-}" =~ ^[[:space:]]+number:[[:space:]]+[1-9][0-9]*$ ]] \
+            && [ -z "${lines[6]:-}" ] && [ "${lines[7]:-}" = github: ] \
+            && [[ "${lines[8]:-}" =~ ^[[:space:]]+comment_id:[[:space:]]+[1-9][0-9]*$ ]] \
+            && [[ "${lines[9]:-}" = "  actor: "* ]] && [ -n "${lines[9]#  actor: }" ] \
+            && [[ "${lines[10]:-}" = "  url: https://github.com/"* ]] \
+            && [ -z "${lines[11]:-}" ] && [[ "${lines[12]:-}" =~ ^message_id:[[:space:]]msg_ ]] \
+            && [ -z "${lines[13]:-}" ] && [ "${lines[14]:-}" = "body: |" ]
+        return
+    fi
+    [[ "${lines[0]:-}" = "Task: "* ]] && [ -n "${lines[0]#Task: }" ] && [ -z "${lines[1]:-}" ] || return 1
+    idx=2
+    if [[ "${lines[$idx]:-}" = "Issue: #"* ]]; then
+        [[ "${lines[$idx]}" =~ ^Issue:\ #[1-9][0-9]*$ ]] || return 1
+        idx=$((idx + 1))
+    fi
+    if [[ "${lines[$idx]:-}" = "Author: "* ]]; then
+        [ -n "${lines[$idx]#Author: }" ] || return 1
+        idx=$((idx + 1))
+    fi
+    if [[ "${lines[$idx]:-}" = "URL: "* ]]; then
+        [[ "${lines[$idx]}" = "URL: https://github.com/"*/issues/[1-9]* ]] || return 1
+        idx=$((idx + 1))
+    fi
+    value="${lines[$idx]:-}"; [[ "$value" = "Status: "* ]] && [ -n "${value#Status: }" ] || return 1
+    idx=$((idx + 1)); value="${lines[$idx]:-}"; [[ "$value" = "Type: "* ]] || return 1
+    type="${value#Type: }"
+    case "$type" in leaf|task|epic) return 0 ;; *) return 1 ;; esac
+}
+
+_ci_repair_snapshot_claim_task() { # <claim-sha> <root|leaf> <path-identity>
+    local sha="$1" kind="$2" identity="$3" parent message task tree idx value
+    local -a lines=()
+    parent="$(_ci_repair_snapshot_one_parent "$sha")" || return 1
+    _ci_repair_snapshot_task "$parent" || [ "$parent" = "$_CI_REPAIR_TARGET_ROOT" ] || return 1
+    tree="$(_ci_repair_snapshot_git rev-parse "${sha}^{tree}" 2>/dev/null || true)"
+    [ "$tree" = "$(_ci_repair_snapshot_git rev-parse "${parent}^{tree}" 2>/dev/null || true)" ] || return 1
+    message="$(_ci_repair_snapshot_git log -1 --format=%B "$sha" 2>/dev/null)" || return 1
+    mapfile -t lines <<<"$message"
+    [[ "${lines[0]:-}" = "Claim: "* ]] && [ -n "${lines[0]#Claim: }" ] && [ -z "${lines[1]:-}" ] || return 1
+    idx=2
+    if [ "$kind" = root ]; then
+        [ -n "${_CI_REPAIR_ROOT_BY_ISSUE[$identity]:-}" ] \
+            && [ "$parent" = "${_CI_REPAIR_ROOT_BY_ISSUE[$identity]}" ] || return 1
+        [ "${lines[$idx]:-}" = "Claim-Kind: root" ] || return 1; idx=$((idx + 1))
+        [ "${lines[$idx]:-}" = "Issue: #${identity}" ] || return 1; idx=$((idx + 1))
+        [[ "${lines[$idx]:-}" = "Claim-ID: "* ]] && [ -n "${lines[$idx]#Claim-ID: }" ] || return 1; idx=$((idx + 1))
+    fi
+    [ "${lines[$idx]:-}" = "Task-Commit: ${parent}" ] || return 1; idx=$((idx + 1))
+    [[ "${lines[$idx]:-}" = "Claimer: "* ]] && [ -n "${lines[$idx]#Claimer: }" ] || return 1; idx=$((idx + 1))
+    [[ "${lines[$idx]:-}" = "Claimer-Host: "* ]] && [ -n "${lines[$idx]#Claimer-Host: }" ] || return 1; idx=$((idx + 1))
+    if [[ "${lines[$idx]:-}" = "Claimer-PID: "* ]]; then
+        [[ "${lines[$idx]}" =~ ^Claimer-PID:\ [1-9][0-9]*$ ]] || return 1; idx=$((idx + 1))
+    fi
+    value="${lines[$idx]:-}"; [[ "$value" = "Claimed-At: "* ]] \
+        && _cichain_timestamp_epoch "${value#Claimed-At: }" >/dev/null 2>&1 || return 1; idx=$((idx + 1))
+    [[ "${lines[$idx]:-}" =~ ^TTL-Hours:\ [1-9][0-9]*$ ]] || return 1
+    task="$parent"
+    printf '%s\n' "$parent"
+}
+
+_ci_repair_snapshot_blocked_meta_task() { # <meta-sha> <task-oid-from-path>
+    local sha="$1" wanted="$2" parent message kind tree idx value
+    local -a lines=()
+    parent="$(_ci_repair_snapshot_one_parent "$sha")" || return 1
+    [ "$parent" = "$wanted" ] || return 1
+    _ci_repair_snapshot_task "$parent" || [ "$parent" = "$_CI_REPAIR_TARGET_ROOT" ] || return 1
+    tree="$(_ci_repair_snapshot_git rev-parse "${sha}^{tree}" 2>/dev/null || true)"
+    [ "$tree" = "$(_ci_repair_snapshot_git rev-parse "${parent}^{tree}" 2>/dev/null || true)" ] || return 1
+    message="$(_ci_repair_snapshot_git log -1 --format=%B "$sha" 2>/dev/null)" || return 1
+    mapfile -t lines <<<"$message"
+    [[ "${lines[0]:-}" = "Blocked-Meta: "* ]] && [ -n "${lines[0]#Blocked-Meta: }" ] \
+        && [ -z "${lines[1]:-}" ] && [ "${lines[2]:-}" = "Task-Commit: ${parent}" ] \
+        && [[ "${lines[3]:-}" = "Blocker-Kind: "* ]] || return 1
+    kind="${lines[3]#Blocker-Kind: }"
+    case "$kind" in operator|downstream) ;; *) return 1 ;; esac
+    idx=4
+    for value in Reason Request-URL Repo Issue Source-URL Blocked-By Blocked-Host; do
+        if [[ "${lines[$idx]:-}" = "${value}: "* ]]; then idx=$((idx + 1)); fi
+    done
+    value="${lines[$idx]:-}"; [[ "$value" = "Blocked-At: "* ]] \
+        && _cichain_timestamp_epoch "${value#Blocked-At: }" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$parent"
+}
+
+_ci_repair_snapshot_membership() { # <task-sha>: member|unrelated|ambiguous
+    local cur="$1" parent seen=$'\n'
+    while :; do
+        [ "$cur" = "$_CI_REPAIR_TARGET_ROOT" ] && { echo member; return 0; }
+        case "$seen" in *$'\n'"$cur"$'\n'*) echo ambiguous; return 0 ;; esac
+        seen+="$cur"$'\n'
+        if [ -n "${_CI_REPAIR_OTHER_ROOTS[$cur]:-}" ]; then
+            echo unrelated; return 0
+        fi
+        _ci_repair_snapshot_task "$cur" || { echo ambiguous; return 0; }
+        parent="$(_ci_repair_snapshot_parent "$cur")" || { echo ambiguous; return 0; }
+        cur="$parent"
+    done
+}
+
+_ci_repair_classify_projection_snapshot() { # <isolated-bare-git-dir> <observation-json>
+    local git_dir="$1" observation="$2" tmp rows refs before after width repo branch first_red issue url body
+    local ref oid sym kind suffix task membership root_ref root_oid pending_ref pending_oid issue_from_ref
+    local -A seen_task_kind=() short_tasks=() _CI_REPAIR_OTHER_ROOTS=() _CI_REPAIR_ROOT_BY_ISSUE=()
+    local _CI_REPAIR_SNAPSHOT_GIT_DIR _CI_REPAIR_SNAPSHOT_EMPTY_TREE
+    local _CI_REPAIR_EXPECTED_SLOT _CI_REPAIR_EXPECTED_FIRST_RED _CI_REPAIR_TARGET_ROOT
+    local -a _body_lines=()
+    tmp="$(mktemp -d)" || return 2
+    rows="$tmp/rows"; refs="$tmp/refs"; : >"$rows"; : >"$refs"
+    if [ ! -f "$observation" ] || [ "$(wc -c <"$observation")" -gt 65536 ] \
+        || _ci_repair_json_has_duplicate_paths "$observation" \
+        || ! jq -e '
+          type=="object" and (keys|sort)==["branch","firstRed","issue","repository","version"] and
+          .version==1 and (.repository|type)=="string" and (.branch|type)=="string" and
+          (.firstRed|type)=="string" and
+          (.issue|type)=="object" and (.issue|keys|sort)==["body","kind","number","url"] and
+          .issue.kind=="issue" and (.issue.number|type)=="number" and
+          ((.issue.number|floor)==.issue.number) and .issue.number>0 and .issue.number<=9007199254740991 and
+          (.issue.url|type)=="string" and (.issue.body|type)=="string" and
+          ([..|strings|contains("\u0000")] | any | not)' \
+          "$observation" >/dev/null 2>&1; then
+        _ci_repair_projection_indeterminate invalid-observation "$rows"; rm -rf "$tmp"; return 2
+    fi
+    repo="$(jq -r .repository "$observation")"; branch="$(jq -r .branch "$observation")"
+    first_red="$(jq -r .firstRed "$observation")"; issue="$(jq -r '.issue.number|tostring' "$observation")"
+    url="$(jq -r .issue.url "$observation")"; body="$(jq -r .issue.body "$observation")"
+    if ! [[ "$repo" =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ && "$issue" =~ ^[1-9][0-9]*$ ]] \
+        || [ -z "$branch" ] || ! _cichain_single_line "$branch" \
+        || [ "$url" != "https://github.com/${repo}/issues/${issue}" ]; then
+        _ci_repair_projection_indeterminate invalid-observation "$rows"; rm -rf "$tmp"; return 2
+    fi
+    local LC_ALL=C
+    _CI_REPAIR_SNAPSHOT_GIT_DIR="$git_dir"
+    if ! iconv -f UTF-8 -t UTF-8 "$observation" >/dev/null 2>&1 \
+        || [ "$(_ci_repair_snapshot_git rev-parse --is-bare-repository 2>/dev/null || true)" != true ] \
+        || [ -f "$git_dir/shallow" ] || [ -f "$git_dir/commondir" ] || [ -f "$git_dir/info/grafts" ] \
+        || [ -f "$git_dir/objects/info/alternates" ] \
+        || compgen -G "$git_dir/objects/pack/*.promisor" >/dev/null \
+        || _ci_repair_snapshot_git config --get-regexp '^remote\..*\.promisor$' >/dev/null 2>&1 \
+        || _ci_repair_snapshot_git config --get-regexp '^remote\..*\.partialCloneFilter$' >/dev/null 2>&1 \
+        || _ci_repair_snapshot_git config --get extensions.partialClone >/dev/null 2>&1; then
+        _ci_repair_projection_indeterminate invalid-snapshot "$rows"; rm -rf "$tmp"; return 2
+    fi
+    case "$(_ci_repair_snapshot_git rev-parse --show-object-format 2>/dev/null || true)" in
+        sha1) width=40 ;; sha256) width=64 ;;
+        *) _ci_repair_projection_indeterminate invalid-snapshot "$rows"; rm -rf "$tmp"; return 2 ;;
+    esac
+    _CI_REPAIR_SNAPSHOT_EMPTY_TREE="$(_ci_repair_snapshot_git hash-object -t tree --stdin </dev/null 2>/dev/null)" || {
+        _ci_repair_projection_indeterminate invalid-snapshot "$rows"; rm -rf "$tmp"; return 2; }
+    [[ "$first_red" =~ ^[0-9a-f]+$ ]] && [ "${#first_red}" -eq "$width" ] || {
+        _ci_repair_projection_indeterminate invalid-observation "$rows"; rm -rf "$tmp"; return 2; }
+    _CI_REPAIR_EXPECTED_SLOT="<!-- ci-repair-slot:v1 repo=${repo} branch=$(_cichain_encode "$branch") -->"
+    _CI_REPAIR_EXPECTED_FIRST_RED="<!-- ci-repair-first-red:${first_red} -->"
+    mapfile -t _body_lines <<<"$body"
+    if [ "${_body_lines[0]:-}" != "$_CI_REPAIR_EXPECTED_SLOT" ] \
+        || [ "${_body_lines[1]:-}" != "$_CI_REPAIR_EXPECTED_FIRST_RED" ] \
+        || [ -n "${_body_lines[2]:-}" ] \
+        || [ "$(grep -cFx "$_CI_REPAIR_EXPECTED_SLOT" <<<"$body")" -ne 1 ] \
+        || [ "$(grep -cFx "$_CI_REPAIR_EXPECTED_FIRST_RED" <<<"$body")" -ne 1 ]; then
+        _ci_repair_projection_indeterminate invalid-observation "$rows"; rm -rf "$tmp"; return 2
+    fi
+    _ci_repair_snapshot_git for-each-ref \
+        --format='%(objectname)%09%(refname)%09%(symref)' \
+        refs/heads/gh/issues refs/heads/tasks/pending refs/heads/tasks/root-active \
+        refs/heads/tasks/frontier refs/heads/tasks/active refs/heads/tasks/blocked \
+        refs/heads/tasks/blocked-meta | LC_ALL=C sort >"$refs" || {
+            _ci_repair_projection_indeterminate invalid-snapshot "$rows"; rm -rf "$tmp"; return 2; }
+    before="$(sha256sum "$refs" | awk '{print $1}')"
+    root_ref="refs/heads/gh/issues/${issue}"
+    root_oid="$(awk -F '\t' -v r="$root_ref" '$2==r {print $1}' "$refs")"
+    [ -n "$root_oid" ] && _ci_repair_snapshot_root "$root_oid" "$issue" "$repo" true || {
+        _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+    _CI_REPAIR_TARGET_ROOT="$root_oid"
+    _CI_REPAIR_ROOT_BY_ISSUE["$issue"]="$root_oid"
+    while IFS=$'\t' read -r oid ref sym; do
+        [ -z "$sym" ] || { _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+        case "$ref" in
+            refs/heads/gh/issues/*)
+                issue_from_ref="${ref##*/}"
+                [[ "$issue_from_ref" =~ ^[1-9][0-9]*$ ]] \
+                    && [ "$ref" = "refs/heads/gh/issues/${issue_from_ref}" ] \
+                    || { _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                if [ "$ref" != "$root_ref" ]; then
+                    _ci_repair_snapshot_root "$oid" "$issue_from_ref" "$repo" false \
+                        || { _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                    _CI_REPAIR_OTHER_ROOTS["$oid"]="$issue_from_ref"
+                    _CI_REPAIR_ROOT_BY_ISSUE["$issue_from_ref"]="$oid"
+                fi
+                ;;
+        esac
+    done <"$refs"
+    pending_ref="refs/heads/tasks/pending/${issue}"
+    pending_oid="$(awk -F '\t' -v r="$pending_ref" '$2==r {print $1}' "$refs")"
+    [ -z "$pending_oid" ] || [ "$pending_oid" = "$root_oid" ] || {
+        _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+    while IFS=$'\t' read -r oid ref sym; do
+        case "$ref" in refs/heads/tasks/*) ;; *) continue ;; esac
+        kind="${ref#refs/heads/tasks/}"; kind="${kind%%/*}"; suffix="${ref##*/}"; task=""
+        case "$kind" in
+            pending)
+                [[ "$suffix" =~ ^[1-9][0-9]*$ ]] && [ "$ref" = "refs/heads/tasks/pending/${suffix}" ] \
+                    && [ -n "${_CI_REPAIR_ROOT_BY_ISSUE[$suffix]:-}" ] \
+                    && [ "$oid" = "${_CI_REPAIR_ROOT_BY_ISSUE[$suffix]}" ] \
+                    && _ci_repair_snapshot_root "$oid" "$suffix" "$repo" false || {
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                task="$oid" ;;
+            root-active)
+                [[ "$suffix" =~ ^[1-9][0-9]*$ ]] && [ "$ref" = "refs/heads/tasks/root-active/${suffix}" ] \
+                    || { _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                task="$(_ci_repair_snapshot_claim_task "$oid" root "$suffix")" || {
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; } ;;
+            frontier)
+                [ "$ref" = "refs/heads/tasks/frontier/${suffix}" ] \
+                    && [[ "$suffix" =~ ^[0-9a-f]{4,64}$ ]] && [[ "$oid" = "$suffix"* ]] && _ci_repair_snapshot_task "$oid" || {
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                task="$oid" ;;
+            active)
+                [ "$ref" = "refs/heads/tasks/active/${suffix}" ] && [[ "$suffix" =~ ^[0-9a-f]{4,64}$ ]] \
+                    || { _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                task="$(_ci_repair_snapshot_claim_task "$oid" leaf "$suffix")" || {
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                [[ "$task" = "$suffix"* ]] || { _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; } ;;
+            blocked)
+                [ "$ref" = "refs/heads/tasks/blocked/${suffix}" ] \
+                    && [[ "$suffix" =~ ^[0-9a-f]+$ ]] && [ "${#suffix}" -eq "$width" ] && [ "$oid" = "$suffix" ] \
+                    && { _ci_repair_snapshot_task "$oid" || [ "$oid" = "$root_oid" ]; } || {
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                task="$oid" ;;
+            blocked-meta)
+                [ "$ref" = "refs/heads/tasks/blocked-meta/${suffix}" ] \
+                    && [[ "$suffix" =~ ^[0-9a-f]+$ ]] && [ "${#suffix}" -eq "$width" ] || {
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+                task="$(_ci_repair_snapshot_blocked_meta_task "$oid" "$suffix")" || {
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; } ;;
+            *) continue ;;
+        esac
+        case "$kind" in
+            frontier|active)
+                if [ -n "${short_tasks[$suffix]:-}" ] && [ "${short_tasks[$suffix]}" != "$task" ]; then
+                    _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2
+                fi
+                short_tasks["$suffix"]="$task"
+                ;;
+        esac
+        membership="$(_ci_repair_snapshot_membership "$task")"
+        [ "$membership" != ambiguous ] || { _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+        [ "$membership" = member ] || continue
+        [ -z "${seen_task_kind["$kind:$task"]:-}" ] || {
+            _ci_repair_projection_indeterminate ambiguous-projection "$rows"; rm -rf "$tmp"; return 2; }
+        seen_task_kind["$kind:$task"]="$ref"
+        printf '%s\t%s\t%s\t%s\n' "$ref" "$oid" "$kind" "$task" >>"$rows"
+    done <"$refs"
+    LC_ALL=C sort -o "$rows" "$rows"
+    _ci_repair_snapshot_git for-each-ref \
+        --format='%(objectname)%09%(refname)%09%(symref)' \
+        refs/heads/gh/issues refs/heads/tasks/pending refs/heads/tasks/root-active \
+        refs/heads/tasks/frontier refs/heads/tasks/active refs/heads/tasks/blocked \
+        refs/heads/tasks/blocked-meta | LC_ALL=C sort >"$tmp/refs-after"
+    after="$(sha256sum "$tmp/refs-after" | awk '{print $1}')"
+    if [ "$before" != "$after" ]; then
+        _ci_repair_projection_indeterminate snapshot-changed "$rows"; rm -rf "$tmp"; return 2
+    fi
+    _ci_repair_projection_result ready ok "$root_oid" "$rows"
+    rm -rf "$tmp"
+}
+
+# ---------------------------------------------------------------------------
 # Repair-superseded audit validation
 #
 # `repair-retire` (implemented by a dependent task) records one immutable,
