@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { DEFAULT_STANDARD_REASONING_MODEL } from '../../shared/domain/bedrockModels.js'
+import {
+  DEFAULT_AGENT_WASTE_CLUSTERER_MODEL,
+  DEFAULT_STANDARD_REASONING_MODEL,
+} from '../../shared/domain/bedrockModels.js'
 import type { Queryable } from '../db/pool.js'
 import {
   BEDROCK_MODEL_OVERRIDES_KEY,
@@ -44,6 +47,17 @@ describe('resolveBedrockModel', () => {
       overrides: { pending_purchase_classifier: 'custom.reasoner-x' },
     })
     expect(await resolveBedrockModel(db, 'pending_purchase_classifier')).toBe('custom.reasoner-x')
+  })
+
+  it('resolves the ticket drafter default and operator override', async () => {
+    expect(await resolveBedrockModel(dbWithSetting(null), 'agent_waste_ticket_drafter')).toBe(
+      DEFAULT_AGENT_WASTE_CLUSTERER_MODEL,
+    )
+    const db = dbWithSetting({
+      version: 1,
+      overrides: { agent_waste_ticket_drafter: 'custom.ticket-model' },
+    })
+    expect(await resolveBedrockModel(db, 'agent_waste_ticket_drafter')).toBe('custom.ticket-model')
   })
 
   it('ignores a malformed/old blob and uses the code default', async () => {

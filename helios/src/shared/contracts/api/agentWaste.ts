@@ -400,6 +400,74 @@ export const AgentWasteTicketDraftRequestSchema = z
   )
 export type AgentWasteTicketDraftRequest = z.infer<typeof AgentWasteTicketDraftRequestSchema>
 
+/** One curated repository that may receive an operator-approved ticket. */
+export const AgentWasteTicketRepositorySchema = z
+  .object({
+    repository: z.string().min(3).max(100),
+    description: z.string().trim().min(1).max(300),
+  })
+  .strict()
+export type AgentWasteTicketRepository = z.infer<typeof AgentWasteTicketRepositorySchema>
+
+/** 200 body for the bounded, read-only ticket-target catalog. */
+export const AgentWasteTicketRepositoriesResponseSchema = z
+  .object({ repositories: z.array(AgentWasteTicketRepositorySchema).max(16) })
+  .strict()
+export type AgentWasteTicketRepositoriesResponse = z.infer<
+  typeof AgentWasteTicketRepositoriesResponseSchema
+>
+
+const TicketDraftTextSchema = z
+  .string()
+  .refine((value) => !/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value), {
+    message: 'must not contain control characters',
+  })
+  .transform((value) => value.trim())
+
+/** Strict model-authored proposal. Every field remains operator-editable. */
+export const AgentWasteTicketProposalSchema = z
+  .object({
+    title: z
+      .string()
+      .refine((value) => !/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value), {
+        message: 'must not contain control characters',
+      })
+      .refine((value) => !/[\r\n\u2028\u2029]/u.test(value), {
+        message: 'title must be a single line',
+      })
+      .transform((value) => value.trim())
+      .pipe(z.string().min(1).max(160)),
+    summary: TicketDraftTextSchema.pipe(z.string().min(1).max(6_000)),
+    repository: z.string().min(3).max(100),
+  })
+  .strict()
+export type AgentWasteTicketProposal = z.infer<typeof AgentWasteTicketProposalSchema>
+
+/** Successful proposal plus immutable source provenance and advisory rationale. */
+export const AgentWasteTicketDraftResponseSchema = z
+  .object({
+    model: z.string().min(1).max(200),
+    filingKey: z.string().regex(/^[0-9a-f]{64}$/u),
+    draft: AgentWasteTicketProposalSchema,
+    rationale: TicketDraftTextSchema.pipe(z.string().min(1).max(1_000)),
+    evidenceMarkdown: z.string().min(1),
+  })
+  .strict()
+export type AgentWasteTicketDraftResponse = z.infer<typeof AgentWasteTicketDraftResponseSchema>
+
+export const AGENT_WASTE_TICKET_FAILURE_CODES = [
+  'invalid_request',
+  'agent_waste_unavailable',
+  'agent_waste_ticket_source_mismatch',
+  'agent_waste_ticket_input_too_large',
+  'bedrock_unconfigured',
+  'bedrock_http_error',
+  'bedrock_transport_error',
+  'bedrock_unexpected_response',
+] as const
+export const AgentWasteTicketFailureCodeSchema = z.enum(AGENT_WASTE_TICKET_FAILURE_CODES)
+export type AgentWasteTicketFailureCode = z.infer<typeof AgentWasteTicketFailureCodeSchema>
+
 /** Structured failure codes for the cluster path. */
 export const AGENT_WASTE_CLUSTER_FAILURE_CODES = [
   'agent_waste_unavailable',

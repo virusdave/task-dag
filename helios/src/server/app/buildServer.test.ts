@@ -9,6 +9,17 @@ afterEach(() => {
   vi.resetModules()
 })
 
+it('maps production body-limit failures to a ticket-specific structured 413 body', async () => {
+  const { bodyTooLargeResponse } = await import('./buildServer.js')
+  expect(bodyTooLargeResponse('/catalog/api/agent-waste/ticket-draft', '/catalog')).toEqual({
+    error: 'agent_waste_ticket_input_too_large',
+    message: 'The request body is too large.',
+  })
+  expect(bodyTooLargeResponse('/catalog/api/agent-waste/ticket-draft?retry=1', '/catalog').error)
+    .toBe('agent_waste_ticket_input_too_large')
+  expect(bodyTooLargeResponse('/catalog/api/other', '/catalog').error).toBe('request_body_too_large')
+})
+
 describeRequiresTestDb('buildServer origin validation', () => {
   it('accepts the localhost Vite fallback port for mutating requests in development', async () => {
     process.env = {

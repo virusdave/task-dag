@@ -43,6 +43,7 @@ export const BEDROCK_MODEL_CONTEXT_KEYS = [
   'pending_purchase_classifier',
   'pending_purchase_refinement',
   'agent_waste_clusterer',
+  'agent_waste_ticket_drafter',
 ] as const
 export type BedrockModelContextKey = (typeof BEDROCK_MODEL_CONTEXT_KEYS)[number]
 
@@ -75,6 +76,13 @@ export const BEDROCK_MODEL_CONTEXTS: readonly BedrockModelContextDefinition[] = 
     label: 'Agent-waste clusterer',
     description:
       'Groups the pending agent-waste review backlog into near-duplicate clusters on demand (the "Cluster similar reports" button). Output is display-only — never injected into agents. Runs only when an operator presses the button; defaults to an advanced model.',
+    defaultModel: DEFAULT_AGENT_WASTE_CLUSTERER_MODEL,
+  },
+  {
+    key: 'agent_waste_ticket_drafter',
+    label: 'Agent-waste ticket drafter',
+    description:
+      'Proposes an editable GitHub issue draft and target repository from operator-selected backlog reports. Nothing is filed automatically.',
     defaultModel: DEFAULT_AGENT_WASTE_CLUSTERER_MODEL,
   },
 ]

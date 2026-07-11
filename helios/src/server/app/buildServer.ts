@@ -93,6 +93,16 @@ import { joinBasePath } from '../../shared/config/appBasePath.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+export function bodyTooLargeResponse(url: string, appBasePath: string) {
+  const ticketDraftPath = joinBasePath(appBasePath, '/api/agent-waste/ticket-draft')
+  return {
+    error: url.split('?', 1)[0] === ticketDraftPath
+      ? 'agent_waste_ticket_input_too_large'
+      : 'request_body_too_large',
+    message: 'The request body is too large.',
+  }
+}
+
 export async function buildServer() {
   const env = getServerEnv()
   const server = Fastify({ logger: true })
@@ -184,9 +194,17 @@ export async function buildServer() {
     }
   })
 
-  server.setErrorHandler((error, _request, reply) => {
+  server.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
       return reply.status(400).send({ error: 'Validation failed.', issues: error.issues })
+    }
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'FST_ERR_CTP_BODY_TOO_LARGE'
+    ) {
+      return reply.status(413).send(bodyTooLargeResponse(request.url, env.appBasePath))
     }
 
     const message = error instanceof Error ? error.message : 'Unknown server error.'

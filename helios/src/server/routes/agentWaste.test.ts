@@ -51,6 +51,10 @@ vi.mock('../agentWaste/clusterModel.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../agentWaste/clusterModel.js')>()
   return { ...actual, callClusterModel: vi.fn() }
 })
+vi.mock('../agentWaste/ticketDraftModel.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../agentWaste/ticketDraftModel.js')>()
+  return { ...actual, callTicketDraftModel: vi.fn() }
+})
 
 import { registerAgentWasteRoutes } from './agentWaste.js'
 import {
@@ -60,8 +64,12 @@ import {
 } from '../agentWasteRepo.js'
 import { callClusterModel, ClusterModelError } from '../agentWaste/clusterModel.js'
 import type { RawClusterModelOutput } from '../agentWaste/clusterBacklog.js'
+import { callTicketDraftModel, TicketDraftModelError } from '../agentWaste/ticketDraftModel.js'
+import { resolveBedrockModel } from '../llm/bedrockModelConfig.js'
 
 const callClusterModelMock = vi.mocked(callClusterModel)
+const callTicketDraftModelMock = vi.mocked(callTicketDraftModel)
+const resolveBedrockModelMock = vi.mocked(resolveBedrockModel)
 
 let server: FastifyInstance
 
@@ -170,6 +178,128 @@ describe('POST /api/agent-waste/promote', () => {
     const body = res.json()
     expect(body.ok).toBe(false)
     expect(body.code).toBe('agent_pain_points_unavailable')
+  })
+})
+
+describe('agent-waste ticket drafting', () => {
+  const report = {
+    time: '2026-07-11T00:00:00Z',
+    kind: 'startup',
+    id: 'repeat-canon',
+    note: 'Canon was read twice',
+    estimated_wasted_tokens: 500,
+  }
+  const requestBody = { clusterLabel: 'Repeated startup work', reports: [report] }
+
+  function ticketReader(reports: Array<Record<string, unknown>>): BacklogReader {
+    return {
+      status: () => ({ available: true, detail: 'test reader' }),
+      readBacklog: async () => reports as never,
+    }
+  }
+
+  it('serves the bounded catalog only to admins', async () => {
+    const allowed = await server.inject({ method: 'GET', url: '/api/agent-waste/repositories' })
+    expect(allowed.statusCode).toBe(200)
+    expect(allowed.json().repositories).toHaveLength(9)
+    expect(allowed.json().repositories.map((entry: { repository: string }) => entry.repository))
+      .toContain('FreshlyBakedNYC/automation')
+
+    mockState.allow = false
+    const denied = await server.inject({ method: 'GET', url: '/api/agent-waste/repositories' })
+    expect(denied.statusCode).toBe(403)
+  })
+
+  it('rejects stale reports before model resolution or invocation', async () => {
+    setBacklogReader(ticketReader([]))
+    const response = await server.inject({
+      method: 'POST', url: '/api/agent-waste/ticket-draft', payload: requestBody,
+    })
+    expect(response.statusCode).toBe(409)
+    expect(response.json().error).toBe('agent_waste_ticket_source_mismatch')
+    expect(callTicketDraftModelMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed requests and unavailable backlog without a model call', async () => {
+    const malformed = await server.inject({
+      method: 'POST', url: '/api/agent-waste/ticket-draft', payload: { clusterLabel: 'x', reports: [], surprise: true },
+    })
+    expect(malformed.statusCode).toBe(400)
+    expect(malformed.json().error).toBe('invalid_request')
+
+    __resetBacklogReaderForTests()
+    const unavailable = await server.inject({
+      method: 'POST', url: '/api/agent-waste/ticket-draft', payload: requestBody,
+    })
+    expect(unavailable.statusCode).toBe(503)
+    expect(unavailable.json().error).toBe('agent_waste_unavailable')
+    expect(resolveBedrockModelMock).not.toHaveBeenCalled()
+    expect(callTicketDraftModelMock).not.toHaveBeenCalled()
+  })
+
+  it('returns an editable proposal with deterministic source provenance', async () => {
+    setBacklogReader(ticketReader([report]))
+    callTicketDraftModelMock.mockResolvedValueOnce({
+      title: 'Avoid repeated canon reads',
+      summary: 'Prepared workers should reuse injected canon context.',
+      repository: 'virusdave/top-level',
+      rationale: 'Top-level owns the agent runtime canon.',
+    })
+    const response = await server.inject({
+      method: 'POST', url: '/api/agent-waste/ticket-draft', payload: requestBody,
+    })
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body.model).toBe('deepseek.v3.2')
+    expect(body.filingKey).toMatch(/^[0-9a-f]{64}$/)
+    expect(body.draft).toEqual({
+      title: 'Avoid repeated canon reads',
+      summary: 'Prepared workers should reuse injected canon context.',
+      repository: 'virusdave/top-level',
+    })
+    expect(body.evidenceMarkdown).toContain('repeat-canon')
+    expect(callTicketDraftModelMock).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['agent_waste_ticket_input_too_large', 413],
+    ['bedrock_unconfigured', 503],
+    ['bedrock_unexpected_response', 502],
+  ] as const)('maps %s to HTTP %s', async (code, status) => {
+    setBacklogReader(ticketReader([report]))
+    callTicketDraftModelMock.mockRejectedValueOnce(new TicketDraftModelError(code, 'safe failure'))
+    const response = await server.inject({
+      method: 'POST', url: '/api/agent-waste/ticket-draft', payload: requestBody,
+    })
+    expect(response.statusCode).toBe(status)
+    expect(response.json().error).toBe(code)
+    expect(response.json().message).not.toContain('safe failure')
+  })
+
+  it('rejects oversized verified input before model resolution', async () => {
+    const oversizedReport = { ...report, note: 'x'.repeat(140 * 1024) }
+    setBacklogReader(ticketReader([oversizedReport]))
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/agent-waste/ticket-draft',
+      payload: { clusterLabel: 'Large report', reports: [oversizedReport] },
+    })
+    expect(response.statusCode).toBe(413)
+    expect(response.json().error).toBe('agent_waste_ticket_input_too_large')
+    expect(resolveBedrockModelMock).not.toHaveBeenCalled()
+    expect(callTicketDraftModelMock).not.toHaveBeenCalled()
+  })
+
+  it('is admin-gated before reading reports or invoking the model', async () => {
+    mockState.allow = false
+    const readBacklog = vi.fn(async () => [report])
+    setBacklogReader({ status: () => ({ available: true, detail: 'x' }), readBacklog })
+    const response = await server.inject({
+      method: 'POST', url: '/api/agent-waste/ticket-draft', payload: requestBody,
+    })
+    expect(response.statusCode).toBe(403)
+    expect(readBacklog).not.toHaveBeenCalled()
+    expect(callTicketDraftModelMock).not.toHaveBeenCalled()
   })
 })
 
