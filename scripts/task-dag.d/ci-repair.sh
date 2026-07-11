@@ -509,7 +509,7 @@ _ci_repair_collect_evidence_impl() { # <repo> <branch> <scratch>
     deadline="$(date -u -d "@$deadline_epoch" +'%Y-%m-%dT%H:%M:%SZ')" \
         || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
 
-    local evidence_state
+    local evidence_state failure_evidence
     evidence_state="$(jq -er '
       if any(.[]; . as $e | .status == "completed" and
            ($e.acceptedConclusions | index($e.conclusion)) == null) then "nonaccepted"
@@ -526,6 +526,20 @@ _ci_repair_collect_evidence_impl() { # <repo> <branch> <scratch>
     else
         aggregate=unknown; reason=grace-pending
     fi
+
+    # Stable tree-fix identity deliberately excludes successful runs and all
+    # run/timing metadata.  Derive it before acceptedConclusions is discarded.
+    failure_evidence="$(jq -cS --arg reason "$reason" '
+      [ .[] | . as $e |
+        if $reason == "nonaccepted" and .status == "completed" and
+             (.acceptedConclusions | index(.conclusion)) == null then
+          {name,appId,appSlug,conclusion,category:"nonaccepted"}
+        elif $reason == "grace-expired" and .status == "absent" then
+          {name,appId,appSlug,conclusion:null,category:"absent"}
+        elif $reason == "grace-expired" and .status != "completed" then
+          {name,appId,appSlug,conclusion,category:"nonterminal"}
+        else empty end ] | sort_by([.name,.appId,.appSlug])' "$evidence")" \
+        || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
 
     # acceptedConclusions is policy input used only for classification; it is
     # omitted from the persisted source-evidence schema.
@@ -552,9 +566,10 @@ _ci_repair_collect_evidence_impl() { # <repo> <branch> <scratch>
         --arg deadline "$deadline" --arg policyDigest "$policy_digest" \
         --arg evidence "$evidence_b64" --arg evidenceKey "$evidence_key" \
         --arg decisionKey "$decision_key" --arg aggregate "$aggregate" --arg reason "$reason" \
+        --argjson failureEvidence "$failure_evidence" \
         '{outcome:"observation",authority:$authority,head:$head,observedAt:$observedAt,
           headFirstSeenAt:$firstSeen,deadline:$deadline,policyDigest:$policyDigest,
-          requiredEvidence:$evidence,evidenceKey:$evidenceKey,decisionKey:$decisionKey,
+          requiredEvidence:$evidence,failureEvidence:$failureEvidence,evidenceKey:$evidenceKey,decisionKey:$decisionKey,
           aggregate:$aggregate,reason:$reason}' \
         || { _ci_repair_error evidence-error canonicalization-failed "$authority"; return 2; }
 }
@@ -569,6 +584,196 @@ _ci_repair_collect_evidence() {
     _ci_repair_collect_evidence_impl "$1" "$2" "$scratch" || rc=$?
     rm -rf "$scratch"
     return "$rc"
+}
+
+_ci_repair_verify_target_head() { # <repo> <branch> <expected>
+    local repo="$1" branch="$2" expected="$3" scratch rc=0 actual
+    scratch="$(mktemp -d)" || return 1
+    _ci_repair_http_get "repos/${repo}/git/ref/heads/$(_ci_repair_urlencode_component "$branch")" \
+        "$scratch" post-write-target || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        actual="$(jq -er 'select(.object.type=="commit")|.object.sha|select(type=="string" and test("^[0-9a-f]{40,64}$"))' "$_CI_HTTP_BODY_FILE" 2>/dev/null)" || rc=1
+        [ "$actual" = "$expected" ] || rc=1
+    fi
+    rm -rf "$scratch"
+    return "$rc"
+}
+
+# Validate the collector boundary before any value is allowed into a chain
+# commit.  In particular, do not let jq's usual duplicate-key/last-value rule
+# turn an ambiguous observation into authority.
+_ci_repair_validate_observation() { # <file> <expected-branch>
+    local file="$1" expected_branch="$2" encoded decoded canonical ek dk observed first deadline
+    _ci_repair_json_has_duplicate_paths "$file" && return 1
+    jq -e '
+      type == "object" and
+      (keys == ["aggregate","authority","deadline","decisionKey","evidenceKey","failureEvidence","head","headFirstSeenAt","observedAt","outcome","policyDigest","reason","requiredEvidence"]) and
+      .outcome == "observation" and
+      (.authority | type == "object" and
+        (keys == ["blob","branch","commit","mode","repositoryFound"]) and
+        (.commit | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$")) and
+        (.blob | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$")) and
+        (.mode | IN("observe","enforce")) and (.branch | type == "string" and length > 0 and length <= 255) and
+        (.repositoryFound == true)) and
+      (.head | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$")) and
+      (.policyDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+      (.aggregate | IN("green","red","unknown")) and
+      ((.aggregate == "green" and .reason == "all-accepted") or
+       (.aggregate == "unknown" and .reason == "grace-pending") or
+       (.aggregate == "red" and (.reason | IN("nonaccepted","grace-expired")))) and
+      (.requiredEvidence | type == "string" and test("^[A-Za-z0-9_-]+$") and length <= 174764) and
+      (.evidenceKey | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+      (.decisionKey | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+      (.failureEvidence | type == "array" and length <= 64 and
+        . == (sort_by([.name,.appId,.appSlug])) and
+        (map([.name,.appId,.appSlug]) | unique | length) == length and
+        all(.[]; type == "object" and keys == ["appId","appSlug","category","conclusion","name"] and
+          (.name|type=="string" and length>0 and length<=200 and test("^[^\\r\\n]+$")) and
+          (.appId|type=="number" and floor==. and .>0 and .<=9007199254740991) and
+          (.appSlug|type=="string" and test("^[a-z0-9][a-z0-9-]{0,99}$")) and
+          (.conclusion == null or (.conclusion|IN("success","failure","neutral","cancelled","skipped","timed_out","action_required","startup_failure","stale"))) and
+          (.category|IN("nonaccepted","absent","nonterminal")))) and
+      (if .aggregate == "red" then
+         (.failureEvidence | length > 0) and
+         (if .reason == "nonaccepted" then all(.failureEvidence[]; .category == "nonaccepted")
+          else all(.failureEvidence[]; .category == "absent" or .category == "nonterminal") end)
+       else (.failureEvidence | length == 0) end) and
+      (.observedAt | type == "string") and (.headFirstSeenAt | type == "string") and
+      (.deadline | type == "string")
+    ' "$file" >/dev/null 2>&1 || return 1
+    [ "$(jq -r .authority.branch "$file")" = "$expected_branch" ] || return 1
+    encoded="$(jq -r .requiredEvidence "$file")"
+    decoded="$(printf '%s' "$encoded" | tr '_-' '/+' | awk '{s=$0; while(length(s)%4)s=s"="; print s}' | base64 -d 2>/dev/null)" || return 1
+    canonical="$(printf '%s' "$decoded" | _ci_repair_base64url)" || return 1
+    [ "$canonical" = "$encoded" ] || return 1
+    [ "$(printf '%s' "$decoded" | jq -cS . 2>/dev/null)" = "$decoded" ] || return 1
+    local decoded_file
+    decoded_file="$(mktemp)" || return 1
+    printf '%s' "$decoded" >"$decoded_file"
+    if _ci_repair_json_has_duplicate_paths "$decoded_file"; then rm -f "$decoded_file"; return 1; fi
+    rm -f "$decoded_file"
+    printf '%s' "$decoded" | jq -ceS 'type=="array" and length>0 and length<=64 and .==sort_by([.name,.appId,.appSlug]) and
+      (map([.name,.appId,.appSlug]) | unique | length)==length and all(.[];
+      type=="object" and keys==["appId","appSlug","completedAt","conclusion","createdAt","name","runId","startedAt","status"] and
+      (.name|type=="string" and length>0 and length<=200 and test("^[^\\r\\n]+$")) and
+      (.appId|type=="number" and floor==. and .>0 and .<=9007199254740991) and
+      (.appSlug|type=="string" and test("^[a-z0-9][a-z0-9-]{0,99}$")) and
+      (.runId==null or (.runId|type=="string" and test("^[0-9]{1,32}$"))) and
+      (.status|IN("absent","queued","in_progress","completed","pending","requested","waiting")) and
+      (.conclusion==null or (.conclusion|IN("success","failure","neutral","cancelled","skipped","timed_out","action_required","startup_failure","stale"))) and
+      all([.createdAt,.startedAt,.completedAt][]; .==null or (type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))) and
+      (.startedAt==null or .createdAt<=.startedAt) and (.completedAt==null or .createdAt<=.completedAt) and
+      (.startedAt==null or .completedAt==null or .startedAt<=.completedAt) and
+      (if .status=="absent" then .runId==null and .conclusion==null and .createdAt==null and .startedAt==null and .completedAt==null
+       elif .status=="completed" then .runId!=null and .conclusion!=null and .createdAt!=null and .completedAt!=null
+       else .runId!=null and .conclusion==null and .createdAt!=null and .completedAt==null end))' >/dev/null || return 1
+    jq -ne --argjson evidence "$decoded" --slurpfile observation "$file" '
+      $observation[0] as $o |
+      if $o.aggregate=="green" then all($evidence[]; .status=="completed" and .conclusion!=null) and ($o.failureEvidence|length==0)
+      elif $o.aggregate=="unknown" then any($evidence[]; .status!="completed") and ($o.failureEvidence|length==0)
+      elif $o.reason=="grace-expired" then
+        ([ $evidence[] | select(.status!="completed") |
+          {name,appId,appSlug,conclusion,category:(if .status=="absent" then "absent" else "nonterminal" end)} ]
+          | sort_by([.name,.appId,.appSlug])) == $o.failureEvidence
+      else
+        ([ $o.failureEvidence[] as $f | any($evidence[];
+          .status=="completed" and .name==$f.name and .appId==$f.appId and
+          .appSlug==$f.appSlug and .conclusion==$f.conclusion) ] | all)
+      end' >/dev/null || return 1
+    local evidence_timestamp
+    while IFS= read -r evidence_timestamp; do
+        _cichain_timestamp_epoch "$evidence_timestamp" >/dev/null || return 1
+    done < <(printf '%s' "$decoded" | jq -r '.[] | [.createdAt,.startedAt,.completedAt][] | select(.!=null)')
+    observed="$(_cichain_timestamp_epoch "$(jq -r .observedAt "$file")")" || return 1
+    first="$(_cichain_timestamp_epoch "$(jq -r .headFirstSeenAt "$file")")" || return 1
+    deadline="$(_cichain_timestamp_epoch "$(jq -r .deadline "$file")")" || return 1
+    [ "$first" -le "$observed" ] && [ "$first" -le "$deadline" ] || return 1
+    ek="$(jq -cnS --arg version ci-repair-evidence-v1 --arg head "$(jq -r .head "$file")" --arg policyDigest "$(jq -r .policyDigest "$file")" --argjson evidence "$decoded" '{version:$version,head:$head,policyDigest:$policyDigest,evidence:$evidence}' | _ci_repair_sha256)" || return 1
+    [ "$ek" = "$(jq -r .evidenceKey "$file")" ] || return 1
+    dk="$(jq -cnS --arg version ci-repair-decision-v1 --arg evidenceKey "$ek" --arg firstSeen "$(jq -r .headFirstSeenAt "$file")" --arg deadline "$(jq -r .deadline "$file")" --arg aggregate "$(jq -r .aggregate "$file")" --arg reason "$(jq -r .reason "$file")" --arg mode "$(jq -r .authority.mode "$file")" '{version:$version,evidenceKey:$evidenceKey,firstSeen:$firstSeen,deadline:$deadline,aggregate:$aggregate,reason:$reason,enrollmentMode:$mode}' | _ci_repair_sha256)" || return 1
+    [ "$dk" = "$(jq -r .decisionKey "$file")" ]
+}
+
+# One serializer call for observation and decision.  write_args uses the small
+# internal chain-write vocabulary emitted by the two classifiers.
+_ci_repair_push_observation() { # <repo> <branch> <ref> <old> <obs-file> <advance-head> <reconcile-status> [write args...]
+    local repo="$1" branch="$2" ref="$3" old="$4" obs="$5" advance="$6" reconcile="$7"; shift 7
+    local f arg key value observed_at
+    declare -A vals=()
+    if [ -n "$old" ]; then
+        for f in "${_CICHAIN_FIELDS[@]}"; do vals["$f"]="$(_cichain_field "$old" "$f")"; done
+    else
+        for f in "${_CICHAIN_FIELDS[@]}"; do vals["$f"]=""; done
+        vals[State]=unknown
+    fi
+    while [ "$#" -gt 0 ]; do
+        arg="$1"; shift
+        case "$arg" in
+            --state=*) vals[State]="${arg#*=}" ;;
+            --first-red=*) vals[First-Red]="${arg#*=}" ;;
+            --last-green=*) vals[Last-Green]="${arg#*=}" ;;
+            --repair-mode=*) vals[Repair-Mode]="${arg#*=}" ;;
+            --repair-issue=*) vals[Repair-Issue]="${arg#*=}" ;;
+            --repair-attempt=*) vals[Repair-Attempt]="${arg#*=}" ;;
+            --set)
+                [ "$#" -gt 0 ] || return 4
+                value="$1"; shift; key="${value%%=*}"; vals["$key"]="${value#*=}" ;;
+            --set=*) value="${arg#--set=}"; key="${value%%=*}"; vals["$key"]="${value#*=}" ;;
+            *) return 4 ;;
+        esac
+    done
+    [ "$advance" = true ] && vals[Current-Head]="$(jq -r .head "$obs")"
+    vals[Observed-Head]="$(jq -r .head "$obs")"
+    vals[Policy-Digest]="$(jq -r .policyDigest "$obs")"
+    vals[Aggregate]="$(jq -r .aggregate "$obs")"
+    vals[Required-Evidence]="$(jq -r .requiredEvidence "$obs")"
+    vals[Head-First-Seen-At]="$(jq -r .headFirstSeenAt "$obs")"
+    observed_at="$(jq -r .observedAt "$obs")"; vals[Observed-At]="$observed_at"
+    vals[Evidence-Key]="$(jq -r .evidenceKey "$obs")"
+    vals[Decision-Key]="$(jq -r .decisionKey "$obs")"
+    vals[Registry-Commit]="$(jq -r .authority.commit "$obs")"
+    vals[Registry-Blob]="$(jq -r .authority.blob "$obs")"
+    vals[Enrollment-Mode]="$(jq -r .authority.mode "$obs")"
+    case "$reconcile" in ok|projection-pending|evidence-error) ;; *) return 4;; esac
+    vals[Reconcile-Status]="$reconcile"; vals[Reconcile-Error]=""
+    _cichain_push_state "$repo" "$branch" "$ref" "$old" "$observed_at" vals
+}
+
+# A branch can move in the narrow interval between the final authority check
+# and the chain CAS. Restore the complete pre-decision state before returning
+# so a stale terminal green is never left as the effective desired state.
+_ci_repair_restore_stale_decision() { # <repo> <branch> <ref> <old> <stale-decision>
+    local repo="$1" branch="$2" ref="$3" old="$4" stale_decision="$5"
+    local field desired current rc attempt now
+    local -a desired_fields=(Current-Head Last-Green First-Red State Repair-Mode Repair-Issue
+        Repair-Attempt Fail-Signature Same-Sig-Count)
+    declare -A prior=() vals=()
+    for field in "${desired_fields[@]}"; do
+        prior["$field"]=""
+        [ -z "$old" ] || prior["$field"]="$(_cichain_field "$old" "$field")"
+    done
+    [ -n "$old" ] || prior[State]=unknown
+    if [[ "${_CI_HTTP_DATE_EPOCH:-}" =~ ^[0-9]+$ ]]; then
+        now="$(date -u -d "@$_CI_HTTP_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")" || return 4
+    else
+        now="$(_cichain_now)"
+    fi
+    for attempt in {1..8}; do
+        current="$(_cichain_remote_sha "$ref")" || return 4
+        [ -n "$current" ] || return 4
+        _cichain_fetch "$ref"
+        git cat-file -e "${current}^{commit}" 2>/dev/null || return 4
+        [ "$(_cichain_field "$current" Decision-Key)" = "$stale_decision" ] || return 0
+        for field in "${_CICHAIN_FIELDS[@]}"; do vals["$field"]="$(_cichain_field "$current" "$field")"; done
+        for desired in "${desired_fields[@]}"; do vals["$desired"]="${prior[$desired]}"; done
+        vals[Reconcile-Status]=evidence-error
+        vals[Reconcile-Error]=head-moved-after-write
+        rc=0
+        _cichain_push_state "$repo" "$branch" "$ref" "$current" "$now" vals || rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        [ "$rc" -eq 5 ] || return "$rc"
+    done
+    return 5
 }
 
 # ---------------------------------------------------------------------------
@@ -1342,7 +1547,7 @@ _ci_aggregate_gates() {
 
 cmd_classify() {
     local repo="" branch="" for_sha="" result="" current_head="" repair_issue=""
-    local allow_stale=false dry_run=false json=false do_fetch=true
+    local allow_stale=false dry_run=false json=false do_fetch=true canonical=false obs_file="" canonical_same=false chain_baseline=""
     local -a gates=()
 
     while [[ $# -gt 0 ]]; do
@@ -1360,10 +1565,12 @@ cmd_classify() {
             --dry-run) dry_run=true; shift ;;
             --json) json=true; shift ;;
             --no-fetch) do_fetch=false; shift ;;
+            --canonical-observation) canonical=true; shift ;;
             --help | -h)
                 cat <<EOF
 Usage: task-dag classify <owner/repo> <branch> --for-sha=<commit> \\
          (--result=green|red|unknown | --gate=<conclusion> [--gate=...]) [options]
+       task-dag classify <owner/repo> <branch> --canonical-observation [options]
 
 CI broken-master auto-repair classifier core (design §2 + §4). Classifies a
 commit's aggregate required-gate result and drives the repair-chain state
@@ -1372,6 +1579,9 @@ Current-Head on continuation reds, close on green only when current). Acts
 relative to the current origin/<branch> HEAD and ignores superseded SHAs.
 
 Result (pick one):
+  --canonical-observation
+                       collect and atomically persist authoritative evidence;
+                       cannot be combined with caller-supplied result/head
   --result=<v>         green | red | unknown (precomputed aggregate)
   --gate=<conclusion>  a required-gate conclusion (repeatable); aggregated as
                        red (any failure) > unknown (any pending/other) > green
@@ -1408,13 +1618,26 @@ EOF
         echo "Error: <owner/repo> and <branch> are required" >&2
         return 1
     fi
-    if [ -z "$for_sha" ]; then
+    if [ "$canonical" = false ] && [ -z "$for_sha" ]; then
         echo "Error: --for-sha=<commit> is required" >&2
         return 1
     fi
-    if [ -z "$result" ] && [ "${#gates[@]}" -eq 0 ]; then
+    if [ "$canonical" = false ] && [ -z "$result" ] && [ "${#gates[@]}" -eq 0 ]; then
         echo "Error: pass --result=<v> or at least one --gate=<conclusion>" >&2
         return 1
+    fi
+    if [ "$canonical" = true ]; then
+        [ -z "$result" ] && [ "${#gates[@]}" -eq 0 ] && [ -z "$current_head" ] && [ "$allow_stale" = false ] \
+            || { echo "Error: canonical observation cannot be combined with --result, --gate, --current-head, or --allow-stale" >&2; return 1; }
+        obs_file="$(mktemp)" || return 4
+        local collect_rc=0
+        _ci_repair_collect_evidence "$repo" "$branch" >"$obs_file" || collect_rc=$?
+        chain_baseline="${_CI_REPAIR_CHAIN_COMMIT-}"
+        if [ "$collect_rc" -ne 0 ] || ! _ci_repair_validate_observation "$obs_file" "$branch"; then
+            rm -f "$obs_file"; echo "Error: canonical CI evidence is unavailable or invalid (fail closed)" >&2; return 4
+        fi
+        for_sha="$(jq -r .head "$obs_file")"; result="$(jq -r .aggregate "$obs_file")"
+        current_head="$for_sha"
     fi
     if [ -n "$result" ] && [ "${#gates[@]}" -gt 0 ]; then
         echo "Error: pass either --result or --gate(s), not both" >&2
@@ -1426,14 +1649,30 @@ EOF
     # (abbreviated SHAs, HEAD, branch/tag names, remote-only or junk values):
     # an ambiguous/mutable ref must never be the basis for a currency or chain
     # decision, nor be stored as Current-Head.
-    if ! printf '%s' "$for_sha" | grep -Eq '^[0-9a-f]{40,64}$'; then
+    if ! printf '%s' "$for_sha" | grep -Eq '^([0-9a-f]{40}|[0-9a-f]{64})$'; then
         echo "Error: --for-sha must be a full commit SHA (got '$for_sha')" >&2
         return 1
     fi
-    local for_sha_full
-    if ! for_sha_full="$(git rev-parse --verify --quiet "${for_sha}^{commit}" 2>/dev/null)"; then
+    local for_sha_full=""
+    if [ "$(git cat-file -t "$for_sha" 2>/dev/null || true)" = commit ]; then
+        for_sha_full="$(git rev-parse --verify --quiet "$for_sha" 2>/dev/null || true)"
+    fi
+    if [ -z "$for_sha_full" ]; then
+        if [ "$canonical" = true ]; then
+            git fetch --quiet --no-write-fetch-head origin "$for_sha" 2>/dev/null || {
+                rm -f "$obs_file"; echo "Error: authoritative observed commit is unavailable locally" >&2; return 4;
+            }
+            [ "$(git cat-file -t "$for_sha" 2>/dev/null || true)" = commit ] \
+                && for_sha_full="$(git rev-parse --verify --quiet "$for_sha" 2>/dev/null || true)"
+        fi
+    fi
+    if [ -z "$for_sha_full" ]; then
+        [ "$canonical" = false ] || rm -f "$obs_file"
         echo "Error: --for-sha must resolve to a commit object present locally (got '$for_sha')" >&2
         return 1
+    fi
+    if [ "$canonical" = true ] && [ "$for_sha_full" != "$for_sha" ]; then
+        rm -f "$obs_file"; echo "Error: observed object does not exactly identify a commit" >&2; return 4
     fi
     for_sha="$for_sha_full"
 
@@ -1500,6 +1739,9 @@ EOF
     else
         old="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
     fi
+    if [ "$canonical" = true ] && [ "$old" != "$chain_baseline" ]; then
+        rm -f "$obs_file"; echo "Error: chain baseline changed during evidence collection" >&2; return 5
+    fi
     # The read→decide→write CAS invariant requires that we actually READ the
     # prior chain commit. If origin advertises a chain SHA we could not
     # materialise (a transient fetch failure on a shallow/cold checkout), its
@@ -1520,6 +1762,24 @@ EOF
         prior_first_red="$(_cichain_field "$old" First-Red)"
         [ "$prior_state" = "red" ] && chain_open=true
         [ "$prior_state" = "blocked" ] && chain_blocked=true
+    fi
+    if [ "$canonical" = true ]; then
+        local prior_decision prior_current anc_rc=0
+        prior_decision="$(_cichain_field "$old" Decision-Key)"
+        if [ "$(_cichain_field "$old" Reconcile-Status)" != evidence-error ] \
+            && [ "$prior_decision" = "$(jq -r .decisionKey "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Observed-Head)" = "$(jq -r .head "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Evidence-Key)" = "$(jq -r .evidenceKey "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Registry-Commit)" = "$(jq -r .authority.commit "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Registry-Blob)" = "$(jq -r .authority.blob "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Enrollment-Mode)" = "$(jq -r .authority.mode "$obs_file")" ]; then
+            canonical_same=true
+        fi
+        prior_current="$(_cichain_field "$old" Current-Head)"
+        if [ "$canonical_same" = false ] && [ -n "$prior_current" ] && [ "$prior_current" != "$for_sha" ]; then
+            git merge-base --is-ancestor "$prior_current" "$for_sha" 2>/dev/null || anc_rc=$?
+            if [ "$anc_rc" -ne 0 ]; then rm -f "$obs_file"; echo "Error: observed head is non-fast-forward from desired Current-Head" >&2; return 4; fi
+        fi
     fi
 
     # ── Decide the action ─────────────────────────────────────────────────
@@ -1580,6 +1840,10 @@ EOF
             action="noop-unknown"
             ;;
     esac
+    if [ "$canonical" = true ] && { [ "$(jq -r .authority.mode "$obs_file")" = observe ] || [ "$result" = unknown ]; }; then
+        action="noop-observe"; [ "$result" = unknown ] && action="noop-unknown"
+        ticket=none; write_args=()
+    fi
 
     # ── Report ────────────────────────────────────────────────────────────
     # NB: the ticket hint (open|close) is valid ONLY when applied=true (the
@@ -1600,6 +1864,11 @@ EOF
         fi
     }
 
+    if [ "$canonical_same" = true ]; then
+        rm -f "$obs_file"; action="noop-decision"; ticket=none
+        _classify_report 0 false; return 0
+    fi
+
     if [ "$action" = "noop-stale" ]; then
         [ "$json" = false ] && printf "${YELLOW}Superseded CI run: %s is not the current %s HEAD — ignoring (design §4).${RESET}\n" "$for_sha" "$branch" >&2
         _classify_report 6 false
@@ -1607,15 +1876,43 @@ EOF
     fi
 
     # Pure no-ops (nothing to persist): unknown, and green-but-not-current.
-    if [ "${#write_args[@]}" -eq 0 ]; then
+    if [ "${#write_args[@]}" -eq 0 ] && [ "$canonical" = false ]; then
         _classify_report 0 false
         return 0
     fi
-
     if [ "$dry_run" = true ]; then
-        [ "$json" = false ] && printf "${BLUE}(dry-run: would chain-write %s)${RESET}\n" "${write_args[*]}" >&2
+        [ "$json" = false ] && printf "${BLUE}(dry-run: would persist classification decision)${RESET}\n" >&2
+        [ -n "$obs_file" ] && rm -f "$obs_file"
         _classify_report 0 false
         return 0
+    fi
+    if [ "$canonical" = true ]; then
+        local advance=false wrc=0 verify_file reconcile=projection-pending second_baseline
+        [ "$(jq -r .authority.mode "$obs_file")" = enforce ] && [ "$result" != unknown ] && advance=true
+        { [ "$(jq -r .authority.mode "$obs_file")" = observe ] || [ "$result" = unknown ]; } && reconcile=ok
+        verify_file="$(mktemp)" || { rm -f "$obs_file"; return 4; }
+        _ci_repair_collect_evidence "$repo" "$branch" >"$verify_file" || wrc=$?
+        second_baseline="${_CI_REPAIR_CHAIN_COMMIT-}"
+        if [ "$wrc" -ne 0 ] || ! _ci_repair_validate_observation "$verify_file" "$branch" \
+          || [ "$second_baseline" != "$old" ] \
+          || ! jq -ne --slurpfile a "$obs_file" --slurpfile b "$verify_file" \
+            '$a[0] as $x|$b[0] as $y|[$x.head,$x.authority.commit,$x.authority.blob,$x.authority.mode,$x.evidenceKey,$x.decisionKey]==[$y.head,$y.authority.commit,$y.authority.blob,$y.authority.mode,$y.evidenceKey,$y.decisionKey]' >/dev/null; then
+            rm -f "$verify_file" "$obs_file"; _classify_report 5 false; return 5
+        fi
+        rm -f "$verify_file"
+        local landed
+        _ci_repair_push_observation "$repo" "$branch" "$ref" "$old" "$obs_file" "$advance" "$reconcile" "${write_args[@]}" || wrc=$?
+        landed="$_CICHAIN_PUSH_COMMIT"
+        rm -f "$obs_file"
+        [ "$wrc" -eq 0 ] || { _classify_report "$wrc" false; return "$wrc"; }
+        if ! _ci_repair_verify_target_head "$repo" "$branch" "$for_sha"; then
+            local stale_decision restore_rc=0
+            stale_decision="$(_cichain_field "$landed" Decision-Key)"
+            _ci_repair_restore_stale_decision "$repo" "$branch" "$ref" "$old" "$stale_decision" >/dev/null 2>&1 || restore_rc=$?
+            if [ "$restore_rc" -ne 0 ]; then ticket=none; _classify_report "$restore_rc" false; return "$restore_rc"; fi
+            ticket=none; _classify_report 5 false; return 5
+        fi
+        _classify_report 0 true; return 0
     fi
 
     # ── Apply via the CAS/stale-safe primitive ────────────────────────────
@@ -1706,7 +2003,7 @@ EOF
 # ---------------------------------------------------------------------------
 cmd_tree_fix_outcome() {
     local repo="" branch="" for_sha="" result="" current_head="" signature=""
-    local threshold=3 allow_stale=false dry_run=false json=false do_fetch=true
+    local threshold=3 allow_stale=false dry_run=false json=false do_fetch=true canonical=false obs_file="" canonical_same=false chain_baseline=""
     local -a gates=()
 
     while [[ $# -gt 0 ]]; do
@@ -1725,11 +2022,13 @@ cmd_tree_fix_outcome() {
             --dry-run) dry_run=true; shift ;;
             --json) json=true; shift ;;
             --no-fetch) do_fetch=false; shift ;;
+            --canonical-observation) canonical=true; shift ;;
             --help | -h)
                 cat <<EOF
 Usage: task-dag tree-fix-outcome <owner/repo> <branch> --for-sha=<commit> \\
          (--result=green|red|unknown | --gate=<conclusion> [--gate=...]) \\
          --signature=<sig> [options]
+       task-dag tree-fix-outcome <owner/repo> <branch> --canonical-observation [options]
 
 CI broken-master auto-repair tree-fix outcome handler (design §3). Interprets
 the result of a commit carrying Tree-Fix* trailers and drives the §3 escalation:
@@ -1740,6 +2039,9 @@ continue failures BLOCK the chain + page after --threshold. Pure: drives chain
 state + reports hints, never touches GitHub.
 
 Result (pick one):
+  --canonical-observation
+                       collect authoritative evidence and derive any red
+                       signature internally (caller --signature is rejected)
   --result=<v>         green | red | unknown (precomputed aggregate)
   --gate=<conclusion>  a required-gate conclusion (repeatable); aggregated as
                        red (any failure) > unknown (any pending/other) > green
@@ -1782,28 +2084,63 @@ EOF
         echo "Error: <owner/repo> and <branch> are required" >&2
         return 1
     fi
-    if [ -z "$for_sha" ]; then
+    if [ "$canonical" = false ] && [ -z "$for_sha" ]; then
         echo "Error: --for-sha=<commit> is required" >&2
         return 1
     fi
-    if [ -z "$result" ] && [ "${#gates[@]}" -eq 0 ]; then
+    if [ "$canonical" = false ] && [ -z "$result" ] && [ "${#gates[@]}" -eq 0 ]; then
         echo "Error: pass --result=<v> or at least one --gate=<conclusion>" >&2
         return 1
+    fi
+    if [ "$canonical" = true ]; then
+        [ -z "$result" ] && [ "${#gates[@]}" -eq 0 ] && [ -z "$current_head" ] \
+            && [ -z "$signature" ] && [ "$allow_stale" = false ] \
+            || { echo "Error: canonical observation cannot accept result, gate, signature, current-head, or allow-stale" >&2; return 1; }
+        obs_file="$(mktemp)" || return 4
+        local collect_rc=0
+        _ci_repair_collect_evidence "$repo" "$branch" >"$obs_file" || collect_rc=$?
+        chain_baseline="${_CI_REPAIR_CHAIN_COMMIT-}"
+        if [ "$collect_rc" -ne 0 ] || ! _ci_repair_validate_observation "$obs_file" "$branch"; then
+            rm -f "$obs_file"; echo "Error: canonical CI evidence is unavailable or invalid (fail closed)" >&2; return 4
+        fi
+        for_sha="$(jq -r .head "$obs_file")"; result="$(jq -r .aggregate "$obs_file")"; current_head="$for_sha"
+        if [ "$result" = red ]; then
+            signature="$(jq -cnS --arg policy "$(jq -r .policyDigest "$obs_file")" \
+                --argjson evidence "$(jq -c .failureEvidence "$obs_file")" \
+                '{policyDigest:$policy,failureEvidence:$evidence}' | _ci_repair_sha256)" || { rm -f "$obs_file"; return 4; }
+        fi
     fi
     if [ -n "$result" ] && [ "${#gates[@]}" -gt 0 ]; then
         echo "Error: pass either --result or --gate(s), not both" >&2
         return 1
     fi
     if ! printf '%s' "$threshold" | grep -Eq '^[0-9]+$' || [ "$threshold" -lt 1 ]; then
+        [ "$canonical" = false ] || rm -f "$obs_file"
         echo "Error: --threshold must be a positive integer (got '$threshold')" >&2
         return 1
     fi
 
     # Resolve --for-sha to a full local commit object (same contract as classify).
-    local for_sha_full
-    if ! for_sha_full="$(git rev-parse --verify --quiet "${for_sha}^{commit}" 2>/dev/null)"; then
+    local for_sha_full=""
+    if [ "$(git cat-file -t "$for_sha" 2>/dev/null || true)" = commit ]; then
+        for_sha_full="$(git rev-parse --verify --quiet "$for_sha" 2>/dev/null || true)"
+    fi
+    if [ -z "$for_sha_full" ]; then
+        if [ "$canonical" = true ]; then
+            git fetch --quiet --no-write-fetch-head origin "$for_sha" 2>/dev/null || {
+                rm -f "$obs_file"; echo "Error: authoritative observed commit is unavailable locally" >&2; return 4;
+            }
+            [ "$(git cat-file -t "$for_sha" 2>/dev/null || true)" = commit ] \
+                && for_sha_full="$(git rev-parse --verify --quiet "$for_sha" 2>/dev/null || true)"
+        fi
+    fi
+    if [ -z "$for_sha_full" ]; then
+        [ "$canonical" = false ] || rm -f "$obs_file"
         echo "Error: --for-sha must resolve to a commit object present locally (got '$for_sha')" >&2
         return 1
+    fi
+    if [ "$canonical" = true ] && [ "$for_sha_full" != "$for_sha" ]; then
+        rm -f "$obs_file"; echo "Error: observed object does not exactly identify a commit" >&2; return 4
     fi
     for_sha="$for_sha_full"
 
@@ -1832,10 +2169,12 @@ EOF
     local tf_json tf_rc=0
     tf_json="$(cmd_parse_tree_fix "$for_sha" --json 2>/dev/null)" || tf_rc=$?
     if [ "$tf_rc" -eq 2 ]; then
+        [ "$canonical" = false ] || rm -f "$obs_file"
         echo "Error: $for_sha carries malformed Tree-Fix* trailers; cannot interpret its outcome" >&2
         return 2
     fi
     if ! printf '%s' "$tf_json" | grep -q '"treeFix":true'; then
+        [ "$canonical" = false ] || rm -f "$obs_file"
         echo "Error: $for_sha is not a tree-fix commit (no Tree-Fix trailers); use 'classify' for ordinary commits" >&2
         return 1
     fi
@@ -1885,6 +2224,9 @@ EOF
     else
         old="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
     fi
+    if [ "$canonical" = true ] && [ "$old" != "$chain_baseline" ]; then
+        rm -f "$obs_file"; echo "Error: chain baseline changed during evidence collection" >&2; return 5
+    fi
     local p_head="" p_state="" p_first_red="" p_attempt="" p_sig="" p_count=""
     if [ -n "$old" ]; then
         p_head="$(_cichain_field "$old" Current-Head)"
@@ -1893,6 +2235,23 @@ EOF
         p_attempt="$(_cichain_field "$old" Repair-Attempt)"
         p_sig="$(_cichain_field "$old" Fail-Signature)"
         p_count="$(_cichain_field "$old" Same-Sig-Count)"
+    fi
+    if [ "$canonical" = true ]; then
+        local prior_current anc_rc=0
+        if [ "$(_cichain_field "$old" Reconcile-Status)" != evidence-error ] \
+            && [ "$(_cichain_field "$old" Decision-Key)" = "$(jq -r .decisionKey "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Observed-Head)" = "$(jq -r .head "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Evidence-Key)" = "$(jq -r .evidenceKey "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Registry-Commit)" = "$(jq -r .authority.commit "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Registry-Blob)" = "$(jq -r .authority.blob "$obs_file")" ] \
+            && [ "$(_cichain_field "$old" Enrollment-Mode)" = "$(jq -r .authority.mode "$obs_file")" ]; then
+            canonical_same=true
+        fi
+        prior_current="$(_cichain_field "$old" Current-Head)"
+        if [ "$canonical_same" = false ] && [ -n "$prior_current" ] && [ "$prior_current" != "$for_sha" ]; then
+            git merge-base --is-ancestor "$prior_current" "$for_sha" 2>/dev/null || anc_rc=$?
+            if [ "$anc_rc" -ne 0 ]; then rm -f "$obs_file"; echo "Error: observed head is non-fast-forward from desired Current-Head" >&2; return 4; fi
+        fi
     fi
     # Sanitise the persisted counters before any arithmetic (set -e would abort
     # on a non-numeric `$(( ))`); a malformed field is treated as unset.
@@ -1991,6 +2350,10 @@ EOF
             fi
             ;;
     esac
+    if [ "$canonical" = true ] && { [ "$(jq -r .authority.mode "$obs_file")" = observe ] || [ "$result" = unknown ]; }; then
+        action=noop-observe; [ "$result" = unknown ] && action=noop-unknown
+        ticket=none; task=none; page=false; write_args=()
+    fi
 
     # ── Report ────────────────────────────────────────────────────────────
     _tfo_report() { # <rc> <applied:true|false>
@@ -2010,6 +2373,10 @@ EOF
         fi
     }
 
+    if [ "$canonical_same" = true ]; then
+        rm -f "$obs_file"; action=noop-decision; _tfo_report 0 false; return 0
+    fi
+
     # Stale red relative to the live HEAD: ignore (design §4).
     if [ "$action" = "noop-stale" ]; then
         [ "$json" = false ] && printf "${YELLOW}Superseded CI run: %s is not the current %s HEAD — ignoring (design §4).${RESET}\n" "$for_sha" "$branch" >&2
@@ -2018,20 +2385,50 @@ EOF
     fi
     if [ "$action" = "noop-stale-otherchain" ]; then
         [ "$json" = false ] && printf "${YELLOW}Tree-fix targets chain %s but %s@%s has a different active chain (first-red %s) — refusing to clobber it.${RESET}\n" "$tf_chain" "$repo" "$branch" "$p_first_red" >&2
+        [ "$canonical" = false ] || rm -f "$obs_file"
         _tfo_report 6 false
         return 6
     fi
 
     # Pure no-ops (nothing to persist).
-    if [ "${#write_args[@]}" -eq 0 ]; then
+    if [ "${#write_args[@]}" -eq 0 ] && [ "$canonical" = false ]; then
         _tfo_report 0 false
         return 0
     fi
 
     if [ "$dry_run" = true ]; then
         [ "$json" = false ] && printf "${BLUE}(dry-run: would chain-write %s)${RESET}\n" "${write_args[*]}" >&2
+        [ -n "$obs_file" ] && rm -f "$obs_file"
         _tfo_report 0 false
         return 0
+    fi
+    if [ "$canonical" = true ]; then
+        local advance=false wrc=0 verify_file reconcile=projection-pending second_baseline
+        [ "$(jq -r .authority.mode "$obs_file")" = enforce ] && [ "$result" != unknown ] && advance=true
+        { [ "$(jq -r .authority.mode "$obs_file")" = observe ] || [ "$result" = unknown ]; } && reconcile=ok
+        verify_file="$(mktemp)" || { rm -f "$obs_file"; return 4; }
+        _ci_repair_collect_evidence "$repo" "$branch" >"$verify_file" || wrc=$?
+        second_baseline="${_CI_REPAIR_CHAIN_COMMIT-}"
+        if [ "$wrc" -ne 0 ] || ! _ci_repair_validate_observation "$verify_file" "$branch" \
+          || [ "$second_baseline" != "$old" ] \
+          || ! jq -ne --slurpfile a "$obs_file" --slurpfile b "$verify_file" \
+            '$a[0] as $x|$b[0] as $y|[$x.head,$x.authority.commit,$x.authority.blob,$x.authority.mode,$x.evidenceKey,$x.decisionKey]==[$y.head,$y.authority.commit,$y.authority.blob,$y.authority.mode,$y.evidenceKey,$y.decisionKey]' >/dev/null; then
+            rm -f "$verify_file" "$obs_file"; _tfo_report 5 false; return 5
+        fi
+        rm -f "$verify_file"
+        local landed
+        _ci_repair_push_observation "$repo" "$branch" "$ref" "$old" "$obs_file" "$advance" "$reconcile" "${write_args[@]}" || wrc=$?
+        landed="$_CICHAIN_PUSH_COMMIT"
+        rm -f "$obs_file"
+        [ "$wrc" -eq 0 ] || { _tfo_report "$wrc" false; return "$wrc"; }
+        if ! _ci_repair_verify_target_head "$repo" "$branch" "$for_sha"; then
+            local stale_decision restore_rc=0
+            stale_decision="$(_cichain_field "$landed" Decision-Key)"
+            _ci_repair_restore_stale_decision "$repo" "$branch" "$ref" "$old" "$stale_decision" >/dev/null 2>&1 || restore_rc=$?
+            if [ "$restore_rc" -ne 0 ]; then ticket=none; task=none; page=false; _tfo_report "$restore_rc" false; return "$restore_rc"; fi
+            ticket=none; task=none; page=false; _tfo_report 5 false; return 5
+        fi
+        _tfo_report 0 true; return 0
     fi
 
     # ── Apply via the CAS/stale-safe primitive ────────────────────────────
