@@ -6,6 +6,7 @@ import {
   CatalogMaintenanceMovePackageResponseSchema,
   CatalogMaintenanceSurveyResponseSchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
+  isCannabisCategory,
   type CatalogMaintenanceCacheRepairResponse,
   type CatalogMaintenanceFatalBanner,
   type CatalogMaintenanceMovePackageResponse,
@@ -2463,18 +2464,6 @@ async function tryZxingDecode(file: File): Promise<string | null> {
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
-}
-
-/**
- * Category names for which missing METRC tags and missing/invalid barcodes
- * are NOT error or warning conditions. Must stay in sync with the server-side
- * NON_CANNABIS_CATEGORY_NAMES set in src/server/catalog/maintenance.ts.
- */
-const NON_CANNABIS_CATEGORY_NAMES = new Set<string>(['Accessories', 'Other'])
-
-function isCannabisCategory(categoryName: string | null): boolean {
-  if (categoryName === null) return true
-  return !NON_CANNABIS_CATEGORY_NAMES.has(categoryName.trim())
 }
 
 function displayGroupName(group: CatalogMaintenanceSiteGroup): string {

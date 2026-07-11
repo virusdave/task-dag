@@ -15,6 +15,7 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
           location: { kind: 'shelf', label: 'FLOWER-A-03' },
           skus: [
             {
+              categoryName: 'Flower',
               combinedAvailableQty: 2,
               packages: [
                 {
@@ -45,6 +46,7 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
               productIds: [101],
               productName: 'A deliberately long product name that must wrap cleanly on a narrow phone screen',
               productSku: 'VERY-LONG-SKU-THAT-MUST-WRAP-ON-MOBILE',
+              subcategoryName: 'Indica',
             },
           ],
         },
@@ -52,6 +54,7 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
           location: { kind: 'stock-room', label: 'FOR SALE - Vault Overflow With A Long Location Name' },
           skus: [
             {
+              categoryName: 'Flower',
               combinedAvailableQty: 2,
               packages: [{
                 availableQty: 1,
@@ -68,6 +71,7 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
               productIds: [101],
               productName: 'A deliberately long product name that must wrap cleanly on a narrow phone screen',
               productSku: 'VERY-LONG-SKU-THAT-MUST-WRAP-ON-MOBILE',
+              subcategoryName: 'Indica',
             },
           ],
         },
@@ -79,8 +83,16 @@ function response(overrides?: Partial<LowInventoryResponse>): LowInventoryRespon
   }
 }
 
-function render(state: LowInventoryViewState): string {
-  return renderToStaticMarkup(<LowInventoryView siteLabel="Midtown" state={state} onRetry={() => undefined} />)
+function render(state: LowInventoryViewState, cannabisOnly = false): string {
+  return renderToStaticMarkup(
+    <LowInventoryView
+      cannabisOnly={cannabisOnly}
+      onCannabisOnlyChange={() => undefined}
+      siteLabel="Midtown"
+      state={state}
+      onRetry={() => undefined}
+    />,
+  )
 }
 
 describe('LowInventoryView', () => {
@@ -93,10 +105,58 @@ describe('LowInventoryView', () => {
     expect(html).toContain('inventory-2')
     expect(html).toContain('3 packages')
     expect(html).toContain('1 SKU')
+    expect(html).toContain('Flower · Indica')
     expect(html).toContain('at this location')
     expect(html.match(/<small>2 site-wide<\/small>/g)).toHaveLength(2)
-    expect(html).not.toContain('<input')
+    expect(html).toContain('type="checkbox"')
+    expect(html).toContain('Cannabis only')
+    expect(html).toContain('Items without a reported category stay visible.')
     expect(html).not.toContain('<form')
+  })
+
+  it('filters non-cannabis cards, prunes empty locations, and updates visible counts', () => {
+    const base = response()
+    const cannabisSku = base.data.locationGroups[0]!.skus[0]!
+    const accessorySku = {
+      ...cannabisSku,
+      categoryName: 'Accessories',
+      packages: [{ ...cannabisSku.packages[0]!, inventoryItemId: 'accessory-package' }],
+      productIds: [202],
+      productName: 'Rolling tray',
+      productSku: 'ACCESSORY-SKU',
+      subcategoryName: null,
+    }
+    const unknownSku = {
+      ...accessorySku,
+      categoryName: null,
+      packages: [{ ...accessorySku.packages[0]!, inventoryItemId: 'unknown-package' }],
+      productIds: [303],
+      productName: 'Uncategorised item',
+      productSku: 'UNKNOWN-SKU',
+    }
+    const filteredResponse = response({
+      data: {
+        ...base.data,
+        locationGroups: [
+          { ...base.data.locationGroups[0]!, skus: [cannabisSku, accessorySku, unknownSku] },
+          { ...base.data.locationGroups[1]!, skus: [accessorySku] },
+        ],
+      },
+    })
+
+    const unfilteredHtml = render({ kind: 'ready', response: filteredResponse })
+    expect(unfilteredHtml).toContain('3 SKUs')
+    expect(unfilteredHtml).toContain('5 packages')
+    expect(unfilteredHtml).toContain('Rolling tray')
+    expect(unfilteredHtml).toContain('Category not reported')
+
+    const filteredHtml = render({ kind: 'ready', response: filteredResponse }, true)
+    expect(filteredHtml).toContain('2 SKUs')
+    expect(filteredHtml).toContain('3 packages')
+    expect(filteredHtml).toContain('Uncategorised item')
+    expect(filteredHtml).not.toContain('Rolling tray')
+    expect(filteredHtml).not.toContain('Vault Overflow With A Long Location Name')
+    expect(filteredHtml).toContain('checked=""')
   })
 
   it.each([
@@ -121,5 +181,24 @@ describe('LowInventoryView', () => {
     const html = render({ kind: 'ready', response: empty })
     expect(html).toContain('No low-inventory items')
     expect(html).toContain('between 1 and 2 available')
+  })
+
+  it('distinguishes a cannabis filter with no matches from an empty source', () => {
+    const base = response()
+    const accessorySku = {
+      ...base.data.locationGroups[0]!.skus[0]!,
+      categoryName: 'Other',
+      subcategoryName: null,
+    }
+    const accessoriesOnly = response({
+      data: {
+        ...base.data,
+        locationGroups: [{ ...base.data.locationGroups[0]!, skus: [accessorySku] }],
+      },
+    })
+    const html = render({ kind: 'ready', response: accessoriesOnly }, true)
+    expect(html).toContain('No cannabis low-inventory items')
+    expect(html).toContain('Turn off Cannabis only to show Accessories and Other.')
+    expect(html).not.toContain('No low-inventory items')
   })
 })

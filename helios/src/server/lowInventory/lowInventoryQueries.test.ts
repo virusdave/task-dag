@@ -18,6 +18,7 @@ describe('low-inventory read model', () => {
       rows: [
         {
           available_qty: '1',
+          category_name: 'Pre-Rolls',
           current_qty: '2',
           hold_qty: '1',
           internal_track_code: 'PRE-A-10',
@@ -28,9 +29,11 @@ describe('low-inventory read model', () => {
           product_name: 'Long Walk Pre-roll',
           product_sku: 'SKU-LOW',
           stock_location: 'FOR SALE - Midtown',
+          subcategory_name: 'Infused',
         },
         {
           available_qty: 1,
+          category_name: 'Pre-Rolls',
           current_qty: 1,
           hold_qty: 0,
           internal_track_code: 'not-a-shelf',
@@ -41,6 +44,7 @@ describe('low-inventory read model', () => {
           product_name: 'Long Walk Pre-roll',
           product_sku: 'SKU-LOW',
           stock_location: 'FOR SALE - Midtown',
+          subcategory_name: 'Infused',
         },
       ],
     })
@@ -49,7 +53,12 @@ describe('low-inventory read model', () => {
     expect(model.locationGroups).toHaveLength(2)
     expect(model.locationGroups[0]).toMatchObject({
       location: { kind: 'shelf', label: 'PRE-A-10' },
-      skus: [{ combinedAvailableQty: 2, productSku: 'SKU-LOW' }],
+      skus: [{
+        categoryName: 'Pre-Rolls',
+        combinedAvailableQty: 2,
+        productSku: 'SKU-LOW',
+        subcategoryName: 'Infused',
+      }],
     })
     expect(model.locationGroups[1]).toMatchObject({
       location: { kind: 'stock-room', label: 'FOR SALE - Midtown' },
@@ -71,6 +80,7 @@ describe('low-inventory read model', () => {
   it('sorts shelf groups in walking order before stock-room fallbacks', () => {
     const row = {
       available_qty: 1,
+      category_name: null,
       current_qty: 1,
       hold_qty: 0,
       inventory_item_id: 'pkg',
@@ -79,6 +89,7 @@ describe('low-inventory read model', () => {
       product_name: 'Product',
       product_id: 100,
       stock_location: 'FOR SALE - Midtown',
+      subcategory_name: null,
     }
     const model = buildLowInventoryReadModel({
       dealerId: 210705,
@@ -99,6 +110,7 @@ describe('low-inventory read model', () => {
 
   it('combines shared SKUs across product ids and excludes totals outside 1..N', () => {
     const baseRow = {
+      category_name: null,
       current_qty: 1,
       hold_qty: 0,
       internal_track_code: 'PRE-A-1',
@@ -106,6 +118,7 @@ describe('low-inventory read model', () => {
       observed_at_max: '2026-07-10T14:00:00.000Z',
       product_name: 'Product',
       stock_location: 'FOR SALE - Midtown',
+      subcategory_name: null,
     }
     const model = buildLowInventoryReadModel({
       dealerId: 210705,
@@ -176,12 +189,66 @@ describe('low-inventory read model', () => {
     expect(sql).toContain("c.stock_location ilike 'FOR SALE%'")
     expect(sql).toContain("c.raw_json->>'isTradeSample'")
     expect(sql).toContain("c.raw_json->>'isNotForSale'")
+    expect(sql).toContain("nullif(btrim(c.category_name), '') as category_name")
+    expect(sql).toContain("nullif(btrim(c.subcategory_name), '') as subcategory_name")
     expect(sql).not.toContain('raw_json as')
+  })
+
+  it('normalizes catalog taxonomy in the existing product lookup', async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{
+          available_qty: 1,
+          category_name: 'Snapshot category',
+          current_qty: 1,
+          hold_qty: 0,
+          internal_track_code: 'PRE-A-1',
+          inventory_item_id: 'package-1',
+          metrc_tag: null,
+          observed_at_max: '2026-07-10T14:00:00.000Z',
+          product_id: 100,
+          product_name: 'Product',
+          product_sku: null,
+          stock_location: 'FOR SALE - Midtown',
+          subcategory_name: 'Snapshot subcategory',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          active: true,
+          category_name: 'Flower',
+          product_id: 100,
+          product_name: 'Catalog product',
+          product_sku: 'CATALOG',
+          subcategory_name: 'Indica',
+        }],
+      })
+    vi.spyOn(poolModule, 'getPool').mockReturnValue({ query } as unknown as ReturnType<
+      typeof poolModule.getPool
+    >)
+
+    await expect(
+      queryLowInventoryReadModel({ dealerId: 210705, threshold: 2 }),
+    ).resolves.toMatchObject({
+      locationGroups: [{
+        skus: [{
+          categoryName: 'Flower',
+          productSku: 'CATALOG',
+          subcategoryName: 'Indica',
+        }],
+      }],
+    })
+
+    expect(query).toHaveBeenCalledTimes(2)
+    const catalogSql = String(query.mock.calls[1]?.[0])
+    expect(catalogSql).toContain("nullif(btrim(cg.category_name), '') as category_name")
+    expect(catalogSql).toContain("nullif(btrim(cg.subcategory_name), '') as subcategory_name")
   })
 
   it('fills missing snapshot SKUs from the catalog and skips inactive products', () => {
     const baseRow = {
       available_qty: 1,
+      category_name: 'Snapshot category',
       current_qty: 1,
       hold_qty: 0,
       internal_track_code: 'PRE-A-1',
@@ -191,20 +258,25 @@ describe('low-inventory read model', () => {
       product_name: null,
       product_sku: null,
       stock_location: 'FOR SALE - Midtown',
+      subcategory_name: 'Snapshot subcategory',
     }
     const model = buildLowInventoryReadModel({
       catalogProducts: [
         {
           active: true,
+          category_name: 'Flower',
           product_id: 100,
           product_name: 'Mapped product',
           product_sku: 'MAPPED',
+          subcategory_name: 'Indica',
         },
         {
           active: false,
+          category_name: 'Other',
           product_id: 200,
           product_name: 'Disabled product',
           product_sku: 'DISABLED',
+          subcategory_name: null,
         },
       ],
       dealerId: 210705,
@@ -217,7 +289,53 @@ describe('low-inventory read model', () => {
 
     expect(model.locationGroups).toHaveLength(1)
     expect(model.locationGroups[0]?.skus).toMatchObject([
-      { productName: 'Mapped product', productSku: 'MAPPED' },
+      {
+        categoryName: 'Flower',
+        productName: 'Mapped product',
+        productSku: 'MAPPED',
+        subcategoryName: 'Indica',
+      },
+    ])
+  })
+
+  it('uses explicit catalog taxonomy values and falls back only for unmapped products', () => {
+    const row = {
+      available_qty: 1,
+      category_name: 'Snapshot category',
+      current_qty: 1,
+      hold_qty: 0,
+      internal_track_code: 'PRE-A-1',
+      metrc_tag: null,
+      observed_at_max: '2026-07-10T14:00:00.000Z',
+      product_name: 'Product',
+      product_sku: null,
+      stock_location: 'FOR SALE - Midtown',
+      subcategory_name: 'Snapshot subcategory',
+    }
+    const model = buildLowInventoryReadModel({
+      catalogProducts: [{
+        active: true,
+        category_name: null,
+        product_id: 100,
+        product_name: 'Catalog product',
+        product_sku: 'CATALOG',
+        subcategory_name: null,
+      }],
+      dealerId: 210705,
+      rows: [
+        { ...row, inventory_item_id: 'catalog-package', product_id: 100 },
+        { ...row, inventory_item_id: 'snapshot-package', product_id: 200 },
+      ],
+      threshold: 2,
+    })
+
+    expect(model.locationGroups[0]?.skus).toMatchObject([
+      { categoryName: null, productSku: 'CATALOG', subcategoryName: null },
+      {
+        categoryName: 'Snapshot category',
+        productSku: null,
+        subcategoryName: 'Snapshot subcategory',
+      },
     ])
   })
 
@@ -227,6 +345,7 @@ describe('low-inventory read model', () => {
       rows: [
         {
           available_qty: 1,
+          category_name: null,
           current_qty: 1,
           hold_qty: 0,
           internal_track_code: null,
@@ -237,6 +356,7 @@ describe('low-inventory read model', () => {
           product_name: 'Unmapped product',
           product_sku: null,
           stock_location: 'FOR SALE - Midtown',
+          subcategory_name: null,
         },
       ],
       threshold: 2,

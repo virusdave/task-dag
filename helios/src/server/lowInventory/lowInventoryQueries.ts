@@ -11,6 +11,7 @@ import { getPool } from '../db/pool.js'
 
 interface LowInventoryRow {
   available_qty: number | string
+  category_name: string | null
   current_qty: number | string | null
   hold_qty: number | string | null
   internal_track_code: string | null
@@ -21,6 +22,7 @@ interface LowInventoryRow {
   product_name: string | null
   product_sku: string | null
   stock_location: string
+  subcategory_name: string | null
 }
 
 const LOW_INVENTORY_SQL = `
@@ -29,6 +31,8 @@ const LOW_INVENTORY_SQL = `
     c.product_id,
     c.product_name,
     nullif(btrim(c.product_sku), '') as product_sku,
+    nullif(btrim(c.category_name), '') as category_name,
+    nullif(btrim(c.subcategory_name), '') as subcategory_name,
     c.current_qty,
     c.hold_qty,
     c.available_qty,
@@ -56,6 +60,8 @@ const LOW_INVENTORY_CATALOG_PRODUCTS_SQL = `
     (product->>'productId')::bigint as product_id,
     nullif(btrim(product->>'name'), '') as product_name,
     nullif(btrim(product->>'sku'), '') as product_sku,
+    nullif(btrim(cg.category_name), '') as category_name,
+    nullif(btrim(cg.subcategory_name), '') as subcategory_name,
     (
       cg.deleted_at is null
       and coalesce(lower(product->>'enabled') = 'false', false) = false
@@ -75,9 +81,11 @@ const LOW_INVENTORY_CATALOG_PRODUCTS_SQL = `
 
 interface LowInventoryCatalogProductRow {
   active: boolean
+  category_name: string | null
   product_id: number | string
   product_name: string | null
   product_sku: string | null
+  subcategory_name: string | null
 }
 
 function numeric(value: number | string, field: string): number {
@@ -139,12 +147,14 @@ export function buildLowInventoryReadModel(args: {
   >()
   let snapshotObservedAt: string | null = null
   const resolvedRows: Array<{
+    categoryName: string | null
     observedAt: string
     productId: number
     productKey: string
     productName: string | null
     productSku: string | null
     row: LowInventoryRow
+    subcategoryName: string | null
   }> = []
   const combinedAvailableByProduct = new Map<string, number>()
 
@@ -161,15 +171,39 @@ export function buildLowInventoryReadModel(args: {
     const productSku = row.product_sku ?? catalogProduct?.product_sku ?? null
     const productKey = productSku === null ? `product-id:${productId}` : `sku:${productSku}`
     const productName = row.product_name ?? catalogProduct?.product_name ?? null
+    const categoryName = catalogProduct === undefined
+      ? row.category_name
+      : catalogProduct.category_name
+    const subcategoryName = catalogProduct === undefined
+      ? row.subcategory_name
+      : catalogProduct.subcategory_name
     const availableQty = numeric(row.available_qty, 'available_qty')
     combinedAvailableByProduct.set(
       productKey,
       (combinedAvailableByProduct.get(productKey) ?? 0) + availableQty,
     )
-    resolvedRows.push({ observedAt, productId, productKey, productName, productSku, row })
+    resolvedRows.push({
+      categoryName,
+      observedAt,
+      productId,
+      productKey,
+      productName,
+      productSku,
+      row,
+      subcategoryName,
+    })
   }
 
-  for (const { observedAt, productId, productKey, productName, productSku, row } of resolvedRows) {
+  for (const {
+    categoryName,
+    observedAt,
+    productId,
+    productKey,
+    productName,
+    productSku,
+    row,
+    subcategoryName,
+  } of resolvedRows) {
     const combinedAvailableQty = combinedAvailableByProduct.get(productKey)
     if (
       combinedAvailableQty === undefined ||
@@ -189,11 +223,13 @@ export function buildLowInventoryReadModel(args: {
     let sku = group.skus.get(productKey)
     if (sku === undefined) {
       sku = {
+        categoryName,
         combinedAvailableQty,
         packages: [],
         productIds: [productId],
         productName,
         productSku,
+        subcategoryName,
       }
       group.skus.set(productKey, sku)
     } else if (!sku.productIds.includes(productId)) {

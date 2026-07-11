@@ -1,4 +1,8 @@
-import type { LowInventoryPackage, LowInventoryResponse } from '../../../shared/contracts/index.js'
+import {
+  isCannabisCategory,
+  type LowInventoryPackage,
+  type LowInventoryResponse,
+} from '../../../shared/contracts/index.js'
 import { nyLongDateTime } from '../../app/nyTime.js'
 import { Pill } from '../../components/Pill.js'
 
@@ -18,22 +22,37 @@ function packageIdentity(pkg: LowInventoryPackage): string {
   return metrcTag ? metrcTag : pkg.inventoryItemId
 }
 
+function taxonomyLabel(categoryName: string | null, subcategoryName: string | null): string {
+  const parts = [categoryName, subcategoryName].filter((part): part is string => part !== null)
+  return parts.length === 0 ? 'Category not reported' : parts.join(' · ')
+}
+
 export function LowInventoryView(props: {
+  cannabisOnly: boolean
+  onCannabisOnlyChange: (cannabisOnly: boolean) => void
   siteLabel: string
   state: LowInventoryViewState
   onRetry?: () => void
 }) {
-  const { onRetry, siteLabel, state } = props
+  const { cannabisOnly, onCannabisOnlyChange, onRetry, siteLabel, state } = props
   const response = state.kind === 'ready' ? state.response : null
+  const visibleLocationGroups = response?.data.locationGroups
+    .map((group) => ({
+      ...group,
+      skus: cannabisOnly
+        ? group.skus.filter((sku) => isCannabisCategory(sku.categoryName))
+        : group.skus,
+    }))
+    .filter((group) => group.skus.length > 0) ?? []
   const skuCount = response === null
     ? 0
-    : new Set(response.data.locationGroups.flatMap((group) => group.skus.map((sku) =>
+    : new Set(visibleLocationGroups.flatMap((group) => group.skus.map((sku) =>
       sku.productSku ?? `product-ids:${sku.productIds.join(',')}`,
     ))).size
-  const packageCount = response?.data.locationGroups.reduce(
+  const packageCount = visibleLocationGroups.reduce(
     (total, group) => total + group.skus.reduce((groupTotal, sku) => groupTotal + sku.packages.length, 0),
     0,
-  ) ?? 0
+  )
 
   return (
     <section className="low-inventory-page" aria-labelledby="low-inventory-title">
@@ -77,10 +96,28 @@ export function LowInventoryView(props: {
 
       {response ? (
         <>
-          <div className="low-inventory-summary" aria-label="Queue summary">
-            <strong>{skuCount} {skuCount === 1 ? 'SKU' : 'SKUs'}</strong>
-            <span>{packageCount} {packageCount === 1 ? 'package' : 'packages'}</span>
-            <span>At or below {displayQuantity(response.data.threshold)} available</span>
+          <div className="low-inventory-toolbar">
+            <label className="low-inventory-cannabis-filter">
+              <input
+                checked={cannabisOnly}
+                onChange={(event) => onCannabisOnlyChange(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              <span>
+                <strong>Cannabis only</strong>
+                <small>Items without a reported category stay visible.</small>
+              </span>
+            </label>
+            <div
+              className="low-inventory-summary"
+              aria-atomic="true"
+              aria-label="Queue summary"
+              aria-live="polite"
+            >
+              <strong>{skuCount} {skuCount === 1 ? 'SKU' : 'SKUs'}</strong>
+              <span>{packageCount} {packageCount === 1 ? 'package' : 'packages'}</span>
+              <span>At or below {displayQuantity(response.data.threshold)} available</span>
+            </div>
           </div>
 
           {response.data.locationGroups.length === 0 ? (
@@ -88,9 +125,14 @@ export function LowInventoryView(props: {
               <strong>No low-inventory items</strong>
               <span>{response.site.siteLabel} has no for-sale SKUs between 1 and {displayQuantity(response.data.threshold)} available.</span>
             </div>
+          ) : visibleLocationGroups.length === 0 ? (
+            <div className="low-inventory-state-card low-inventory-empty" role="status">
+              <strong>No cannabis low-inventory items</strong>
+              <span>Turn off Cannabis only to show Accessories and Other.</span>
+            </div>
           ) : (
             <div className="low-inventory-locations">
-              {response.data.locationGroups.map((group, groupIndex) => {
+              {visibleLocationGroups.map((group, groupIndex) => {
                 const headingId = `low-inventory-location-${groupIndex}`
                 return (
                   <section className="low-inventory-location" aria-labelledby={headingId} key={`${group.location.kind}:${group.location.label}`}>
@@ -107,6 +149,9 @@ export function LowInventoryView(props: {
                           <header>
                             <div className="low-inventory-product">
                               <h4>{sku.productName ?? 'Unnamed product'}</h4>
+                              <span className="low-inventory-taxonomy">
+                                {taxonomyLabel(sku.categoryName, sku.subcategoryName)}
+                              </span>
                               <span>{sku.productSku ? `SKU ${sku.productSku}` : 'SKU not reported'}</span>
                             </div>
                             <div className="low-inventory-total" aria-label={`${displayQuantity(sku.packages.reduce((total, pkg) => total + pkg.availableQty, 0))} available at this location; ${displayQuantity(sku.combinedAvailableQty)} site-wide`}>

@@ -11463,8 +11463,42 @@ span.metric-chart-legend-item {
   margin-top: 0.25rem;
 }
 
+.low-inventory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.65rem;
+}
+
+.low-inventory-cannabis-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 44px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 250, 241, 0.7);
+  cursor: pointer;
+}
+
+.low-inventory-cannabis-filter > span {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.low-inventory-cannabis-filter strong {
+  font-size: 0.86rem;
+}
+
+.low-inventory-cannabis-filter small {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
 .low-inventory-summary {
   display: flex;
+  flex: 1 1 18rem;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.3rem 0.7rem;
@@ -11537,6 +11571,12 @@ span.metric-chart-legend-item {
   color: var(--text-muted);
   font-size: 0.76rem;
   overflow-wrap: anywhere;
+}
+
+.low-inventory-product .low-inventory-taxonomy {
+  color: var(--text-muted-strong);
+  font-size: 0.8rem;
+  font-weight: 650;
 }
 
 .low-inventory-total {

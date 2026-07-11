@@ -24,6 +24,7 @@ export function LowInventoryPage() {
 }
 
 function LowInventorySitePage({ site }: { site: HeliosPendingPurchaseSiteDealer | null }) {
+  const [cannabisOnly, setCannabisOnly] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
   const [state, setState] = useState<LowInventoryViewState>(() => site === null
     ? { kind: 'error', message: 'That store is not available. Choose Bronx or Midtown from the navigation.' }
@@ -60,6 +61,8 @@ function LowInventorySitePage({ site }: { site: HeliosPendingPurchaseSiteDealer 
 
   return (
     <LowInventoryView
+      cannabisOnly={cannabisOnly}
+      onCannabisOnlyChange={setCannabisOnly}
       siteLabel={site?.siteLabel ?? 'Low inventory'}
       state={state}
       onRetry={site === null ? undefined : () => setReloadKey((current) => current + 1)}

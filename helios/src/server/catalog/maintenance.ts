@@ -52,6 +52,7 @@ import {
   BARCODE_CHECK_UNAVAILABLE_WARNING,
   buildCatalogGroupModuleScope,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
+  isCannabisCategory,
   isValidWarehouseLocationCode,
   type CatalogMaintenanceCacheRepairResponse,
   type CatalogMaintenanceFatalBanner,
@@ -1029,19 +1030,6 @@ function compareVariantsForCard(left: CatalogMaintenanceSiteVariant, right: Cata
 function countBrandIssue(counts: Map<string, number>, brand: string | null, n: number): void {
   if (!brand) return
   counts.set(brand, (counts.get(brand) ?? 0) + n)
-}
-
-/**
- * Category names for which METRC tags and barcode quality are NOT tracked
- * as errors or warnings on the Images & Barcodes page. Everything else is
- * treated as a cannabis category, so we err on the side of flagging issues
- * for groups whose category we don't recognize.
- */
-const NON_CANNABIS_CATEGORY_NAMES = new Set<string>(['Accessories', 'Other'])
-
-function isCannabisCategory(categoryName: string | null): boolean {
-  if (categoryName === null) return true
-  return !NON_CANNABIS_CATEGORY_NAMES.has(categoryName.trim())
 }
 
 /**

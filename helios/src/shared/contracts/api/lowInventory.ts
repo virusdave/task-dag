@@ -50,11 +50,13 @@ export const LowInventoryPackageSchema = z.object({
 export type LowInventoryPackage = z.infer<typeof LowInventoryPackageSchema>
 
 export const LowInventorySkuSchema = z.object({
+  categoryName: z.string().nullable(),
   combinedAvailableQty: z.number(),
   packages: z.array(LowInventoryPackageSchema),
   productIds: z.array(z.number().int().positive()),
   productName: z.string().nullable(),
   productSku: z.string().nullable(),
+  subcategoryName: z.string().nullable(),
 })
 export type LowInventorySku = z.infer<typeof LowInventorySkuSchema>
 
