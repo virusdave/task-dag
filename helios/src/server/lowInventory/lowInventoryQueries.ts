@@ -1,17 +1,25 @@
 import {
   getHeliosPendingPurchaseSiteDealer,
+  isCannabisCategory,
   isValidWarehouseLocationCode,
+  LOW_INVENTORY_STALE_AFTER_MINUTES,
   LowInventoryThresholdSchema,
   type LowInventoryLocation,
   type LowInventoryLocationGroup,
   type LowInventoryReadModel,
   type LowInventorySku,
+  LowInventoryAuditResultSchema,
+  LowInventoryCountBodySchema,
+  LowInventoryPackageSchema,
+  type LowInventoryAuditResult,
+  type LowInventoryCountBody,
+  type LowInventoryPackage,
 } from '../../shared/contracts/index.js'
+import type { Queryable } from '../db/pool.js'
 import { getPool } from '../db/pool.js'
 
 interface LowInventoryRow {
   available_qty: number | string
-  category_name: string | null
   current_qty: number | string | null
   hold_qty: number | string | null
   internal_track_code: string | null
@@ -23,7 +31,6 @@ interface LowInventoryRow {
   product_name: string | null
   product_sku: string | null
   stock_location: string
-  subcategory_name: string | null
 }
 
 const LOW_INVENTORY_SQL = `
@@ -32,8 +39,6 @@ const LOW_INVENTORY_SQL = `
     c.product_id,
     c.product_name,
     nullif(btrim(c.product_sku), '') as product_sku,
-    nullif(btrim(c.category_name), '') as category_name,
-    nullif(btrim(c.subcategory_name), '') as subcategory_name,
     c.current_qty,
     c.hold_qty,
     c.available_qty,
@@ -60,9 +65,10 @@ const LOW_INVENTORY_SQL = `
 const LOW_INVENTORY_CATALOG_PRODUCTS_SQL = `
   select distinct on ((product->>'productId')::bigint)
     (product->>'productId')::bigint as product_id,
+    nullif(btrim(cg.category_name), '') as category_name,
+    nullif(btrim(product->>'imageUrl'), '') as image_url,
     nullif(btrim(product->>'name'), '') as product_name,
     nullif(btrim(product->>'sku'), '') as product_sku,
-    nullif(btrim(cg.category_name), '') as category_name,
     nullif(btrim(cg.subcategory_name), '') as subcategory_name,
     (
       cg.deleted_at is null
@@ -84,6 +90,7 @@ const LOW_INVENTORY_CATALOG_PRODUCTS_SQL = `
 interface LowInventoryCatalogProductRow {
   active: boolean
   category_name: string | null
+  image_url: string | null
   product_id: number | string
   product_name: string | null
   product_sku: string | null
@@ -137,6 +144,7 @@ function compareLabels(left: string, right: string): number {
 export function buildLowInventoryReadModel(args: {
   catalogProducts?: readonly LowInventoryCatalogProductRow[]
   dealerId: number
+  now?: Date
   rows: readonly LowInventoryRow[]
   threshold: number
 }): LowInventoryReadModel {
@@ -149,16 +157,15 @@ export function buildLowInventoryReadModel(args: {
   >()
   let snapshotObservedAt: string | null = null
   const resolvedRows: Array<{
-    categoryName: string | null
     observedAt: string
     productId: number
     productKey: string
     productName: string | null
     productSku: string | null
     row: LowInventoryRow
-    subcategoryName: string | null
   }> = []
   const combinedAvailableByProduct = new Map<string, number>()
+  const staleProducts = new Set<string>()
 
   for (const row of args.rows) {
     const catalogProduct = catalogProducts.get(String(row.product_id))
@@ -173,47 +180,31 @@ export function buildLowInventoryReadModel(args: {
     const productSku = row.product_sku ?? catalogProduct?.product_sku ?? null
     const productKey = productSku === null ? `product-id:${productId}` : `sku:${productSku}`
     const productName = row.product_name ?? catalogProduct?.product_name ?? null
-    const categoryName = catalogProduct === undefined
-      ? row.category_name
-      : catalogProduct.category_name
-    const subcategoryName = catalogProduct === undefined
-      ? row.subcategory_name
-      : catalogProduct.subcategory_name
     const availableQty = numeric(row.available_qty, 'available_qty')
+    if (
+      args.now !== undefined &&
+      args.now.getTime() - new Date(observedAt).getTime() > LOW_INVENTORY_STALE_AFTER_MINUTES * 60_000
+    ) {
+      staleProducts.add(productKey)
+    }
     combinedAvailableByProduct.set(
       productKey,
       (combinedAvailableByProduct.get(productKey) ?? 0) + availableQty,
     )
-    resolvedRows.push({
-      categoryName,
-      observedAt,
-      productId,
-      productKey,
-      productName,
-      productSku,
-      row,
-      subcategoryName,
-    })
+    resolvedRows.push({ observedAt, productId, productKey, productName, productSku, row })
   }
 
-  for (const {
-    categoryName,
-    observedAt,
-    productId,
-    productKey,
-    productName,
-    productSku,
-    row,
-    subcategoryName,
-  } of resolvedRows) {
+  for (const { observedAt, productId, productKey, productName, productSku, row } of resolvedRows) {
     const combinedAvailableQty = combinedAvailableByProduct.get(productKey)
     if (
       combinedAvailableQty === undefined ||
+      staleProducts.has(productKey) ||
       combinedAvailableQty < 1 ||
       combinedAvailableQty > args.threshold
     ) {
       continue
     }
+    const catalogProduct = catalogProducts.get(String(productId))
     const location = locationForRow(row)
     const key = locationKey(location)
     let group = groupsByLocation.get(key)
@@ -224,14 +215,17 @@ export function buildLowInventoryReadModel(args: {
 
     let sku = group.skus.get(productKey)
     if (sku === undefined) {
+      const categoryName = catalogProduct?.category_name ?? null
       sku = {
         categoryName,
         combinedAvailableQty,
+        imageUrl: catalogProduct?.image_url ?? null,
+        isCannabis: isCannabisCategory(categoryName),
         packages: [],
         productIds: [productId],
         productName,
         productSku,
-        subcategoryName,
+        subcategoryName: catalogProduct?.subcategory_name ?? null,
       }
       group.skus.set(productKey, sku)
     } else if (!sku.productIds.includes(productId)) {
@@ -315,6 +309,130 @@ export async function queryLowInventoryReadModel(args: {
   return buildLowInventoryReadModel({
     ...args,
     catalogProducts: catalogResult.rows,
+    now: new Date(),
     rows: result.rows,
   })
+}
+
+export async function getLowInventoryPackageSnapshot(args: {
+  db: Queryable
+  dealerId: number
+  inventoryItemId: string
+  productId: number
+  snapshotObservedAt: string
+}): Promise<LowInventoryPackage | null> {
+  const result = await args.db.query<LowInventoryRow>(
+    `select c.inventory_item_id, c.product_id, c.product_name, c.current_qty, c.hold_qty,
+            c.available_qty, c.metrc_tag, c.internal_track_code, c.stock_location, c.observed_at_max,
+            nullif(btrim(c.product_sku), '') as product_sku
+       from sweed_package_current c
+      where c.dealer_id = $1
+        and c.inventory_item_id = $2
+        and c.product_id = $3
+        and c.observed_at_max = $4::timestamptz
+        and c.is_on_stock = true
+        and c.current_qty is not null
+        and c.available_qty is not null
+        and c.stock_location ilike 'FOR SALE%'
+        and coalesce(lower(c.raw_json->>'enabled') = 'false', false) = false
+        and coalesce(lower(c.raw_json->>'isTradeSample') = 'true', false) = false
+        and coalesce(lower(c.raw_json->>'isNotForSale') = 'true', false) = false
+        and not exists (
+          select 1 from audit_events te
+           where te.event_type = 'low_inventory.package_transfer.completed'
+             and (te.payload_json->>'dealerId')::bigint = c.dealer_id
+             and te.payload_json->>'inventoryItemId' = c.inventory_item_id
+             and te.created_at >= c.observed_at_min
+        )`,
+    [args.dealerId, args.inventoryItemId, args.productId, args.snapshotObservedAt],
+  )
+  const row = result.rows[0]
+  if (row === undefined) return null
+  return LowInventoryPackageSchema.parse({
+    availableQty: numeric(row.available_qty, 'available_qty'),
+    currentQty: nullableNumeric(row.current_qty, 'current_qty'),
+    holdQty: nullableNumeric(row.hold_qty, 'hold_qty'),
+    internalTrackCode: row.internal_track_code,
+    inventoryItemId: row.inventory_item_id,
+    metrcTag: row.metrc_tag,
+    observedAt: isoTimestamp(row.observed_at_max),
+    productId: positiveInteger(row.product_id, 'product_id'),
+    productName: row.product_name,
+    stockLocation: row.stock_location,
+  })
+}
+
+interface CountAuditRow {
+  actor_label: string
+  created_at: Date | string
+  id: number
+  payload_json: unknown
+  transfer_audit_id: number | null
+}
+
+export async function listLowInventoryCountAudits(
+  db: Queryable,
+  dealerId: number,
+  limit: number,
+): Promise<LowInventoryAuditResult[]> {
+  const result = await db.query<CountAuditRow>(
+    `select ae.id, ae.created_at, ae.payload_json,
+            coalesce(u.name, ae.actor_type) as actor_label,
+            (select min(te.id) from audit_events te
+             where te.entity_type = 'low_inventory_package_transfer'
+               and te.event_type = 'low_inventory.package_transfer.completed'
+               and te.entity_id = ae.id::text) as transfer_audit_id
+       from audit_events ae
+       left join users u on u.id = ae.actor_user_id
+      where ae.event_type = 'low_inventory.package_count.recorded'
+        and (ae.payload_json->>'dealerId')::bigint = $1
+      order by ae.created_at desc, ae.id desc
+      limit $2`,
+    [dealerId, limit],
+  )
+  return result.rows.map((row) => {
+    const count = LowInventoryCountBodySchema.parse(row.payload_json)
+    return LowInventoryAuditResultSchema.parse({
+      ...count,
+      auditId: row.id,
+      actorLabel: row.actor_label,
+      createdAt: isoTimestamp(row.created_at),
+      transferAuditId: row.transfer_audit_id,
+      transferStatus:
+        count.classification !== 'short' && count.classification !== 'zero'
+          ? 'not_applicable'
+          : row.transfer_audit_id === null
+            ? 'pending'
+            : 'resolved',
+    })
+  })
+}
+
+export async function getPendingLowInventoryCountAudit(
+  db: Queryable,
+  auditId: number,
+  dealerId: number,
+): Promise<LowInventoryCountBody | null> {
+  const result = await db.query<{ payload_json: unknown }>(
+    `select ae.payload_json
+       from audit_events ae
+      where ae.id = $1
+        and ae.event_type = 'low_inventory.package_count.recorded'
+        and (ae.payload_json->>'dealerId')::bigint = $2
+        and ae.payload_json->>'classification' in ('short', 'zero')
+        and not exists (
+          select 1 from audit_events newer
+           where newer.event_type = 'low_inventory.package_count.recorded'
+             and newer.entity_id = ae.entity_id
+             and newer.id > ae.id
+        )
+        and not exists (
+          select 1 from audit_events te
+           where te.entity_type = 'low_inventory_package_transfer'
+             and te.event_type = 'low_inventory.package_transfer.completed'
+             and te.entity_id = ae.id::text
+        )`,
+    [auditId, dealerId],
+  )
+  return result.rows[0] ? LowInventoryCountBodySchema.parse(result.rows[0].payload_json) : null
 }

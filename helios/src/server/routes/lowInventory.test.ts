@@ -5,6 +5,7 @@ import type { LowInventoryReadModel } from '../../shared/contracts/index.js'
 
 const mockState = vi.hoisted(() => ({
   admin: false,
+  sessionRole: null as 'admin' | 'editor' | 'viewer' | null,
   appSetting: null as {
     key: string
     updatedAt: string
@@ -12,13 +13,15 @@ const mockState = vi.hoisted(() => ({
     value: unknown
   } | null,
   metricsGranted: false,
-  countMigrationApplied: false,
 }))
 
 const getAppSettingMock = vi.hoisted(() => vi.fn())
 const upsertAppSettingMock = vi.hoisted(() => vi.fn())
 const queryLowInventoryReadModelMock = vi.hoisted(() => vi.fn())
-const captureLowInventoryCountMock = vi.hoisted(() => vi.fn())
+const listLowInventoryCountAuditsMock = vi.hoisted(() => vi.fn())
+const appendAuditEventMock = vi.hoisted(() => vi.fn())
+const confirmLowInventoryTransferMock = vi.hoisted(() => vi.fn())
+const getLowInventoryPackageSnapshotMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../auth/requireSession.js', () => ({
   requireMetricsGrant: vi.fn(
@@ -45,14 +48,15 @@ vi.mock('../auth/requireSession.js', () => ({
       _request: unknown,
       reply: { status: (code: number) => { send: (body: unknown) => void } },
     ) => {
-      if (mockState.admin) {
+      const role = mockState.admin ? 'admin' : mockState.sessionRole
+      if (role !== null) {
         return {
           active: true,
           email: 'admin@example.com',
           id: 2,
-          metricGrants: [],
+          metricGrants: mockState.metricsGranted ? ['reordering'] : [],
           name: 'Admin',
-          role: 'admin',
+          role,
         }
       }
       reply.status(403).send({ error: 'Admin required.' })
@@ -61,12 +65,14 @@ vi.mock('../auth/requireSession.js', () => ({
   ),
 }))
 
+vi.mock('../audit/appendAuditEvent.js', () => ({ appendAuditEvent: appendAuditEventMock }))
+
 vi.mock('../db/pool.js', () => ({
   getPool: vi.fn(() => ({ query: vi.fn() })),
 }))
-
-vi.mock('../db/pendingMigrations.js', () => ({
-  isMigrationAppliedLive: vi.fn(async () => mockState.countMigrationApplied),
+vi.mock('../db/tx.js', () => ({
+  withTransaction: (run: (db: { query: ReturnType<typeof vi.fn> }) => Promise<unknown>) =>
+    run({ query: vi.fn().mockResolvedValue({ rows: [] }) }),
 }))
 
 vi.mock('../db/queries/appSettingsQueries.js', () => ({
@@ -75,14 +81,13 @@ vi.mock('../db/queries/appSettingsQueries.js', () => ({
 }))
 
 vi.mock('../lowInventory/lowInventoryQueries.js', () => ({
+  getLowInventoryPackageSnapshot: getLowInventoryPackageSnapshotMock,
+  listLowInventoryCountAudits: listLowInventoryCountAuditsMock,
   queryLowInventoryReadModel: queryLowInventoryReadModelMock,
 }))
-
-vi.mock('../lowInventory/lowInventoryCounts.js', () => ({
-  captureLowInventoryCount: captureLowInventoryCountMock,
-  LowInventoryCountCaptureError: class extends Error {
-    readonly statusCode = 404
-  },
+vi.mock('../lowInventory/lowInventoryTransferService.js', () => ({
+  LowInventoryTransferConflictError: class extends Error {},
+  confirmLowInventoryTransfer: confirmLowInventoryTransferMock,
 }))
 
 import { registerLowInventoryRoutes } from './lowInventory.js'
@@ -101,9 +106,9 @@ let server: FastifyInstance
 
 beforeEach(async () => {
   mockState.admin = false
+  mockState.sessionRole = null
   mockState.appSetting = null
   mockState.metricsGranted = false
-  mockState.countMigrationApplied = false
   getAppSettingMock.mockImplementation(async () => mockState.appSetting)
   upsertAppSettingMock.mockImplementation(
     async (_db: unknown, key: string, value: unknown, updatedBy: string) => ({
@@ -117,28 +122,22 @@ beforeEach(async () => {
     async (args: { dealerId: number; threshold: number }) =>
       model({ dealerId: args.dealerId, threshold: args.threshold }),
   )
-  captureLowInventoryCountMock.mockResolvedValue({
-    id: '20c4a7fe-ea9f-45ad-98d2-437d7378579d',
-    requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
-    dealerId: 210705,
-    inventoryItemId: 'package-1',
-    productId: 101,
-    productSku: 'SKU-1',
+  appendAuditEventMock.mockResolvedValue(41)
+  getLowInventoryPackageSnapshotMock.mockResolvedValue({
+    availableQty: 2,
+    currentQty: 2,
+    holdQty: 0,
+    internalTrackCode: 'FLOWER-A-1',
+    inventoryItemId: 'pkg-1',
+    metrcTag: 'TAG-1',
+    observedAt: new Date().toISOString(),
+    productId: 123,
     productName: 'Product',
-    physicalQty: 1,
-    classification: 'short',
-    resolutionStatus: 'pending',
-    actor: { userId: 2, email: 'admin@example.com', name: 'Admin' },
-    capturedAt: '2026-07-11T14:00:00.000Z',
-    sweedSnapshot: {
-      currentQty: 2,
-      holdQty: 0,
-      availableQty: 2,
-      stockLocation: 'FOR SALE - Midtown',
-      internalTrackCode: 'PRE-A-1',
-      metrcTag: 'TAG-1',
-      observedAt: '2026-07-11T13:55:00.000Z',
-    },
+    stockLocation: 'FOR SALE - Midtown',
+  })
+  listLowInventoryCountAuditsMock.mockResolvedValue([])
+  confirmLowInventoryTransferMock.mockResolvedValue({
+    transferAuditId: 42, countAuditId: 41, movedQty: 1, notificationStatus: 'not_requested',
   })
   server = Fastify()
   server.setErrorHandler((error, _request, reply) =>
@@ -277,56 +276,80 @@ describe('low-inventory routes', () => {
     )
   })
 
-  it('requires editor authorization and an applied migration before capturing a count', async () => {
-    const denied = await server.inject({
-      method: 'POST',
-      url: '/api/low-inventory/counts',
-      payload: {
-        dealerId: 210705,
-        inventoryItemId: 'package-1',
-        physicalQty: 1,
-        requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
-      },
-    })
-    expect(denied.statusCode).toBe(403)
-    expect(captureLowInventoryCountMock).not.toHaveBeenCalled()
-
-    mockState.admin = true
-    const migrationPending = await server.inject({
-      method: 'POST',
-      url: '/api/low-inventory/counts',
-      payload: {
-        dealerId: 210705,
-        inventoryItemId: 'package-1',
-        physicalQty: 1,
-        requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
-      },
-    })
-    expect(migrationPending.statusCode).toBe(503)
-    expect(captureLowInventoryCountMock).not.toHaveBeenCalled()
-
-    mockState.countMigrationApplied = true
-    const captured = await server.inject({
-      method: 'POST',
-      url: '/api/low-inventory/counts',
-      payload: {
-        dealerId: 210705,
-        inventoryItemId: 'package-1',
-        physicalQty: 1,
-        requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
-      },
-    })
-    expect(captured.statusCode).toBe(201)
-    expect(captured.json()).toMatchObject({
-      count: { classification: 'short', resolutionStatus: 'pending' },
-      inventoryChanged: false,
-      notificationSent: false,
-    })
-    expect(captureLowInventoryCountMock).toHaveBeenCalledWith(expect.objectContaining({
-      dealerId: 210705,
-      inventoryItemId: 'package-1',
-      physicalQty: 1,
-      requestId: 'd1dc2c24-bca5-4c44-ad05-07f254e3a554',
+  it('records a validated immutable package-count snapshot', async () => {
+    mockState.sessionRole = 'editor'
+    mockState.metricsGranted = true
+    const payload = {
+      dealerId: 210705, productId: 123, inventoryItemId: 'pkg-1',
+      snapshotObservedAt: '2026-07-10T14:00:00.000Z', physicalCount: 1,
+    }
+    const response = await server.inject({ method: 'POST', url: '/api/low-inventory/counts', payload })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ auditId: 41, notificationStatus: 'not_requested' })
+    expect(appendAuditEventMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      actorUserId: 2,
+      eventType: 'low_inventory.package_count.recorded',
+      payload: expect.objectContaining({ ...payload, classification: 'short', snapshotCurrentQty: 2 }),
     }))
+
+    getLowInventoryPackageSnapshotMock.mockResolvedValueOnce(null)
+    const invalid = await server.inject({
+      method: 'POST', url: '/api/low-inventory/counts', payload,
+    })
+    expect(invalid.statusCode).toBe(409)
+
+    getLowInventoryPackageSnapshotMock.mockResolvedValueOnce({
+      availableQty: 2, currentQty: 2, holdQty: 0, internalTrackCode: 'FLOWER-A-1',
+      inventoryItemId: 'pkg-1', metrcTag: 'TAG-1', observedAt: '2020-01-01T00:00:00.000Z',
+      productId: 123, productName: 'Product', stockLocation: 'FOR SALE - Midtown',
+    })
+    const stale = await server.inject({
+      method: 'POST', url: '/api/low-inventory/counts', payload,
+    })
+    expect(stale.statusCode).toBe(409)
+  })
+
+  it('lists bounded site audits and returns fail-closed transfer configuration defaults', async () => {
+    mockState.sessionRole = 'viewer'
+    mockState.metricsGranted = true
+    const audits = await server.inject({ method: 'GET', url: '/api/low-inventory/audits?dealerId=210705&limit=20' })
+    expect(audits.statusCode).toBe(200)
+    expect(listLowInventoryCountAuditsMock).toHaveBeenCalledWith(expect.anything(), 210705, 20)
+
+    const config = await server.inject({ method: 'GET', url: '/api/low-inventory/transfer-config?dealerId=210705' })
+    expect(config.json()).toMatchObject({
+      dealerId: 210705, destinationName: 'NOT FOR SALE - Hold for Dave inspection', transferEnabled: false,
+    })
+    const unbounded = await server.inject({ method: 'GET', url: '/api/low-inventory/audits?dealerId=210705&limit=101' })
+    expect(unbounded.statusCode).toBe(400)
+  })
+
+  it('lets an admin configure one site and an editor explicitly confirm transfer', async () => {
+    mockState.admin = true
+    const config = await server.inject({ method: 'PUT', url: '/api/low-inventory/transfer-config', payload: {
+      dealerId: 210705, destinationName: 'NOT FOR SALE - Inspection room', transferEnabled: true,
+    } })
+    expect(config.statusCode).toBe(200)
+    expect(upsertAppSettingMock).toHaveBeenCalledWith(expect.anything(),
+      'low_inventory_transfer_config:midtown', expect.objectContaining({ transferEnabled: true }),
+      'admin@example.com')
+
+    mockState.admin = false
+    mockState.sessionRole = 'editor'
+    mockState.metricsGranted = true
+    mockState.appSetting = {
+      key: 'low_inventory_transfer_config:midtown', updatedAt: '2026-07-10T15:00:00.000Z',
+      updatedBy: 'admin@example.com', value: {
+        dealerId: 210705, destinationName: 'NOT FOR SALE - Inspection room', transferEnabled: true,
+      },
+    }
+    const transfer = await server.inject({ method: 'POST', url: '/api/low-inventory/transfers', payload: {
+      dealerId: 210705,
+      countAuditId: 41,
+      confirmedConfigUpdatedAt: '2026-07-10T15:00:00.000Z',
+      confirmedDestinationName: 'NOT FOR SALE - Inspection room',
+    } })
+    expect(transfer.statusCode).toBe(200)
+    expect(transfer.json()).toMatchObject({ notificationStatus: 'not_requested', transferAuditId: 42 })
   })
 })

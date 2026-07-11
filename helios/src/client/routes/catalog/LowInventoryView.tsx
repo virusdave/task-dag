@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 
-import {
-  LowInventoryCountCaptureResponseSchema,
-  isCannabisCategory,
-  type LowInventoryCountCaptureResponse,
-  type LowInventoryPackage,
-  type LowInventoryResponse,
+import type {
+  LowInventoryAuditResult,
+  LowInventoryClassification,
+  LowInventoryCountRequest,
+  LowInventoryPackage,
+  LowInventoryResponse,
+  LowInventoryTransferConfigBody,
+  LowInventoryTransferConfigResponse,
 } from '../../../shared/contracts/index.js'
-import { mutateJson } from '../../app/fetchJson.js'
 import { nyLongDateTime } from '../../app/nyTime.js'
 import { Pill } from '../../components/Pill.js'
-import { decodeBarcodeFromImageFile, LiveBarcodeScanner } from './LiveBarcodeScanner.js'
+import { HoverZoomImage } from '../../components/HoverZoomImage.js'
+import { LiveBarcodeScanner } from './LiveBarcodeScanner.js'
 
 export type LowInventoryViewState =
   | { kind: 'loading' }
@@ -23,594 +25,205 @@ function displayQuantity(quantity: number | null): string {
   return quantity === null ? 'N/A' : quantityFormatter.format(quantity)
 }
 
-function packageIdentity(pkg: LowInventoryPackage): string {
+function packageIdentity(pkg: Pick<LowInventoryPackage, 'inventoryItemId' | 'metrcTag'>): string {
   const metrcTag = pkg.metrcTag?.trim()
   return metrcTag ? metrcTag : pkg.inventoryItemId
 }
 
-function taxonomyLabel(categoryName: string | null, subcategoryName: string | null): string {
-  const parts = [categoryName, subcategoryName].filter((part): part is string => part !== null)
-  return parts.length === 0 ? 'Category not reported' : parts.join(' · ')
+function classifyCount(pkg: LowInventoryPackage, physicalCount: number): LowInventoryClassification | null {
+  if (pkg.currentQty === null) return null
+  if (physicalCount === 0 && (pkg.holdQty ?? 0) > 0) return 'held'
+  if (physicalCount === 0) return 'zero'
+  if (physicalCount < pkg.currentQty) return 'short'
+  if (physicalCount === pkg.currentQty) return 'equal'
+  return 'over'
 }
 
-function focusPhysicalCountInput(inventoryItemId: string): void {
-  window.requestAnimationFrame(() => {
-    const input = document.querySelector<HTMLInputElement>(
-      `[data-physical-count-input="${CSS.escape(inventoryItemId)}"]`,
-    )
-    input?.focus()
-    input?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  })
-}
-
-export function findLowInventoryPackagesForScan(
-  packages: readonly LowInventoryPackage[],
-  scannedCode: string,
-): LowInventoryPackage[] {
-  const normalized = scannedCode.trim().toUpperCase()
-  if (normalized.length === 0) return []
-  return packages.filter((pkg) =>
-    [pkg.metrcTag, pkg.inventoryBarcode]
-      .some((candidate) => candidate?.trim().toUpperCase() === normalized),
-  )
-}
-
-export function isLowInventoryPackageCountable(pkg: LowInventoryPackage): boolean {
-  return pkg.currentQty !== null
+function classificationLabel(classification: LowInventoryClassification): string {
+  switch (classification) {
+    case 'equal': return 'Count matches Sweed'
+    case 'short': return 'Short count; transfer pending'
+    case 'zero': return 'Zero count; transfer pending'
+    case 'over': return 'Count is over Sweed'
+    case 'held': return 'Zero counted, but units are held'
+  }
 }
 
 export function LowInventoryView(props: {
-  cannabisOnly: boolean
-  onCannabisOnlyChange: (cannabisOnly: boolean) => void
+  audits?: readonly LowInventoryAuditResult[]
+  busy?: boolean
+  canEdit?: boolean
+  isAdmin?: boolean
+  mutationMessage?: string | null
+  onRetry?: () => void
+  onRecordCount?: (body: LowInventoryCountRequest) => Promise<void>
+  onSaveTransferConfig?: (body: LowInventoryTransferConfigBody) => Promise<void>
+  onTransfer?: (auditId: number, config: LowInventoryTransferConfigResponse) => Promise<void>
   siteLabel: string
   state: LowInventoryViewState
-  canCaptureCounts?: boolean
-  countMigrationPending?: boolean
-  onRetry?: () => void
+  transferConfig?: LowInventoryTransferConfigResponse | null
 }) {
   const {
-    cannabisOnly,
-    canCaptureCounts = false,
-    countMigrationPending = false,
-    onCannabisOnlyChange,
-    onRetry,
-    siteLabel,
-    state,
+    audits = [], busy = false, canEdit = false, isAdmin = false, mutationMessage,
+    onRecordCount, onRetry, onSaveTransferConfig, onTransfer, siteLabel, state,
+    transferConfig = null,
   } = props
   const response = state.kind === 'ready' ? state.response : null
-  const visibleLocationGroups = response?.data.locationGroups
+  const [cannabisOnly, setCannabisOnly] = useState(true)
+  const [counts, setCounts] = useState<Record<string, string>>({})
+  const [manualScan, setManualScan] = useState('')
+  const [scanMessage, setScanMessage] = useState<string | null>(null)
+  const [scannerOpen, setScannerOpen] = useState(false)
+  const [selectedPackageId, setSelectedPackageId] = useState<string | null>(null)
+  const [showCompleted, setShowCompleted] = useState(false)
+  const [transferReview, setTransferReview] = useState<LowInventoryAuditResult | null>(null)
+  const transferDialogRef = useRef<HTMLElement>(null)
+  const transferTriggerRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    if (transferReview === null) return
+    transferDialogRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    return () => transferTriggerRef.current?.focus()
+  }, [transferReview])
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLElement>): void {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setTransferReview(null)
+      return
+    }
+    if (event.key !== 'Tab' || transferDialogRef.current === null) return
+    const controls = [...transferDialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)')]
+    const first = controls[0]
+    const last = controls[controls.length - 1]
+    if (first === undefined || last === undefined) return
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+
+  const latestAuditByPackage = useMemo(() => {
+    const byPackage = new Map<string, LowInventoryAuditResult>()
+    for (const audit of audits) {
+      if (!byPackage.has(audit.inventoryItemId)) byPackage.set(audit.inventoryItemId, audit)
+    }
+    return byPackage
+  }, [audits])
+  const visibleGroups = useMemo(() => response?.data.locationGroups
     .map((group) => ({
       ...group,
-      skus: cannabisOnly
-        ? group.skus.filter((sku) => isCannabisCategory(sku.categoryName))
-        : group.skus,
+      skus: group.skus
+        .filter((sku) => !cannabisOnly || sku.isCannabis)
+        .map((sku) => ({
+          ...sku,
+          packages: sku.packages.filter((pkg) => {
+            if (showCompleted) return true
+            const audit = latestAuditByPackage.get(pkg.inventoryItemId)
+            return audit === undefined || (audit.classification !== 'equal' && audit.transferStatus !== 'resolved')
+          }),
+        }))
+        .filter((sku) => sku.packages.length > 0),
     }))
-    .filter((group) => group.skus.length > 0) ?? []
-  const packages = visibleLocationGroups.flatMap((group) =>
-    group.skus.flatMap((sku) => sku.packages),
-  )
-  const [activePackageId, setActivePackageId] = useState<string | null>(null)
-  const [scannerOpen, setScannerOpen] = useState(false)
-  const [scanCode, setScanCode] = useState('')
-  const [scanStatus, setScanStatus] = useState<{ message: string; event: number } | null>(null)
-  const [ambiguousMatches, setAmbiguousMatches] = useState<LowInventoryPackage[]>([])
-  const [photoBusy, setPhotoBusy] = useState(false)
-  const [captureInFlight, setCaptureInFlight] = useState(false)
-  const [locallyStale, setLocallyStale] = useState(response?.freshness.isStale ?? true)
-  const photoInputRef = useRef<HTMLInputElement | null>(null)
-  const scanStatusRef = useRef<HTMLDivElement | null>(null)
-  const statusEventRef = useRef(0)
-  const captureInFlightRef = useRef(false)
-  const previousResponseRef = useRef(response)
-  const captureEnabled = canCaptureCounts && response !== null && !response.freshness.isStale && !locallyStale
-  const interactionBusy = captureInFlight || photoBusy
+    .filter((group) => group.skus.length > 0) ?? [], [cannabisOnly, latestAuditByPackage, response, showCompleted])
+  const visibleSkus = visibleGroups.flatMap((group) => group.skus)
+  const visiblePackages = visibleSkus.flatMap((sku) => sku.packages)
 
-  const reportScanStatus = useCallback((message: string) => {
-    statusEventRef.current += 1
-    setScanStatus({ message, event: statusEventRef.current })
-  }, [])
-
-  useEffect(() => {
-    captureInFlightRef.current = captureInFlight
-  }, [captureInFlight])
-
-  useEffect(() => {
-    if (response === previousResponseRef.current) return
-    previousResponseRef.current = response
-    if (captureInFlightRef.current) return
-    setActivePackageId(null)
-    setAmbiguousMatches([])
-    setScanStatus(null)
-  }, [response])
-
-  useEffect(() => {
-    if (response === null || response.freshness.isStale || response.data.snapshotObservedAt === null) {
-      setLocallyStale(true)
+  function selectScan(rawCode: string): void {
+    const code = rawCode.trim().toLowerCase()
+    const matches = visiblePackages.filter((pkg) =>
+      pkg.inventoryItemId.toLowerCase() === code ||
+      pkg.inventoryBarcode?.trim().toLowerCase() === code ||
+      pkg.metrcTag?.trim().toLowerCase() === code,
+    )
+    if (matches.length !== 1) {
+      setScanMessage(matches.length === 0
+        ? 'No visible package matches that barcode or METRC tag. Check the site and cannabis filter.'
+        : 'That scan matches more than one package. Use the package row to choose one.')
       return
     }
-    const staleAt = new Date(response.data.snapshotObservedAt).getTime()
-      + response.freshness.staleAfterMinutes * 60_000
-    const delay = staleAt - Date.now()
-    if (delay <= 0) {
-      setLocallyStale(true)
-      return
-    }
-    setLocallyStale(false)
-    const timeout = window.setTimeout(() => {
-      setLocallyStale(true)
-      setAmbiguousMatches([])
-      if (!captureInFlightRef.current) setActivePackageId(null)
-      reportScanStatus('This stock snapshot became stale. Reload inventory before recording a count.')
-    }, delay)
-    return () => window.clearTimeout(timeout)
-  }, [reportScanStatus, response])
-
-  const activateScannedPackage = useCallback((value: string) => {
-    if (captureInFlightRef.current) return
-    const matches = findLowInventoryPackagesForScan(packages, value)
+    const match = matches[0]
+    setSelectedPackageId(match.inventoryItemId)
+    setScanMessage(`Matched ${packageIdentity(match)}. Enter the physical count on the highlighted row.`)
     setScannerOpen(false)
-    setActivePackageId(null)
-    setAmbiguousMatches([])
-    if (matches.length === 0) {
-      reportScanStatus(`No package in this ${siteLabel} queue matches that barcode or METRC tag.`)
-      return
-    }
-    if (matches.length > 1) {
-      setAmbiguousMatches(matches)
-      const countableMatches = matches.filter(isLowInventoryPackageCountable)
-      reportScanStatus(countableMatches.length === 0
-        ? `${matches.length} packages match that code, but none has a current Sweed quantity. Reload the queue or try another package.`
-        : `${matches.length} packages match that code. Choose the package you are holding.`)
-      return
-    }
-    if (!isLowInventoryPackageCountable(matches[0]!)) {
-      reportScanStatus('That package has no current Sweed quantity. Reload the queue or choose another package.')
-      return
-    }
-    setActivePackageId(matches[0]!.inventoryItemId)
-    setScanCode('')
-    reportScanStatus(`Ready to count ${packageIdentity(matches[0]!)}.`)
-    focusPhysicalCountInput(matches[0]!.inventoryItemId)
-  }, [packages, reportScanStatus, siteLabel])
+    window.setTimeout(() => document.getElementById(`low-inventory-package-${match.inventoryItemId}`)?.focus(), 0)
+  }
 
-  useEffect(() => {
-    if (scanStatus !== null && activePackageId === null) {
-      scanStatusRef.current?.focus()
-      scanStatusRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-    }
-  }, [activePackageId, scanStatus])
-
-  const closeCountForm = useCallback((inventoryItemId: string) => {
-    setActivePackageId(null)
-    window.requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>(
-        `[data-count-trigger="${CSS.escape(inventoryItemId)}"]`,
-      )?.focus()
-    })
-  }, [])
-  const skuCount = response === null
-    ? 0
-    : new Set(visibleLocationGroups.flatMap((group) => group.skus.map((sku) =>
-      sku.productSku ?? `product-ids:${sku.productIds.join(',')}`,
-    ))).size
-  const packageCount = visibleLocationGroups.reduce(
-    (total, group) => total + group.skus.reduce((groupTotal, sku) => groupTotal + sku.packages.length, 0),
-    0,
-  )
+  const skuCount = new Set(visibleSkus.map((sku) => sku.productSku ?? `product-ids:${sku.productIds.join(',')}`)).size
+  const packageCount = visiblePackages.length
 
   return (
     <section className="low-inventory-page" aria-labelledby="low-inventory-title">
       <header className="low-inventory-header">
         <div>
           <p className="eyebrow">Catalog &amp; Inventory / {siteLabel}</p>
-          <h2 id="low-inventory-title">Low inventory</h2>
+          <h2 id="low-inventory-title">Low inventory audit</h2>
         </div>
-        <Pill tone="muted">
-          {canCaptureCounts && (response?.freshness.isStale || locallyStale) ? 'Stale' : canCaptureCounts ? 'Count only' : 'Read only'}
-        </Pill>
+        <Pill tone={canEdit ? 'warning' : 'muted'}>{canEdit ? 'Audit mode' : 'Read only'}</Pill>
       </header>
 
       <div className="low-inventory-status" aria-live="polite">
-        {state.kind === 'loading' ? (
-          <div className="low-inventory-state-card" role="status">
-            <strong>Loading {siteLabel} inventory…</strong>
-            <span>Checking the latest stock snapshot.</span>
-          </div>
-        ) : null}
-
-        {state.kind === 'error' ? (
-          <div className="low-inventory-state-card low-inventory-state-card-error" role="alert">
-            <strong>Inventory could not be loaded</strong>
-            <span>{state.message}</span>
-            {onRetry ? (
-              <button type="button" className="ghost-button" onClick={onRetry} disabled={captureInFlight}>Try again</button>
-            ) : null}
-          </div>
-        ) : null}
-
-        {response && (response.freshness.isStale || locallyStale) ? (
-          <div className="low-inventory-state-card low-inventory-state-card-stale" role="status">
-            <strong>Stock snapshot is stale</strong>
-            <span>
-              {response.data.snapshotObservedAt === null
-                ? 'No stock snapshot is available. Do not use this list for a floor check.'
-                : `Last observed ${nyLongDateTime(new Date(response.data.snapshotObservedAt).getTime())} New York time. Do not use this list for a floor check.`}
-            </span>
-            {onRetry ? (
-              <button type="button" className="ghost-button" onClick={onRetry} disabled={captureInFlight}>Reload inventory</button>
-            ) : null}
-          </div>
-        ) : null}
+        {state.kind === 'loading' ? <div className="low-inventory-state-card" role="status"><strong>Loading {siteLabel} inventory…</strong><span>Checking the latest stock snapshot.</span></div> : null}
+        {state.kind === 'error' ? <div className="low-inventory-state-card low-inventory-state-card-error" role="alert"><strong>Inventory could not be loaded</strong><span>{state.message}</span>{onRetry ? <button type="button" className="ghost-button" onClick={onRetry}>Try again</button> : null}</div> : null}
+        {response?.freshness.isStale ? <div className="low-inventory-state-card low-inventory-state-card-stale" role="status"><strong>Stock snapshot is stale</strong><span>{response.data.snapshotObservedAt === null ? 'No stock snapshot is available. Do not use this list for a floor check.' : `Last observed ${nyLongDateTime(new Date(response.data.snapshotObservedAt).getTime())} New York time. Do not use this list for a floor check; reload before recording counts.`}</span></div> : null}
+        {mutationMessage ? <div className="low-inventory-state-card" role="status"><strong>{mutationMessage}</strong></div> : null}
       </div>
 
-      {response ? (
-        <>
-          <div className="low-inventory-toolbar">
-            <label className="low-inventory-cannabis-filter">
-              <input
-                checked={cannabisOnly}
-                disabled={interactionBusy}
-                onChange={(event) => {
-                  setActivePackageId(null)
-                  setAmbiguousMatches([])
-                  setScanStatus(null)
-                  onCannabisOnlyChange(event.currentTarget.checked)
-                }}
-                type="checkbox"
-              />
-              <span>
-                <strong>Cannabis only</strong>
-                <small>Items without a reported category stay visible.</small>
-              </span>
-            </label>
-            <div className="low-inventory-summary" aria-atomic="true" aria-label="Queue summary" aria-live="polite">
-              <strong>{skuCount} {skuCount === 1 ? 'SKU' : 'SKUs'}</strong>
-              <span>{packageCount} {packageCount === 1 ? 'package' : 'packages'}</span>
-              <span>At or below {displayQuantity(response.data.threshold)} available</span>
-            </div>
-          </div>
+      {response ? <>
+        <div className="low-inventory-toolbar">
+          <label><input type="checkbox" checked={cannabisOnly} onChange={(event) => setCannabisOnly(event.target.checked)} /> Cannabis products only</label>
+          <label><input type="checkbox" checked={showCompleted} onChange={(event) => setShowCompleted(event.target.checked)} /> Show completed checks</label>
+          {canEdit ? <>
+            <button type="button" className="ghost-button" disabled={busy} onClick={() => setScannerOpen(true)}>Scan package</button>
+            <form onSubmit={(event) => { event.preventDefault(); selectScan(manualScan) }}>
+              <input aria-label="Barcode or METRC tag" type="text" inputMode="text" autoComplete="off" placeholder="Type or hardware-scan" value={manualScan} onChange={(event) => setManualScan(event.target.value)} />
+              <button type="submit" className="ghost-button" disabled={manualScan.trim().length === 0}>Find</button>
+            </form>
+          </> : null}
+        </div>
+        {scanMessage ? <div className="low-inventory-scan-message" aria-live="polite">{scanMessage}</div> : null}
 
-          {captureEnabled ? (
-            <section className="low-inventory-scan" aria-labelledby="low-inventory-scan-title">
-              <div>
-                <strong id="low-inventory-scan-title">Find a package</strong>
-                <span>Scan first, then record its physical count.</span>
-              </div>
-              <div className="low-inventory-scan-actions">
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => {
-                    setActivePackageId(null)
-                    setAmbiguousMatches([])
-                    setScanStatus(null)
-                    setScannerOpen(true)
-                  }}
-                  disabled={interactionBusy}
-                >
-                  Scan package
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => {
-                    setActivePackageId(null)
-                    setAmbiguousMatches([])
-                    photoInputRef.current?.click()
-                  }}
-                  disabled={interactionBusy}
-                >
-                  {photoBusy ? 'Reading photo…' : 'From photo'}
-                </button>
-              </div>
-              <form
-                className="low-inventory-manual-scan"
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  activateScannedPackage(scanCode)
-                }}
-              >
-                <label htmlFor="low-inventory-scan-code">Barcode or METRC tag</label>
-                <div>
-                  <input
-                    id="low-inventory-scan-code"
-                    type="text"
-                    autoComplete="off"
-                    spellCheck={false}
-                    value={scanCode}
-                    onChange={(event) => setScanCode(event.target.value)}
-                    disabled={interactionBusy}
-                  />
-                  <button type="submit" className="ghost-button" disabled={interactionBusy || scanCode.trim().length === 0}>Find</button>
-                </div>
-              </form>
-              <input
-                ref={photoInputRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="catalog-maintenance-file-input"
-                aria-label="Choose a package barcode photo"
-                onChange={(event) => {
-                  const file = event.target.files?.[0]
-                  if (!file) return
-                  setPhotoBusy(true)
-                  void decodeBarcodeFromImageFile(file).then(
-                    (value) => {
-                      if (captureInFlightRef.current) return
-                      if (value === null) reportScanStatus('No barcode was found in that photo. Retake it or enter the code.')
-                      else activateScannedPackage(value)
-                    },
-                    () => {
-                      if (!captureInFlightRef.current) reportScanStatus('That photo could not be read. Retake it or enter the code.')
-                    },
-                  ).finally(() => {
-                    setPhotoBusy(false)
-                    event.target.value = ''
-                  })
-                }}
-              />
-              {scanStatus ? (
-                <div
-                  ref={scanStatusRef}
-                  className="low-inventory-scan-status"
-                  role="status"
-                  tabIndex={-1}
-                >
-                  <p>{scanStatus.message}</p>
-                  {ambiguousMatches.length > 0 ? (
-                    <div className="low-inventory-scan-candidates" aria-label="Matching packages">
-                      {ambiguousMatches.map((pkg) => (
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          disabled={interactionBusy || !isLowInventoryPackageCountable(pkg)}
-                          key={pkg.inventoryItemId}
-                          onClick={() => {
-                            setActivePackageId(pkg.inventoryItemId)
-                            setAmbiguousMatches([])
-                            reportScanStatus(`Ready to count ${packageIdentity(pkg)}.`)
-                            focusPhysicalCountInput(pkg.inventoryItemId)
-                          }}
-                        >
-                          {packageIdentity(pkg)} · {pkg.stockLocation}
-                          {isLowInventoryPackageCountable(pkg) ? '' : ' · Current quantity unavailable'}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              <LiveBarcodeScanner
-                open={scannerOpen}
-                onDetected={activateScannedPackage}
-                onCancel={() => setScannerOpen(false)}
-                onPickPhoto={() => {
-                  setScannerOpen(false)
-                  photoInputRef.current?.click()
-                }}
-              />
+        <div className="low-inventory-summary" aria-label="Queue summary"><strong>{skuCount} {skuCount === 1 ? 'SKU' : 'SKUs'}</strong><span>{packageCount} {packageCount === 1 ? 'package' : 'packages'}</span><span>At or below {displayQuantity(response.data.threshold)} available</span></div>
+
+        {visibleGroups.length === 0 ? <div className="low-inventory-state-card low-inventory-empty" role="status"><strong>{response.data.locationGroups.length === 0 ? 'No low-inventory items' : 'No matching low-inventory items'}</strong><span>{response.data.locationGroups.length === 0 ? `${response.site.siteLabel} has no for-sale SKUs between 1 and ${displayQuantity(response.data.threshold)} available.` : 'Turn off “Cannabis products only” to include accessories and other products.'}</span></div> :
+          <div className="low-inventory-locations">{visibleGroups.map((group, groupIndex) => {
+            const headingId = `low-inventory-location-${groupIndex}`
+            return <section className="low-inventory-location" aria-labelledby={headingId} key={`${group.location.kind}:${group.location.label}`}>
+              <header className="low-inventory-location-header"><div><span>{group.location.kind === 'shelf' ? 'Shelf' : 'Stock room'}</span><h3 id={headingId}>{group.location.label}</h3></div><Pill tone="muted">{group.skus.length} {group.skus.length === 1 ? 'SKU' : 'SKUs'}</Pill></header>
+              <div className="low-inventory-skus">{group.skus.map((sku, skuIndex) => <article className="low-inventory-sku" key={`${sku.productSku ?? 'no-sku'}:${sku.productIds.join(',')}:${skuIndex}`}>
+                <header>{sku.imageUrl ? <HoverZoomImage alt={sku.productName ?? 'Product'} src={sku.imageUrl} expandOnClick zoomedSize={320} style={{ width: 52, height: 52, borderRadius: 6, objectFit: 'cover' }} /> : null}<div className="low-inventory-product"><h4>{sku.productName ?? 'Unnamed product'}</h4><span>{[sku.categoryName, sku.subcategoryName].filter(Boolean).join(' / ') || 'Category not reported'}</span><span>{sku.productSku ? `SKU ${sku.productSku}` : 'SKU not reported'}</span></div><div className="low-inventory-total"><strong>{displayQuantity(sku.packages.reduce((total, pkg) => total + pkg.availableQty, 0))}</strong><span>at this location</span><small>{displayQuantity(sku.combinedAvailableQty)} site-wide</small></div></header>
+                <ul className="low-inventory-packages" aria-label="Packages">{sku.packages.map((pkg) => {
+                  const latestAudit = latestAuditByPackage.get(pkg.inventoryItemId)
+                  const countText = counts[pkg.inventoryItemId] ?? ''
+                  const physicalCount = countText === '' ? null : Number(countText)
+                  const classification = physicalCount !== null && Number.isFinite(physicalCount) ? classifyCount(pkg, physicalCount) : null
+                  return <li id={`low-inventory-package-${pkg.inventoryItemId}`} tabIndex={-1} className={selectedPackageId === pkg.inventoryItemId ? 'is-selected' : undefined} key={pkg.inventoryItemId}>
+                    <div><strong>{packageIdentity(pkg)}</strong><span>{pkg.stockLocation}</span></div>
+                    <dl><div><dt>Available</dt><dd>{displayQuantity(pkg.availableQty)}</dd></div><div><dt>Current</dt><dd>{displayQuantity(pkg.currentQty)}</dd></div><div><dt>Held</dt><dd>{displayQuantity(pkg.holdQty)}</dd></div></dl>
+                    {canEdit && pkg.currentQty !== null ? <form className="low-inventory-count" onSubmit={(event: FormEvent) => {
+                      event.preventDefault()
+                      if (!classification || physicalCount === null || !onRecordCount) return
+                      void onRecordCount({ dealerId: response.site.dealerId, productId: pkg.productId, inventoryItemId: pkg.inventoryItemId, snapshotObservedAt: pkg.observedAt, physicalCount }).catch(() => undefined)
+                    }}><label>Physical count<input type="number" min="0" step="0.01" inputMode="decimal" value={countText} onChange={(event) => setCounts((current) => ({ ...current, [pkg.inventoryItemId]: event.target.value }))} /></label><button type="submit" className="primary-button" disabled={busy || classification === null || response.freshness.isStale}>Record count</button>{classification ? <span className={`low-inventory-classification is-${classification}`}>{classificationLabel(classification)}</span> : null}</form> : null}
+                    {latestAudit ? <div className="low-inventory-audit-result"><strong>{classificationLabel(latestAudit.classification)}</strong><span>Counted {displayQuantity(latestAudit.physicalCount)} by {latestAudit.actorLabel} · {nyLongDateTime(new Date(latestAudit.createdAt).getTime())} NY</span>{latestAudit.transferStatus === 'pending' ? <button ref={(element) => { if (transferReview?.auditId === latestAudit.auditId) transferTriggerRef.current = element }} type="button" className="danger-button" disabled={busy || !transferConfig?.transferEnabled} onClick={(event) => { transferTriggerRef.current = event.currentTarget; setTransferReview(latestAudit) }}>Review location move</button> : null}{latestAudit.transferStatus === 'resolved' ? <span>Package moved out of the for-sale room.</span> : null}</div> : null}
+                  </li>
+                })}</ul>
+              </article>)}</div>
             </section>
-          ) : countMigrationPending ? (
-            <div className="low-inventory-state-card" role="status">
-              <strong>Physical counts are not available yet</strong>
-              <span>The reviewed count-storage migration must be applied before this page can record counts.</span>
-            </div>
-          ) : null}
+          })}</div>}
 
-          {response.data.locationGroups.length === 0 ? (
-            <div className="low-inventory-state-card low-inventory-empty" role="status">
-              <strong>No low-inventory items</strong>
-              <span>{response.site.siteLabel} has no for-sale SKUs between 1 and {displayQuantity(response.data.threshold)} available.</span>
-            </div>
-          ) : visibleLocationGroups.length === 0 ? (
-            <div className="low-inventory-state-card low-inventory-empty" role="status">
-              <strong>No cannabis low-inventory items</strong>
-              <span>Turn off Cannabis only to show Accessories and Other.</span>
-            </div>
-          ) : (
-            <div className="low-inventory-locations">
-              {visibleLocationGroups.map((group, groupIndex) => {
-                const headingId = `low-inventory-location-${groupIndex}`
-                return (
-                  <section className="low-inventory-location" aria-labelledby={headingId} key={`${group.location.kind}:${group.location.label}`}>
-                    <header className="low-inventory-location-header">
-                      <div>
-                        <span>{group.location.kind === 'shelf' ? 'Shelf' : 'Stock room'}</span>
-                        <h3 id={headingId}>{group.location.label}</h3>
-                      </div>
-                      <Pill tone="muted">{group.skus.length} {group.skus.length === 1 ? 'SKU' : 'SKUs'}</Pill>
-                    </header>
-                    <div className="low-inventory-skus">
-                      {group.skus.map((sku, skuIndex) => (
-                        <article className="low-inventory-sku" key={`${sku.productSku ?? 'no-sku'}:${sku.productIds.join(',')}:${skuIndex}`}>
-                          <header>
-                            <div className="low-inventory-product">
-                              <h4>{sku.productName ?? 'Unnamed product'}</h4>
-                              <span className="low-inventory-taxonomy">
-                                {taxonomyLabel(sku.categoryName, sku.subcategoryName)}
-                              </span>
-                              <span>{sku.productSku ? `SKU ${sku.productSku}` : 'SKU not reported'}</span>
-                            </div>
-                            <div className="low-inventory-total" aria-label={`${displayQuantity(sku.packages.reduce((total, pkg) => total + pkg.availableQty, 0))} available at this location; ${displayQuantity(sku.combinedAvailableQty)} site-wide`}>
-                              <strong>{displayQuantity(sku.packages.reduce((total, pkg) => total + pkg.availableQty, 0))}</strong>
-                              <span>at this location</span>
-                              <small>{displayQuantity(sku.combinedAvailableQty)} site-wide</small>
-                            </div>
-                          </header>
-                          <ul className="low-inventory-packages" aria-label="Packages">
-                            {sku.packages.map((pkg) => (
-                              <li key={pkg.inventoryItemId}>
-                                <div>
-                                  <strong>{packageIdentity(pkg)}</strong>
-                                  <span>{pkg.stockLocation}</span>
-                                </div>
-                                <dl>
-                                  <div><dt>Available</dt><dd>{displayQuantity(pkg.availableQty)}</dd></div>
-                                  <div><dt>Current</dt><dd>{displayQuantity(pkg.currentQty)}</dd></div>
-                                  <div><dt>Held</dt><dd>{displayQuantity(pkg.holdQty)}</dd></div>
-                                </dl>
-                                {activePackageId === pkg.inventoryItemId && isLowInventoryPackageCountable(pkg) ? (
-                                    <PhysicalCountForm
-                                      canSubmit={captureEnabled || captureInFlight}
-                                      dealerId={response.data.dealerId}
-                                      pkg={pkg}
-                                      onClose={() => closeCountForm(pkg.inventoryItemId)}
-                                      onBusyChange={(busy) => {
-                                        captureInFlightRef.current = busy
-                                        setCaptureInFlight(busy)
-                                      }}
-                                    />
-                                ) : captureEnabled ? (
-                                    <button
-                                      type="button"
-                                      className="ghost-button low-inventory-count-button"
-                                      data-count-trigger={pkg.inventoryItemId}
-                                      disabled={interactionBusy || !isLowInventoryPackageCountable(pkg)}
-                                      onClick={() => {
-                                        setActivePackageId(pkg.inventoryItemId)
-                                        setScanStatus(null)
-                                      }}
-                                    >
-                                      {pkg.currentQty === null ? 'Current quantity unavailable' : 'Record physical count'}
-                                    </button>
-                                ) : null}
-                              </li>
-                            ))}
-                          </ul>
-                        </article>
-                      ))}
-                    </div>
-                  </section>
-                )
-              })}
-            </div>
-          )}
+        <details className="low-inventory-history"><summary>Recent audit results ({audits.length})</summary>{audits.length === 0 ? <p>No counts have been recorded for this site.</p> : <ul>{audits.map((audit) => <li key={audit.auditId}><strong>{packageIdentity(audit)}</strong><span>{classificationLabel(audit.classification)} · physical {displayQuantity(audit.physicalCount)} / Sweed {displayQuantity(audit.snapshotCurrentQty)} · {audit.transferStatus.replace('_', ' ')}</span></li>)}</ul>}</details>
 
-          <details className="low-inventory-about">
-            <summary>About this list</summary>
-            <p>
-              Shows for-sale SKUs with a combined available quantity from 1 through {displayQuantity(response.data.threshold)}.
-              Quantities are a read-only stock snapshot and this page cannot change inventory.
-            </p>
-            <p>
-              Snapshot time: {response.data.snapshotObservedAt === null
-                ? 'not available'
-                : `${nyLongDateTime(new Date(response.data.snapshotObservedAt).getTime())} New York time`}.
-              Data is considered stale after {response.freshness.staleAfterMinutes} minutes.
-            </p>
-          </details>
-        </>
-      ) : null}
+        {isAdmin && transferConfig && onSaveTransferConfig ? <details className="low-inventory-config"><summary>Transfer settings</summary><form onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void onSaveTransferConfig({ dealerId: transferConfig.dealerId, destinationName: String(data.get('destinationName') ?? ''), transferEnabled: data.get('transferEnabled') === 'on' }).catch(() => undefined) }}><label>NOT FOR SALE destination<input name="destinationName" defaultValue={transferConfig.destinationName} maxLength={200} required /></label><label><input name="transferEnabled" type="checkbox" defaultChecked={transferConfig.transferEnabled} /> Enable confirmed package transfers for this site</label><button className="primary-button" type="submit" disabled={busy}>Save transfer settings</button></form></details> : null}
+
+        <details className="low-inventory-about"><summary>About this workflow</summary><p>Shows for-sale SKUs with a combined available quantity from 1 through {displayQuantity(response.data.threshold)}. Counts create an audit record. A short or zero result stays pending until an operator separately confirms moving that exact package to the configured NOT FOR SALE room.</p><p>Snapshot time: {response.data.snapshotObservedAt === null ? 'not available' : `${nyLongDateTime(new Date(response.data.snapshotObservedAt).getTime())} New York time`}.</p></details>
+      </> : null}
+
+      <LiveBarcodeScanner open={scannerOpen} onDetected={selectScan} onCancel={() => setScannerOpen(false)} />
+      {transferReview && transferConfig ? <div className="low-inventory-transfer-scrim" role="presentation"><section ref={transferDialogRef} className="low-inventory-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="low-inventory-transfer-title" onKeyDown={handleDialogKeyDown}><h3 id="low-inventory-transfer-title">Move this package out of FOR SALE?</h3><dl><div><dt>Site</dt><dd>{siteLabel}</dd></div><div><dt>Package</dt><dd>{transferReview.metrcTag ?? transferReview.inventoryItemId}</dd></div><div><dt>Sweed / physical</dt><dd>{displayQuantity(transferReview.snapshotCurrentQty)} / {displayQuantity(transferReview.physicalCount)}</dd></div><div><dt>From</dt><dd>{transferReview.sourceLocation}</dd></div><div><dt>To</dt><dd>{transferConfig.destinationName}</dd></div></dl><p>The whole package leaves the customer menu. No quantity is changed.</p><div><button type="button" className="ghost-button" onClick={() => setTransferReview(null)}>Cancel</button><button type="button" className="danger-button" disabled={busy} onClick={() => { if (onTransfer) void onTransfer(transferReview.auditId, transferConfig).then(() => setTransferReview(null)).catch(() => undefined) }}>Confirm package move</button></div></section></div> : null}
     </section>
-  )
-}
-
-const classificationLabels: Record<LowInventoryCountCaptureResponse['count']['classification'], string> = {
-  equal: 'Matches Sweed',
-  short: 'Short count',
-  zero: 'Counted zero',
-  'zero-held': 'Counted zero, held stock remains',
-  over: 'Over count',
-}
-
-function PhysicalCountForm(props: {
-  canSubmit: boolean
-  dealerId: number
-  pkg: LowInventoryPackage
-  onClose: () => void
-  onBusyChange: (busy: boolean) => void
-}) {
-  const { canSubmit, dealerId, onBusyChange, onClose, pkg } = props
-  const [physicalQty, setPhysicalQty] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<LowInventoryCountCaptureResponse | null>(null)
-  const [requestId] = useState(() => globalThis.crypto.randomUUID())
-  const inFlightRef = useRef(false)
-  const inputId = `physical-count-${pkg.inventoryItemId.replace(/[^a-zA-Z0-9_-]/g, '-')}`
-
-  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault()
-    if (inFlightRef.current || !canSubmit) return
-    const parsedQty = Number(physicalQty)
-    if (!Number.isFinite(parsedQty) || parsedQty < 0) {
-      setError('Enter a physical count of zero or more.')
-      return
-    }
-    inFlightRef.current = true
-    setBusy(true)
-    onBusyChange(true)
-    setError(null)
-    try {
-      const response = await mutateJson(
-        '/api/low-inventory/counts',
-        LowInventoryCountCaptureResponseSchema,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            dealerId,
-            inventoryItemId: pkg.inventoryItemId,
-            physicalQty: parsedQty,
-            requestId,
-          }),
-        },
-      )
-      setResult(response)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The physical count could not be recorded.')
-    } finally {
-      inFlightRef.current = false
-      setBusy(false)
-      onBusyChange(false)
-    }
-  }
-
-  if (result !== null) {
-    const pending = result.count.resolutionStatus === 'pending'
-    return (
-      <div className={`low-inventory-count-result${pending ? ' is-pending' : ' is-equal'}`} role="status">
-        <strong>{classificationLabels[result.count.classification]}</strong>
-        <span>
-          {pending
-            ? 'Count recorded. Package still for sale. Transfer pending.'
-            : 'Count recorded. No discrepancy.'}
-        </span>
-        <small>No Sweed inventory changed and no notification was sent.</small>
-        <button type="button" className="ghost-button" onClick={onClose}>Done</button>
-      </div>
-    )
-  }
-
-  return (
-    <form className="low-inventory-count-form" onSubmit={(event) => void submit(event)}>
-      <div>
-        <label htmlFor={inputId}>Physical count for {packageIdentity(pkg)}</label>
-        <span>Sweed current: {displayQuantity(pkg.currentQty)}</span>
-      </div>
-      <input
-        id={inputId}
-        data-physical-count-input={pkg.inventoryItemId}
-        type="number"
-        inputMode="decimal"
-        min="0"
-        max="1000000"
-        step="0.001"
-        required
-        autoFocus
-        value={physicalQty}
-        onChange={(event) => setPhysicalQty(event.target.value)}
-        disabled={busy || !canSubmit}
-      />
-      {error ? <span className="low-inventory-count-error" role="alert">{error}</span> : null}
-      <div className="low-inventory-count-actions">
-        <button type="submit" className="primary-button" disabled={busy || !canSubmit || physicalQty.length === 0}>
-          {busy ? 'Recording…' : 'Record count'}
-        </button>
-        <button type="button" className="ghost-button" onClick={onClose} disabled={busy}>Cancel</button>
-      </div>
-      {!canSubmit ? <span className="low-inventory-count-error" role="status">Reload fresh inventory before retrying this count.</span> : null}
-      <small>Records an audit entry only. It does not change Sweed or notify anyone.</small>
-    </form>
   )
 }

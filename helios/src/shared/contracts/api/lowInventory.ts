@@ -53,6 +53,8 @@ export type LowInventoryPackage = z.infer<typeof LowInventoryPackageSchema>
 export const LowInventorySkuSchema = z.object({
   categoryName: z.string().nullable(),
   combinedAvailableQty: z.number(),
+  imageUrl: z.string().url().nullable(),
+  isCannabis: z.boolean(),
   packages: z.array(LowInventoryPackageSchema),
   productIds: z.array(z.number().int().positive()),
   productName: z.string().nullable(),
@@ -92,6 +94,79 @@ export const LowInventoryResponseSchema = z.object({
 })
 export type LowInventoryResponse = z.infer<typeof LowInventoryResponseSchema>
 
+export const LOW_INVENTORY_DEFAULT_DESTINATION = 'NOT FOR SALE - Hold for Dave inspection'
+export const LowInventoryClassificationSchema = z.enum(['equal', 'short', 'zero', 'over', 'held'])
+export type LowInventoryClassification = z.infer<typeof LowInventoryClassificationSchema>
+
+export const LowInventoryCountRequestSchema = z.object({
+  dealerId: z.number().int().positive(),
+  productId: z.number().int().positive(),
+  inventoryItemId: z.string().trim().min(1),
+  snapshotObservedAt: z.string().datetime(),
+  physicalCount: z.number().nonnegative(),
+}).strict()
+export type LowInventoryCountRequest = z.infer<typeof LowInventoryCountRequestSchema>
+
+export const LowInventoryCountBodySchema = LowInventoryCountRequestSchema.extend({
+  metrcTag: z.string().trim().min(1).nullable(),
+  sourceLocation: z.string().trim().min(1),
+  snapshotCurrentQty: z.number().nonnegative(),
+  snapshotAvailableQty: z.number().nonnegative(),
+  snapshotHoldQty: z.number().nonnegative().nullable(),
+  classification: LowInventoryClassificationSchema,
+}).strict()
+export type LowInventoryCountBody = z.infer<typeof LowInventoryCountBodySchema>
+
+export const LowInventoryNotificationStatusSchema = z.enum(['not_requested', 'sent', 'failed'])
+export const LowInventoryCountResponseSchema = z.object({
+  auditId: z.number().int().positive(),
+  notificationStatus: LowInventoryNotificationStatusSchema,
+})
+
+export const LowInventoryAuditListRequestSchema = z.object({
+  dealerId: z.coerce.number().int().positive(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+})
+export const LowInventoryAuditResultSchema = LowInventoryCountBodySchema.extend({
+  auditId: z.number().int().positive(),
+  actorLabel: z.string(),
+  createdAt: z.string().datetime(),
+  transferStatus: z.enum(['not_applicable', 'pending', 'resolved']),
+  transferAuditId: z.number().int().positive().nullable(),
+})
+export type LowInventoryAuditResult = z.infer<typeof LowInventoryAuditResultSchema>
+export const LowInventoryAuditListResponseSchema = z.object({
+  items: z.array(LowInventoryAuditResultSchema),
+})
+
+export const LowInventoryTransferConfigBodySchema = z.object({
+  dealerId: z.number().int().positive(),
+  destinationName: z.string().trim().min(1).max(200).refine(
+    (name) => name.toLowerCase().startsWith('not for sale'),
+    'Destination must be a NOT FOR SALE room.',
+  ),
+  transferEnabled: z.boolean(),
+}).strict()
+export type LowInventoryTransferConfigBody = z.infer<typeof LowInventoryTransferConfigBodySchema>
+export const LowInventoryTransferConfigResponseSchema = LowInventoryTransferConfigBodySchema.extend({
+  updatedAt: z.string().nullable(),
+  updatedBy: z.string().nullable(),
+})
+export type LowInventoryTransferConfigResponse = z.infer<typeof LowInventoryTransferConfigResponseSchema>
+
+export const LowInventoryTransferBodySchema = z.object({
+  dealerId: z.number().int().positive(),
+  countAuditId: z.number().int().positive(),
+  confirmedConfigUpdatedAt: z.string().nullable(),
+  confirmedDestinationName: z.string().trim().min(1).max(200),
+}).strict()
+export const LowInventoryTransferResponseSchema = z.object({
+  transferAuditId: z.number().int().positive(),
+  countAuditId: z.number().int().positive(),
+  movedQty: z.number().positive(),
+  notificationStatus: LowInventoryNotificationStatusSchema,
+})
+export type LowInventoryTransferResponse = z.infer<typeof LowInventoryTransferResponseSchema>
 export const LowInventoryCountClassificationSchema = z.enum([
   'equal',
   'short',

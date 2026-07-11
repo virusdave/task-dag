@@ -11516,86 +11516,42 @@ span.metric-chart-legend-item {
   font-size: 0.85rem;
 }
 
-.low-inventory-scan {
-  display: grid;
-  gap: 0.65rem;
-  padding: 0.8rem;
-  border: 1px solid var(--panel-border);
-  border-radius: 14px;
-  background: rgba(255, 250, 241, 0.8);
-}
-
-.low-inventory-scan > div:first-child {
-  display: grid;
-  gap: 0.15rem;
-}
-
-.low-inventory-scan > div:first-child span,
-.low-inventory-manual-scan label,
-.low-inventory-count-form span,
-.low-inventory-count-form small,
-.low-inventory-count-result span,
-.low-inventory-count-result small {
-  color: var(--text-muted-strong);
-  font-size: 0.78rem;
-}
-
-.low-inventory-scan-actions,
-.low-inventory-count-actions {
+.low-inventory-toolbar,
+.low-inventory-toolbar form {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
 }
 
-.low-inventory-scan-actions button,
-.low-inventory-count-actions button,
-.low-inventory-count-button,
-.low-inventory-count-result button {
+.low-inventory-toolbar {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.low-inventory-toolbar > label {
   min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 700;
 }
 
-.low-inventory-manual-scan {
-  display: grid;
-  gap: 0.25rem;
+.low-inventory-toolbar form {
+  flex: 1 1 15rem;
 }
 
-.low-inventory-manual-scan > div {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.5rem;
-}
-
-.low-inventory-manual-scan input,
-.low-inventory-count-form input {
+.low-inventory-toolbar input[type='text'] {
   min-width: 0;
-  min-height: 44px;
-  padding: 0.55rem 0.65rem;
-  border: 1px solid var(--control-border);
-  border-radius: 9px;
-  background: var(--panel);
-  color: var(--text);
-  font: inherit;
+  flex: 1 1 9rem;
 }
 
-.low-inventory-scan-status {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.low-inventory-scan-status p {
-  margin: 0;
-}
-
-.low-inventory-scan-candidates {
-  display: grid;
-  gap: 0.4rem;
-  margin-top: 0.5rem;
-}
-
-.low-inventory-scan-candidates button {
-  min-height: 44px;
-  width: 100%;
-  overflow-wrap: anywhere;
+.low-inventory-scan-message {
+  padding: 0.7rem 0.8rem;
+  border-left: 4px solid var(--accent);
+  background: var(--accent-muted);
 }
 
 .low-inventory-locations,
@@ -11703,6 +11659,11 @@ span.metric-chart-legend-item {
   background: rgba(255, 255, 255, 0.55);
 }
 
+.low-inventory-packages > li.is-selected {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .low-inventory-packages > li > div {
   display: grid;
   gap: 0.1rem;
@@ -11749,51 +11710,130 @@ span.metric-chart-legend-item {
   overflow-wrap: anywhere;
 }
 
-.low-inventory-count-button {
-  width: 100%;
-}
-
-.low-inventory-count-form,
-.low-inventory-count-result {
+.low-inventory-count,
+.low-inventory-audit-result {
   display: grid;
-  gap: 0.55rem;
-  padding: 0.7rem;
-  border: 1px solid var(--accent);
-  border-radius: 10px;
-  background: var(--panel);
+  gap: 0.45rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--panel-border);
 }
 
-.low-inventory-count-form > div:first-child,
-.low-inventory-count-result {
+.low-inventory-count label,
+.low-inventory-config label {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.low-inventory-count input,
+.low-inventory-config input[type='text'],
+.low-inventory-config input:not([type]) {
+  min-height: 44px;
   min-width: 0;
 }
 
-.low-inventory-count-form label,
-.low-inventory-count-result strong {
-  display: block;
-  font-weight: 700;
-  overflow-wrap: anywhere;
+.low-inventory-count button,
+.low-inventory-audit-result button {
+  min-height: 44px;
 }
 
-.low-inventory-count-form input {
-  width: 100%;
-  box-sizing: border-box;
-  font-size: 1rem;
+.low-inventory-classification,
+.low-inventory-audit-result span {
+  color: var(--text-muted-strong);
+  font-size: 0.78rem;
 }
 
-.low-inventory-count-error {
+.low-inventory-classification.is-short,
+.low-inventory-classification.is-zero,
+.low-inventory-classification.is-held {
   color: var(--danger);
   font-weight: 700;
 }
 
-.low-inventory-count-result.is-pending {
-  border-color: var(--warning);
-  background: rgba(199, 154, 46, 0.14);
+.low-inventory-history,
+.low-inventory-config {
+  border-top: 1px solid var(--panel-border);
 }
 
-.low-inventory-count-result.is-equal {
-  border-color: var(--success);
-  background: rgba(61, 137, 85, 0.1);
+.low-inventory-history summary,
+.low-inventory-config summary {
+  min-height: 44px;
+  padding: 0.7rem 0;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.low-inventory-history ul,
+.low-inventory-history li,
+.low-inventory-config form {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.low-inventory-history ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.low-inventory-history li {
+  padding: 0.65rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.low-inventory-history li span {
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-transfer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+  display: grid;
+  place-items: end center;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.low-inventory-transfer-dialog {
+  width: min(100%, 34rem);
+  max-height: 92vh;
+  overflow: auto;
+  padding: 1rem;
+  border-radius: 16px 16px 0 0;
+  background: var(--panel, #fff);
+}
+
+.low-inventory-transfer-dialog h3 {
+  margin-top: 0;
+}
+
+.low-inventory-transfer-dialog dl {
+  display: grid;
+  grid-template-columns: minmax(6rem, 35%) 1fr;
+}
+
+.low-inventory-transfer-dialog dt,
+.low-inventory-transfer-dialog dd {
+  padding: 0.35rem 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.low-inventory-transfer-dialog dt {
+  font-weight: 700;
+}
+
+.low-inventory-transfer-dialog > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.low-inventory-transfer-dialog button {
+  min-height: 44px;
 }
 
 .low-inventory-empty {
@@ -11820,6 +11860,15 @@ span.metric-chart-legend-item {
 @media (min-width: 768px) {
   .low-inventory-skus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .low-inventory-transfer-scrim {
+    place-items: center;
+    padding: 1rem;
+  }
+
+  .low-inventory-transfer-dialog {
+    border-radius: 16px;
   }
 }
 

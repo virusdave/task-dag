@@ -4,6 +4,7 @@ import {
   useState,
   type CSSProperties,
   type JSX,
+  type KeyboardEvent,
   type MouseEvent,
 } from 'react'
 
@@ -43,6 +44,7 @@ export function HoverZoomImage({
   delayMs = 350,
   openHref,
   openTitle,
+  expandOnClick = false,
 }: {
   alt: string
   src: string
@@ -59,10 +61,12 @@ export function HoverZoomImage({
   openHref?: string | null
   /** Tooltip text for the link wrapper, if `openHref` is set. */
   openTitle?: string
+  /** Render an accessible thumbnail button that toggles the large preview. */
+  expandOnClick?: boolean
 }): JSX.Element {
   const ref = useRef<HTMLImageElement | null>(null)
   const timerRef = useRef<number | null>(null)
-  const [popup, setPopup] = useState<{ left: number; top: number } | null>(null)
+  const [popup, setPopup] = useState<{ left: number; size: number; top: number } | null>(null)
 
   useEffect(() => () => {
     if (timerRef.current !== null) {
@@ -78,32 +82,33 @@ export function HoverZoomImage({
     }
   }
 
-  const computePosition = (): { left: number; top: number } => {
+  const computePosition = (): { left: number; size: number; top: number } => {
     const el = ref.current
     const vw = window.innerWidth
     const vh = window.innerHeight
     const margin = 8
+    const size = Math.max(0, Math.min(zoomedSize, vw - margin * 2, vh - margin * 2))
     if (!el) {
-      return { left: margin, top: margin }
+      return { left: margin, size, top: margin }
     }
     const rect = el.getBoundingClientRect()
     // Prefer placing the popup to the right of the thumbnail; fall
     // back to the left if there isn't room.
     let left = rect.right + margin
-    if (left + zoomedSize + margin > vw) {
-      left = rect.left - margin - zoomedSize
+    if (left + size + margin > vw) {
+      left = rect.left - margin - size
     }
     if (left < margin) {
-      left = Math.max(margin, Math.min(vw - zoomedSize - margin, rect.left))
+      left = Math.max(margin, Math.min(vw - size - margin, rect.left))
     }
     let top = rect.top
-    if (top + zoomedSize + margin > vh) {
-      top = vh - zoomedSize - margin
+    if (top + size + margin > vh) {
+      top = vh - size - margin
     }
     if (top < margin) {
       top = margin
     }
-    return { left, top }
+    return { left, size, top }
   }
 
   const handleEnter = () => {
@@ -125,14 +130,18 @@ export function HoverZoomImage({
   // they click — otherwise it can hover-stick on touch / fast-click.
   const handleClick = (_event: MouseEvent) => {
     clearTimer()
-    setPopup(null)
+    setPopup((current) => expandOnClick && current === null ? computePosition() : null)
+  }
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'Escape') setPopup(null)
   }
 
   const thumbnail = (
     <img
       alt={alt}
       loading="lazy"
-      onClick={handleClick}
+      onClick={expandOnClick ? undefined : handleClick}
       onMouseEnter={handleEnter}
       onMouseLeave={handleLeave}
       ref={ref}
@@ -140,10 +149,33 @@ export function HoverZoomImage({
       style={style}
     />
   )
+  const popupImage = popup ? (
+    <img
+      alt={alt}
+      src={src}
+      style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+    />
+  ) : null
+  const popupStyle: CSSProperties | undefined = popup ? {
+    position: 'fixed', left: popup.left, top: popup.top, width: popup.size, height: popup.size,
+    background: '#fff', border: '1px solid #ccc', borderRadius: '4px',
+    boxShadow: '0 8px 24px rgba(0,0,0,0.18)', padding: '4px', zIndex: 1000,
+  } : undefined
 
   return (
     <>
-      {openHref ? (
+      {expandOnClick ? (
+        <button
+          aria-expanded={popup !== null}
+          aria-label={`${alt}; ${popup === null ? 'expand' : 'close'} image`}
+          onClick={handleClick}
+          onKeyDown={handleKeyDown}
+          style={{ background: 'none', border: 0, cursor: 'zoom-in', lineHeight: 0, padding: 0 }}
+          type="button"
+        >
+          {thumbnail}
+        </button>
+      ) : openHref ? (
         <a
           href={openHref}
           onMouseEnter={handleEnter}
@@ -158,29 +190,20 @@ export function HoverZoomImage({
       ) : (
         thumbnail
       )}
-      {popup ? (
-        <div
-          style={{
-            position: 'fixed',
-            left: popup.left,
-            top: popup.top,
-            width: zoomedSize,
-            height: zoomedSize,
-            background: '#fff',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
-            padding: '4px',
-            zIndex: 1000,
-            pointerEvents: 'none',
+      {popup && expandOnClick ? (
+        <button
+          aria-label={`Close expanded ${alt} image`}
+          onClick={(event) => {
+            event.stopPropagation()
+            setPopup(null)
           }}
+          style={popupStyle}
+          type="button"
         >
-          <img
-            alt={alt}
-            src={src}
-            style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
-          />
-        </div>
+          {popupImage}
+        </button>
+      ) : popup ? (
+        <div style={{ ...popupStyle, pointerEvents: 'none' }}>{popupImage}</div>
       ) : null}
     </>
   )

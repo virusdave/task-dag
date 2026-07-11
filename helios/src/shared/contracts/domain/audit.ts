@@ -31,6 +31,8 @@ export const AuditEntityTypeSchema = z.enum([
   'seo_faq_set',
   'seo_bundle',
   'migration_apply_attempt',
+  'low_inventory_package_count',
+  'low_inventory_package_transfer',
 ])
 export const AuditEventTypeSchema = z.enum([
   'auth.user.signed_in',
@@ -166,6 +168,9 @@ export const AuditEventTypeSchema = z.enum([
   'db.migration.apply.started',
   'db.migration.apply.succeeded',
   'db.migration.apply.failed',
+  'low_inventory.package_count.recorded',
+  'low_inventory.package_transfer.attempted',
+  'low_inventory.package_transfer.completed',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>
