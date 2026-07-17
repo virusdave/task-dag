@@ -136,9 +136,15 @@ if [ -n "$CLAIMED_SHORT" ]; then
     fi
     git push -q origin HEAD:master
     "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
+    converge_rc=$?
     still=$(git ls-remote origin "refs/heads/tasks/active/$CLAIMED_SHORT" | wc -l | tr -d ' ')
-    [ "$still" = 0 ] && ok "6: convergence clears the born-claimed active ref" \
-                       || bad "6: convergence left the active ref ($still)"
+    if [ "$converge_rc" -eq 0 ] && [ "$still" = 0 ]; then
+      ok "6: convergence clears the born-claimed active ref"
+    elif [ "$converge_rc" -eq 75 ] && [ "$still" = 1 ]; then
+      ok "6: migration drain defers born-claimed active-ref projection"
+    else
+      bad "6: convergence rc=$converge_rc produced invalid active-ref count $still"
+    fi
   else
     bad "6: complete failed for the born-claimed child"
   fi

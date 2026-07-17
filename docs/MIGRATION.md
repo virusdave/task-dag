@@ -336,6 +336,33 @@ Operational caveats:
   graph-convergence instead; no tombstone is needed because `master` carries the
   durable completion witness.
 
+## Semantic migration drain (committed state)
+
+The committed `scripts/task-dag.d/semantic-migration-policy.json` is the sole
+authority for the current drain. It recognizes only the legacy read schema and
+authorizes only `legacy-read-only` semantics. Legacy epic-close,
+materialisation, completion-ingest, and projection writers are disabled;
+`task-dag migration-status --json` reports the strict policy consumed by every
+guarded entry point. A missing, malformed, or unsupported policy fails closed
+for those writers and for migration status, without disabling unrelated reads
+or local completion recording. Human work-request comments remain available;
+completion comments are classified and rejected before API fallback, receipt,
+or ref effects. Reusable workflows obtain each mutator, guard, and policy from
+one checkout/archive revision and translate only exact status 75 into an
+explicit deferred-success result. Every other policy or runtime failure stays
+red.
+
+An ordinary revert is safe only before any canonical-v1 activation,
+epoch-backed write, or other activation write has occurred. After activation,
+rollback must be fenced against the activated epoch and preserve its durable
+facts. Never restore a legacy writer that is incompatible with activated
+canonical-v1 state.
+
+After this drain policy is pushed, the next implementation leaf must not start
+until mandatory post-push evidence shows every legacy writer workflow has
+observed the exact `draining-legacy-writers` status and either skipped or
+deferred successfully, with malformed/missing-policy probes remaining red.
+
 ## Repair-chain reconciliation format activation
 
 The reconciliation lease and evidence fields extend the existing

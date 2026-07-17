@@ -135,4 +135,13 @@ jobs:
           ENABLE_AUTO_FRONTIER: ${{ inputs.enable_auto_frontier }}
         working-directory: ${{ github.workspace }}
         run: |
+          set -euo pipefail
+          set +e
           .task-dag-runtime/scripts/sync-comment-to-tasks.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 75 ]; then
+            echo "Completion-comment ingestion deferred successfully during semantic migration drain."
+            exit 0
+          fi
+          exit "$rc"

@@ -287,10 +287,12 @@ cmd_delegate() {
     done
     [ -n "$top_issue" ] || { _xrepo_die "delegate: --issue is required"; return 2; }
     [ -n "$target"    ] || { _xrepo_die "delegate: --to is required";    return 2; }
+    [[ "$top_issue" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "delegate: --issue must be a positive integer"; return 2; }
+    _xrepo_parse_repo_issue "$target" || return $?
+    taskdag_migration_guard materialise || return $?
 
     _xrepo_need_cmd gh
     _xrepo_need_cmd jq
-    _xrepo_parse_repo_issue "$target" || return $?
 
     local top_repo
     top_repo="$(_xrepo_current_repo)"
@@ -772,10 +774,18 @@ cmd_ingest_completion() {
     [ -n "$comment_id"  ] || { _xrepo_die "ingest-completion: --comment-id is required";  return 2; }
     [ -n "$comment_url" ] || { _xrepo_die "ingest-completion: --comment-url is required"; return 2; }
     [ -n "$from"        ] || { _xrepo_die "ingest-completion: --from is required";        return 2; }
+    [[ "$top_issue" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "ingest-completion: --issue must be a positive integer"; return 2; }
+    [[ "$comment_id" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "ingest-completion: --comment-id must be a positive integer"; return 2; }
+    [[ "$comment_url" =~ ^https:// ]] || { _xrepo_die "ingest-completion: --comment-url must be https"; return 2; }
+    [ -z "$comment_phase" ] || [[ "$comment_phase" =~ ^[A-Za-z0-9]+$ ]] \
+        || { _xrepo_die "ingest-completion: --phase must be alphanumeric"; return 2; }
+    [ -z "$comment_peer_issue" ] || [[ "$comment_peer_issue" =~ ^[1-9][0-9]*$ ]] \
+        || { _xrepo_die "ingest-completion: --peer-issue must be a positive integer"; return 2; }
+    _xrepo_parse_repo_sha "$from" || return $?
+    taskdag_migration_guard completion-ingest || return $?
 
     _xrepo_need_cmd gh
     _xrepo_need_cmd jq
-    _xrepo_parse_repo_sha "$from" || return $?
 
     local top_repo
     top_repo="$(_xrepo_current_repo)"
@@ -1078,7 +1088,7 @@ _xrepo_epic_status() {
 # ─────────────────────────────────────────────────────────────────────
 
 cmd_ingest_comment() {
-    local issue="" comment_id="" author="" comment_url="" body_file="" created_at="" updated_at=""
+    local issue="" comment_id="" author="" comment_url="" body_file="" body_stdin=false created_at="" updated_at=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --issue)        issue="$2";       shift 2 ;;
@@ -1086,6 +1096,7 @@ cmd_ingest_comment() {
             --author)       author="$2";      shift 2 ;;
             --comment-url)  comment_url="$2"; shift 2 ;;
             --body-file)    body_file="$2";   shift 2 ;;
+            --body-stdin)   body_stdin=true;  shift ;;
             --created-at)   created_at="$2";  shift 2 ;;
             --updated-at)   updated_at="$2";  shift 2 ;;
             *) _xrepo_die "ingest-comment: unknown arg: $1"; return 2 ;;
@@ -1095,15 +1106,46 @@ cmd_ingest_comment() {
     [ -n "$comment_id"   ] || { _xrepo_die "ingest-comment: --comment-id is required";   return 2; }
     [ -n "$author"       ] || { _xrepo_die "ingest-comment: --author is required";       return 2; }
     [ -n "$comment_url"  ] || { _xrepo_die "ingest-comment: --comment-url is required";  return 2; }
-    [ -n "$body_file"    ] || { _xrepo_die "ingest-comment: --body-file is required";    return 2; }
-    [ -r "$body_file"    ] || { _xrepo_die "ingest-comment: cannot read $body_file";     return 2; }
+    if [ "$body_stdin" = true ] && [ -n "$body_file" ]; then
+        _xrepo_die "ingest-comment: use exactly one of --body-file or --body-stdin"; return 2
+    fi
+    if [ "$body_stdin" = false ]; then
+        [ -n "$body_file" ] || { _xrepo_die "ingest-comment: --body-file or --body-stdin is required"; return 2; }
+        [ -r "$body_file" ] || { _xrepo_die "ingest-comment: cannot read $body_file"; return 2; }
+    fi
     if { [ -n "$created_at" ] && [ -z "$updated_at" ]; } || { [ -z "$created_at" ] && [ -n "$updated_at" ]; }; then
         _xrepo_die "ingest-comment: --created-at and --updated-at are required as a pair"; return 2
+    fi
+    [[ "$issue" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "ingest-comment: --issue must be a positive integer"; return 2; }
+    [[ "$comment_id" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "ingest-comment: --comment-id must be a positive integer"; return 2; }
+    if [ -n "$created_at" ]; then
+        _xrepo_valid_timestamp "$created_at" && _xrepo_valid_timestamp "$updated_at" \
+            && { [ "$created_at" \< "$updated_at" ] || [ "$created_at" = "$updated_at" ]; } \
+            || { _xrepo_die "ingest-comment: invalid observation timestamps"; return 2; }
+    fi
+    # Classification is pure. Drain completion observations before the API
+    # timestamp fallback, remote receipt probe, or any local/durable write.
+    # Human work-request comments continue under the legacy reader semantics.
+    local pre_classification pre_disposition _pre_from _pre_phase _pre_issue pre_repo body_value="" body_tmp=""
+    if [ "$body_stdin" = true ]; then
+        IFS= read -r -d '' body_value || true
+    fi
+    pre_repo="$(printf '%s' "$(_xrepo_current_repo_offline)" | tr '[:upper:]' '[:lower:]')"
+    [[ "$pre_repo" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] \
+        || { _xrepo_die "ingest-comment: cannot determine repository without network access"; return 2; }
+    if [ "$body_stdin" = true ]; then
+        pre_classification="$(_xrepo_classify_comment_body "$pre_repo" "$issue" <(printf '%s' "$body_value"))" || return 2
+    else
+        pre_classification="$(_xrepo_classify_comment_body "$pre_repo" "$issue" "$body_file")" || return 2
+    fi
+    IFS=$'\x1f' read -r pre_disposition _pre_from _pre_phase _pre_issue <<<"$pre_classification"
+    if [ "$pre_disposition" = completion ]; then
+        taskdag_migration_guard completion-ingest || return $?
     fi
     # Offline/event fixtures may explicitly provide their coherent snapshot.
     # Without timestamps obtain body and metadata from one direct API response.
     if [ -z "$created_at" ]; then
-        local pre_ref pre_sha pre_rc=0 pre_repo
+        local pre_ref pre_sha pre_rc=0
         pre_ref="refs/heads/gh/comments/${issue}/${comment_id}"
         pre_repo="$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')"
         pre_sha="$(_xrepo_remote_sha "$pre_ref")" || pre_rc=$?
@@ -1130,9 +1172,17 @@ cmd_ingest_comment() {
         return "$rc"
     fi
 
+    if [ "$body_stdin" = true ]; then
+        body_tmp="$(mktemp)" || return 2
+        printf '%s' "$body_value" >"$body_tmp" || { rm -f "$body_tmp"; return 2; }
+        body_file="$body_tmp"
+    fi
     _xrepo_ensure_git_identity
 
-    _xrepo_ingest_observed_comment "$issue" "$comment_id" "$created_at" "$updated_at" "$author" "$comment_url" "$body_file"
+    local rc=0
+    _xrepo_ingest_observed_comment "$issue" "$comment_id" "$created_at" "$updated_at" "$author" "$comment_url" "$body_file" || rc=$?
+    [ -z "$body_tmp" ] || rm -f "$body_tmp"
+    return "$rc"
 }
 
 _xrepo_remote_sha() {
@@ -1298,6 +1348,7 @@ _xrepo_ingest_observed_comment() {
     classification="$(_xrepo_classify_comment_body "$repo" "$issue" "$body_file")" || return 2
     IFS=$'\x1f' read -r disposition peer_from peer_phase peer_issue <<<"$classification"
     if [ "$disposition" = completion ]; then
+        taskdag_migration_guard completion-ingest || return $?
         local _XREPO_PREPARE_COMPLETION=true
         local completion_args=(--issue "$issue" --comment-id "$comment_id" --comment-url "$comment_url" --from "$peer_from")
         [ -z "$peer_phase" ] || completion_args+=(--phase "$peer_phase")
@@ -1702,6 +1753,9 @@ cmd_close_epic() {
         esac
     done
     [ -n "$top_issue" ] || { _xrepo_die "close-epic: --issue is required"; return 2; }
+    [[ "$top_issue" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "close-epic: --issue must be a positive integer"; return 2; }
+
+    taskdag_migration_guard epic-close || return $?
 
     _xrepo_ensure_git_identity
 
@@ -1966,6 +2020,8 @@ EOF
     case "$top_issue" in
         ''|*[!0-9]*) _xrepo_die "close-ops-epic: --issue must be a number"; return 2 ;;
     esac
+
+    taskdag_migration_guard epic-close || return $?
 
     _xrepo_ensure_git_identity
 
@@ -2248,6 +2304,8 @@ EOF
     esac
     [ -n "$reason" ] || { _xrepo_die "close-completed-epic: --reason is required to record rollout/done evidence or an approved exception."; return 2; }
     validate_ops_trailer_value "--reason" "$reason" || return 2
+
+    taskdag_migration_guard epic-close || return $?
 
     _xrepo_ensure_git_identity
 

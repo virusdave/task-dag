@@ -50,20 +50,19 @@ if [ ! -x "$TASK_DAG_CLI" ]; then
     exit 1
 fi
 
-# Configure git for the refs/commits the CLI will push.
-git config user.name "github-actions[bot]"
-git config user.email "github-actions[bot]@users.noreply.github.com"
-
-BODY_FILE="$(mktemp)"
-printf '%s' "$COMMENT_BODY" > "$BODY_FILE"
-trap 'rm -f "$BODY_FILE"' EXIT
+# Supply commit identity without mutating caller-local git config. The CLI
+# classifies and drains completion comments before any receipt/ref write.
+export GIT_AUTHOR_NAME="github-actions[bot]"
+export GIT_AUTHOR_EMAIL="github-actions[bot]@users.noreply.github.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 log "Delegating coherent event observation to sibling task-dag ingest-comment"
-"$TASK_DAG_CLI" ingest-comment \
+printf '%s' "$COMMENT_BODY" | "$TASK_DAG_CLI" ingest-comment \
     --issue "$ISSUE_NUMBER" \
     --comment-id "$COMMENT_ID" \
     --author "$COMMENT_AUTHOR" \
     --comment-url "$COMMENT_URL" \
     --created-at "$COMMENT_CREATED_AT" \
     --updated-at "$COMMENT_UPDATED_AT" \
-    --body-file "$BODY_FILE"
+    --body-stdin

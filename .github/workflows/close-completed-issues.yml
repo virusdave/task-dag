@@ -1,9 +1,10 @@
 name: Close Completed Task Issues (Reusable)
 
 # Reusable version of the per-repo close-completed-issues workflow. The
-# caller wires its own `push` event; this workflow fetches the canonical
-# close-completed-issues.sh from virusdave/task-dag and runs it against the
-# caller's checkout (the script is self-contained: git + gh only).
+# caller wires its own `push` event; this workflow checks out one coherent
+# task-dag runtime and runs its projection script against the caller checkout.
+# The script, migration guard, policy, cleaner, and CLI therefore cannot come
+# from mixed revisions.
 
 on:
   workflow_call:
@@ -45,17 +46,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.token }}
 
-      - name: Download close-completed-issues scripts
-        env:
-          REF: ${{ inputs.ref }}
-        run: |
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/close-completed-issues.sh" \
-            -o /tmp/close-completed-issues.sh
-          # Companion cleaner for blocked/frontier overlay refs of a closed
-          # issue (invoked by close-completed-issues.sh via CLEANUP_REFS_SCRIPT).
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/cleanup-closed-issue-task-refs.sh" \
-            -o /tmp/cleanup-closed-issue-task-refs.sh
-          chmod +x /tmp/close-completed-issues.sh /tmp/cleanup-closed-issue-task-refs.sh
+      - name: Checkout coherent task-dag runtime
+        uses: actions/checkout@v4
+        with:
+          repository: virusdave/task-dag
+          ref: ${{ inputs.ref }}
+          path: .task-dag-runtime
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Close issues for completed task epics
         env:
@@ -63,8 +61,16 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          CLEANUP_REFS_SCRIPT: /tmp/cleanup-closed-issue-task-refs.sh
-          # Pin the blocked-ref enumeration's canonical CLI clone to the same
-          # task-dag ref the scripts were fetched from (default master).
-          TASK_DAG_REF: ${{ inputs.ref }}
-        run: bash /tmp/close-completed-issues.sh
+          CLEANUP_REFS_SCRIPT: .task-dag-runtime/.github/scripts/cleanup-closed-issue-task-refs.sh
+          TASK_DAG_CLI: .task-dag-runtime/scripts/task-dag
+        run: |
+          set -euo pipefail
+          set +e
+          bash .task-dag-runtime/.github/scripts/close-completed-issues.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 75 ]; then
+            echo "Completed-issue projection deferred successfully during semantic migration drain."
+            exit 0
+          fi
+          exit "$rc"

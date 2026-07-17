@@ -54,6 +54,21 @@
 
 set -euo pipefail
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    echo "Usage: close-completed-issues.sh"
+    echo "Project legacy epic-close commits to GitHub issues and task refs."
+    exit 0
+fi
+[ "$#" -eq 0 ] || { echo "Error: close-completed-issues.sh accepts no arguments" >&2; exit 2; }
+
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_migration_lib="$_here/../../scripts/task-dag.d/semantic-migration.sh"
+[ -r "$_migration_lib" ] || { echo "Error: coherent semantic migration guard not found: $_migration_lib" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$_migration_lib"
+taskdag_migration_guard projection || exit $?
+unset _here _migration_lib
+
 BEFORE_SHA="${BEFORE_SHA:-}"
 AFTER_SHA="${AFTER_SHA:-}"
 : "${GH_TOKEN:?GH_TOKEN is required}"

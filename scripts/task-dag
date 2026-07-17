@@ -61,6 +61,10 @@ set -euo pipefail
 VERSION="0.1.0"
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+TASKDAG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=task-dag.d/semantic-migration.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
+
 # Colors for output (if supported)
 if [ -t 1 ]; then
     RED='\033[0;31m'
@@ -1097,6 +1101,8 @@ epic_already_closed_on() {
 # best-effort auto-close.
 maybe_emit_local_epic_close() {
     local task_sha="$1"
+
+    taskdag_migration_guard epic-close || return $?
 
     local root_sha
     root_sha=$(get_first_parent "$task_sha" 2>/dev/null || true)
@@ -4994,7 +5000,13 @@ EOF
     # fully-complete epic; the caller's explicit push lets the server workflow
     # close the issue and clean the refs. Epics with cross-repo
     # delegated children still close via `close-epic`.
-    maybe_emit_local_epic_close "$task_sha"
+    local close_rc=0
+    maybe_emit_local_epic_close "$task_sha" || close_rc=$?
+    if [ "$close_rc" -eq "$TASKDAG_MIGRATION_EXIT" ]; then
+        echo "completion recorded; epic close deferred by migration drain"
+    elif [ "$close_rc" -ne 0 ]; then
+        return "$close_rc"
+    fi
 
     printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "$task_sha")"
     print_completion_push_instruction
@@ -5269,7 +5281,11 @@ EOF
     advance_head_to_completion "$origin_master" "$new_commit" || return 1
     echo "Created ops completion commit: $new_commit"
 
-    maybe_emit_local_epic_close "$task_sha"
+    local close_rc=0
+    maybe_emit_local_epic_close "$task_sha" || close_rc=$?
+    if [ "$close_rc" -eq "$TASKDAG_MIGRATION_EXIT" ]; then
+        echo "completion recorded; epic close deferred by migration drain"
+    elif [ "$close_rc" -ne 0 ]; then return "$close_rc"; fi
 
     printf "${GREEN}✓ Ops task completed: %s${RESET}\n" "$task_title"
     print_completion_push_instruction
@@ -5538,7 +5554,14 @@ cmd_complete_batch() {
     printf "${GREEN}✓ Grafted %d completion merge(s) onto their impls; rewrote local unpushed commits.${RESET}\n" "$n"
     printf "  Old tip %s saved at %s (also recoverable via 'git reflog').\n" "${old_head:0:12}" "$backup_ref"
 
-    for (( i=0; i<n; i++ )); do maybe_emit_local_epic_close "${task_shas[i]}"; done
+    local close_rc=0
+    for (( i=0; i<n; i++ )); do
+        maybe_emit_local_epic_close "${task_shas[i]}" || close_rc=$?
+        if [ "$close_rc" -eq "$TASKDAG_MIGRATION_EXIT" ]; then
+            echo "completion recorded; epic close deferred by migration drain"
+            close_rc=0
+        elif [ "$close_rc" -ne 0 ]; then return "$close_rc"; fi
+    done
     for (( i=0; i<n; i++ )); do
         printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "${task_shas[i]}")"
     done
@@ -5827,7 +5850,11 @@ Related: $issue_url"
 
     # If this link finished a purely-local epic, append the local Closes-Epic
     # commit so the explicit push publishes both facts together.
-    maybe_emit_local_epic_close "$task_sha"
+    local close_rc=0
+    maybe_emit_local_epic_close "$task_sha" || close_rc=$?
+    if [ "$close_rc" -eq "$TASKDAG_MIGRATION_EXIT" ]; then
+        echo "completion recorded; epic close deferred by migration drain"
+    elif [ "$close_rc" -ne 0 ]; then return "$close_rc"; fi
 
     # ── LOUD audit banner ──
     printf '%b\n' "${YELLOW}" >&2
@@ -7373,7 +7400,6 @@ EOF
 
     [ -n "$issue" ] || { echo "Error: <issue> is required" >&2; return 2; }
     [[ "$issue" =~ ^[0-9]+$ ]] || { echo "Error: <issue> must be numeric, got: $issue" >&2; return 2; }
-    if [ "$json" = true ]; then require_jq_for_json || return 2; fi
     local hint
     for hint in "${hint_shas[@]}"; do
         [[ "$hint" =~ ^[0-9a-fA-F]{40}$ ]] || {
@@ -7381,6 +7407,12 @@ EOF
             return 2
         }
     done
+    if [ -n "$repo_opt" ] && [[ ! "$repo_opt" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        echo "Error: --repo must be owner/repo, got: $repo_opt" >&2
+        return 2
+    fi
+    taskdag_migration_guard projection || return $?
+    if [ "$json" = true ]; then require_jq_for_json || return 2; fi
 
     # Resolve THIS repo (owner/repo): --repo overrides, else derive from the
     # origin remote (handles aliased ephemeral SSH remotes).
@@ -7718,6 +7750,14 @@ main() {
     case "$command" in
         help|--help|-h) cmd_help ;;
         --version|-v) echo "task-dag v${VERSION}" ;;
+        migration-status)
+            if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+                echo "Usage: task-dag migration-status --json"
+            elif [ "$#" -eq 1 ] && [ "$1" = "--json" ]; then
+                taskdag_migration_status_json
+            else
+                echo "Usage: task-dag migration-status --json" >&2; return 2
+            fi ;;
         frontier) cmd_frontier "$@" ;;
         claim) cmd_claim "$@" ;;
         claim-root) cmd_claim_root "$@" ;;
@@ -8167,6 +8207,7 @@ EOF
     _gm_has '^Retroactive:[[:space:]]*true'          && hits+=("Retroactive: true  → use 'task-dag complete-historical'")
     _gm_has '^Blocked-Meta:'                         && hits+=("Blocked-Meta:      → blocking is done by 'task-dag block'")
     _gm_has '^Type:[[:space:]]*(epic|task|leaf)([[:space:]]|$)' && hits+=("Type: …            → task commits are minted by tooling ('task-dag breakdown')")
+    _gm_has '^(Materialise-Child-Epic|Materialize-Child-Epic|Child-Epic-Title|Child-Epic-Body-File|Child-Epic-Slug|Parent-Issue|Delegation-Note|Satisfies|Phase):' && hits+=("Legacy producer metadata → legacy semantic writers are disabled during migration drain")
     _gm_has '(^|[^[:alnum:]_-])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+([-[:alnum:]_.]+/[-[:alnum:]_.]+)?#[1-9][0-9]*([^0-9]|$)' && hits+=("GitHub close keyword → use task-dag close/complete flows; native close/fix/resolve keywords bypass projection")
 
     [ ${#hits[@]} -eq 0 ] && return 0

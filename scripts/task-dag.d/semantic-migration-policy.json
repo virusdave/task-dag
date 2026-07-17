@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "mode": "draining-legacy-writers",
+  "recognizedReadSchemas": ["legacy"],
+  "authorizedSemantics": ["legacy-read-only"],
+  "disabledWriterClasses": [
+    "epic-close",
+    "materialise",
+    "completion-ingest",
+    "projection"
+  ]
+}

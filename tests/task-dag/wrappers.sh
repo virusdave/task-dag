@@ -278,6 +278,16 @@ git update-ref "refs/heads/gh/issues/100" "$EPIC"   # ensure-issue-epic finds it
 NEPIC="task:$REPO@$EPIC"
 
 # D1: delegate mints a requires edge (epic requires the child issue).
+if [ "$($TD migration-status --json | jq -r .mode)" = draining-legacy-writers ]; then
+  "$TD" delegate --issue 100 --to "peer/repo#7" >/dev/null 2>&1; delegate_rc=$?
+  if [ "$delegate_rc" -eq 75 ] \
+    && ! git show-ref --verify --quiet refs/heads/tasks/delegated/100/peer/repo/7 \
+    && ! has_edge "$NEPIC" "issue:peer/repo#7" requires; then
+    ok "D1-D3 legacy delegation writer is drained without ref or graph effects"
+  else
+    bad "D1-D3 drained delegation returned rc=$delegate_rc or created an effect"
+  fi
+else
 if "$TD" delegate --issue 100 --to "peer/repo#7" >/dev/null 2>&1 \
         && has_edge "$NEPIC" "issue:peer/repo#7" requires; then
     ok "D1 delegate mints a requires edge (epic -> child issue)"
@@ -316,6 +326,7 @@ if [ "$tombstoned_d3" = yes ] && ! has_edge "$NEPIC" "issue:peer/repo#7" require
     ok "D3 delegate does NOT resurrect a deliberately dropped (tombstoned) edge"
 else
     bad "D3 tombstoned delegation edge was resurrected (tombstoned=$tombstoned_d3)"
+fi
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"

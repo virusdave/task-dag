@@ -21,6 +21,19 @@
 
 set -euo pipefail
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  echo "Usage: aggregate-cross-repo-completions.sh"
+  echo "Publish legacy cross-repository completion metadata."
+  exit 0
+fi
+[ "$#" -eq 0 ] || { echo "Error: aggregate-cross-repo-completions.sh accepts no arguments" >&2; exit 2; }
+
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=task-dag.d/semantic-migration.sh
+source "$_here/task-dag.d/semantic-migration.sh"
+taskdag_migration_guard completion-ingest || exit $?
+unset _here
+
 log()  { echo "[$(date -u +%FT%TZ)] $*"; }
 warn() { echo "::warning::$*"; }
 die()  { echo "::error::$*"; exit 1; }

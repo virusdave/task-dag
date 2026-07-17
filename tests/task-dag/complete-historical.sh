@@ -178,7 +178,14 @@ out=$(TASK_DAG_CLAIMER=bob TASK_DAG_CLAIMER_HOST=hostB "$TD" complete-historical
 if [ $rc -eq 0 ]; then ok "claim: --force overrides foreign claim (rc=0)"; else bad "claim: --force rc=$rc: $(cat "$ROOT/err6")"; fi
 git push -q origin HEAD:master
 "$TD" graph-converge --range "$OLD_TIP..HEAD" >/dev/null 2>&1
-if [ "$(git ls-remote origin "refs/heads/tasks/active/$T6" | wc -l)" -eq 0 ]; then ok "claim: convergence cleaned the forced active claim"; else bad "claim: active ref lingered after convergence"; fi
+converge_rc=$?
+if [ "$converge_rc" -eq 0 ] && [ "$(git ls-remote origin "refs/heads/tasks/active/$T6" | wc -l)" -eq 0 ]; then
+  ok "claim: convergence cleaned the forced active claim"
+elif [ "$converge_rc" -eq 75 ] && [ "$(git ls-remote origin "refs/heads/tasks/active/$T6" | wc -l)" -eq 1 ]; then
+  ok "claim: migration drain deferred active-claim projection"
+else
+  bad "claim: convergence rc=$converge_rc produced an invalid active-ref state"
+fi
 
 # ---------------------------------------------------------------------------
 # TEST 7: a no-tree-change (empty) historical commit is refused
@@ -245,18 +252,20 @@ CLOSE_HIST=$(git rev-parse HEAD)
 git push -q origin HEAD:master
 out=$("$TD" complete-historical "$CLOSE_LEAF" --commit="$CLOSE_HIST" 2>&1); rc=$?
 git fetch -q origin master
-if [ $rc -eq 0 ] && git log HEAD --format='%B' | grep -q '^Closes-Epic: #5252$' \
+if [ $rc -eq 0 ] && ! git log HEAD --format='%B' | grep -q '^Closes-Epic: #5252$' \
    && ! git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$' \
+   && echo "$out" | grep -q 'completion recorded; epic close deferred by migration drain' \
    && echo "$out" | grep -q '^git push origin HEAD:master$'; then
-  ok "historical final leaf prepares Closes-Epic locally and prints explicit push"
+  ok "historical final leaf records completion and explicitly defers epic close"
 else
   bad "historical final leaf violated local publication contract (rc=$rc out=$out)"
 fi
 git push -q origin HEAD:master
-if git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$'; then
-  ok "explicit push publishes the prepared historical close"
+if ! git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$' \
+  && git log origin/master --format='%B' | grep -q '^Historical-Commit:'; then
+  ok "explicit push publishes historical completion without legacy close projection"
 else
-  bad "explicit push did not publish historical close"
+  bad "explicit push lost completion or published a drained historical close"
 fi
 
 echo "-----"

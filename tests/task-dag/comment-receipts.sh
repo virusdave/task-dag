@@ -28,6 +28,12 @@ ingest_file(){
     --created-at "${3:-2026-01-02T03:04:05Z}" --updated-at "${4:-2026-01-02T03:04:05Z}" \
     --body-file "$2"
 }
+ingest_stdin(){
+  cat "$2" | "$TD" ingest-comment --issue 10 --comment-id "$1" --author alice \
+    --comment-url "https://github.com/acme/widgets/issues/10#issuecomment-$1" \
+    --created-at "2026-01-02T03:04:05Z" --updated-at "2026-01-02T03:04:05Z" \
+    --body-stdin
+}
 
 # Human receipt and effect are bound, exact-byte hashed, and born together.
 printf 'ship it' >"$ROOT/body"
@@ -43,6 +49,28 @@ else
 fi
 [ "$(field "$R100" Body-SHA256)" = "$(sha256sum "$ROOT/body" | awk '{print $1}')" ] \
   && ok "receipt hashes exact body bytes" || bad "receipt body hash differs"
+
+printf 'multiline human body\nwith a trailing newline\n' >"$ROOT/stdin-human"
+ingest_stdin 120 "$ROOT/stdin-human" >/dev/null 2>&1
+R120=$(remote_sha refs/heads/gh/comments/10/120)
+if [ "$(field "$R120" Disposition)" = human ] \
+  && [ "$(field "$R120" Body-SHA256)" = "$(sha256sum "$ROOT/stdin-human" | awk '{print $1}')" ]; then
+  ok "stdin ingestion preserves multiline human body and trailing newline bytes"
+else
+  bad "stdin ingestion changed human body bytes or disposition"
+fi
+
+before=$(frontier_count)
+printf '<!-- task-dag:status -->\nprogress\n' >"$ROOT/stdin-machine"
+ingest_stdin 121 "$ROOT/stdin-machine" >/dev/null 2>&1
+R121=$(remote_sha refs/heads/gh/comments/10/121)
+if [ "$(field "$R121" Disposition)" = machine-skip ] \
+  && [ "$(field "$R121" Body-SHA256)" = "$(sha256sum "$ROOT/stdin-machine" | awk '{print $1}')" ] \
+  && [ "$(frontier_count)" = "$before" ]; then
+  ok "stdin machine marker remains skipped without a phantom task"
+else
+  bad "stdin machine marker was reclassified, rehashed, or created a task"
+fi
 
 printf 'same' >"$ROOT/no-newline"; printf 'same\n' >"$ROOT/newline"
 ingest_file 101 "$ROOT/no-newline" >/dev/null 2>&1
@@ -97,14 +125,14 @@ R105=$(remote_sha refs/heads/gh/comments/10/105)
   && ok "local-only receipt is ignored and replaced after origin success" \
   || bad "local-only state incorrectly terminated ingestion"
 
-# Existing valid origin provenance short-circuits before reclassification.
+# Existing valid origin provenance short-circuits before any replacement.
 before=$(frontier_count); printf '<!-- task-dag:status --> edited later' >"$ROOT/edit"
-if ingest_file 100 "$ROOT/edit" 2026-99-99T00:00:00Z 2025-01-01T00:00:00Z >/dev/null 2>&1 \
+if ingest_file 100 "$ROOT/edit" 2026-01-02T03:04:05Z 2026-01-02T03:04:05Z >/dev/null 2>&1 \
   && [ "$(remote_sha refs/heads/gh/comments/10/100)" = "$R100" ] \
   && [ "$(frontier_count)" = "$before" ]; then
-  ok "valid origin receipt short-circuits current edited content"
+  ok "valid origin receipt short-circuits current edited content without replacement"
 else
-  bad "existing receipt did not short-circuit before classification"
+  bad "existing receipt was replaced or created a new effect"
 fi
 
 # Malformed provenance is fatal and immutable.

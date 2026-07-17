@@ -11,6 +11,11 @@ ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+if [ "$($TD migration-status --json | jq -r .mode)" = draining-legacy-writers ]; then
+  "$TD" close-epic --issue 1 >/dev/null 2>&1; rc=$?
+  [ "$rc" -eq 75 ] && { echo "PASS: legacy local epic-close integration is drained"; exit 0; }
+  echo "FAIL: expected migration status 75, got $rc"; exit 1
+fi
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export TASK_DAG_GIT_NAME=t TASK_DAG_GIT_EMAIL=t@t
 

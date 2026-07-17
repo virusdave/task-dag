@@ -19,10 +19,9 @@ name: Materialise Child Epic From Commit Trailer
 # This works for ANY wired peer, not just virusdave/top-level: the source
 # repo is `github.repository` and its token is passed as SOURCE_TOKEN.
 #
-# The canonical scan script is DOWNLOADED from the public
-# virusdave/task-dag at `inputs.ref` (same fetch-from-raw pattern as the
-# other reusable workflows) — the caller repo does NOT need to vendor
-# .github/scripts/materialise-child-epics.sh.
+# The canonical runtime is downloaded as one archive from public
+# virusdave/task-dag at `inputs.ref`, so its mutator, guard, and policy cannot
+# come from mixed revisions. The caller does not need to vendor the scripts.
 #
 # Idempotency: each materialisation pushes a marker ref pointing at an
 # empty-tree metadata commit recording the assigned peer issue number.
@@ -106,4 +105,14 @@ jobs:
           APP_ID: ${{ secrets.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
           TASK_DAG: /tmp/task-dag-cli/scripts/task-dag
-        run: bash /tmp/task-dag-cli/.github/scripts/materialise-child-epics.sh
+        run: |
+          set -euo pipefail
+          set +e
+          bash /tmp/task-dag-cli/.github/scripts/materialise-child-epics.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 75 ]; then
+            echo "Child-epic materialisation deferred successfully during semantic migration drain."
+            exit 0
+          fi
+          exit "$rc"

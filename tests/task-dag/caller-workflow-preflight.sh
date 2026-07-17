@@ -104,7 +104,10 @@ raise 'runtime checkout is not one coherent non-credentialed revision' unless ru
 
 sync = named.fetch('Sync comment to task-dag')
 raise 'sync does not run explicitly in caller repository' unless sync['working-directory'] == '${{ github.workspace }}'
-raise 'sync does not use checked-out helper' unless sync['run'].to_s.strip == '.task-dag-runtime/scripts/sync-comment-to-tasks.sh'
+sync_run = sync['run'].to_s
+raise 'sync does not use checked-out helper' unless sync_run.include?('.task-dag-runtime/scripts/sync-comment-to-tasks.sh')
+raise 'sync does not defer exact migration status 75' unless sync_run.include?('if [ "$rc" -eq 75 ]')
+raise 'sync masks non-migration failures' unless sync_run.include?('exit "$rc"')
 raise 'raw-file download remains in reusable workflow' if steps.any? { |step| step['run'].to_s.match?(/curl|raw\.githubusercontent\.com/) }
 
 raise 'workflow permissions drifted' unless workflow['permissions'] == { 'contents' => 'write', 'issues' => 'write' }
@@ -116,27 +119,11 @@ else
     bad "7: reusable workflow runtime checkout contract failed"
 fi
 
-# Exercise the helper against a fake sibling CLI from a separate caller repo.
-# This proves that the checked-out helper delegates without network access and
-# keeps every field from one event observation intact.
-mkdir -p "$TMP/runtime/scripts" "$TMP/caller" "$TMP/output" "$TMP/bin"
-cp "$COMMENT_SHIM" "$TMP/runtime/scripts/sync-comment-to-tasks.sh"
-cat > "$TMP/runtime/scripts/task-dag" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s' "$PWD" > "$OUTPUT_DIR/cwd"
-printf '%s\0' "$@" > "$OUTPUT_DIR/args"
-while [ "$#" -gt 0 ]; do
-    if [ "$1" = --body-file ]; then
-        cp "$2" "$OUTPUT_DIR/body"
-        exit 0
-    fi
-    shift
-done
-echo "missing --body-file" >&2
-exit 2
-EOF
-chmod +x "$TMP/runtime/scripts/task-dag"
+# Exercise the helper against a coherent drained runtime in a separate caller
+# repo. This proves the guard runs before CLI invocation, git config, network,
+# or receipt creation.
+mkdir -p "$TMP/runtime" "$TMP/caller" "$TMP/output" "$TMP/bin"
+cp -R "$ROOT/scripts" "$TMP/runtime/scripts"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 echo called > "$OUTPUT_DIR/curl-called"
@@ -144,11 +131,12 @@ exit 99
 EOF
 chmod +x "$TMP/bin/curl"
 git -C "$TMP/caller" init -q
-printf 'line one\nline two\n' > "$TMP/expected-body"
+git -C "$TMP/caller" config taskdag.current-repo acme/widgets
+printf '<!-- task-dag:completion --> Satisfies acme/widgets#42 via peer/repo@abcdef1' > "$TMP/expected-body"
 COMMENT_BODY="$(cat "$TMP/expected-body"; printf x)"
 COMMENT_BODY="${COMMENT_BODY%x}"
 export COMMENT_BODY
-if (
+(
     cd "$TMP/caller" || exit 1
     OUTPUT_DIR="$TMP/output" PATH="$TMP/bin:$PATH" \
       GITHUB_TOKEN=test ISSUE_NUMBER=42 COMMENT_ID=99 \
@@ -156,34 +144,60 @@ if (
       COMMENT_CREATED_AT=2026-07-10T01:02:03Z \
       COMMENT_UPDATED_AT=2026-07-10T04:05:06Z \
       "$TMP/runtime/scripts/sync-comment-to-tasks.sh"
-) >/dev/null 2>&1; then
-    mapfile -d '' -t args < "$TMP/output/args"
-    expected=(ingest-comment --issue 42 --comment-id 99 --author alice \
-      --comment-url https://example.test/comment/99 \
-      --created-at 2026-07-10T01:02:03Z \
-      --updated-at 2026-07-10T04:05:06Z)
-    if [ "${args[*]:0:${#expected[@]}}" = "${expected[*]}" ] \
-      && [ "${args[${#args[@]}-2]}" = --body-file ] \
-      && [ "$(cat "$TMP/output/cwd")" = "$TMP/caller" ] \
-      && cmp -s "$TMP/expected-body" "$TMP/output/body" \
-      && [ ! -e "$TMP/output/curl-called" ]; then
-        ok "8: shim preserves caller cwd and the complete event observation without network"
-    else
-        bad "8: shim changed cwd, arguments, body bytes, or attempted network access"
-    fi
+) >"$TMP/drain.out" 2>&1
+rc=$?
+if [ "$rc" -eq 75 ] \
+  && grep -q '^MIGRATION REQUIRED$' "$TMP/drain.out" \
+  && [ ! -e "$TMP/output/curl-called" ] \
+  && [ -z "$(git -C "$TMP/caller" for-each-ref --format='%(refname)')" ] \
+  && ! git -C "$TMP/caller" config --local --get user.name >/dev/null; then
+    ok "8: shim drains before CLI, git config, receipt, or network effects"
 else
-    bad "8: shim failed to invoke its fake sibling CLI"
+    bad "8: shim drain rc=$rc allowed an effect or omitted the migration notice"
+fi
+unset COMMENT_BODY
+
+mkdir -p "$TMP/human-runtime/scripts" "$TMP/human-output"
+cp "$COMMENT_SHIM" "$TMP/human-runtime/scripts/sync-comment-to-tasks.sh"
+cat > "$TMP/human-runtime/scripts/task-dag" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$OUTPUT_DIR/body"
+printf '%s\0' "$@" >"$OUTPUT_DIR/args"
+EOF
+chmod +x "$TMP/human-runtime/scripts/task-dag"
+printf 'human line one\nhuman line two\n' >"$TMP/human-body"
+COMMENT_BODY="$(cat "$TMP/human-body"; printf x)"
+COMMENT_BODY="${COMMENT_BODY%x}"
+export COMMENT_BODY
+if (
+  cd "$TMP/caller" || exit 1
+  OUTPUT_DIR="$TMP/human-output" GITHUB_TOKEN=test ISSUE_NUMBER=42 COMMENT_ID=100 \
+    COMMENT_URL=https://example.test/comment/100 COMMENT_AUTHOR=alice \
+    COMMENT_CREATED_AT=2026-07-10T01:02:03Z \
+    COMMENT_UPDATED_AT=2026-07-10T01:02:03Z \
+    "$TMP/human-runtime/scripts/sync-comment-to-tasks.sh"
+) >/dev/null 2>&1; then
+  mapfile -d '' -t human_args <"$TMP/human-output/args"
+  if cmp -s "$TMP/human-body" "$TMP/human-output/body" \
+    && [ "${human_args[${#human_args[@]}-1]}" = --body-stdin ]; then
+    ok "9: shim preserves multiline human body bytes through canonical stdin"
+  else
+    bad "9: shim changed human body bytes or omitted --body-stdin"
+  fi
+else
+  bad "9: shim failed to stream a human body to its coherent CLI"
 fi
 unset COMMENT_BODY
 
 mkdir -p "$TMP/incomplete/scripts"
 cp "$COMMENT_SHIM" "$TMP/incomplete/scripts/sync-comment-to-tasks.sh"
 if (cd "$TMP/caller" && "$TMP/incomplete/scripts/sync-comment-to-tasks.sh") >"$TMP/missing.out" 2>&1; then
-    bad "9: shim with a missing sibling CLI unexpectedly passed"
+    bad "10: shim with a missing sibling CLI unexpectedly passed"
 elif grep -q 'coherent task-dag checkout is incomplete' "$TMP/missing.out"; then
-    ok "9: missing sibling CLI fails loudly without fallback"
+    ok "10: missing sibling CLI fails loudly without fallback"
 else
-    bad "9: missing sibling CLI failed without the actionable error"
+    bad "10: missing sibling CLI failed without the actionable error"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"

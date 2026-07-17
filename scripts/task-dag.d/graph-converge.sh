@@ -365,9 +365,19 @@ EOF
     done
     [ -n "$node" ] || { echo "Error: propagate-completion requires --node" >&2; return 2; }
     [ -n "$witness" ] || { echo "Error: propagate-completion requires --witness" >&2; return 2; }
+    local normalized_node spec remote dest
+    normalized_node="$(taskdag_normalize_node "$node")" || { echo "Error: invalid completion node: $node" >&2; return 2; }
+    [[ "$witness" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || { echo "Error: --witness must be 40 or 64 lowercase hex" >&2; return 2; }
+    [ -z "$mid" ] || [[ "$mid" =~ ^[0-9a-f]{64}$ ]] || { echo "Error: --mailbox-message-id must be 64 lowercase hex" >&2; return 2; }
+    for spec in "${notify[@]}"; do
+        remote="${spec%%:*}"; dest="${spec#*:}"
+        [ -n "$remote" ] && [ "$dest" != "$spec" ] && taskdag_norm_owner_repo "$dest" >/dev/null \
+            || { echo "Error: --notify-peer expects <remote>:<owner/repo>" >&2; return 2; }
+    done
+    taskdag_migration_guard projection || return $?
     local seen=$'\n' n w cn cw next rc=0 idx=0
     local -a q_nodes=() q_witnesses=()
-    q_nodes+=("$(taskdag_normalize_node "$node")")
+    q_nodes+=("$normalized_node")
     q_witnesses+=("$witness")
     taskdag_verify_completed_node "${q_nodes[0]}" "$witness" || return $?
     taskdag_notify_peers "$node" "$witness" "${notify[@]}" || return $?
@@ -418,6 +428,7 @@ EOF
         esac
     done
 
+    taskdag_migration_guard projection || return $?
     local rc=0 helper args=() edges n w helper_fetch_arg=""
     if [ "$consume" = true ]; then
         [ "$do_fetch" = false ] && helper_fetch_arg="--no-fetch"
@@ -497,6 +508,13 @@ EOF
             *) echo "Error: unknown option to graph-converge: $1" >&2; return 2 ;;
         esac
     done
+    local spec remote dest
+    for spec in "${notify[@]}"; do
+        remote="${spec%%:*}"; dest="${spec#*:}"
+        [ -n "$remote" ] && [ "$dest" != "$spec" ] && taskdag_norm_owner_repo "$dest" >/dev/null \
+            || { echo "Error: --notify-peer expects <remote>:<owner/repo>" >&2; return 2; }
+    done
+    taskdag_migration_guard projection || return $?
     local args=() rc=0 n w completed
     [ "$do_fetch" = false ] && args+=(--no-fetch)
     if [ -n "$range" ]; then

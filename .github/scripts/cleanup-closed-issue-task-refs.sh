@@ -87,6 +87,17 @@ ISSUE_NUM="${1:-}"
 [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]] || { echo "ERROR: <issue-number> must be numeric, got: $ISSUE_NUM" >&2; exit 2; }
 shift || true
 HINT_SHAS=("$@")
+for hint_sha in "${HINT_SHAS[@]}"; do
+    [[ "$hint_sha" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "ERROR: extra task SHAs must be full 40-hex values, got: $hint_sha" >&2; exit 2; }
+done
+
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_migration_lib="$_here/../../scripts/task-dag.d/semantic-migration.sh"
+[ -r "$_migration_lib" ] || { echo "ERROR: coherent semantic migration guard not found: $_migration_lib" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$_migration_lib"
+taskdag_migration_guard projection || exit $?
+unset _here _migration_lib
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required (owner/repo for the repo match)}"
 

@@ -213,10 +213,13 @@ else
 fi
 git push -q origin HEAD:master
 "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
-if [ "$(git ls-remote origin "$(meta_ref "$T2_FULL")" | wc -l)" -eq 0 ]; then
+converge_rc=$?
+if [ "$converge_rc" -eq 0 ] && [ "$(git ls-remote origin "$(meta_ref "$T2_FULL")" | wc -l)" -eq 0 ]; then
   ok "11: convergence cleared blocked-meta after durable completion"
+elif [ "$converge_rc" -eq 75 ] && [ "$(git ls-remote origin "$(meta_ref "$T2_FULL")" | wc -l)" -eq 1 ]; then
+  ok "11: migration drain defers blocked-meta projection"
 else
-  bad "11: convergence left blocked-meta ref"
+  bad "11: convergence rc=$converge_rc produced an invalid blocked-meta state"
 fi
 cd "$ROOT/wc"
 

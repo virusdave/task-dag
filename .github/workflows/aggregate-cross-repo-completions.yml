@@ -73,12 +73,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download aggregator script
-        run: |
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
-            "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/aggregate-cross-repo-completions.sh" \
-            -o /tmp/aggregate-cross-repo-completions.sh
-          chmod 0755 /tmp/aggregate-cross-repo-completions.sh
+      - name: Checkout coherent task-dag runtime
+        uses: actions/checkout@v4
+        with:
+          repository: virusdave/task-dag
+          ref: ${{ inputs.ref }}
+          path: .task-dag-runtime
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Aggregate cross-repo completions
         env:
@@ -88,4 +90,13 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           PEER_REPO: ${{ github.repository }}
         run: |
-          /tmp/aggregate-cross-repo-completions.sh
+          set -euo pipefail
+          set +e
+          .task-dag-runtime/scripts/aggregate-cross-repo-completions.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 75 ]; then
+            echo "Completion aggregation deferred successfully during semantic migration drain."
+            exit 0
+          fi
+          exit "$rc"

@@ -83,13 +83,17 @@ reject "native resolved keyword uppercase" "Repair projection
 RESOLVED #61 after the rollout."
 
 # ── ordinary work → ALLOW ───────────────────────────────────────────
-allow "impl commit with Satisfies/Phase" \
+reject "legacy Satisfies/Phase producer metadata" \
 "Enforce ads-policy lint in the approval gate
 
 Wire the scanner into the approval gate.
 
 Phase: P5. Satisfies: virusdave/top-level#17.
 Co-authored-by: Amp <amp@ampcode.com>"
+allow "ordinary prose mentioning satisfies and phase" \
+"Explain the rollout sequence
+
+This satisfies the review goal during the final phase."
 allow "prose mentioning a task casually" \
 "Handle the completed state in the UI
 

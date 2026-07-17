@@ -103,17 +103,38 @@
 
 set -euo pipefail
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    echo "Usage: materialise-child-epics.sh"
+    echo "Materialise cross-repository child epics declared by commit metadata."
+    exit 0
+fi
+MATERIALISE_LIBRARY_MODE=false
+if [ "${BASH_SOURCE[0]}" != "$0" ] && [ -n "${MATERIALISE_LIB_ONLY:-}" ]; then
+    MATERIALISE_LIBRARY_MODE=true
+fi
+[ "$MATERIALISE_LIBRARY_MODE" = true ] || [ "$#" -eq 0 ] \
+    || { echo "::error ::materialise-child-epics.sh accepts no arguments" >&2; exit 2; }
+
+_materialise_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "$MATERIALISE_LIBRARY_MODE" = false ]; then
+    _migration_lib="$_materialise_script_dir/../../scripts/task-dag.d/semantic-migration.sh"
+    [ -r "$_migration_lib" ] || { echo "::error ::semantic migration guard not found: $_migration_lib" >&2; exit 1; }
+    # shellcheck source=/dev/null
+    source "$_migration_lib"
+    taskdag_migration_guard materialise || exit $?
+    unset _migration_lib
+fi
+
 # Use the same whole-message parser as every epic-close barrier. The reusable
 # workflow downloads this module beside the script; repository/test runs use
 # the checked-in copy. Fail loud rather than letting parser drift recreate a
 # window where materialisation sees an obligation but closure does not.
 MATERIALISE_INTENT_LIB="${MATERIALISE_INTENT_LIB:-}"
 if [ -z "$MATERIALISE_INTENT_LIB" ]; then
-    _materialise_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [ -f "${_materialise_here}/../../scripts/task-dag.d/materialise-intent.sh" ]; then
-        MATERIALISE_INTENT_LIB="${_materialise_here}/../../scripts/task-dag.d/materialise-intent.sh"
+    if [ -f "${_materialise_script_dir}/../../scripts/task-dag.d/materialise-intent.sh" ]; then
+        MATERIALISE_INTENT_LIB="${_materialise_script_dir}/../../scripts/task-dag.d/materialise-intent.sh"
     else
-        MATERIALISE_INTENT_LIB="${_materialise_here}/materialise-intent.sh"
+        MATERIALISE_INTENT_LIB="${_materialise_script_dir}/materialise-intent.sh"
     fi
 fi
 [ -r "$MATERIALISE_INTENT_LIB" ] || {
@@ -122,12 +143,12 @@ fi
 }
 # shellcheck source=/dev/null
 source "$MATERIALISE_INTENT_LIB"
-unset _materialise_here
+unset _materialise_script_dir
 
 # When sourced by the unit test with MATERIALISE_LIB_ONLY=1, define the
 # helper functions but skip the required-env checks, the App-key setup,
 # and the main scan at the bottom of this file.
-if [ -z "${MATERIALISE_LIB_ONLY:-}" ]; then
+if [ "$MATERIALISE_LIBRARY_MODE" = false ]; then
     : "${BEFORE_SHA:?BEFORE_SHA is required}"
     : "${AFTER_SHA:?AFTER_SHA is required}"
     : "${GH_REPO:?GH_REPO is required}"
@@ -330,11 +351,8 @@ marker_sha_checked() {
 # --- main scan --------------------------------------------------------------
 
 # Skip the scan when sourced for unit testing (helpers are defined above).
-if [ -n "${MATERIALISE_LIB_ONLY:-}" ]; then
-    # `return` succeeds when sourced; `exit` is the fallback if this file
-    # is ever executed directly with the flag set.
-    # shellcheck disable=SC2317
-    return 0 2>/dev/null || exit 0
+if [ "$MATERIALISE_LIBRARY_MODE" = true ]; then
+    return 0
 fi
 
 # Empty-on-first-push fallback (mirrors post-issue-comments.sh).

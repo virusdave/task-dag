@@ -21,6 +21,7 @@ unset GITHUB_REPOSITORY
 command -v shellcheck >/dev/null 2>&1 && {
     echo "== shellcheck =="
     shellcheck -S error "$TD" "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
+        "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
         "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
         "$(dirname "$TD")/task-dag.d/ci-chains.sh" \
         "$(dirname "$TD")/task-dag.d/edges.sh" \
@@ -54,6 +55,7 @@ command -v shellcheck >/dev/null 2>&1 && {
 echo "== bash -n =="
 bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ci-chains.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/edges.sh" \
@@ -77,6 +79,8 @@ bash -n "$TD" \
     && bash -n "$here/reconcile-comments.sh" || exit 1
 
 rc=0
+echo "== migration-drain.sh =="
+bash "$here/migration-drain.sh" "$TD" || rc=1
 echo "== reconcile-comments.sh =="
 bash "$here/reconcile-comments.sh" "$TD" || rc=1
 for t in complete-safety.sh guard-commit-message.sh guard-pre-push.sh complete-subject-style.sh complete-historical.sh complete-ops.sh local-epic-close.sh local-epic-close-partial-view.sh close-ops-epic.sh close-completed-epic.sh close-issue-ref-cleanup.sh reconcile-closed-issue.sh projection-backstop.sh completed-ref-reconcile.sh validate-closed-issue-audit.sh ingest-loop.sh comment-receipts.sh comment-cmd.sh ingest-selfheal.sh cross-repo-completion-attribution.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh frontier-json.sh emitter-json.sh no-handbuilt-json.sh validate-strict.sh edges.sh edges-write.sh facts.sh reconcile.sh graph-converge.sh edges-prune.sh legacy-edges.sh mailbox.sh wrappers.sh caller-workflow-preflight.sh operator-blocked-dashboard.sh operator-blocked-dashboard-publish.sh operator-blocked-dispatch.sh transitive-block.sh claim-pid.sh claim-idempotent.sh claim-force-steal.sh reap.sh breakdown-self-claim.sh breakdown-self-continue.sh root-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-reconcile-lease.sh ci-classifier.sh ci-verify-target.sh ci-repair-audit.sh ci-repair-projections.sh ci-repair-retire.sh ci-repair-evidence.sh ci-repair-decisions.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh delegated-block-json.sh context-cmd.sh ../create-task-commit.sh ../post-reopen-notice.sh ../../.github/scripts/materialise-child-epics.test.sh; do

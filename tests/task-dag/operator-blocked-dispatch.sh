@@ -147,10 +147,13 @@ else
 fi
 git push -q origin HEAD:master
 TASK_DAG_DASHBOARD_DISPATCH_FORCE=1 "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
-if [ "$(ghlines)" -ge 1 ] && grep -q "action]=complete" "$GHLOG"; then
+converge_rc=$?
+if [ "$converge_rc" -eq 0 ] && [ "$(ghlines)" -ge 1 ] && grep -q "action]=complete" "$GHLOG"; then
   ok "6: convergence of a blocked completion fires a dispatch"
+elif [ "$converge_rc" -eq 75 ] && [ "$(ghlines)" -eq 0 ]; then
+  ok "6: migration drain defers completion projection and dashboard dispatch"
 else
-  bad "6: blocked-completion convergence did not dispatch: $(cat "$GHLOG")"
+  bad "6: blocked-completion convergence rc=$converge_rc had invalid dispatch effects: $(cat "$GHLOG")"
 fi
 cd "$ROOT/wc"
 

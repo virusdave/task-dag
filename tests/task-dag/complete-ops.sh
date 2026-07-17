@@ -102,10 +102,13 @@ if [ -n "$LEAF" ]; then
     bad "1f: explicit push unexpectedly cleaned scheduling refs"
   fi
   "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
-  if [ "$(git ls-remote origin "refs/heads/tasks/blocked/$LEAF_SHA" | wc -l)" -eq 0 ]; then
+  converge_rc=$?
+  if [ "$converge_rc" -eq 0 ] && [ "$(git ls-remote origin "refs/heads/tasks/blocked/$LEAF_SHA" | wc -l)" -eq 0 ]; then
     ok "1g: graph-converge cleans blocked scheduling refs after publication"
+  elif [ "$converge_rc" -eq 75 ] && [ "$(git ls-remote origin "refs/heads/tasks/blocked/$LEAF_SHA" | wc -l)" -eq 1 ]; then
+    ok "1g: migration drain defers blocked-ref projection"
   else
-    bad "1g: graph-converge left blocked scheduling refs"
+    bad "1g: graph-converge rc=$converge_rc produced an invalid blocked-ref state"
   fi
   AFTER1=$(git ls-remote origin refs/heads/master | awk '{print $1}')
   out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
@@ -115,10 +118,11 @@ if [ -n "$LEAF" ]; then
   else
     bad "1h: idempotent rerun moved master or failed (rc=$rc before=$AFTER1 after=$AFTER2 out=$out)"
   fi
-  if git log origin/master --merges --format='%B' | grep -q '^Closes-Epic: #901$'; then
-    ok "1i: explicit push carries the normal local epic close"
+  if ! git log origin/master --merges --format='%B' | grep -q '^Closes-Epic: #901$' \
+    && echo "$out" | grep -qi 'already'; then
+    ok "1i: completion remains durable while legacy epic close is drained"
   else
-    bad "1i: explicit push omitted the local Closes-Epic merge"
+    bad "1i: drained completion emitted a legacy Closes-Epic merge"
   fi
   git clone -q --no-local "$ROOT/origin.git" "$ROOT/keepalive"
   (

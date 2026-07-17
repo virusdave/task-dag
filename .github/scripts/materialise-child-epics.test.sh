@@ -184,6 +184,26 @@ check "non-top-level source: slugged automation peer ref" \
     "$(marker_ref_for 57 FreshlyBakedNYC automation waste-backlog)" \
     "refs/heads/gh/child-epic-slots/57/FreshlyBakedNYC/automation/waste-backlog"
 
+mode="$("$HERE/../../scripts/task-dag" migration-status --json | jq -r .mode)"
+if [ "$mode" = draining-legacy-writers ]; then
+    set +e
+    drain_out="$(bash "$HERE/materialise-child-epics.sh" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$drain_out"; then
+        echo "ok  - integration path is deterministically drained before effects"
+    else
+        echo "NOT OK - integration path did not return migration status 75"
+        fail=1
+    fi
+    if [ "$fail" -ne 0 ]; then
+        echo "FAILED"
+        exit 1
+    fi
+    echo "ALL PASS (legacy writer integration drained)"
+    exit 0
+fi
+
 # --- integration: SOURCE_TOKEN generalisation + non-top-level GH_REPO -----
 
 # Run the whole script (non-lib mode) with a NON-top-level source repo. The

@@ -119,10 +119,15 @@ if [ -n "$T3" ]; then
   [ "$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)" -eq 1 ] \
     && ok "C2: explicit push publishes without deleting scheduling refs" \
     || bad "C2: explicit push unexpectedly deleted scheduling refs"
-  "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1
-  [ "$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)" -eq 0 ] \
-    && ok "C2: graph-converge cleans scheduling refs from durable master" \
-    || bad "C2: graph-converge left completed active ref"
+  if "$TD" graph-converge --range "$BEFORE..HEAD" >/dev/null 2>&1; then
+    [ "$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)" -eq 0 ] \
+      && ok "C2: graph-converge cleans scheduling refs from durable master" \
+      || bad "C2: graph-converge left completed active ref"
+  elif [ $? -eq 75 ] && [ "$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)" -eq 1 ]; then
+    ok "C2: migration drain defers scheduling projection without deleting the claim"
+  else
+    bad "C2: graph-converge failed outside the migration drain contract"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
