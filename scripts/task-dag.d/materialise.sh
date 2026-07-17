@@ -153,15 +153,16 @@ taskdag_materialise_prepare() {
 }
 
 _taskdag_materialise_batch_json() {
-    local prepared=$1 members provenance batch
+    local prepared=$1 activation=$2 members provenance batch activation_provenance
     members=$(jq -cS '[.declarations[]|{slotId,declarationDigest,operationId,provenance:.memberProvenance}]|sort_by(.slotId)' <<<"$prepared") || return 2
     provenance=$(jq -c '.batchProvenance' <<<"$prepared") || return 2
-    batch=$(_taskdag_materialise_id batch "$(jq -c . <<<"$members")" "$(jq -c . <<<"$provenance")")
-    jq -ncS --arg batchId "$batch" --argjson members "$members" --argjson provenance "$provenance" '{schema:1,batchId:$batchId,members:$members,provenance:$provenance}'
+    activation_provenance=$(jq -cS '{epoch,digest,guardVersion}' <<<"$activation") || return 2
+    batch=$(_taskdag_materialise_id batch "$(jq -c . <<<"$members")" "$(jq -c . <<<"$provenance")" "$activation_provenance")
+    jq -ncS --arg batchId "$batch" --argjson members "$members" --argjson provenance "$provenance" --argjson activation "$activation_provenance" '{schema:1,activation:$activation,batchId:$batchId,members:$members,provenance:$provenance}'
 }
 
 _taskdag_materialisation_snapshot_violations() {
-    local tip=$1 work=$2 parent="" count path mode type prepared state sid dd op batch body_sha body_len expected declaration_path timestamp
+    local tip=$1 work=$2 activation_authority=$3 parent="" count path mode type prepared state sid dd op batch body_sha body_len expected declaration_path timestamp
     git rev-list --parents -1 "$tip" >"$work/snapshot-parents" 2>/dev/null \
       || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot read snapshot parents"; return 0; }
     count=$(awk '{print NF-1}' "$work/snapshot-parents")
@@ -216,14 +217,17 @@ _taskdag_materialisation_snapshot_violations() {
           batches/*)
             if ! jq -e '
               def safe($n): type=="string" and length>0 and length<=$n and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not);
-              .schema==1 and keys==["batchId","members","provenance","schema"] and (.batchId|test("^[0-9a-f]{64}$")) and
+              .schema==1 and keys==["activation","batchId","members","provenance","schema"] and
+              (.activation|keys==["digest","epoch","guardVersion"] and (.epoch|type=="number" and floor==. and .>=1) and (.digest|test("^[0-9a-f]{64}$")) and .guardVersion==1) and (.batchId|test("^[0-9a-f]{64}$")) and
               (.members|type=="array" and length>0 and .==(.|sort_by(.slotId)) and (map(.slotId)|length==(unique|length)) and all(.[];
                 type=="object" and keys==["declarationDigest","operationId","provenance","slotId"] and
                 (.slotId|test("^[0-9a-f]{64}$")) and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")) and
                 (.provenance|type=="array" and length>0 and length<=100 and .==(.|sort|unique) and all(.[];safe(4096))))) and
               (.provenance|type=="array" and length<=100 and .==(.|sort|unique) and all(.[];safe(1024)))
             ' >/dev/null <<<"$prepared"; then echo "✗ invalid batch $path"; continue; fi
-            dd=${path#batches/}; dd=${dd%.json}; expected=$(_taskdag_materialise_id batch "$(jq -c .members <<<"$prepared")" "$(jq -c .provenance <<<"$prepared")")
+            taskdag_activation_validate_provenance "$activation_authority" "$(jq -c .activation <<<"$prepared")" \
+              || echo "✗ batch $path has forged activation provenance"
+            dd=${path#batches/}; dd=${dd%.json}; expected=$(_taskdag_materialise_id batch "$(jq -c .members <<<"$prepared")" "$(jq -c .provenance <<<"$prepared")" "$(jq -c .activation <<<"$prepared")")
             [ "$dd" = "$expected" ] && [ "$(jq -r .batchId <<<"$prepared")" = "$expected" ] || echo "✗ batch $dd ID mismatch"
             jq -c '.members[]' <<<"$prepared" >"$work/snapshot-members" 2>/dev/null \
               || { echo "✗ validator cannot enumerate stored batch members $path"; continue; }
@@ -236,12 +240,15 @@ _taskdag_materialisation_snapshot_violations() {
             done <"$work/snapshot-members" ;;
           slots/*)
             state=$prepared; sid=${path#slots/}; sid=${sid%/state.json}; dd=$(jq -r '.declarationDigest' <<<"$state"); op=$(jq -r '.operationId' <<<"$state"); batch=$(jq -r '.batchId' <<<"$state")
-            if ! jq -e --arg sid "$sid" '.schema==1 and .state=="batch-reserved-before-create" and .slotId==$sid and .generation==0 and .fence==1 and .predecessorStateDigest==null and (.actor|type=="string" and length>0 and length<=256 and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not)) and (.authoritativeTimestamp|type=="string" and length==20 and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and (.batchId|test("^[0-9a-f]{64}$")) and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")) and (.originReadback|keys==["materialisationTip"]) and ((.originReadback.materialisationTip==null) or (.originReadback.materialisationTip|test("^[0-9a-f]{40}$"))) and keys==["actor","authoritativeTimestamp","batchId","declarationDigest","fence","generation","operationId","originReadback","predecessorStateDigest","schema","slotId","state"]' >/dev/null <<<"$state"; then echo "✗ invalid slot state $path"; continue; fi
+            if ! jq -e --arg sid "$sid" '.schema==1 and .state=="batch-reserved-before-create" and .slotId==$sid and .generation==0 and .fence==1 and .predecessorStateDigest==null and (.activation|keys==["digest","epoch","guardVersion"] and (.epoch|type=="number" and floor==. and .>=1) and (.digest|test("^[0-9a-f]{64}$")) and .guardVersion==1) and (.actor|type=="string" and length>0 and length<=256 and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not)) and (.authoritativeTimestamp|type=="string" and length==20 and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and (.batchId|test("^[0-9a-f]{64}$")) and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")) and (.originReadback|keys==["activationAuthorityTip","materialisationTip"] and (.activationAuthorityTip|test("^[0-9a-f]{40}$"))) and ((.originReadback.materialisationTip==null) or (.originReadback.materialisationTip|test("^[0-9a-f]{40}$"))) and keys==["activation","actor","authoritativeTimestamp","batchId","declarationDigest","fence","generation","operationId","originReadback","predecessorStateDigest","schema","slotId","state"]' >/dev/null <<<"$state"; then echo "✗ invalid slot state $path"; continue; fi
             timestamp=$(jq -r .authoritativeTimestamp <<<"$state")
+            taskdag_activation_validate_provenance "$activation_authority" "$(jq -c .activation <<<"$state")" \
+              || echo "✗ slot $sid has forged activation provenance"
             jq -ne --arg timestamp "$timestamp" '($timestamp|fromdateiso8601|todateiso8601)==$timestamp' >/dev/null 2>&1 || echo "✗ slot $sid has an impossible timestamp"
             expected=$(_taskdag_materialise_id operation "$sid" "$dd"); [ "$op" = "$expected" ] || echo "✗ slot $sid operation ID mismatch"
             git cat-file -e "$tip:declarations/$dd.json" 2>/dev/null || echo "✗ slot $sid lacks declaration"
             [ "$(git show "$tip:declarations/$dd.json" 2>/dev/null | jq -r .slotId)" = "$sid" ] || echo "✗ slot $sid does not match declaration"
+            [ "$(git show "$tip:batches/$batch.json" 2>/dev/null | jq -c .activation)" = "$(jq -c .activation <<<"$state")" ] || echo "✗ slot $sid activation provenance does not match batch"
             git show "$tip:batches/$batch.json" 2>/dev/null | jq -e --arg dd "$dd" --arg sid "$sid" --arg op "$op" 'any(.members[];.declarationDigest==$dd and .slotId==$sid and .operationId==$op)' >/dev/null 2>&1 || echo "✗ slot $sid is absent from batch" ;;
         esac
     done <"$work/snapshot-json-paths"
@@ -264,7 +271,11 @@ _taskdag_materialisation_snapshot_violations() {
 # must be a root; every later commit has exactly one parent, names the previous
 # generation, and only adds immutable files.
 taskdag_materialisation_tree_violations() {
-    local tip=$1 previous="" commit parents path json canonical expected_origin validation_tmp added batch_path batch_json member sid dd body_sha shallow
+    local tip=$1 activation_authority=${2:-} previous="" commit parents path json canonical expected_origin validation_tmp added batch_path batch_json member sid dd body_sha shallow
+    if [ -z "$activation_authority" ] || ! taskdag_activation_validate_history "$activation_authority" >/dev/null; then
+        echo "✗ $TASKDAG_MATERIALISATION_REF requires a valid activation authority"
+        return 0
+    fi
     validation_tmp=$(mktemp -d) || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot create private workspace"; return 0; }
     shallow=$(git rev-parse --is-shallow-repository 2>/dev/null) || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot inspect repository depth"; rm -rf "$validation_tmp"; return 0; }
     if [ "$shallow" = true ]; then
@@ -292,7 +303,7 @@ taskdag_materialisation_tree_violations() {
                 git diff --quiet "$previous" "$commit" -- "$path" 2>/dev/null || echo "✗ append-only path changed or unreadable: $path"
             done <"$validation_tmp/previous-paths"
         fi
-        _taskdag_materialisation_snapshot_violations "$commit" "$validation_tmp"
+        _taskdag_materialisation_snapshot_violations "$commit" "$validation_tmp" "$activation_authority"
         added="$validation_tmp/added"
         if [ -z "$previous" ]; then
             git ls-tree -r --name-only "$commit" >"$added" 2>/dev/null \
@@ -381,13 +392,15 @@ taskdag_materialisation_tree_violations() {
 # Private seam: tests source this module and call the core.  No CLI path tests
 # an environment variable, so exported state cannot bypass migration drain.
 taskdag_materialise_reserve_core() {
-    local spec=$1 prepared batch_json batch_id actor timestamp old="" tmp index tree commit remote now slot dd op body_sha declaration state
+    local spec=$1 prepared batch_json batch_id actor timestamp old="" tmp index tree commit remote now slot dd op body_sha declaration state activation activation_provenance
+    activation=$(taskdag_activation_snapshot_token) || return 3
     prepared=$(taskdag_materialise_prepare "$spec") || return $?
-    batch_json=$(_taskdag_materialise_batch_json "$prepared") || return 2; batch_id=$(jq -r .batchId <<<"$batch_json")
+    batch_json=$(_taskdag_materialise_batch_json "$prepared" "$activation") || return 2; batch_id=$(jq -r .batchId <<<"$batch_json")
+    activation_provenance=$(jq -c '{epoch,digest,guardVersion}' <<<"$activation") || return 2
     actor=$(jq -r .actor <<<"$prepared"); timestamp=$(jq -r .authoritativeTimestamp <<<"$prepared")
     for _ in 1 2 3 4 5; do
       remote=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF") || return 2; old=${remote%%[[:space:]]*}; [ "$remote" != "$old" ] || old=""
-      [ -z "$old" ] || { git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2; old=$(git rev-parse FETCH_HEAD); [ -z "$(taskdag_materialisation_tree_violations "$old")" ] || return 3; }
+      [ -z "$old" ] || { git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2; old=$(git rev-parse FETCH_HEAD); [ -z "$(taskdag_materialisation_tree_violations "$old" "$(jq -r .authorityTip <<<"$activation")")" ] || return 3; }
       while IFS= read -r slot; do
         dd=$(jq -r --arg s "$slot" '.declarations[]|select(.slotId==$s)|.declarationDigest' <<<"$prepared")
         if [ -n "$old" ] && git cat-file -e "$old:slots/$slot/state.json" 2>/dev/null; then
@@ -401,7 +414,7 @@ taskdag_materialise_reserve_core() {
         mkdir -p "$tmp/bodies" "$tmp/declarations" "$tmp/slots/$slot"
         jq -rj .body <<<"$declaration" >"$tmp/bodies/$body_sha.body"
         jq -cS 'del(.body,.memberProvenance)' <<<"$declaration" >"$tmp/declarations/$dd.json"
-        state=$(jq -ncS --arg slotId "$slot" --arg declarationDigest "$dd" --arg operationId "$op" --arg batchId "$batch_id" --arg actor "$actor" --arg authoritativeTimestamp "$timestamp" --arg tip "$old" '{schema:1,state:"batch-reserved-before-create",slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,batchId:$batchId,generation:0,fence:1,actor:$actor,authoritativeTimestamp:$authoritativeTimestamp,predecessorStateDigest:null,originReadback:{materialisationTip:(if $tip=="" then null else $tip end)}}')
+        state=$(jq -ncS --arg slotId "$slot" --arg declarationDigest "$dd" --arg operationId "$op" --arg batchId "$batch_id" --arg actor "$actor" --arg authoritativeTimestamp "$timestamp" --arg tip "$old" --arg authorityTip "$(jq -r .authorityTip <<<"$activation")" --argjson activation "$activation_provenance" '{schema:1,state:"batch-reserved-before-create",slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,batchId:$batchId,generation:0,fence:1,activation:$activation,actor:$actor,authoritativeTimestamp:$authoritativeTimestamp,predecessorStateDigest:null,originReadback:{activationAuthorityTip:$authorityTip,materialisationTip:(if $tip=="" then null else $tip end)}}')
         printf '%s\n' "$state" >"$tmp/slots/$slot/state.json"
         GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/bodies/$body_sha.body"),bodies/$body_sha.body"
         GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/declarations/$dd.json"),declarations/$dd.json"
@@ -415,15 +428,15 @@ taskdag_materialise_reserve_core() {
       tree=$(GIT_INDEX_FILE="$index" git write-tree); rm -rf "$tmp"
       if [ -n "$old" ] && [ "$tree" = "$(git rev-parse "$old^{tree}")" ]; then printf '%s\n' "$batch_json"; return 0; fi
       if [ -n "$old" ]; then commit=$(printf 'Reserve materialisation batch %s\n' "${batch_id:0:12}" | git commit-tree "$tree" -p "$old"); else commit=$(printf 'Reserve materialisation batch %s\n' "${batch_id:0:12}" | git commit-tree "$tree"); fi
-      [ -z "$(taskdag_materialisation_tree_violations "$commit")" ] || return 3
+      [ -z "$(taskdag_materialisation_tree_violations "$commit" "$(jq -r .authorityTip <<<"$activation")")" ] || return 3
       if [ "${TASKDAG_MATERIALISE_TEST_CRASH_BEFORE_CAS:-0}" = 1 ]; then return 86; fi
-      if git push -q origin --force-with-lease="$TASKDAG_MATERIALISATION_REF:$old" "$commit:$TASKDAG_MATERIALISATION_REF" 2>/dev/null; then
+      if taskdag_activation_fenced_push "$activation" materialisation reserve-batch "$actor" "$timestamp" "$TASKDAG_MATERIALISATION_REF" "$old" "$commit"; then
         # Deterministic fixture seam for a transport that reports failure after
         # the server accepted the CAS.  The next iteration must prove the
         # complete durable request from origin rather than write or POST again.
         if [ "${TASKDAG_MATERIALISE_TEST_AMBIGUOUS_SUCCESS:-0}" = 1 ]; then continue; fi
         now=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk '{print $1}'); git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2; now=$(git rev-parse FETCH_HEAD)
-        [ -z "$(taskdag_materialisation_tree_violations "$now")" ] || return 3
+        [ -z "$(taskdag_materialisation_tree_violations "$now" "$(jq -r .authorityTip <<<"$activation")")" ] || return 3
         [ "$(git show "$now:batches/$batch_id.json" 2>/dev/null)" = "$batch_json" ] || return 3
         while IFS= read -r declaration; do
           slot=$(jq -r .slotId <<<"$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); body_sha=$(jq -r .bodySha256 <<<"$declaration")

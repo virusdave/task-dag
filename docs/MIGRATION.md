@@ -363,6 +363,28 @@ until mandatory post-push evidence shows every legacy writer workflow has
 observed the exact `draining-legacy-writers` status and either skipped or
 deferred successfully, with malformed/missing-policy probes remaining red.
 
+### Canonical activation and the private materialisation fence
+
+Canonical activation is now represented only by
+`refs/heads/tasks/v1/activation`. Use `task-dag activation apply --spec-file`,
+`activation status --json`, and `activation check-compatible` rather than
+editing the ref. Records are permanent monotonic epochs; writer guard commits
+are replaceable same-tree children and are bypassed by the next epoch.
+
+The private canonical-v1 materialisation reservation core requires an enabled,
+runtime-compatible activation snapshot. It persists activation provenance in
+batch and slot records and advances the materialisation authority together
+with an activation guard in one leased atomic push. This is infrastructure for
+the later migration and census stages only: public `materialise-batch` and
+`materialise-child` still validate then exit 75 under the unchanged committed
+policy. Activation alone never enables producers. Rollback first advances to a
+disabled epoch; records, guards and materialisation provenance are never
+deleted. A task-dag runtime repin must follow this exact order: apply a
+disabled epoch, confirm `activation status --json` reports that disabled
+authority, run `activation check-compatible` offline for the proposed runtime,
+and only then repin. Never repin before the disable, confirmation, and offline
+compatibility check have all succeeded.
+
 ## Repair-chain reconciliation format activation
 
 The reconciliation lease and evidence fields extend the existing

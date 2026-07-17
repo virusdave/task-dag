@@ -8,6 +8,24 @@ pass=0; fail=0
 ok() { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
+# This fixture exercises materialisation mechanics independently. Activation's
+# own fixture covers authority acquisition and atomic guard publication; bind a
+# stable enabled token and retain the old local-CAS seam here.
+taskdag_activation_snapshot_token() {
+  jq -ncS '{activationCommit:"1111111111111111111111111111111111111111",authorityTip:"2222222222222222222222222222222222222222",digest:"3333333333333333333333333333333333333333333333333333333333333333",epoch:1,guardVersion:1,minimumCompatibleTaskDagCommit:"4444444444444444444444444444444444444444",origin:"fixture",runtimeCommit:"5555555555555555555555555555555555555555",state:"enabled"}'
+}
+taskdag_activation_fenced_push() {
+  local target=$6 old=$7 new=$8
+  git push -q origin --force-with-lease="$target:$old" "$new:$target" 2>/dev/null
+}
+taskdag_activation_validate_history() { [[ "$1" = 2222222222222222222222222222222222222222 || "$1" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]; }
+taskdag_activation_validate_provenance() {
+  [[ "$1" = 2222222222222222222222222222222222222222 || "$1" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] \
+    && jq -e '.guardVersion==1 and ((.epoch==1 and .digest=="3333333333333333333333333333333333333333333333333333333333333333") or (.epoch==2 and .digest=="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))' <<<"$2" >/dev/null
+}
+export -f taskdag_activation_snapshot_token taskdag_activation_fenced_push \
+  taskdag_activation_validate_history taskdag_activation_validate_provenance
+
 printf 'body with trailing lines\n\n' >"$ROOT/body"
 printf 'second body\n' >"$ROOT/body-2"
 jq -n '{schema:1,actor:"fixture",authoritativeTimestamp:"2026-07-17T00:00:00Z",provenance:["test"],declarations:[{sourceRepo:{id:"src-1",name:"o/source"},parentIssue:{id:"issue-21",number:21},peerRepo:{id:"peer-2",name:"o/peer"},title:"Immutable child",bodyFile:"body",provenance:"fixture"}]}' >"$ROOT/spec"
@@ -50,9 +68,9 @@ ids=$(
   source "$(dirname "$TD")/task-dag.d/materialise.sh"
   p=$(taskdag_materialise_prepare "$ROOT/spec")
   printf '%s\n' "$p" | jq -r '.declarations[0]|[.slotId,.declarationDigest,.operationId]|join(":")'
-  _taskdag_materialise_batch_json "$p" | jq -r .batchId
+  _taskdag_materialise_batch_json "$p" "$(taskdag_activation_snapshot_token)" | jq -r .batchId
 )
-expected=$'205a028163b8c8da6fb3505e7b4169231e76a1adb5869204ea12cda91f9d60e7:ca0423b62c4ba49dc9f2e2f102cc338e335d5ff7cf8174fa8fb5ca36a42db7e0:786b2daa911b565593d5ddfde62833094fd1c70ba2e6c02625124b7090b10675\n0b99fd235effc12e3a2e0545e29327abeee1cfd90bd78062a1bd79beb42002fc'
+expected=$'205a028163b8c8da6fb3505e7b4169231e76a1adb5869204ea12cda91f9d60e7:ca0423b62c4ba49dc9f2e2f102cc338e335d5ff7cf8174fa8fb5ca36a42db7e0:786b2daa911b565593d5ddfde62833094fd1c70ba2e6c02625124b7090b10675\n5b5e6e4f3c3531addc2a01566c65a415b1ce4255412af9acfc90ca8918659b50'
 [ "$ids" = "$expected" ] && ok "golden slot, declaration, operation, and batch IDs" || bad "golden IDs changed: $ids"
 
 # Duplicate declarations coalesce with sorted provenance; declaration and
@@ -72,7 +90,8 @@ if (
   second=$(taskdag_materialise_prepare "$ROOT/permuted-spec")
   [ "$(jq '.declarations|length' <<<"$duplicate")" -eq 1 ] && [ "$(jq -c '.declarations[0].memberProvenance' <<<"$duplicate")" = '["fixture","second"]' ]
   [ "$first" = "$second" ]
-  [ "$(_taskdag_materialise_batch_json "$first")" = "$(_taskdag_materialise_batch_json "$second")" ]
+  token=$(taskdag_activation_snapshot_token)
+  [ "$(_taskdag_materialise_batch_json "$first" "$token")" = "$(_taskdag_materialise_batch_json "$second" "$token")" ]
 ); then ok "duplicates coalesce and declaration order is identity-neutral"; else bad "coalescing/order independence failed"; fi
 
 jq '.declarations += [(.declarations[0] | .title="Conflicting duplicate")]' "$ROOT/spec" >"$ROOT/in-batch-conflict"
@@ -175,13 +194,32 @@ else bad "golden authority tree shape or JSON is not canonical: $paths"; fi
 ); rc=$?
 [ "$rc" -eq 0 ] && [ "$tip" = "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/materialisation)" ] \
   && ok "identical retry is idempotent" || bad "identical retry changed authority"
+
+# The same semantic request under a later activation has a different immutable
+# batch path. It may append that receipt, but must not overwrite epoch one's
+# receipt, declaration, body, or slot.
+(
+  cd "$ROOT/wc" || exit 1
+  source "$(dirname "$TD")/task-dag.d/materialise.sh"
+  taskdag_activation_snapshot_token() {
+    jq -ncS '{activationCommit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",authorityTip:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",digest:"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",epoch:2,guardVersion:1,minimumCompatibleTaskDagCommit:"4444444444444444444444444444444444444444",origin:"fixture",runtimeCommit:"5555555555555555555555555555555555555555",state:"enabled"}'
+  }
+  taskdag_materialise_reserve_core "$ROOT/spec" >"$ROOT/epoch2-result"
+); rc=$?
+cross_epoch_tip=$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/materialisation)
+if [ "$rc" -eq 0 ] && [ "$cross_epoch_tip" != "$tip" ] \
+  && [ "$(git --git-dir="$ROOT/origin" ls-tree -r --name-only "$cross_epoch_tip" | grep -c '^batches/')" -eq 2 ] \
+  && git --git-dir="$ROOT/origin" diff --quiet "$tip" "$cross_epoch_tip" -- bodies declarations slots \
+  && [ "$(jq -r .activation.epoch "$ROOT/epoch2-result")" -eq 2 ]; then
+  ok "cross-epoch exact retry appends a distinct receipt without immutable mutation"
+else bad "cross-epoch retry mutated immutable content or reused a batch path (rc=$rc)"; fi
 jq '.declarations[0].title="Conflicting child"' "$ROOT/spec" >"$ROOT/conflict-spec"
 (
   cd "$ROOT/wc" || exit 1
   source "$(dirname "$TD")/task-dag.d/materialise.sh"
   taskdag_materialise_reserve_core "$ROOT/conflict-spec" >/dev/null
 ); rc=$?
-[ "$rc" -eq 3 ] && [ "$tip" = "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/materialisation)" ] \
+[ "$rc" -eq 3 ] && [ "$cross_epoch_tip" = "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/materialisation)" ] \
   && ok "same-slot conflict rejects whole request without mutation" || bad "conflict mutated authority (rc=$rc)"
 
 # A batch that combines an existing-identical slot with a new slot adds the
@@ -263,9 +301,9 @@ else bad "overlapping race was not atomic: rc=$races"; fi
   bad_path=$(printf 'corrupt\n' | git commit-tree "$path_tree" -p "$tip2")
   second_parent=$(printf 'other\n' | git commit-tree "$base_tree")
   bad_merge=$(printf 'merge\n' | git commit-tree "$base_tree" -p "$tip2" -p "$second_parent")
-  content_out=$(taskdag_materialisation_tree_violations "$bad_content")
-  path_out=$(taskdag_materialisation_tree_violations "$bad_path")
-  merge_out=$(taskdag_materialisation_tree_violations "$bad_merge")
+  content_out=$(taskdag_materialisation_tree_violations "$bad_content" 2222222222222222222222222222222222222222)
+  path_out=$(taskdag_materialisation_tree_violations "$bad_path" 2222222222222222222222222222222222222222)
+  merge_out=$(taskdag_materialisation_tree_violations "$bad_merge" 2222222222222222222222222222222222222222)
   grep -q 'invalid batch\|append-only path changed' <<<"$content_out" \
     && grep -q 'unexpected path' <<<"$path_out" \
     && grep -q 'not linear\|malformed or non-linear ancestry' <<<"$merge_out"
@@ -293,11 +331,11 @@ else bad "overlapping race was not atomic: rc=$races"; fi
   GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$unsafe_blob,bodies/$unsafe_sha.body"
   unsafe_tree=$(GIT_INDEX_FILE="$idx" git write-tree); rm -f "$idx"
   unsafe_commit=$(printf 'unsafe\n' | git commit-tree "$unsafe_tree" -p "$tip2")
-  orphan_out=$(taskdag_materialisation_tree_violations "$orphan_commit")
-  no_op_out=$(taskdag_materialisation_tree_violations "$no_op")
-  empty_out=$(taskdag_materialisation_tree_violations "$empty_root")
-  unsafe_out=$(taskdag_materialisation_tree_violations "$unsafe_commit")
-  mktemp_out=$(TMPDIR="$ROOT/absent-tmp" taskdag_materialisation_tree_violations "$no_op" 2>/dev/null)
+  orphan_out=$(taskdag_materialisation_tree_violations "$orphan_commit" 2222222222222222222222222222222222222222)
+  no_op_out=$(taskdag_materialisation_tree_violations "$no_op" 2222222222222222222222222222222222222222)
+  empty_out=$(taskdag_materialisation_tree_violations "$empty_root" 2222222222222222222222222222222222222222)
+  unsafe_out=$(taskdag_materialisation_tree_violations "$unsafe_commit" 2222222222222222222222222222222222222222)
+  mktemp_out=$(TMPDIR="$ROOT/absent-tmp" taskdag_materialisation_tree_violations "$no_op" 2222222222222222222222222222222222222222 2>/dev/null)
   grep -q 'lacks matching slot\|not reachable from a batch' <<<"$orphan_out" \
     && grep -q 'must add exactly one batch' <<<"$no_op_out" \
     && grep -q 'must add exactly one batch' <<<"$empty_out" \
@@ -310,7 +348,7 @@ git clone -q --depth=1 --branch tasks/v1/materialisation "file://$ROOT/origin" "
 shallow_out=$(
   cd "$ROOT/shallow" || exit 1
   source "$(dirname "$TD")/task-dag.d/materialise.sh"
-  taskdag_materialisation_tree_violations "$(git rev-parse HEAD)"
+  taskdag_materialisation_tree_violations "$(git rev-parse HEAD)" 2222222222222222222222222222222222222222
 )
 grep -q 'shallow repository' <<<"$shallow_out" && ok "strict validator rejects shallow authority history" || bad "shallow authority was accepted"
 
@@ -322,7 +360,7 @@ rm "$ROOT/missing-ancestry/.git/objects/${missing_root:0:2}/${missing_root:2}"
 missing_out=$(
   cd "$ROOT/missing-ancestry" || exit 1
   source "$(dirname "$TD")/task-dag.d/materialise.sh"
-  taskdag_materialisation_tree_violations "$missing_tip"
+  taskdag_materialisation_tree_violations "$missing_tip" 2222222222222222222222222222222222222222
 )
 grep -q 'ancestry is incomplete or unreadable' <<<"$missing_out" && ok "strict validator rejects missing non-shallow ancestry" || bad "missing ancestry was accepted"
 
@@ -337,7 +375,7 @@ chmod +x "$ROOT/failing-tools/git"
 read_failure_out=$(
   cd "$ROOT/wc" || exit 1
   source "$(dirname "$TD")/task-dag.d/materialise.sh"
-  PATH="$ROOT/failing-tools:$PATH" taskdag_materialisation_tree_violations "$tip2" 2>/dev/null
+  PATH="$ROOT/failing-tools:$PATH" taskdag_materialisation_tree_violations "$tip2" 2222222222222222222222222222222222222222 2>/dev/null
 )
 grep -q 'validator cannot read batch\|unreadable' <<<"$read_failure_out" && ok "strict validator turns Git read failure into a violation" || bad "Git read failure disappeared from validation"
 
@@ -350,7 +388,7 @@ chmod +x "$ROOT/failing-tools/git"
 tree_failure_out=$(
   cd "$ROOT/wc" || exit 1
   source "$(dirname "$TD")/task-dag.d/materialise.sh"
-  PATH="$ROOT/failing-tools:$PATH" taskdag_materialisation_tree_violations "$tip2" 2>/dev/null
+  PATH="$ROOT/failing-tools:$PATH" taskdag_materialisation_tree_violations "$tip2" 2222222222222222222222222222222222222222 2>/dev/null
 )
 grep -q 'validator cannot read snapshot tree\|validator cannot list' <<<"$tree_failure_out" && ok "strict validator turns tree enumeration failure into a violation" || bad "tree enumeration failure disappeared from validation"
 rm "$ROOT/failing-tools/git"
@@ -379,7 +417,7 @@ chmod +x "$ROOT/failing-tools/jq"
 jq_failure_out=$(
   cd "$ROOT/wc" || exit 1
   source "$(dirname "$TD")/task-dag.d/materialise.sh"
-  PATH="$ROOT/failing-tools:$PATH" taskdag_materialisation_tree_violations "$tip2" 2>/dev/null
+  PATH="$ROOT/failing-tools:$PATH" taskdag_materialisation_tree_violations "$tip2" 2222222222222222222222222222222222222222 2>/dev/null
 )
 [ -n "$jq_failure_out" ] && ok "strict validator turns jq failure into a violation" || bad "jq failure disappeared from validation"
 

@@ -1,5 +1,38 @@
 # task-dag commit & ref invariants — READ BEFORE TOUCHING ANY TASK REF
 
+## Canonical semantic activation authority
+
+`refs/heads/tasks/v1/activation` is the only activation ref. Its permanent
+history is a zero-parent epoch-1 commit followed by a linear, append-only
+chain. Epoch `N` adds only `records/%016d.json`; epochs are consecutive and
+each record binds the previous epoch and SHA-256 digest. The ref may
+temporarily point to one replaceable guard commit parented directly to the
+active activation commit with an identical tree. The next activation bypasses
+that guard and parents directly to the active commit.
+
+Activation records are canonical strict JSON and bind state, compatibility
+floor, immutable registry and exact source tips, guard version, actor and audit
+timestamp. Registry snapshots contain schema 1, a domain-separated
+`sha256:<hex>` identity, independent registry-file provenance
+`{repository,path,commit,blob}`, and at most 128 sorted repositories identified
+by canonical lowercase repository plus immutable repository ID. Source tips
+match those repositories exactly by both fields; registry provenance is not an
+extra source tip. Compatibility uses the one `virusdave/task-dag` source tip,
+not registry provenance. `activation apply` snapshots its request, validates complete
+non-shallow history, uses an exact leased compare-and-swap, and always reads
+origin back. Compatibility is offline against the full task-dag repository;
+the floor cannot move backward. Activation does not authorize public semantic
+producers, which remain controlled by the committed migration drain.
+
+An enabled writer snapshot binds origin, epoch and record digest, active
+commit, current authority tip, guard version, compatibility floor and runtime
+commit. A fenced writer replaces the authority tip with a strict same-tree
+guard while atomically advancing its target under exact leases. Every guard
+binds the active epoch, record digest, guard version and activation commit, and
+separately records the prior authority tip it leased. Thus repeated writes in
+one epoch remain sibling guards with only one current guard. Missing,
+disabled, malformed, stale, shallow or uncertain authority fails closed.
+
 ## Immutable materialisation reservations (disabled-state schema 1)
 
 `refs/heads/tasks/v1/materialisation` is one exact data-in-tree exception;
@@ -11,8 +44,9 @@ one) and append-only. Regular `100644` blobs are restricted to
 
 Schema 1 permits only `batch-reserved-before-create` slot states at generation
 0/fence 1. Each state names its deterministic slot, declaration, operation and
-batch IDs, and records the authority tip observed before the whole-batch leased
-compare-and-swap (null only for the initial branch). A reservation commit adds
+batch IDs, durable activation `{epoch,digest,guardVersion}` provenance, and the
+activation and materialisation authority tips observed before the whole-batch
+leased compare-and-swap (the materialisation tip is null only initially). A reservation commit adds
 complete bodies, declarations, batch membership and slot states atomically;
 existing paths can never be deleted or replaced. `task-dag validate --strict`
 revalidates this state offline. Public materialisation commands remain denied
@@ -20,8 +54,12 @@ by the semantic migration policy and perform no issue creation or publication.
 
 Declarations contain semantic input only. Request provenance lives in the
 batch receipt's sorted member records, each of which binds slot, declaration,
-operation, and complete member provenance; the complete receipt determines the
-batch ID. Repository names are deliberate immutable routing assertions in the
+operation, and complete member provenance. The batch ID also binds the
+canonical activation epoch, record digest, and guard version, so an exact
+cross-epoch retry appends a distinct immutable receipt without rewriting the
+prior epoch's path. The later receipt attests a new observation under the
+current activation; an already reserved immutable slot retains its original
+reservation activation and is never rewritten to the later epoch. Repository names are deliberate immutable routing assertions in the
 declaration, not display-only provenance: a repository rename conflicts until
 an explicit migration defines the replacement identity. String limits count
 Unicode code points; body limits count exact UTF-8 bytes. Writers snapshot the

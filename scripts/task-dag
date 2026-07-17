@@ -66,6 +66,8 @@ TASKDAG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
 # shellcheck source=task-dag.d/materialise.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
+# shellcheck source=task-dag.d/activation.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
 
 # Colors for output (if supported)
 if [ -t 1 ]; then
@@ -349,6 +351,14 @@ TASKDAG_GRAPH_REF="refs/heads/tasks/v1/graph"
 # Immutable materialisation reservations have one exact data-in-tree ref.
 # Never broaden this exception to tasks/v1/*.
 TASKDAG_MATERIALISATION_REF="refs/heads/tasks/v1/materialisation"
+TASKDAG_ACTIVATION_REF="refs/heads/tasks/v1/activation"
+
+taskdag_is_activation_ref() {
+    case "$1" in
+        refs/heads/tasks/v1/activation|tasks/v1/activation) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 taskdag_is_materialisation_ref() {
     case "$1" in
@@ -489,10 +499,10 @@ taskdag_mailbox_tree_violations() {
 # mid-walk (concurrent claim/complete/drop) yields no lines, so the audit never
 # flaps. The immutable materialisation authority instead fails closed.
 taskdag_ref_violations() {
-    local sha="$1" ref="$2"
+    local sha="$1" ref="$2" activation_authority=${3:-}
     local objtype tree rest ns
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || {
-        taskdag_is_materialisation_ref "$ref" \
+        { taskdag_is_materialisation_ref "$ref" || taskdag_is_activation_ref "$ref"; } \
             && echo "✗ ${ref} → ${sha} is missing or unreadable"
         return 0
     }
@@ -519,7 +529,12 @@ taskdag_ref_violations() {
         return 0
     fi
     if taskdag_is_materialisation_ref "$ref"; then
-        taskdag_materialisation_tree_violations "$sha"
+        taskdag_materialisation_tree_violations "$sha" "$activation_authority"
+        return 0
+    fi
+    if taskdag_is_activation_ref "$ref"; then
+        taskdag_activation_validate_history "$sha" >/dev/null \
+            || echo "✗ ${ref} has malformed activation history or guard"
         return 0
     fi
     # The cross-repo mailbox shards are the other data-in-tree exception: a
@@ -1657,6 +1672,9 @@ COMMANDS:
     materialise-child --spec-file FILE
                            One-declaration adapter to materialise-batch. Also
                            disabled by migration policy (exit 75).
+    activation apply|status|check-compatible
+                           Manage and inspect the exact canonical semantic
+                           activation authority (offline git plus origin).
     comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
                            sanctioned path) — stamps a task-dag:<kind> marker
                            so it can't be re-ingested as a phantom task.
@@ -5968,6 +5986,7 @@ EOF
         taskdag_is_graph_ref "$ref" && continue
         taskdag_is_mailbox_ref "$ref" && continue
         taskdag_is_materialisation_ref "$ref" && continue
+        taskdag_is_activation_ref "$ref" && continue
         local tree
         tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
         if [ "$tree" != "$EMPTY_TREE" ]; then
@@ -6014,12 +6033,13 @@ EOF
         # sub-namespaces) so a hand-crafted ref at an UNKNOWN path is
         # actually seen and flagged — restricting the snapshot to known
         # namespaces would make the unknown-namespace check dead code.
-        local snapshot line vsha vref out
+        local snapshot line vsha vref out activation_authority
         snapshot=$(git for-each-ref --format='%(objectname) %(refname)' \
             refs/heads/tasks/ refs/heads/gh/)
+        activation_authority=$(awk -v ref="$TASKDAG_ACTIVATION_REF" '$2==ref {print $1}' <<<"$snapshot")
         while read -r vsha vref; do
             [ -n "$vsha" ] || continue
-            out=$(taskdag_ref_violations "$vsha" "$vref")
+            out=$(taskdag_ref_violations "$vsha" "$vref" "$activation_authority")
             [ -n "$out" ] || continue
             while IFS= read -r line; do
                 errors=$((errors + 1))
@@ -7774,6 +7794,7 @@ main() {
         supersede) cmd_supersede "$@" ;;
         materialise-batch) cmd_materialise_batch "$@" ;;
         materialise-child) cmd_materialise_child "$@" ;;
+        activation) cmd_activation "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;
