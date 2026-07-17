@@ -252,8 +252,8 @@ CLOSE_HIST=$(git rev-parse HEAD)
 git push -q origin HEAD:master
 out=$("$TD" complete-historical "$CLOSE_LEAF" --commit="$CLOSE_HIST" 2>&1); rc=$?
 git fetch -q origin master
-if [ $rc -eq 0 ] && ! git log HEAD --format='%B' | grep -q '^Closes-Epic: #5252$' \
-   && ! git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$' \
+if [ $rc -eq 0 ] && [ -z "$(git log HEAD -1 --grep='^Closes-Epic: #5252$' --format='%H')" ] \
+   && [ -z "$(git log origin/master -1 --grep='^Closes-Epic: #5252$' --format='%H')" ] \
    && echo "$out" | grep -q 'completion recorded; epic close deferred by migration drain' \
    && echo "$out" | grep -q '^git push origin HEAD:master$'; then
   ok "historical final leaf records completion and explicitly defers epic close"
@@ -261,8 +261,8 @@ else
   bad "historical final leaf violated local publication contract (rc=$rc out=$out)"
 fi
 git push -q origin HEAD:master
-if ! git log origin/master --format='%B' | grep -q '^Closes-Epic: #5252$' \
-  && git log origin/master --format='%B' | grep -q '^Historical-Commit:'; then
+if [ -z "$(git log origin/master -1 --grep='^Closes-Epic: #5252$' --format='%H')" ] \
+  && [ -n "$(git log origin/master -1 --grep='^Historical-Commit:' --format='%H')" ]; then
   ok "explicit push publishes historical completion without legacy close projection"
 else
   bad "explicit push lost completion or published a drained historical close"
