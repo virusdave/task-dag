@@ -702,26 +702,67 @@ _xrepo_validate_completion_fact() {
     ' <<<"$msg"
 }
 
-# Validate one isolated delegated/completion snapshot and report whether every
-# delegated child for an issue has a matching completion fact.  The caller
+# Parent-authoritative delegated-close/v1 read predicate. There is
+# intentionally no writer while completion-ingest is migration-drained.
+# The record is create-only evidence, parented by the exact delegation, and
+# binds immutable GitHub identities plus the exact peer close witness.
+_xrepo_validate_delegated_close_v1() {
+    local sha="$1" delegation_sha="$2" top_repo="$3" top_issue="$4"
+    local peer_repo="$5" peer_issue="$6" peer_tip peer_close peer_root wt parents first second extra tree first_tree close_issue
+    local gh_root pending_root
+    local key record_value delegation_value
+    [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] || return 2
+    [ "$(git rev-parse "$sha^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] || return 2
+    [ "$(git show -s --format='%P' "$sha")" = "$delegation_sha" ] || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Task-Dag-Delegated-Close)" = v1 ] || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Parent-Repo)" = "$top_repo" ] || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Parent-Issue)" = "#${top_issue}" ] || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Peer-Repo)" = "$peer_repo" ] || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Peer-Issue)" = "#${peer_issue}" ] || return 2
+    for key in Parent-Repo-Node-Id Parent-Issue-Node-Id Peer-Repo-Node-Id Peer-Issue-Node-Id Materialisation-Operation-Id Declaration-Digest; do
+        record_value=$(_xrepo_exact_trailer "$sha" "$key") || return 2
+        delegation_value=$(_xrepo_exact_trailer "$delegation_sha" "$key") || return 2
+        [ -n "$record_value" ] && [ "$record_value" = "$delegation_value" ] || return 2
+    done
+    record_value=$(_xrepo_exact_trailer "$sha" Declaration-Digest) || return 2
+    [[ "$record_value" =~ ^[0-9a-f]{64}$ ]] || return 2
+    peer_tip=$(_xrepo_exact_trailer "$sha" Peer-Tip) || return 2
+    peer_close=$(_xrepo_exact_trailer "$sha" Peer-Close) || return 2
+    peer_root=$(_xrepo_exact_trailer "$sha" Peer-Epic) || return 2
+    [[ "$peer_tip" =~ ^[0-9a-f]{40}$ && "$peer_close" =~ ^[0-9a-f]{40}$ && "$peer_root" =~ ^[0-9a-f]{40}$ ]] || return 2
+    wt=$(taskdag_peer_worktree_for "$peer_repo") || return 2
+    env -u GIT_DIR git -C "$wt" rev-list --first-parent "$peer_tip" 2>/dev/null \
+        | awk -v close_oid="$peer_close" '$0 == close_oid { found=1 } END { exit !found }' || return 2
+    gh_root=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/gh/issues/${peer_issue}^{commit}" 2>/dev/null || true)
+    pending_root=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/tasks/pending/${peer_issue}^{commit}" 2>/dev/null || true)
+    [ -z "$gh_root" ] || [ -z "$pending_root" ] || [ "$gh_root" = "$pending_root" ] || return 2
+    [ "${gh_root:-$pending_root}" = "$peer_root" ] || return 2
+    parents=$(env -u GIT_DIR git -C "$wt" show -s --format='%P' "$peer_close" 2>/dev/null) || return 2
+    read -r first second extra <<<"$parents"
+    [ -n "$first" ] && [ "$second" = "$peer_root" ] && [ -z "${extra:-}" ] || return 2
+    tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$peer_close^{tree}" 2>/dev/null) || return 2
+    first_tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$first^{tree}" 2>/dev/null) || return 2
+    [ "$tree" = "$first_tree" ] || return 2
+    close_issue=$(env -u GIT_DIR git -C "$wt" show -s \
+        --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$peer_close")
+    [ "$close_issue" = "#${peer_issue}" ] || return 2
+}
+
+_xrepo_exact_trailer() {
+    local commit="$1" key="$2" values
+    values=$(git show -s --format="%(trailers:key=${key},valueonly,separator=%x0A)" "$commit" 2>/dev/null) || return 2
+    [ "$(printf '%s\n' "$values" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || return 2
+    [ -n "$values" ] || return 2
+    printf '%s\n' "$values"
+}
+
+# Validate one isolated delegated/close snapshot and report whether every
+# delegated child for an issue has a matching strict close fact. The caller
 # supplies a bare GIT_DIR populated from one verified origin advertisement, so
 # this never falls back to stale refs in the working checkout.
 _xrepo_strict_snapshot_status() {
     local git_dir="$1" top_repo="$2" top_issue="$3"
-    local ref tail owner repo peer sha any=false missing=false delegation_sha peer_commit
-    while IFS=$'\t' read -r sha ref; do
-        [ -n "$ref" ] || continue
-        tail="${ref#refs/heads/tasks/completions/${top_issue}/}"
-        owner="${tail%%/*}"; tail="${tail#*/}"
-        repo="${tail%%/*}"; tail="${tail#*/}"
-        peer="${tail%%/*}"; peer_commit="${tail#*/}"
-        [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ && "$repo" =~ ^[A-Za-z0-9_.-]+$ && "$peer" =~ ^[1-9][0-9]*$ && "$peer_commit" =~ ^[0-9a-f]{7,40}$ ]] || return 2
-        delegation_sha=$(git --git-dir="$git_dir" rev-parse -q --verify \
-            "refs/heads/tasks/delegated/${top_issue}/${owner}/${repo}/${peer}^{commit}") || return 2
-        GIT_DIR="$git_dir" _xrepo_validate_completion_fact "$sha" "$delegation_sha" "$top_repo" \
-            "$top_issue" "${owner}/${repo}" "$peer" "$peer_commit" || return 2
-    done < <(git --git-dir="$git_dir" for-each-ref --format='%(objectname)%09%(refname)' \
-        "refs/heads/tasks/completions/${top_issue}/")
+    local ref tail owner repo peer sha any=false missing=false
     while IFS=$'\t' read -r sha ref; do
         [ -n "$ref" ] || continue
         any=true
@@ -992,49 +1033,16 @@ cmd_ingest_completion() {
     return 0
 }
 
-# Helper: echo the required final phase for a phase-gated epic, or
-# nothing if the epic is not phase-gated. Config is the line-based
-# scripts/task-dag.d/phase-gates.conf ("<issue> <final-phase>").
-_xrepo_required_final_phase() {
-    local top_issue="$1"
-    local conf="${_XREPO_MODULE_DIR}/phase-gates.conf"
-    [ -f "$conf" ] || return 0
-    awk -v issue="$top_issue" '
-        /^[[:space:]]*#/ { next }
-        /^[[:space:]]*$/ { next }
-        { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
-        $1 == issue { print $2; exit }
-    ' "$conf"
-}
-
 # Helper: return 0 if delegated child <rest> (= <owner>/<repo>/<peer>)
-# under epic <top_issue> is satisfied. Non-phase-gated epics are
-# satisfied by any completion ref; phase-gated epics require at least one
-# completion recorded at the epic's required final phase.
+# under epic <top_issue> has exact parent-authoritative close evidence.
 _xrepo_child_satisfied() {
     local top_issue="$1" rest="$2"
-    local required_phase
-    required_phase="$(_xrepo_required_final_phase "$top_issue")"
-
-    if [ -z "$required_phase" ]; then
-        local found
-        found="$(git for-each-ref --format='%(refname)' \
-            "refs/heads/tasks/completions/${top_issue}/${rest}/*" 2>/dev/null | head -n1)"
-        [ -n "$found" ]
-        return
-    fi
-
-    local ref phase
-    while read -r ref; do
-        [ -n "$ref" ] || continue
-        phase="$(git log -1 --format=%B "$ref" 2>/dev/null \
-            | awk -F': ' '$1 ~ /^[[:space:]]*phase$/ { gsub(/[[:space:]]/, "", $2); print $2; exit }')"
-        if [ "$phase" = "$required_phase" ]; then
-            return 0
-        fi
-    done < <(git for-each-ref --format='%(refname)' \
-        "refs/heads/tasks/completions/${top_issue}/${rest}/*" 2>/dev/null)
-    return 1
+    local owner="${rest%%/*}" trail="${rest#*/}" repo peer record delegation top_repo
+    repo="${trail%%/*}"; peer="${trail#*/}"
+    record=$(git rev-parse -q --verify "refs/heads/tasks/delegated-close/v1/${top_issue}/${owner}/${repo}/${peer}^{commit}" 2>/dev/null) || return 1
+    delegation=$(git rev-parse -q --verify "refs/heads/tasks/delegated/${top_issue}/${owner}/${repo}/${peer}^{commit}" 2>/dev/null) || return 2
+    top_repo=$(_xrepo_current_repo) || return 2
+    _xrepo_validate_delegated_close_v1 "$record" "$delegation" "$top_repo" "$top_issue" "${owner}/${repo}" "$peer"
 }
 
 # Helper: print one of:
@@ -1045,11 +1053,11 @@ _xrepo_child_satisfied() {
 _xrepo_epic_status() {
     local top_issue="$1"
 
-    # Ensure we have a complete local view of delegated and completion refs.
-    git fetch origin \
+    # Ensure we have a complete local view of delegated and strict close refs.
+    git fetch --prune origin \
         "+refs/heads/tasks/delegated/${top_issue}/*:refs/heads/tasks/delegated/${top_issue}/*" \
-        "+refs/heads/tasks/completions/${top_issue}/*:refs/heads/tasks/completions/${top_issue}/*" \
-        >/dev/null 2>&1 || true
+        "+refs/heads/tasks/delegated-close/v1/${top_issue}/*:refs/heads/tasks/delegated-close/v1/${top_issue}/*" \
+        >/dev/null 2>&1 || return 2
 
     local missing=()
     local any_delegated="false"
@@ -1519,18 +1527,19 @@ EOF
     _rc_time() { [ "$(date +%s)" -lt "$deadline" ]; }
     # One authoritative namespace advertisement. It is also the proof used by
     # the private no-initial-probe ingestion mode.
-    listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 2>"$tmp/git.err") || { _rc_fail snapshot "" "" "$(cat "$tmp/git.err")"; fatal=true; listing=""; }
+    listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 2>"$tmp/git.err") || { _rc_fail snapshot "" "" "$(cat "$tmp/git.err")"; fatal=true; listing=""; }
     printf '%s' "$listing" | LC_ALL=C sort >"$tmp/manifest"
-    if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
+    if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
     printf '%s\n' "$listing" | awk '$2 ~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ {print $2}' >"$tmp/receipts"
     git init -q --bare "$tmp/snapshot.git" && git --git-dir="$tmp/snapshot.git" remote add origin "$(git remote get-url origin)" || { _rc_fail snapshot "" "" "cannot initialize isolated snapshot"; fatal=true; }
     if [ "$fatal" = false ] && [ -s "$tmp/manifest" ]; then
         timeout "${max_seconds}s" git --git-dir="$tmp/snapshot.git" fetch -q --no-tags origin \
             '+refs/heads/gh/comments/*:refs/heads/gh/comments/*' \
             '+refs/heads/tasks/completions/*:refs/heads/tasks/completions/*' \
-            '+refs/heads/tasks/delegated/*:refs/heads/tasks/delegated/*' || { _rc_fail snapshot "" "" "isolated snapshot fetch failed"; fatal=true; }
+            '+refs/heads/tasks/delegated/*:refs/heads/tasks/delegated/*' \
+            '+refs/heads/tasks/delegated-close/v1/*:refs/heads/tasks/delegated-close/v1/*' || { _rc_fail snapshot "" "" "isolated snapshot fetch failed"; fatal=true; }
     fi
-    git --git-dir="$tmp/snapshot.git" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/gh/comments refs/heads/tasks/completions refs/heads/tasks/delegated | LC_ALL=C sort >"$tmp/fetched"
+    git --git-dir="$tmp/snapshot.git" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/gh/comments refs/heads/tasks/completions refs/heads/tasks/delegated refs/heads/tasks/delegated-close/v1 | LC_ALL=C sort >"$tmp/fetched"
     cmp -s "$tmp/manifest" "$tmp/fetched" || { _rc_fail snapshot "" "" "snapshot changed during fetch"; fatal=true; }
     : >"$tmp/converge-issues"
     while IFS=$'\t' read -r sha ref; do
@@ -1680,16 +1689,16 @@ EOF
         local advertised
         rm -rf "$dir"
         advertised=$(git ls-remote --refs origin \
-            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/completions/${ci}/*") || return 2
+            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*") || return 2
         printf '%s' "$advertised" | LC_ALL=C sort >"$manifest"
         git init -q --bare "$dir" && git --git-dir="$dir" remote add origin "$(git remote get-url origin)" || return 2
         if [ -s "$manifest" ]; then
             git --git-dir="$dir" fetch -q --no-tags origin \
                 "+refs/heads/tasks/delegated/${ci}/*:refs/heads/tasks/delegated/${ci}/*" \
-                "+refs/heads/tasks/completions/${ci}/*:refs/heads/tasks/completions/${ci}/*" || return 2
+                "+refs/heads/tasks/delegated-close/v1/${ci}/*:refs/heads/tasks/delegated-close/v1/${ci}/*" || return 2
         fi
         git --git-dir="$dir" for-each-ref --format='%(objectname)%09%(refname)' \
-            "refs/heads/tasks/delegated/${ci}/" "refs/heads/tasks/completions/${ci}/" | LC_ALL=C sort >"$fetched"
+            "refs/heads/tasks/delegated/${ci}/" "refs/heads/tasks/delegated-close/v1/${ci}/" | LC_ALL=C sort >"$fetched"
         cmp -s "$manifest" "$fetched" || return 2
         _xrepo_strict_snapshot_status "$dir" "$repo" "$ci"
     }
@@ -1827,10 +1836,13 @@ cmd_close_epic() {
             return 3
         }
     else
-        git fetch origin \
+        git fetch --prune origin \
             "+refs/heads/tasks/delegated/${top_issue}/*:refs/heads/tasks/delegated/${top_issue}/*" \
-            "+refs/heads/tasks/completions/${top_issue}/*:refs/heads/tasks/completions/${top_issue}/*" \
-            >/dev/null 2>&1 || true
+            "+refs/heads/tasks/delegated-close/v1/${top_issue}/*:refs/heads/tasks/delegated-close/v1/${top_issue}/*" \
+            >/dev/null 2>&1 || {
+                _xrepo_die "close-epic: cannot refresh strict delegated-close authority"
+                return 2
+            }
 
         local missing=()
         local any_delegated="false"
@@ -1962,19 +1974,17 @@ cmd_close_epic() {
 # ref) is a no-op success; a concurrent master advance turns the push into
 # a non-fast-forward rejection that a re-run converges from.
 
-# Helper: is there a `Closes-Epic: #<N>` trailer merge anywhere on the
-# default branch? Trailer-ONLY variant used when the pending ref is already
-# gone (post-close) so we no longer have the epic SHA for a parent check.
+# Helper for the post-close case where pending/<N> is gone. The durable
+# gh/issues/<N> identity remains available, so this still delegates to the
+# exact root-parent + parsed-trailer close predicate rather than accepting a
+# trailer-only historical match.
 _ops_epic_closed_trailer_on() {
-    local issue="$1" base_ref="$2" mc
-    while read -r mc; do
-        if git log -1 --format='%B' "$mc" 2>/dev/null \
-            | git interpret-trailers --parse 2>/dev/null \
-            | grep -qE "^Closes-Epic:[[:space:]]*#?${issue}([^0-9]|\$)"; then
-            return 0
-        fi
-    done < <(git log "$base_ref" --merges --format='%H' 2>/dev/null)
-    return 1
+    local issue="$1" base_ref="$2" root_ref="refs/heads/gh/issues/${issue}" root rc=0
+    root=$(remote_ref_sha_checked "$root_ref") || rc=$?
+    case "$rc" in 0) ;; 2) return 1 ;; *) return 2 ;; esac
+    git fetch --quiet origin "+${root_ref}:${root_ref}" >/dev/null 2>&1 || return 2
+    [ "$(git rev-parse -q --verify "${root_ref}^{commit}" 2>/dev/null || true)" = "$root" ] || return 2
+    taskdag_issue_closed_at_tip "$base_ref" "$issue" "$root"
 }
 
 cmd_close_ops_epic() {
@@ -2238,17 +2248,11 @@ EOF
 #     safe to close (rollout/done evidence or the approved exception).
 
 _epic_subtree_complete_at_commit() {
-    local tip="$1" node="$2" child had_child=false
-    while IFS= read -r child; do
-        [ -z "$child" ] && continue
-        had_child=true
-        _epic_subtree_complete_at_commit "$tip" "$child" || return 1
-    done < <(list_dag_children "$node")
-    if [ "$had_child" = false ]; then
-        task_is_completed_at_commit "$tip" "$node"
-        return $?
-    fi
-    return 0
+    local tip="$1" node="$2" cur
+    taskdag_recon_prepare --no-fetch || return 2
+    taskdag_load_facts "$tip" || return 2
+    cur=$(taskdag_current_repo) || return 2
+    taskdag_node_complete "task:${cur}@${node}"
 }
 
 _epic_first_incomplete_leaf_at_commit() {

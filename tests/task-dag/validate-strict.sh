@@ -57,6 +57,7 @@ role: human
 intent: comment"
 mk_ref "refs/heads/tasks/completions/42/o/r/1/deadbeef" "kind: completion"
 mk_ref "refs/heads/tasks/delegated/42/o/r/1"            "kind: delegated"
+mk_ref "refs/heads/tasks/delegated-close/v1/42/o/r/1"   "Task-Dag-Delegated-Close: v1"
 mk_ref "refs/heads/gh/child-epics/42/o/r"              "kind: child-epic"
 # Named-slot child-epic marker (slug namespace) — a valid, tool-minted ref.
 # This is the golden fixture for the child-epic-slots namespace: it would

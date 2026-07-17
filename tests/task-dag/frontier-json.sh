@@ -125,6 +125,38 @@ else
   bad "4: non-numeric issue was '$ISS' (want null)"
 fi
 
+# TEST 5: frontier and deps must consume the same strict completion fact.
+# Completing a descendant makes its parent reachable, but does not complete
+# that parent; both callers must keep a task depending on the parent parked.
+DEP=$(git commit-tree "$EMPTY_TREE" -p "$EPIC" -m "Task: strict dependency")
+DESC=$(git commit-tree "$EMPTY_TREE" -p "$DEP" -m "Task: dependency descendant")
+tip=$(git rev-parse HEAD); tree=$(git rev-parse "${tip}^{tree}")
+desc_done=$(git commit-tree "$tree" -p "$tip" -p "$DESC" -m "Complete descendant only")
+git update-ref refs/heads/master "$desc_done"; git reset -q --soft "$desc_done"
+WAIT=$(git commit-tree "$EMPTY_TREE" -p "$EPIC" -p "$DEP" -m "Task: waits for strict dependency")
+WAIT_SHORT=$(git rev-parse --short "$WAIT")
+git update-ref "refs/heads/tasks/frontier/$WAIT_SHORT" "$WAIT"
+J5=$("$TD" frontier --no-fetch --json 2>/dev/null)
+"$TD" deps "$WAIT" --no-fetch --check-complete >/dev/null 2>&1; deps_rc=$?
+if ! echo "$J5" | jq -e --arg s "$WAIT" 'any(.[]; .sha == $s)' >/dev/null \
+  && [ "$deps_rc" -eq 2 ]; then
+  ok "5: frontier and deps agree that arbitrary ancestry does not complete a dependency"
+else
+  bad "5: frontier/deps disagreed on the false parent completion (deps rc $deps_rc)"
+fi
+
+tip=$(git rev-parse HEAD); tree=$(git rev-parse "${tip}^{tree}")
+dep_done=$(git commit-tree "$tree" -p "$tip" -p "$DEP" -m "Complete exact dependency")
+git update-ref refs/heads/master "$dep_done"; git reset -q --soft "$dep_done"
+J5_DONE=$("$TD" frontier --no-fetch --json 2>/dev/null)
+"$TD" deps "$WAIT" --no-fetch --check-complete >/dev/null 2>&1; deps_rc=$?
+if echo "$J5_DONE" | jq -e --arg s "$WAIT" 'any(.[]; .sha == $s)' >/dev/null \
+  && [ "$deps_rc" -eq 0 ]; then
+  ok "5: frontier and deps agree when the exact dependency witness exists"
+else
+  bad "5: frontier/deps disagreed on the exact completion (deps rc $deps_rc)"
+fi
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

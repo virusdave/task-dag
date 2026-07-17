@@ -70,8 +70,29 @@
 #   • the resolved current repo (to address current-repo task nodes).
 TASKDAG_RECON_EDGES_JSON=""
 declare -gA TASKDAG_RECON_FP_CHILDREN=()
+declare -gA TASKDAG_RECON_NODE_STATE=()
 TASKDAG_RECON_CUR=""
 TASKDAG_RECON_READY=false   # set by prepare; guards use-before-prepare
+
+# Canonical parent-encoded dependency verdict used by legacy-shaped task
+# commits while graph migration is drained. Callers consume this JSON instead
+# of reconstructing readiness. The authority tip is mandatory.
+taskdag_task_dependency_status_json() {
+    local tip="$1" task="$2" dep complete=true reasons='[]' deps='[]' done
+    git rev-parse --verify -q "${tip}^{commit}" >/dev/null 2>&1 || return 2
+    while IFS= read -r dep; do
+        [ -n "$dep" ] || continue
+        done=false
+        if taskdag_task_completed_at_tip "$tip" "$dep"; then done=true; else complete=false; fi
+        deps=$(jq -c --arg sha "$dep" --argjson completed "$done" '. + [{sha:$sha,completed:$completed}]' <<<"$deps") || return 2
+        if [ "$done" = false ]; then
+            reasons=$(jq -c --arg sha "$dep" '. + [{code:"incomplete-requirement",task:$sha}]' <<<"$reasons") || return 2
+        fi
+    done < <(get_dep_parents "$task")
+    jq -nc --arg task "$task" --arg tip "$(git rev-parse "${tip}^{commit}")" \
+        --argjson ready "$complete" --argjson reasons "$reasons" --argjson dependencies "$deps" \
+        '{schema:1,task:$task,authorityTip:$tip,dependencies:$dependencies,ready:$ready,reasons:$reasons}'
+}
 
 # taskdag_recon_build_child_map: build the containment (first-parent) child
 # map ONCE from ALL reachable task commits, in a SINGLE `git log` call (no
@@ -115,6 +136,7 @@ taskdag_recon_prepare() {
     TASKDAG_RECON_EDGES_JSON=""
     TASKDAG_RECON_CUR=""
     TASKDAG_RECON_FP_CHILDREN=()
+    TASKDAG_RECON_NODE_STATE=()
 
     if [ "$nofetch" = false ]; then
         taskdag_sync_master || { echo "Error: could not sync origin/master (indeterminate); refusing to reconcile against a possibly-stale view (use --no-fetch for local refs)" >&2; return 2; }
@@ -160,20 +182,32 @@ taskdag_recon_resolve_task_node() {
 }
 
 # taskdag_recon_has_satisfying_edge <normalized-node>: rc 0 iff ANY outgoing
-# satisfies-edge (from == node) is satisfied (the supersede short-circuit).
+# satisfies target is semantically complete (the supersede short-circuit).
 taskdag_recon_has_satisfying_edge() {
-    printf '%s' "$TASKDAG_RECON_EDGES_JSON" | jq -e --arg n "$1" \
-        'any(.[]; .from == $n and .relation == "satisfies" and .satisfied == true)' \
-        >/dev/null 2>&1
+    local target rc
+    while IFS= read -r target; do
+        [ -n "$target" ] || continue
+        rc=0; taskdag_node_complete "$target" || rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        [ "$rc" -eq 2 ] && return 2
+    done < <(printf '%s' "$TASKDAG_RECON_EDGES_JSON" | jq -r --arg n "$1" \
+        '.[] | select(.from == $n and .relation == "satisfies") | .to')
+    return 1
 }
 
 # taskdag_recon_requires_satisfied <normalized-node>: rc 0 iff EVERY outgoing
-# requires-edge (from == node) is satisfied. Vacuously true when the node has
-# no requires-edges (`all` over an empty set is true) — requires = ALL.
+# requires target is semantically complete. Vacuously true when the node has
+# no requires-edges — requires = ALL.
 taskdag_recon_requires_satisfied() {
-    printf '%s' "$TASKDAG_RECON_EDGES_JSON" | jq -e --arg n "$1" \
-        '[.[] | select(.from == $n and .relation == "requires")] | all(.satisfied == true)' \
-        >/dev/null 2>&1
+    local target rc
+    while IFS= read -r target; do
+        [ -n "$target" ] || continue
+        rc=0; taskdag_node_complete "$target" || rc=$?
+        [ "$rc" -eq 2 ] && return 2
+        [ "$rc" -eq 0 ] || return 1
+    done < <(printf '%s' "$TASKDAG_RECON_EDGES_JSON" | jq -r --arg n "$1" \
+        '.[] | select(.from == $n and .relation == "requires") | .to')
+    return 0
 }
 
 # taskdag_recon_has_requires <normalized-node>: rc 0 iff the node has at
@@ -193,19 +227,14 @@ taskdag_recon_task_type() {
         | awk -F':[[:space:]]*' 'tolower($1) == "type" { print tolower($2); exit }'
 }
 
-# taskdag_node_complete <node>: the north-star complete() predicate.
-#   rc 0 -> complete   rc 1 -> not complete   rc 2 -> error (bad node / setup)
-# Assumes taskdag_recon_prepare has run this invocation.
-taskdag_node_complete() {
-    [ "$TASKDAG_RECON_READY" = true ] || { echo "Error: taskdag_node_complete called before taskdag_recon_prepare" >&2; return 2; }
+# Internal implementation. The public wrapper below memoizes verdicts and
+# rejects graph cycles, so every recursive requires/satisfies lookup shares
+# one least-fixed-point evaluation.
+taskdag__node_complete_impl() {
     local node
     node=$(taskdag_normalize_node "$1") || { echo "Error: invalid node: $1" >&2; return 2; }
 
-    # (1) supersede — any outgoing satisfies-edge satisfied fulfils the node
-    #     (valid for both leaves and epics; the supersede short-circuit).
-    taskdag_recon_has_satisfying_edge "$node" && return 0
-
-    # (2) classify by CONTAINMENT and explicit epic type. A node with
+    # (1) classify by CONTAINMENT and explicit epic type. A node with
     #     first-parent children is an EPIC; a childless Type: epic task with
     #     outgoing requires-edges is also an EPIC whose obligations are those
     #     edges. A childless Type: epic task with no requires-edges has EMPTY
@@ -231,25 +260,35 @@ taskdag_node_complete() {
         children="${TASKDAG_RECON_FP_CHILDREN[$sha]:-}"
         task_type="$(taskdag_recon_task_type "$sha")"
         taskdag_recon_has_requires "$node" && has_requires=true || has_requires=false
-        if [ -n "$children" ] || { [ "$task_type" = epic ] && [ "$has_requires" = true ]; }; then
+        if [ -n "$children" ] || [ "$task_type" = epic ]; then
             is_epic=true
-        elif [ "$task_type" = epic ]; then
-            return 1
         fi
     fi
 
     if [ "$is_epic" = false ]; then
-        # LEAF / issue / foreign node — the durable done() fact is
-        # authoritative. `|| rc=$?` (not `; rc=$?`) so a non-zero return
-        # under the CLI's `set -e` is captured, not an abort. A leaf's
-        # outgoing requires-edges gate READINESS, not completeness.
+        # A direct leaf/issue fact seeds the fixed point. Check it before
+        # following satisfies edges so a valid seed can terminate an
+        # otherwise cyclic supersedence graph.
         local rc=0
         taskdag_node_done "$node" || rc=$?
         [ "$rc" -eq 2 ] && return 2
-        return "$rc"
+        [ "$rc" -eq 0 ] && return 0
     fi
 
-    # EPIC — obligations = its containment children ∪ its outgoing
+    # (2) supersede — any semantically complete satisfies target fulfils this
+    # node. A target's mere reachability or routing hint never does.
+    local satisfies_rc=0
+    taskdag_recon_has_satisfying_edge "$node" || satisfies_rc=$?
+    [ "$satisfies_rc" -eq 0 ] && return 0
+    [ "$satisfies_rc" -eq 2 ] && return 2
+
+    [ "$is_epic" = true ] || return 1
+
+    # A childless epic with no requires obligations stays incomplete unless
+    # the satisfies short-circuit above completed it.
+    [ -n "$children" ] || [ "$has_requires" = true ] || return 1
+
+    # (3) EPIC — obligations = its containment children ∪ its outgoing
     # requires-edges. Complete iff obligations are non-empty, every
     # requires-edge is satisfied (mode = all), and every child subtree is
     # complete. The empty-obligations Type: epic case returned incomplete
@@ -263,6 +302,31 @@ taskdag_node_complete() {
         [ "$rc" -eq 0 ] || return 1
     done <<< "$children"
     return 0
+}
+
+# taskdag_node_complete <node>: canonical complete() predicate.
+#   rc 0 -> complete   rc 1 -> not complete   rc 2 -> corrupt/indeterminate
+taskdag_node_complete() {
+    [ "$TASKDAG_RECON_READY" = true ] || { echo "Error: taskdag_node_complete called before taskdag_recon_prepare" >&2; return 2; }
+    local node state rc=0
+    node=$(taskdag_normalize_node "$1") || { echo "Error: invalid node: $1" >&2; return 2; }
+    state="${TASKDAG_RECON_NODE_STATE[$node]:-}"
+    case "$state" in
+        complete) return 0 ;;
+        incomplete) return 1 ;;
+        visiting)
+            echo "Error: dependency graph cycle encountered while resolving $node" >&2
+            return 2
+            ;;
+    esac
+    TASKDAG_RECON_NODE_STATE["$node"]=visiting
+    taskdag__node_complete_impl "$node" || rc=$?
+    case "$rc" in
+        0) TASKDAG_RECON_NODE_STATE["$node"]=complete ;;
+        1) TASKDAG_RECON_NODE_STATE["$node"]=incomplete ;;
+        *) unset 'TASKDAG_RECON_NODE_STATE[$node]' ;;
+    esac
+    return "$rc"
 }
 
 # taskdag_leaf_ready <node>: the north-star leaf-readiness predicate —

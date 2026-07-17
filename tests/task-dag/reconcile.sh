@@ -104,6 +104,7 @@ close_issue() {
 
 Closes-Epic: #$n")
     git update-ref refs/heads/master "$merge"
+    git update-ref "refs/heads/gh/issues/$n" "$epic"
     git symbolic-ref HEAD refs/heads/master 2>/dev/null || true
     git reset -q --soft "$merge"
     git push -q origin master:master
@@ -221,6 +222,18 @@ Type: leaf")
 NZ="task:$REPO@$Z"
 add_edge "$NZ" "issue:$REPO#6" satisfies
 complete_is no "B3 unsatisfied satisfies-edge does not complete" "$NZ"
+
+# B4: semantic completion propagates transitively through satisfies targets;
+# callers must not stop at the target's raw direct-done bit.
+CHAIN_TARGET=$(mk_task "Task: semantic satisfies target
+Type: leaf")
+CHAIN_SOURCE=$(mk_task "Task: transitive satisfies source
+Type: leaf")
+NCHAIN_TARGET="task:$REPO@$CHAIN_TARGET"
+NCHAIN_SOURCE="task:$REPO@$CHAIN_SOURCE"
+add_edge "$NCHAIN_TARGET" "issue:$REPO#5" satisfies
+add_edge "$NCHAIN_SOURCE" "$NCHAIN_TARGET" satisfies
+complete_is yes "B4 transitive satisfies uses semantic target completion" "$NCHAIN_SOURCE"
 
 # ===========================================================================
 # Part C — leaf-readiness.

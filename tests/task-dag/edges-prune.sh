@@ -100,11 +100,12 @@ echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin 
 complete_issue() {
     local n="$1" base side merge
     base=$(git rev-parse HEAD)
-    side=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p "$base" -m "side-$n" </dev/null)
+    side=$(git commit-tree "$EMPTY_TREE" -p "$base" -m "Task: issue root $n" </dev/null)
     merge=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p "$base" -p "$side" -m "close #$n
 
 Closes-Epic: #$n" </dev/null)
     git update-ref refs/heads/master "$merge"
+    git update-ref "refs/heads/gh/issues/$n" "$side"
     git push -q origin master
 }
 

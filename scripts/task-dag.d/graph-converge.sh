@@ -36,14 +36,17 @@ taskdag_peer_worktree_for() {
     local repo key path
     repo=$(taskdag_norm_owner_repo "$1") || return 1
     key=$(taskdag_peer_path_config_key "$repo") || return 1
-    path=$(git config --get "$key" 2>/dev/null || true)
+    # A strict delegated-close snapshot evaluates with GIT_DIR pointed at an
+    # isolated bare snapshot. Peer path configuration still belongs to the
+    # caller's worktree, never that snapshot.
+    path=$(env -u GIT_DIR git config --get "$key" 2>/dev/null || true)
     [ -n "$path" ] || path="${TASKDAG_PEER_PATH_PREFIX:-}/${repo}"
     [ -n "$path" ] && [ -d "$path/.git" ] || return 1
     printf '%s\n' "$path"
 }
 
 taskdag_node_done_in_worktree() {
-    local wt="$1" node="$2" rest repo ref tip scan commit first parents commit_tree first_tree found=false
+    local wt="$1" node="$2" rest repo ref tip root
     node=$(taskdag_normalize_node "$node") || return 2
     repo=$(taskdag_node_repo "$node") || return 2
     tip=$(git -C "$wt" rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
@@ -52,22 +55,12 @@ taskdag_node_done_in_worktree() {
     case "$node" in
         task:*)
             rest="${node#task:}"; ref="${rest##*@}"
-            [ "$(git -C "$wt" rev-parse "$ref^{tree}" 2>/dev/null)" = "$EMPTY_TREE" ] || return 1
-            scan=$(git -C "$wt" rev-list --first-parent --parents "$tip" 2>/dev/null) || return 2
-            while read -r commit first parents; do
-                [ -n "$commit" ] && [ -n "$first" ] && [ -n "$parents" ] || continue
-                case " $parents " in *" $ref "*) ;; *) continue ;; esac
-                commit_tree=$(git -C "$wt" rev-parse "$commit^{tree}" 2>/dev/null || true)
-                first_tree=$(git -C "$wt" rev-parse "$first^{tree}" 2>/dev/null || true)
-                if [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ]; then found=true; break; fi
-            done <<< "$scan"
-            [ "$found" = true ] || return 1
+            (cd "$wt" && taskdag_task_completed_at_tip "$tip" "$ref")
             ;;
         issue:*)
             rest="${node#issue:}"; ref="${rest##*#}"
-            git -C "$wt" log "$tip" --merges --no-color \
-                --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' 2>/dev/null \
-                | sed 's/^#//' | grep -qx "$ref" || return 1
+            root=$(cd "$wt" && taskdag_issue_root "$ref") || return $?
+            (cd "$wt" && taskdag_issue_closed_at_tip "$tip" "$ref" "$root")
             ;;
     esac
 }
@@ -457,7 +450,7 @@ EOF
 }
 
 taskdag_push_completed_nodes() {
-    local range="$1" cur commit parents first p tree issue commits commit_tree first_tree
+    local range="$1" cur commit p issue commits tip
     cur=$(taskdag_current_repo) || return 2
     commits=$(git rev-list --reverse --first-parent "$range" 2>/dev/null) || {
         echo "Error: cannot scan pushed range '$range' for completion facts" >&2
@@ -465,23 +458,21 @@ taskdag_push_completed_nodes() {
     }
     while IFS= read -r commit; do
         [ -n "$commit" ] || continue
-        parents=$(git show -s --format='%P' "$commit")
-        first="${parents%% *}"
-        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
-        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
-        if [ -n "$first" ] && [ "$commit_tree" = "$first_tree" ]; then
-            parents="${parents#"$first"}"
-        else
-            parents=""
-        fi
-        for p in $parents; do
-            tree=$(git rev-parse -q --verify "$p^{tree}" 2>/dev/null || true)
-            if [ "$tree" = "$EMPTY_TREE" ]; then
+        tip="$commit"
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            if taskdag_task_completed_at_tip "$tip" "$p"; then
                 printf 'task:%s@%s\t%s\n' "$cur" "$p" "$commit"
             fi
-        done
+        done < <(git show -s --format='%P' "$commit" | cut -d' ' -f2- | tr ' ' '\n')
         while IFS= read -r issue; do
-            [ -n "$issue" ] && printf 'issue:%s#%s\t%s\n' "$cur" "${issue#\#}" "$commit"
+            issue="${issue#\#}"
+            [ -n "$issue" ] || continue
+            local root
+            root=$(git rev-parse -q --verify "refs/heads/gh/issues/${issue}^{commit}" 2>/dev/null \
+                || git rev-parse -q --verify "refs/heads/tasks/pending/${issue}^{commit}" 2>/dev/null || true)
+            [ -n "$root" ] && taskdag_issue_closed_at_tip "$tip" "$issue" "$root" \
+                && printf 'issue:%s#%s\t%s\n' "$cur" "$issue" "$commit"
         done < <(git show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$commit" | grep -E '^#?[1-9][0-9]*$' || true)
     done <<< "$commits"
 }

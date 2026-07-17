@@ -162,11 +162,7 @@ get_dep_parents() {
 # depending on HEAD (a pre-push hook may push an explicit SHA, not HEAD).
 task_is_completed_at_commit() {
     local tip="$1" task_sha="$2"
-    git log "$tip" --format='%P' 2>/dev/null |
-        awk -v sha="$task_sha" '
-            { for (i = 1; i <= NF; i++) if ($i == sha) found = 1 }
-            END { exit found ? 0 : 1 }
-        '
+    taskdag_task_completed_at_tip "$tip" "$task_sha"
 }
 
 is_task_completed() {
@@ -181,13 +177,7 @@ is_task_completed() {
 # and `deps` never disagree about whether a task is pickable.
 deps_satisfied() {
     local sha="$1"
-    local deps dep
-    deps="$(get_dep_parents "$sha")" || return 1
-    while IFS= read -r dep; do
-        [ -z "$dep" ] && continue
-        is_task_completed "$dep" || return 1
-    done <<< "$deps"
-    return 0
+    taskdag_task_dependency_status_json HEAD "$sha" | jq -e '.ready == true' >/dev/null
 }
 
 # Helper: same dependency predicate as deps_satisfied, but evaluated against a
@@ -196,13 +186,7 @@ deps_satisfied() {
 # unrelated local HEAD.
 deps_satisfied_at_commit() {
     local tip="$1" sha="$2"
-    local deps dep
-    deps="$(get_dep_parents "$sha")" || return 1
-    while IFS= read -r dep; do
-        [ -z "$dep" ] && continue
-        task_is_completed_at_commit "$tip" "$dep" || return 1
-    done <<< "$deps"
-    return 0
+    taskdag_task_dependency_status_json "$tip" "$sha" | jq -e '.ready == true' >/dev/null
 }
 
 # Helper: find the first reachable completion merge whose parent list includes
@@ -210,20 +194,7 @@ deps_satisfied_at_commit() {
 # message only for audit/idempotency notes.
 completion_merge_for_task_at_commit() {
     local tip="$1" task_sha="$2"
-    local commit first parent commit_tree first_tree
-    while read -r commit first parent; do
-        [ -n "$commit" ] && [ -n "$first" ] && [ -n "$parent" ] || continue
-        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
-        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
-        [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ] || continue
-        for parent in $parent; do
-            if [ "$parent" = "$task_sha" ]; then
-                printf '%s\n' "$commit"
-                return 0
-            fi
-        done
-    done < <(git rev-list --first-parent --parents "$tip" 2>/dev/null)
-    return 1
+    taskdag_task_completion_witness_at_tip "$tip" "$task_sha"
 }
 
 print_completion_push_instruction() {
@@ -355,7 +326,7 @@ list_task_refs() {
 # at a path the tool would never mint — i.e. exactly the "I'll just do the
 # ref surgery by hand" mistake this whole subsystem exists to prevent.
 # ─────────────────────────────────────────────────────────────────────
-TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated completions ci-chains repair-superseded"
+TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated delegated-close completions ci-chains repair-superseded"
 TASKDAG_KNOWN_GH_NS="issues comments child-epics child-epic-slots"
 
 # ─────────────────────────────────────────────────────────────────────
@@ -597,7 +568,8 @@ fetch_task_refs_strict() {
         '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
         '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
         '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
-        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*'
+        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
+        '+refs/heads/gh/issues/*:refs/heads/gh/issues/*'
 }
 
 fetch_task_refs() {
@@ -1025,17 +997,10 @@ list_dag_children() {
 # refuses to complete a decomposed node), so completeness is derived from
 # the leaves, not from the intermediate node itself.
 epic_subtree_complete() {
-    local node="$1" child had_child=false
-    while IFS= read -r child; do
-        [ -z "$child" ] && continue
-        had_child=true
-        epic_subtree_complete "$child" || return 1
-    done < <(list_dag_children "$node")
-    if [ "$had_child" = false ]; then
-        is_task_completed "$node"
-        return $?
-    fi
-    return 0
+    local node="$1" cur
+    taskdag_recon_prepare --no-fetch || return 2
+    cur=$(taskdag_current_repo) || return 2
+    taskdag_node_complete "task:${cur}@${node}"
 }
 
 # Helper: does epic issue <N> have any cross-repo delegated children
@@ -1069,19 +1034,8 @@ epic_has_delegated_children() {
 # close commit. An ordinary `complete` attach-merge also lists the epic as
 # a parent but carries NO trailer, so the trailer check is required.
 epic_already_closed_on() {
-    local issue="$1" epic_sha="$2" base_ref="$3" mc mparents
-    while read -r mc mparents; do
-        case " $mparents " in
-            *" $epic_sha "*) ;;
-            *) continue ;;
-        esac
-        if git log -1 --format='%B' "$mc" 2>/dev/null \
-            | git interpret-trailers --parse 2>/dev/null \
-            | grep -qE "^Closes-Epic:[[:space:]]*#?${issue}([^0-9]|\$)"; then
-            return 0
-        fi
-    done < <(git log "$base_ref" --merges --format='%H %P' 2>/dev/null)
-    return 1
+    local issue="$1" epic_sha="$2" base_ref="$3"
+    taskdag_issue_closed_at_tip "$base_ref" "$issue" "$epic_sha"
 }
 
 # After a successful leaf completion, auto-close the epic it belongs to IFF
@@ -3358,7 +3312,9 @@ cmd_deps() {
     fi
     
     sha=$(resolve_sha "$sha") || return 1
-    local deps=$(get_dep_parents "$sha")
+    local dependency_status deps
+    dependency_status=$(taskdag_task_dependency_status_json HEAD "$sha") || return 2
+    deps=$(printf '%s' "$dependency_status" | jq -r '.dependencies[].sha')
 
     # Informational: a blocked structural (breakdown) ancestor makes the
     # task un-pickable in `frontier`/`claim` even when its dependency
@@ -3391,7 +3347,8 @@ cmd_deps() {
         return 0
     fi
     
-    local all_met=true
+    local all_met
+    all_met=$(printf '%s' "$dependency_status" | jq -r '.ready')
     
     if [ "$json" = true ]; then
         echo "{"
@@ -3402,11 +3359,9 @@ cmd_deps() {
     while read -r dep; do
         local dep_title=$(get_task_title "$dep" 2>/dev/null || echo "Unknown")
         local dep_short=$(git rev-parse --short "$dep")
-        local completed=$(is_task_completed "$dep" && echo "true" || echo "false")
-        
-        if [ "$completed" = "false" ]; then
-            all_met=false
-        fi
+        local completed
+        completed=$(printf '%s' "$dependency_status" | jq -r --arg dep "$dep" \
+            '.dependencies[] | select(.sha == $dep) | .completed')
         
         if [ "$json" = true ]; then
             [ "$first" = false ] && echo ","

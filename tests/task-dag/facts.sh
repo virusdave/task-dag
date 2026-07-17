@@ -46,6 +46,10 @@ export TASKDAG_CURRENT_REPO="owner/repo"
 source "$LIB_DIR/edges.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/facts.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/graph-converge.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/cross-repo.sh"
 
 # ===========================================================================
 # Build a real repo with completion + close history on master.
@@ -91,6 +95,7 @@ close_issue() {  # <epic_task_sha> <N>
 
 Closes-Epic: #$n")
     git update-ref refs/heads/master "$merge"
+    git update-ref "refs/heads/gh/issues/$n" "$epic"
     git reset -q --soft "$merge"
     git push -q origin master:master
 }
@@ -204,6 +209,132 @@ if [ "$rc" -eq 1 ]; then
 else
     bad "C1: body-prose Closes-Epic wrongly marked issue done (rc $rc)"
 fi
+
+# Exact issue identity and merge arity are load-bearing. A matching trailer
+# with the wrong root, or a close with an extra parent, is not a close fact.
+WRONG_ROOT=$(mk_task "Task: wrong root")
+EXTRA=$(mk_task "Task: extra parent")
+forged=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -p "$WRONG_ROOT" -m $'Forged close\n\nCloses-Epic: #88')
+git update-ref refs/heads/gh/issues/88 "$EXTRA"
+git update-ref refs/heads/master "$forged"; git reset -q --soft "$forged"
+taskdag_node_done "issue:owner/repo#88"; rc=$?
+[ "$rc" -eq 1 ] && ok "C2: matching trailer with the wrong epic root is rejected" || bad "C2: wrong-root close accepted"
+too_many=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -p "$EXTRA" -p "$WRONG_ROOT" -m $'Extra-parent close\n\nCloses-Epic: #89')
+git update-ref refs/heads/gh/issues/89 "$EXTRA"
+git update-ref refs/heads/master "$too_many"; git reset -q --soft "$too_many"
+taskdag_node_done "issue:owner/repo#89"; rc=$?
+[ "$rc" -eq 1 ] && ok "C3: extra-parent close merge is rejected" || bad "C3: extra-parent close accepted"
+
+EXTRA_TASK=$(mk_task "Task: extra-parent completion target")
+extra_completion=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -p "$EXTRA_TASK" -p "$WRONG_ROOT" -m "Not a strict completion")
+git update-ref refs/heads/master "$extra_completion"; git reset -q --soft "$extra_completion"
+taskdag_node_done "task:owner/repo@$EXTRA_TASK"; rc=$?
+[ "$rc" -eq 1 ] && ok "C4: extra-parent task completion merge is rejected" || bad "C4: extra-parent completion accepted"
+
+# Generated adversarial histories exercise the shape predicate across a mix
+# of exact witnesses, extra-parent merges, and tree-changing merges. Keep the
+# seed fixed so failures reproduce while still checking a family of objects
+# rather than one hand-picked example.
+RANDOM=67
+property_ok=true
+for i in {1..16}; do
+    candidate=$(mk_task "Task: generated completion $i")
+    tip=$(git rev-parse HEAD)
+    tree=$(git rev-parse "${tip}^{tree}")
+    case $((RANDOM % 3)) in
+        0)
+            generated=$(git commit-tree "$tree" -p "$tip" -p "$candidate" -m "Exact generated completion")
+            expected=0
+            ;;
+        1)
+            generated=$(git commit-tree "$tree" -p "$tip" -p "$candidate" -p "$EXTRA" -m "Generated extra-parent merge")
+            expected=1
+            ;;
+        2)
+            changed_blob=$(printf 'generated-%s\n' "$i" | git hash-object -w --stdin)
+            changed_tree=$(printf '100644 blob %s\tgenerated\n' "$changed_blob" | git mktree)
+            generated=$(git commit-tree "$changed_tree" -p "$tip" -p "$candidate" -m "Generated tree-changing merge")
+            expected=1
+            ;;
+    esac
+    git update-ref refs/heads/master "$generated"
+    git reset -q --soft "$generated"
+    taskdag_task_completed_at_tip HEAD "$candidate"; rc=$?
+    [ "$rc" -eq "$expected" ] || property_ok=false
+done
+git push -q origin master:master
+[ "$property_ok" = true ] \
+    && ok "C5: generated completion histories accept only exact two-parent tree-equal witnesses" \
+    || bad "C5: generated completion shape property failed"
+
+# A delegated issue is a separate node kind: legacy completion refs and
+# Satisfies routing hints are not closure authority. Only a create-only v1
+# record, parented by the exact delegation and proving the exact peer close,
+# may satisfy it.
+mkdir -p "$ROOT/peers/nicponskis"
+git clone -q "$ROOT/origin.git" "$ROOT/peers/nicponskis/github-worker"
+PEER="$ROOT/peers/nicponskis/github-worker"
+(
+    cd "$PEER"
+    git checkout -q -B master origin/master
+    peer_root=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: delegated peer epic\n\nIssue: #901\nType: epic')
+    git update-ref refs/heads/gh/issues/901 "$peer_root"
+    peer_tip=$(git rev-parse HEAD)
+    peer_close=$(git commit-tree "$(git rev-parse "${peer_tip}^{tree}")" -p "$peer_tip" -p "$peer_root" -m $'Close delegated peer epic\n\nCloses-Epic: #901')
+    git update-ref refs/heads/master "$peer_close"
+    printf '%s\n%s\n%s\n' "$peer_root" "$peer_close" "$peer_close" > "$ROOT/peer-facts"
+)
+readarray -t peer_facts < "$ROOT/peer-facts"
+PEER_ROOT=${peer_facts[0]}; PEER_CLOSE=${peer_facts[1]}; PEER_TIP=${peer_facts[2]}
+export TASKDAG_PEER_PATH_PREFIX="$ROOT/peers"
+_xrepo_current_repo() { printf 'owner/repo\n'; }
+
+DELEGATION=$(git commit-tree "$EMPTY_TREE" -m $'kind: delegated\nrole: system\nintent: delegated-child\n\nissue:\n  repo: owner/repo\n  number: 90\n\ndelegated:\n  repo: Nicponskis/github-worker\n  number: 901\n\nParent-Repo-Node-Id: PR_1\nParent-Issue-Node-Id: PI_90\nPeer-Repo-Node-Id: RR_1\nPeer-Issue-Node-Id: RI_901\nMaterialisation-Operation-Id: OP_1\nDeclaration-Digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+git update-ref refs/heads/tasks/delegated/90/Nicponskis/github-worker/901 "$DELEGATION"
+LEGACY=$(git commit-tree "$EMPTY_TREE" -p "$DELEGATION" -m 'kind: completion')
+git update-ref refs/heads/tasks/completions/90/Nicponskis/github-worker/901/deadbeef "$LEGACY"
+if _xrepo_child_satisfied 90 Nicponskis/github-worker/901; then
+    bad "C6: legacy completion fact satisfied delegated closure"
+else
+    ok "C6: legacy completion facts and routing hints do not satisfy delegated closure"
+fi
+
+close_record_message() {
+    cat <<EOF
+Record delegated close
+
+Task-Dag-Delegated-Close: v1
+Parent-Repo: owner/repo
+Parent-Issue: #90
+Peer-Repo: Nicponskis/github-worker
+Peer-Issue: #901
+Parent-Repo-Node-Id: PR_1
+Parent-Issue-Node-Id: PI_90
+Peer-Repo-Node-Id: RR_1
+Peer-Issue-Node-Id: RI_901
+Materialisation-Operation-Id: OP_1
+Declaration-Digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Peer-Tip: $PEER_TIP
+Peer-Close: $PEER_CLOSE
+Peer-Epic: $PEER_ROOT
+EOF
+}
+CLOSE_RECORD=$(git commit-tree "$EMPTY_TREE" -p "$DELEGATION" -m "$(close_record_message)")
+git update-ref refs/heads/tasks/delegated-close/v1/90/Nicponskis/github-worker/901 "$CLOSE_RECORD"
+if _xrepo_child_satisfied 90 Nicponskis/github-worker/901; then
+    ok "C7: exact parent-authoritative delegated-close record is accepted"
+else
+    bad "C7: exact delegated-close record was rejected"
+fi
+
+MALFORMED_CLOSE=$(git commit-tree "$EMPTY_TREE" -p "$DELEGATION" -p "$EXTRA" -m "$(close_record_message)")
+git update-ref refs/heads/tasks/delegated-close/v1/90/Nicponskis/github-worker/901 "$MALFORMED_CLOSE"
+if _xrepo_child_satisfied 90 Nicponskis/github-worker/901; then
+    bad "C8: extra-parent delegated-close record was accepted"
+else
+    ok "C8: malformed delegated-close record fails closed"
+fi
+git update-ref refs/heads/tasks/delegated-close/v1/90/Nicponskis/github-worker/901 "$CLOSE_RECORD"
 
 # ===========================================================================
 # Part D — satisfied(edge) = done(.to), both relations, no aggregation

@@ -67,6 +67,7 @@ close_issue() {
 
 Closes-Epic: #$n")
     git update-ref refs/heads/master "$merge"
+    git update-ref "refs/heads/gh/issues/$n" "$epic"
     git symbolic-ref HEAD refs/heads/master 2>/dev/null || true
     git reset -q --soft "$merge"
     git push -q origin master:master
