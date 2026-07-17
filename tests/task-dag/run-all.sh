@@ -47,6 +47,17 @@ fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TD="${1:-$(cd "$here/../../scripts" && pwd)/task-dag}"
+case "$TD" in
+    /*) ;;
+    *)
+        relative_td=$TD
+        TD=$(realpath -e -- "$TD") || {
+            echo "run-all.sh: cannot resolve relative TASK_DAG_CLI path: $relative_td" >&2
+            exit 2
+        }
+        echo "run-all.sh: converting relative TASK_DAG_CLI path '$relative_td' to absolute path '$TD'" >&2
+        ;;
+esac
 
 echo "Testing CLI: $TD"
 
