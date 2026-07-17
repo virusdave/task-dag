@@ -1,5 +1,33 @@
 # task-dag commit & ref invariants — READ BEFORE TOUCHING ANY TASK REF
 
+## Immutable materialisation reservations (disabled-state schema 1)
+
+`refs/heads/tasks/v1/materialisation` is one exact data-in-tree exception;
+no other `tasks/v1/materialisation/*` or broad `tasks/v1/*` ref is valid. Its
+history is linear (the initial commit has no parent, every successor exactly
+one) and append-only. Regular `100644` blobs are restricted to
+`bodies/<body-sha256>.body`, `declarations/<declaration-digest>.json`,
+`batches/<batch-id>.json`, and `slots/<slot-id>/state.json`.
+
+Schema 1 permits only `batch-reserved-before-create` slot states at generation
+0/fence 1. Each state names its deterministic slot, declaration, operation and
+batch IDs, and records the authority tip observed before the whole-batch leased
+compare-and-swap (null only for the initial branch). A reservation commit adds
+complete bodies, declarations, batch membership and slot states atomically;
+existing paths can never be deleted or replaced. `task-dag validate --strict`
+revalidates this state offline. Public materialisation commands remain denied
+by the semantic migration policy and perform no issue creation or publication.
+
+Declarations contain semantic input only. Request provenance lives in the
+batch receipt's sorted member records, each of which binds slot, declaration,
+operation, and complete member provenance; the complete receipt determines the
+batch ID. Repository names are deliberate immutable routing assertions in the
+declaration, not display-only provenance: a repository rename conflicts until
+an explicit migration defines the replacement identity. String limits count
+Unicode code points; body limits count exact UTF-8 bytes. Writers snapshot the
+request spec and each body once, then derive all metadata, validation, digests,
+declarations, receipts, and persisted blobs only from those snapshots.
+
 > ## ⛔ STOP — do not hand-craft task commits or do ref surgery by hand
 >
 > task-dag's **entire state is git** — refs under `refs/heads/tasks/**` and

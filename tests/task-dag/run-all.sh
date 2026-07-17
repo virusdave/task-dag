@@ -70,6 +70,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/edges-prune.sh" \
         "$(dirname "$TD")/task-dag.d/legacy-edges.sh" \
         "$(dirname "$TD")/task-dag.d/mailbox.sh" \
+        "$(dirname "$TD")/task-dag.d/materialise.sh" \
         "$(dirname "$TD")/operator-blocked-dashboard.sh" \
         "$(dirname "$TD")/operator-blocked-dashboard-publish.sh" \
         "$(dirname "$TD")/../.github/scripts/close-completed-issues.sh" \
@@ -104,6 +105,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/edges-prune.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/legacy-edges.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/mailbox.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/materialise.sh" \
     && bash -n "$(dirname "$TD")/operator-blocked-dashboard.sh" \
     && bash -n "$(dirname "$TD")/operator-blocked-dashboard-publish.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/close-completed-issues.sh" \
@@ -163,6 +165,7 @@ parallel_tests=(
     frontier-json.sh
     edges.sh
     migration-drain.sh
+    materialise.sh
     blocked-overlay.sh
     tree-fix-trailers.sh
     no-handbuilt-json.sh

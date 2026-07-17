@@ -12,10 +12,24 @@ status="$($TD migration-status --json 2>/dev/null)"
 if jq -e '.schema == 1 and .mode == "draining-legacy-writers" and .recognizedReadSchemas == ["legacy"] and .authorizedSemantics == ["legacy-read-only"]' <<<"$status" >/dev/null; then ok "strict status JSON"; else bad "strict status JSON"; fi
 
 printf '<!-- task-dag:completion --> Satisfies virusdave/task-dag#1 via peer/repo@abcdef1' >"$ROOT/completion-body"
+printf 'child body\n\n' >"$ROOT/materialise-body"
+jq -n --arg body "materialise-body" '{schema:1,actor:"fixture",authoritativeTimestamp:"2026-07-17T00:00:00Z",provenance:["fixture"],declarations:[{sourceRepo:{id:"1",name:"o/source"},parentIssue:{id:"2",number:21},peerRepo:{id:"3",name:"o/peer"},title:"Child",bodyFile:$body,provenance:"fixture"}]}' >"$ROOT/materialise-spec"
 for spec in "close-epic --issue 1" "close-ops-epic --issue 1 --yes" "close-completed-epic --issue 1 --reason evidence --yes" "delegate --issue 1 --to peer/repo#2" "reconcile-closed-issue 1 --yes" "ingest-comment --issue 1 --comment-id 1 --author bot --comment-url https://example.test/1 --created-at 2026-07-17T00:00:00Z --updated-at 2026-07-17T00:00:00Z --body-file $ROOT/completion-body" "propagate-completion --node issue:virusdave/task-dag#1 --witness aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "reconcile-backstop --no-fetch" "graph-converge --no-fetch"; do
     read -r -a args <<<"$spec"
     out="$($TD "${args[@]}" 2>&1)"; rc=$?
     if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out" && grep -q '^mode: draining-legacy-writers$' <<<"$out"; then ok "${args[0]} drains before effects"; else bad "${args[0]} rc=$rc: $out"; fi
+done
+
+for command in materialise-batch materialise-child; do
+    out="$($TD "$command" --spec-file "$ROOT/materialise-spec" 2>&1)"; rc=$?
+    if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out"; then
+        ok "$command validates then drains"
+    else
+        bad "$command valid spec rc=$rc: $out"
+    fi
+    "$TD" "$command" --spec-file "$ROOT/completion-body" >/dev/null 2>&1; rc=$?
+    [ "$rc" -eq 2 ] && ok "$command malformed spec fails before drain" \
+      || bad "$command malformed spec returned rc=$rc"
 done
 
 for spec in \
