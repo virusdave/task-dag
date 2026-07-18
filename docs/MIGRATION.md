@@ -348,9 +348,9 @@ Operational caveats:
 ## Semantic migration drain (committed state)
 
 The committed `scripts/task-dag.d/semantic-migration-policy.json` is the sole
-authority for the current drain. It recognizes only the legacy read schema and
-authorizes only `legacy-read-only` semantics. Legacy epic-close,
-materialisation, completion-ingest, and projection writers are disabled;
+authority for the pre-activation drain. It recognizes only the legacy read
+schema and authorizes only `legacy-read-only` semantics. Pre-activation
+epic-close, materialisation, completion-ingest, and projection writers are disabled;
 `task-dag migration-status --json` reports the strict policy consumed by every
 guarded entry point. A missing, malformed, or unsupported policy fails closed
 for those writers and for migration status, without disabling unrelated reads
@@ -360,6 +360,13 @@ or ref effects. Reusable workflows obtain each mutator, guard, and policy from
 one checkout/archive revision and translate only exact status 75 into an
 explicit deferred-success result. Every other policy or runtime failure stays
 red.
+
+Once an activation authority exists, local epic closure no longer consults
+that legacy drain. It consumes the canonical root-completeness snapshot and
+publishes the close commit through the same activation-generation fence as the
+completion. Missing, malformed, incompatible, disabled, or disappearing
+activation authority never authorizes a close or a fallback to legacy
+semantics. The other legacy writer classes remain drained.
 
 An ordinary revert is safe only before any canonical-v1 activation,
 epoch-backed write, or other activation write has occurred. After activation,

@@ -33,7 +33,7 @@ registry_commit=1111111111111111111111111111111111111111
 registry_blob=2222222222222222222222222222222222222222
 registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
 printf '%s\n' "$registry" >"$ROOT/registry"
-TASKDAG_SCRIPT_DIR=$(dirname "$TD"); source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
+TASKDAG_SCRIPT_DIR=$(dirname "$TD"); source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/cross-repo.sh"
 registry_id=$(_taskdag_activation_registry_id "$ROOT/registry")
 jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" \
   '{actor:"fixture",authoritativeTimestamp:"2026-07-18T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/enabled"
@@ -172,6 +172,36 @@ else
 fi
 jq '.authoritativeTimestamp="2026-07-18T00:00:07Z"' "$ROOT/enabled" >"$ROOT/re-enabled-backfill"
 "$TD" activation apply --spec-file "$ROOT/re-enabled-backfill" >/dev/null
+
+# Establish the materialisation authority that an enabled fleet carries. The
+# unrelated reservation keeps the close fixture free of materialisation work.
+printf 'unrelated child\n' >"$ROOT/unrelated-body"
+jq -n '{schema:1,actor:"fixture",authoritativeTimestamp:"2026-07-18T00:00:08Z",provenance:["consumer-cutover"],declarations:[{sourceRepo:{id:"1",name:"virusdave/task-dag"},parentIssue:{id:"issue-999",number:999},peerRepo:{id:"1",name:"virusdave/task-dag"},title:"Unrelated child",bodyFile:"unrelated-body",provenance:"consumer-cutover"}]}' >"$ROOT/unrelated-materialisation"
+taskdag_materialise_reserve_core "$ROOT/unrelated-materialisation" >/dev/null
+
+close_root=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: activated close root\nIssue: #80\nType: epic')
+git update-ref refs/heads/tasks/pending/80 "$close_root"
+git update-ref refs/heads/gh/issues/80 "$close_root"
+git push -q origin refs/heads/tasks/pending/80 refs/heads/gh/issues/80
+"$TD" claim-root 80 >/dev/null
+cat >"$ROOT/close-breakdown.json" <<'EOF'
+[{"title":"Final activated close child","type":"leaf","status":"pending","claim":true}]
+EOF
+close_breakdown=$($TD breakdown "$close_root" --spec-file="$ROOT/close-breakdown.json" --json)
+close_child=$(jq -r '.tasks[0].sha // empty' <<<"$close_breakdown")
+echo close-implementation >close-implementation; git add close-implementation; git commit -qm 'Implement activated close child'
+close_out=$($TD complete "$close_child")
+close_tip=$(git rev-parse HEAD)
+authority_before_close_publish=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+if git log -1 --format=%B "$close_tip" | grep -q '^Closes-Epic: #80$' \
+   && ! grep -q 'deferred by migration drain' <<<"$close_out" \
+   && "$TD" publish >/dev/null \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$close_tip" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_close_publish" ]; then
+  ok "enabled activation closes the final local epic child through fenced publication"
+else
+  bad "enabled activation left local epic closure on the legacy migration drain"
+fi
 
 remote_master=$(git ls-remote origin refs/heads/master | awk '{print $1}')
 malformed=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -p "$wait" -p "$dep" -m 'Malformed extra-parent completion')

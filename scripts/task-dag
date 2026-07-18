@@ -1148,8 +1148,6 @@ epic_already_closed_on() {
 maybe_emit_local_epic_close() {
     local task_sha="$1"
 
-    taskdag_migration_guard epic-close || return $?
-
     local root_sha
     root_sha=$(get_first_parent "$task_sha" 2>/dev/null || true)
     [ -n "$root_sha" ] || return 0
@@ -1210,6 +1208,7 @@ maybe_emit_local_epic_close() {
         root_status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${root_sha}" "$issue") || return 0
         [ "$(jq -r '.complete and (.blocked|not) and .requirementsSatisfied' <<<"$root_status")" = true ] || return 0
     else
+        taskdag_migration_guard epic-close || return $?
         epic_subtree_complete "$root_sha" || return 0
     fi
 
