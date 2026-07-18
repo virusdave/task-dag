@@ -95,10 +95,10 @@ guard me h origin <<<"(delete) $ZERO refs/heads/master $BASE"
 [ $? -eq 0 ] && ok "ALLOW: master deletion" \
              || bad "wrongly blocked a master deletion"
 
-# ── ALLOW: first push of master (remote sha all zeros) ────────────────
+# ── BLOCK: prepared-worker first push has no semantic base ───────────
 guard me h origin <<<"refs/heads/master $L1 refs/heads/master $ZERO"
-[ $? -eq 0 ] && ok "ALLOW: first push of master (no remote base)" \
-             || bad "wrongly blocked first master push"
+[ $? -eq 1 ] && ok "BLOCK: first master push has no semantic base" \
+             || bad "allowed prepared-worker first master push without a semantic base"
 
 # ── ALLOW: non-origin remote ──────────────────────────────────────────
 guard me h upstream <<<"refs/heads/master $L1 refs/heads/master $BASE"

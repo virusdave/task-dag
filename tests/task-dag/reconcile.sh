@@ -80,6 +80,7 @@ mk_task() {
     sha=$(git commit-tree "$EMPTY_TREE" -p "$parent" -m "$msg")
     short=$(git rev-parse --short "$sha")
     git update-ref "refs/heads/tasks/frontier/$short" "$sha"
+    git push -q origin "refs/heads/tasks/frontier/$short"
     printf '%s\n' "$sha"
 }
 # complete_task <task_sha>: land a completion merge on master (2nd parent =
@@ -107,7 +108,7 @@ Closes-Epic: #$n")
     git update-ref "refs/heads/gh/issues/$n" "$epic"
     git symbolic-ref HEAD refs/heads/master 2>/dev/null || true
     git reset -q --soft "$merge"
-    git push -q origin master:master
+    git push -q origin master:master "refs/heads/gh/issues/$n"
 }
 add_edge() {  # <from> <to> <relation>
     "$TD" dep add --from "$1" --to "$2" --relation "$3" --repo-id 4242 --witness w >/dev/null 2>&1

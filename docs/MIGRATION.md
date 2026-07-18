@@ -385,6 +385,44 @@ authority, run `activation check-compatible` offline for the proposed runtime,
 and only then repin. Never repin before the disable, confirmation, and offline
 compatibility check have all succeeded.
 
+### Consumer cutover and rollback
+
+Live semantic readers enter through the epoch-aware consumer adapter. Before
+activation it authorizes only the legacy parent-encoded read bridge. The
+presence of any valid activation history is the irreversible reader boundary:
+enabled and disabled epochs both use canonical facts and graph reconciliation.
+A disabled epoch therefore stops fenced producers without making an older
+reader authoritative again.
+
+Each online operation validates runtime compatibility, snapshots activation,
+facts, graph, and task refs, then compares them with one origin advertisement
+before returning a verdict. A moving or unreadable authority fails closed. Dispatch discovery,
+dependency reporting, direct claims, root discovery/claims, and completion
+gates all consume the shared requirements/status adapters. Activated graph,
+block, breakdown, claim, release, reap, and master completion/close writers
+advance the activation authority as a shared semantic generation in the same
+atomic push as their effect. This is a moving server-side fence; unchanged
+graph/master refspecs are not treated as leases. Completion and close tips use
+`task-dag publish` after exact shape/status validation, and the managed
+task-dag pre-push hook rejects raw master publication after activation. A
+disabled epoch pauses scheduling effects. Internal no-fetch helpers may reuse an enclosing operation's freshly
+observed pre-activation absence; standalone offline absence fails closed. Once
+`refs/task-dag/activation-observed` exists, online disappearance also fails
+closed and cannot revive legacy interpretation.
+
+Missing-epic human comment ingestion crosses a documented valid-state boundary
+in two fenced generations: first matching pending/issue epic refs, then the
+frontier effect and receipt. A crash between them leaves a valid pending epic;
+retry adopts it and completes the comment generation. Create-only leases plus
+authoritative readback converge concurrent or ambiguously acknowledged pushes,
+and disabled epochs reject the epic generation before remote effects.
+
+Rollback is a new disabled activation epoch followed by a runtime certified
+compatible with every persisted schema. It does not delete activation or graph
+history and cannot restore parent-only semantics. Re-enabling uses another
+monotonic activation epoch after compatibility and drain checks; no consumer
+configuration toggle or legacy fallback participates.
+
 ### Offline census/import/adoption schemas
 
 `materialise-census` accepts one strict schema-1 JSON object with exactly

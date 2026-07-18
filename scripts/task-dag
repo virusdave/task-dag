@@ -181,7 +181,8 @@ is_task_completed() {
 # and `deps` never disagree about whether a task is pickable.
 deps_satisfied() {
     local sha="$1"
-    taskdag_task_dependency_status_json HEAD "$sha" | jq -e '.ready == true' >/dev/null
+    [ "$TASKDAG_CONSUMER_READY" = true ] || taskdag_consumer_prepare requirements || return 2
+    taskdag_requirements_status_json "task:${TASKDAG_RECON_CUR}@${sha}" | jq -e '.requirementsSatisfied == true' >/dev/null
 }
 
 # Helper: same dependency predicate as deps_satisfied, but evaluated against a
@@ -190,7 +191,30 @@ deps_satisfied() {
 # unrelated local HEAD.
 deps_satisfied_at_commit() {
     local tip="$1" sha="$2"
-    taskdag_task_dependency_status_json "$tip" "$sha" | jq -e '.ready == true' >/dev/null
+    taskdag_consumer_prepare requirements-at-tip --tip "$tip" || return 2
+    taskdag_requirements_status_json "task:${TASKDAG_RECON_CUR}@${sha}" | jq -e '.requirementsSatisfied == true' >/dev/null
+}
+
+taskdag_completion_allowed() { # <task-sha>, against prepared snapshot
+    local status
+    status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@$1" --include-claimed) || return 2
+    [ "$(jq -r '(.complete|not) and .requirementsSatisfied' <<<"$status")" = true ]
+}
+
+taskdag_task_is_complete_prepared() { # <task-sha>
+    local status
+    status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@$1" --include-claimed) || return 2
+    [ "$(jq -r .complete <<<"$status")" = true ]
+}
+
+taskdag_consumer_fenced_scheduling_push() { # <operation> <actor> <updates-json>
+    local operation=$1 actor=$2 updates=$3 token timestamp
+    [ "$TASKDAG_CONSUMER_MODE" = canonical ] || return 2
+    token=$(taskdag_activation_snapshot_token) || return 3
+    [ "$(jq -r .authorityTip <<<"$token")" = "$(jq -r .authorityTip <<<"$TASKDAG_CONSUMER_ACTIVATION")" ] || return 3
+    updates=$(jq -cS 'sort_by(.ref)' <<<"$updates") || return 3
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    taskdag_activation_fenced_multi_push "$token" scheduling "$operation" "$actor" "$timestamp" "$updates"
 }
 
 # Helper: find the first reachable completion merge whose parent list includes
@@ -204,7 +228,7 @@ completion_merge_for_task_at_commit() {
 print_completion_push_instruction() {
     echo "Completion prepared locally; origin/master and task scheduling refs are unchanged."
     echo "Run exactly:"
-    echo "git push origin HEAD:master"
+    echo "task-dag publish"
 }
 
 # Helper: is <sha> a task commit? Every task commit (epic/task/leaf, and
@@ -247,20 +271,21 @@ subject_is_conventional_commits() {
 # Used by guard-pre-push to allow a properly-completed push through. Never keys
 # off HEAD — the caller passes the exact commit being pushed.
 is_sanctioned_tip_commit() {
-    local sha="$1" first second first_tree self_tree
+    local sha="$1" first second first_tree self_tree parent_count close_count has_close=false
     self_tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || return 1
+    parent_count=$(get_parents "$sha" 2>/dev/null | wc -l)
+    [ "$parent_count" -eq 2 ] || return 1
     first=$(get_first_parent "$sha" 2>/dev/null || true)
     [ -n "$first" ] || return 1
     first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null) || return 1
-    # Completion/link merge: 2nd parent is a task commit, tree-equal to parent.
     second=$(get_parents "$sha" 2>/dev/null | sed -n '2p')
-    if [ -n "$second" ] && [ "$self_tree" = "$first_tree" ] && is_task_commit "$second"; then
+    [ -n "$second" ] && [ "$self_tree" = "$first_tree" ] && is_task_commit "$second" || return 1
+    git log -1 --format='%B' "$sha" 2>/dev/null | grep -qE '^Closes-Epic:' && has_close=true
+    close_count=$(git log -1 --format='%B' "$sha" 2>/dev/null | grep -cE '^Closes-Epic:[[:space:]]*#[0-9]+[[:space:]]*$' || true)
+    if [ "$has_close" = false ]; then
         return 0
     fi
-    # Epic-close commit: Closes-Epic trailer, tree-equal to first parent.
-    if [ "$self_tree" = "$first_tree" ] \
-       && git log -1 --format='%B' "$sha" 2>/dev/null \
-            | grep -qE '^Closes-Epic:'; then
+    if [ "$close_count" -eq 1 ]; then
         return 0
     fi
     return 1
@@ -1082,8 +1107,8 @@ epic_already_closed_on() {
 #   parent1 = HEAD (the completion commit just created)
 #   parent2 = the epic root SHA (== tasks/pending/<N>)
 #   message = "...\n\nCloses-Epic: #<N>"
-# The worker's subsequent `git push origin HEAD:master` carries this
-# commit, and close-completed-issues.yml then closes the issue and cleans
+# The worker's subsequent `task-dag publish` carries this commit together
+# with its semantic generation, and close-completed-issues.yml then closes the issue and cleans
 # the pending/root-active refs. This keeps ONE closure mechanism (the
 # trailer-gated server workflow); the old direct REST close was removed
 # because it bypassed that gate and needed a token workers don't have.
@@ -1146,7 +1171,16 @@ maybe_emit_local_epic_close() {
     fi
 
     # Whole subtree must be complete (this completion is already on HEAD).
-    epic_subtree_complete "$root_sha" || return 0
+    # After activation consume the canonical root status; parent recursion is
+    # retained only by the bounded pre-activation bridge.
+    taskdag_consumer_prepare local-epic-close --tip HEAD || return 0
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        local root_status
+        root_status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${root_sha}" "$issue") || return 0
+        [ "$(jq -r '.complete and (.blocked|not) and .requirementsSatisfied' <<<"$root_status")" = true ] || return 0
+    else
+        epic_subtree_complete "$root_sha" || return 0
+    fi
 
     # A Materialise-Child-Epic trailer in this local completion range is an
     # obligation declaration even though its marker/delegation/edge are only
@@ -1603,6 +1637,8 @@ COMMANDS:
                            fetches exactly that ref.
     breakdown <parent>     Create task breakdown
     complete <sha>         Mark task as complete
+    publish [<tip>]        Publish an exact completion/close tip with the
+                           activated semantic-generation fence
     complete-historical <sha> --commit=<historical-sha>
                            ADMIN RECOVERY ONLY: retroactively link an
                            already-landed historical commit on master to a
@@ -1814,18 +1850,9 @@ cmd_frontier() {
     if [ "$do_fetch" = true ]; then
         fetch_task_refs
     fi
-
-    # Build a set of currently-claimed short SHAs from local refs that
-    # we just fetched. Doing a single per-row remote ls is too chatty;
-    # the fetched local view is the canonical answer modulo races.
-    local claimed_shas=""
-    if [ "$include_claimed" = false ]; then
-        claimed_shas=$(
-            git for-each-ref refs/heads/tasks/active/ \
-                --format='%(refname:strip=4)' 2>/dev/null \
-                | tr '\n' ' '
-        )
-    fi
+    local consumer_args=()
+    [ "$do_fetch" = false ] && consumer_args+=(--no-fetch --tip HEAD)
+    taskdag_consumer_prepare frontier "${consumer_args[@]}" || return 2
 
     if [ "$json" = true ]; then
         echo "["
@@ -1835,23 +1862,9 @@ cmd_frontier() {
     fi
 
     local first=true
-    git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:strip=3)' | while read sha short_ref; do
+    while read -r sha short_ref; do
         # strip=3 leaves 'frontier/<short>' — drop the prefix.
         short_ref="${short_ref#frontier/}"
-
-        # Blocked tasks stay in the DAG but are NOT pickable.
-        if is_task_blocked "$sha"; then
-            continue
-        fi
-
-        # Transitive block: a task whose structural (breakdown) ancestor
-        # is blocked is also NOT pickable. Blocking a parent/epic — e.g. a
-        # task parked awaiting operator feedback — must withhold every
-        # subtask decomposed under it; otherwise the dispatcher spawns
-        # no-op workers on children of a blocked node.
-        if blocked_structural_ancestor "$sha" >/dev/null && ! is_human_comment_task "$sha"; then
-            continue
-        fi
 
         local short_sha=$(git rev-parse --short "$sha")
         local title=$(get_task_title "$sha")
@@ -1867,27 +1880,10 @@ cmd_frontier() {
             continue
         fi
 
-        # Skip tasks that are already claimed elsewhere. Match against
-        # both the ref name and the resolved short SHA — older refs
-        # may have been created at a different abbreviation length.
-        if [ "$include_claimed" = false ]; then
-            if echo " $claimed_shas " | grep -q " $short_ref "; then
-                continue
-            fi
-            if echo " $claimed_shas " | grep -q " $short_sha "; then
-                continue
-            fi
-        fi
-
-        # Not-ready tasks are NOT pickable. `breakdown` publishes a
-        # tasks/frontier/<short> ref for EVERY task up front, so the ref
-        # set also contains tasks whose dependencies are not yet complete.
-        # Advertising those caused premature dispatch (a worker claims a
-        # task it cannot actually start). Skip any task with >=1 incomplete
-        # dependency; it surfaces automatically once its deps land.
-        if ! deps_satisfied "$sha"; then
-            continue
-        fi
+        local dispatch_status dispatch_args=()
+        [ "$include_claimed" = true ] && dispatch_args+=(--include-claimed)
+        dispatch_status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${sha}" "${dispatch_args[@]}") || return 2
+        [ "$(jq -r .ready <<<"$dispatch_status")" = true ] || continue
 
         if [ "$json" = true ]; then
             [ "$first" = false ] && echo ","
@@ -1908,7 +1904,7 @@ JSON
                 "${issue:+#$issue}" \
                 "${status:-pending}"
         fi
-    done
+    done < <(git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:strip=3)')
 
     if [ "$json" = true ]; then
         echo ""
@@ -2028,43 +2024,29 @@ EOF
     # Refresh local view so we see other workers' claims AND the blocked
     # overlay (fetch_task_refs now syncs tasks/blocked/*).
     fetch_task_refs
-
-    # Defense-in-depth: a blocked task is excluded from `frontier`, but a
-    # worker could still target its SHA directly. Refuse unless --force,
-    # so a parked task can never be claimed back into flight by accident.
-    if [ "$do_force" = false ] && is_task_blocked "$task_sha"; then
+    taskdag_consumer_prepare claim || return 3
+    local dispatch_status dispatch_reason
+    dispatch_status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${task_sha}" --include-claimed) || return 3
+    if [ "$(jq -r .complete <<<"$dispatch_status")" = true ]; then
+        dispatch_reason=complete
+    elif [ "$(jq -r .requirementsSatisfied <<<"$dispatch_status")" != true ]; then
+        dispatch_reason=deps-pending
+    elif [ "$do_force" = false ] && [ "$(jq -r .blocked <<<"$dispatch_status")" = true ]; then
+        dispatch_reason=blocked
+    elif [ "$do_force" = false ] && [ "$(jq -r '.blockedAncestor // ""' <<<"$dispatch_status")" != "" ] && ! is_human_comment_task "$task_sha"; then
+        dispatch_reason=ancestor-blocked
+    else
+        dispatch_reason=""
+    fi
+    if [ -n "$dispatch_reason" ]; then
         if [ "$json" = true ]; then
-            jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
-                '{ok:false,reason:"blocked",sha:$sha,shortSha:$short}'
+            jq -nc --arg sha "$task_sha" --arg short "$short_sha" --arg reason "$dispatch_reason" \
+                --arg anc "$(jq -r '.blockedAncestor // ""' <<<"$dispatch_status")" \
+                '{ok:false,reason:$reason,sha:$sha,shortSha:$short} + (if $anc=="" then {} else {blockedAncestor:$anc} end)'
         else
-            printf "${RED}Task %s is BLOCKED (parked) — not claimable.${RESET}\n" "$short_sha" >&2
-            echo "Revive it with 'task-dag unblock $short_sha', or --force if you know the block is stale." >&2
+            printf "${RED}Task %s is not claimable (%s).${RESET}\n" "$short_sha" "$dispatch_reason" >&2
         fi
         return 2
-    fi
-
-    # Defense-in-depth (transitive): refuse a task whose structural
-    # (breakdown) ancestor is blocked, mirroring the frontier filter. A
-    # worker could target a child of a blocked parent directly; claiming
-    # it would put work the operator parked back in flight. The one narrow
-    # exception is an exact human-comment task, which is the operator's
-    # wake-up signal for the blocked node.
-    if [ "$do_force" = false ]; then
-        local blocking_ancestor
-        blocking_ancestor=$(blocked_structural_ancestor "$task_sha" || true)
-        if [ -n "$blocking_ancestor" ] && ! is_human_comment_task "$task_sha"; then
-            local blocking_short
-            blocking_short=$(git rev-parse --short "$blocking_ancestor" 2>/dev/null || echo "$blocking_ancestor")
-            if [ "$json" = true ]; then
-                jq -nc --arg sha "$task_sha" --arg short "$short_sha" \
-                    --arg anc "$blocking_ancestor" \
-                    '{ok:false,reason:"ancestor-blocked",sha:$sha,shortSha:$short,blockedAncestor:$anc}'
-            else
-                printf "${RED}Task %s has a BLOCKED ancestor (%s) — not claimable.${RESET}\n" "$short_sha" "$blocking_short" >&2
-                echo "Revive it with 'task-dag unblock $blocking_short', or --force if you know the block is stale." >&2
-            fi
-            return 2
-        fi
     fi
 
     local frontier_local_ref="refs/heads/tasks/frontier/$short_sha"
@@ -2181,12 +2163,36 @@ EOF
         lease_frontier="--force-with-lease=refs/heads/tasks/frontier/$short_sha:$remote_frontier_sha"
     fi
 
-    local push_output
-    if push_output=$(git push --atomic origin \
-        $lease_active \
-        $lease_frontier \
-        "${active_force}${claim_commit}:refs/heads/tasks/active/$short_sha" \
-        ":refs/heads/tasks/frontier/$short_sha" 2>&1); then
+    # Re-attest immediately before the remote CAS. Preparing the claim commit
+    # and inspecting an existing holder can take time; never act on that old
+    # semantic snapshot if activation, facts, dependencies, or blocks moved.
+    taskdag_consumer_prepare claim-pre-cas || return 3
+    dispatch_status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${task_sha}" --include-claimed) || return 3
+    if [ "$(jq -r .complete <<<"$dispatch_status")" = true ] \
+      || [ "$(jq -r .requirementsSatisfied <<<"$dispatch_status")" != true ] \
+      || { [ "$do_force" = false ] && [ "$(jq -r .blocked <<<"$dispatch_status")" = true ]; } \
+      || { [ "$do_force" = false ] && [ "$(jq -r '.blockedAncestor // ""' <<<"$dispatch_status")" != "" ] && ! is_human_comment_task "$task_sha"; }; then
+        [ "$json" = true ] && jq -nc --arg sha "$task_sha" --arg short "$short_sha" '{ok:false,reason:"state-changed",sha:$sha,shortSha:$short}'
+        [ "$json" = true ] || printf "${RED}Task %s ceased to be claimable before the origin CAS; retry discovery.${RESET}\n" "$short_sha" >&2
+        return 2
+    fi
+
+    local push_output="" push_ok=false
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        local updates active_old
+        active_old=$(task_active_sha_on_remote "$short_sha")
+        updates=$(jq -ncS \
+          --arg ar "refs/heads/tasks/active/$short_sha" --arg ao "$active_old" --arg an "$claim_commit" \
+          --arg fr "refs/heads/tasks/frontier/$short_sha" --arg fo "$remote_frontier_sha" \
+          '[{ref:$ar,old:$ao,new:$an},{ref:$fr,old:$fo,new:""}]') || return 3
+        taskdag_consumer_fenced_scheduling_push claim "$claimer" "$updates" && push_ok=true
+    elif push_output=$(git push --atomic origin \
+          $lease_active $lease_frontier \
+          "${active_force}${claim_commit}:refs/heads/tasks/active/$short_sha" \
+          ":refs/heads/tasks/frontier/$short_sha" 2>&1); then
+        push_ok=true
+    fi
+    if [ "$push_ok" = true ]; then
 
         # ── Double-checked locking ────────────────────────────────────
         # The push reported success, which means the git remote
@@ -2358,12 +2364,21 @@ EOF
         lease_frontier=""
     fi
 
-    local push_output
-    if push_output=$(git push --atomic origin \
-        $lease_active \
-        $lease_frontier \
-        "${task_sha}:refs/heads/tasks/frontier/$short_sha" \
-        ":refs/heads/tasks/active/$short_sha" 2>&1); then
+    local push_output release_rc=0 updates
+    taskdag_consumer_prepare release-pre-cas || return 3
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        updates=$(jq -ncS --arg ar "$active_local_ref" --arg ao "$remote_active_sha" \
+            --arg fr "$frontier_local_ref" --arg task "$task_sha" \
+            '[{ref:$ar,old:$ao,new:""},{ref:$fr,old:"",new:$task}] | sort_by(.ref)') || return 3
+        taskdag_consumer_fenced_scheduling_push release "${TASK_DAG_CLAIMER:-releaser}" "$updates" || release_rc=$?
+        push_output="canonical semantic-generation CAS failed"
+    else
+        push_output=$(git push --atomic origin \
+            $lease_active $lease_frontier \
+            "${task_sha}:refs/heads/tasks/frontier/$short_sha" \
+            ":refs/heads/tasks/active/$short_sha" 2>&1) || release_rc=$?
+    fi
+    if [ "$release_rc" -eq 0 ]; then
 
         # Double-checked locking, mirroring cmd_claim: after the push
         # reports success, re-read origin to confirm the active ref
@@ -2545,7 +2560,17 @@ EOF
     # real but not claimable now. Run this BEFORE the idempotent re-claim path
     # so a root pre-claimed by the dispatcher cannot continue if it was parked
     # before the spawned agent verifies ownership.
-    if is_task_blocked "$root_sha"; then
+    taskdag_consumer_prepare claim-root || return 3
+    local root_status
+    root_status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${root_sha}" "$issue") || return 3
+    if [ "$(jq -r .complete <<<"$root_status")" = true ]; then
+        if [ "$json" = true ]; then
+            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"complete",issue:$issue}'
+        else
+            printf "${RED}Epic root #%s is already canonically complete — refusing a new orchestration claim.${RESET}\n" "$issue" >&2
+        fi
+        return 2
+    elif [ "$(jq -r .blocked <<<"$root_status")" = true ]; then
         if [ "$json" = true ]; then
             jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"blocked",issue:$issue}'
         else
@@ -2553,7 +2578,7 @@ EOF
         fi
         return 2
     fi
-    if ! deps_satisfied "$root_sha"; then
+    if [ "$(jq -r .requirementsSatisfied <<<"$root_status")" != true ]; then
         if [ "$json" = true ]; then
             jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"deps-pending",issue:$issue}'
         else
@@ -2656,12 +2681,28 @@ EOF
         active_force="+"
     fi
 
-    local push_output
-    if push_output=$(git push --atomic origin \
-        $lease_active \
-        "$lease_pending" \
-        "${active_force}${claim_commit}:$root_active_ref" \
-        "$root_sha:$pending_ref" 2>&1); then
+    taskdag_consumer_prepare claim-root-pre-cas || return 3
+    root_status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${root_sha}" "$issue") || return 3
+    [ "$(jq -r .complete <<<"$root_status")" = false ] || return 2
+    [ "$(jq -r .requirementsSatisfied <<<"$root_status")" = true ] || return 2
+    [ "$(jq -r .pickable <<<"$root_status")" = true ] || [ "$do_force" = true ] || return 2
+
+    local push_output="" push_ok=false
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        local updates active_old
+        active_old=$(root_active_sha_on_remote "$issue")
+        updates=$(jq -ncS \
+          --arg ar "$root_active_ref" --arg ao "$active_old" --arg an "$claim_commit" \
+          --arg pr "$pending_ref" --arg po "$root_sha" \
+          '[{ref:$ar,old:$ao,new:$an},{ref:$pr,old:$po,new:$po}]') || return 3
+        taskdag_consumer_fenced_scheduling_push claim-root "$claimer" "$updates" && push_ok=true
+    elif push_output=$(git push --atomic origin \
+          $lease_active "$lease_pending" \
+          "${active_force}${claim_commit}:$root_active_ref" \
+          "$root_sha:$pending_ref" 2>&1); then
+        push_ok=true
+    fi
+    if [ "$push_ok" = true ]; then
 
         # Double-checked locking: confirm origin holds OUR claim commit.
         local readback
@@ -2856,10 +2897,17 @@ EOF
         fi
     fi
 
-    local push_output
-    if push_output=$(git push --atomic origin \
-        "--force-with-lease=$root_active_ref:$active_sha" \
-        ":$root_active_ref" 2>&1); then
+    local push_output release_root_rc=0 updates
+    taskdag_consumer_prepare release-root-pre-cas || return 3
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        updates=$(jq -ncS --arg ref "$root_active_ref" --arg old "$active_sha" '[{ref:$ref,old:$old,new:""}]') || return 3
+        taskdag_consumer_fenced_scheduling_push release-root "${TASK_DAG_CLAIMER:-root-releaser}" "$updates" || release_root_rc=$?
+        push_output="canonical semantic-generation CAS failed"
+    else
+        push_output=$(git push --atomic origin \
+            "--force-with-lease=$root_active_ref:$active_sha" ":$root_active_ref" 2>&1) || release_root_rc=$?
+    fi
+    if [ "$release_root_rc" -eq 0 ]; then
         git update-ref -d "$root_active_ref" 2>/dev/null || true
         if [ "$json" = true ]; then
             jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:true,issue:$issue}'
@@ -2882,6 +2930,9 @@ reap_leaf_claim() {
     ref_active="refs/heads/tasks/active/$short_sha"
     ref_frontier="refs/heads/tasks/frontier/$short_sha"
     local readback_sha
+    local reap_status
+    taskdag_consumer_prepare reap-pre-cas || return 1
+    reap_status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${task_sha}" --include-claimed) || return 1
 
     # Never resurrect completed work. If the task already landed on master
     # (its completion commit lists it as a parent) but its active claim ref
@@ -2889,21 +2940,27 @@ reap_leaf_claim() {
     # recreating tasks/frontier/<short> would make finished work pickable
     # again — the exact "wasted dispatch on already-done task" symptom we
     # are fixing. In that case just lease-delete the stale active ref.
-    if is_task_completed "$task_sha"; then
-        if git push --atomic origin \
-            "--force-with-lease=$ref_active:$claim_sha" \
-            ":$ref_active" >/dev/null 2>&1; then
+    if [ "$(jq -r .complete <<<"$reap_status")" = true ]; then
+        local updates
+        updates=$(jq -ncS --arg ref "$ref_active" --arg old "$claim_sha" '[{ref:$ref,old:$old,new:""}]') || return 1
+        if { [ "$TASKDAG_CONSUMER_MODE" = canonical ] \
+             && taskdag_consumer_fenced_scheduling_push reap-complete "${TASK_DAG_CLAIMER:-reaper}" "$updates"; } \
+          || { [ "$TASKDAG_CONSUMER_MODE" = legacy ] && git push --atomic origin \
+             "--force-with-lease=$ref_active:$claim_sha" ":$ref_active" >/dev/null 2>&1; }; then
             git update-ref -d "$ref_active" 2>/dev/null || true
             [ -z "$(task_active_sha_on_remote "$short_sha")" ] && return 0
         fi
         return 1
     fi
 
-    if git push --atomic origin \
-        "--force-with-lease=$ref_active:$claim_sha" \
-        "--force-with-lease=$ref_frontier:" \
-        "$task_sha:$ref_frontier" \
-        ":$ref_active" >/dev/null 2>&1; then
+    local updates
+    updates=$(jq -ncS --arg ar "$ref_active" --arg ao "$claim_sha" --arg fr "$ref_frontier" --arg task "$task_sha" \
+      '[{ref:$ar,old:$ao,new:""},{ref:$fr,old:"",new:$task}]') || return 1
+    if { [ "$TASKDAG_CONSUMER_MODE" = canonical ] \
+         && taskdag_consumer_fenced_scheduling_push reap-requeue "${TASK_DAG_CLAIMER:-reaper}" "$updates"; } \
+      || { [ "$TASKDAG_CONSUMER_MODE" = legacy ] && git push --atomic origin \
+         "--force-with-lease=$ref_active:$claim_sha" "--force-with-lease=$ref_frontier:" \
+         "$task_sha:$ref_frontier" ":$ref_active" >/dev/null 2>&1; }; then
         readback_sha=$(task_active_sha_on_remote "$short_sha")
         if [ -z "$readback_sha" ]; then
             git update-ref "$ref_frontier" "$task_sha" 2>/dev/null || true
@@ -2915,11 +2972,14 @@ reap_leaf_claim() {
 }
 
 reap_root_claim() {
-    local issue="$1" claim_sha="$2" ref
+    local issue="$1" claim_sha="$2" ref updates
     ref="refs/heads/tasks/root-active/$issue"
-    if git push --atomic origin \
-        "--force-with-lease=$ref:$claim_sha" \
-        ":$ref" >/dev/null 2>&1; then
+    taskdag_consumer_prepare reap-root-pre-cas || return 1
+    updates=$(jq -ncS --arg ref "$ref" --arg old "$claim_sha" '[{ref:$ref,old:$old,new:""}]') || return 1
+    if { [ "$TASKDAG_CONSUMER_MODE" = canonical ] \
+         && taskdag_consumer_fenced_scheduling_push reap-root "${TASK_DAG_CLAIMER:-reaper}" "$updates"; } \
+      || { [ "$TASKDAG_CONSUMER_MODE" = legacy ] && git push --atomic origin \
+         "--force-with-lease=$ref:$claim_sha" ":$ref" >/dev/null 2>&1; }; then
         git update-ref -d "$ref" 2>/dev/null || true
         [ -z "$(root_active_sha_on_remote "$issue")" ] && return 0
     fi
@@ -3077,24 +3137,30 @@ EOF
     if [ "$do_fetch" = true ]; then
         fetch_task_refs
     fi
+    local consumer_args=()
+    [ "$do_fetch" = false ] && consumer_args+=(--no-fetch --tip HEAD)
+    taskdag_consumer_prepare roots "${consumer_args[@]}" || return 2
 
     if [ "$json" = true ]; then echo "["; else
         printf "${BOLD}%-8s %-50s %-12s${RESET}\n" "ISSUE" "TITLE" "STATE"
         printf "%-8s %-50s %-12s\n" "========" "$(printf '%.50s' '==================================================')" "============"
     fi
 
-    local first=true ref issue root_sha title state
+    local first=true ref issue root_sha title state root_status
     while IFS= read -r ref; do
         [ -z "$ref" ] && continue
         issue="${ref##*/}"
         root_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
-        if task_has_children "$root_sha" >/dev/null 2>&1; then
+        root_status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${root_sha}" "$issue") || return 2
+        if [ "$(jq -r .complete <<<"$root_status")" = true ]; then
+            state="complete"
+        elif [ "$(jq -r .decomposed <<<"$root_status")" = true ]; then
             state="decomposed"
-        elif git show-ref --verify --quiet "refs/heads/tasks/root-active/$issue"; then
+        elif [ "$(jq -r .claimed <<<"$root_status")" = true ]; then
             state="claimed"
-        elif is_task_blocked "$root_sha"; then
+        elif [ "$(jq -r .blocked <<<"$root_status")" = true ]; then
             state="blocked"
-        elif ! deps_satisfied "$root_sha"; then
+        elif [ "$(jq -r .requirementsSatisfied <<<"$root_status")" != true ]; then
             state="deps-pending"
         else
             state="pickable"
@@ -3251,6 +3317,10 @@ cmd_show() {
     fi
     
     sha=$(resolve_sha "$sha") || return 1
+    local consumer_args=(--tip HEAD) task_status
+    [ "$do_fetch" = false ] && consumer_args+=(--no-fetch)
+    taskdag_consumer_prepare show "${consumer_args[@]}" || return 2
+    task_status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${sha}" --include-claimed) || return 2
     
     local msg=$(parse_commit_metadata "$sha")
     local title=$(get_task_title "$sha")
@@ -3260,7 +3330,8 @@ cmd_show() {
     local type=$(extract_field "$msg" "Type")
     local parent_task=$(extract_field "$msg" "Parent-Task")
     local first_parent=$(get_first_parent "$sha")
-    local deps=$(get_dep_parents "$sha")
+    local deps
+    deps=$(jq -r '.requirements[].node' <<<"$task_status")
     
     # Find refs pointing to this task
     local refs=$(git for-each-ref --format='%(refname:short)' --points-at "$sha" | grep '^tasks/' || true)
@@ -3279,7 +3350,7 @@ cmd_show() {
     "firstParent": $(json_str_or_null "$first_parent"),
     "dependencies": $(printf '%s\n' "$deps" | json_str_array),
     "refs": $(printf '%s\n' "$refs" | json_str_array),
-    "completed": $(is_task_completed "$sha" && echo "true" || echo "false")
+    "completed": $(jq -r .complete <<<"$task_status")
 }
 JSON
     else
@@ -3302,9 +3373,10 @@ JSON
         if [ -n "$deps" ]; then
             printf "${BOLD}Dependencies:${RESET}\n"
             echo "$deps" | while read dep; do
-                local dep_title=$(get_task_title "$dep" 2>/dev/null || echo "Unknown")
-                local dep_short=$(git rev-parse --short "$dep")
-                if is_task_completed "$dep"; then
+                local dep_ref=${dep##*@}
+                local dep_title=$(get_task_title "$dep_ref" 2>/dev/null || echo "$dep")
+                local dep_short=$(git rev-parse --short "$dep_ref" 2>/dev/null || echo "$dep")
+                if jq -e --arg n "$dep" '.requirements[]|select(.node==$n and .complete)' <<<"$task_status" >/dev/null; then
                     printf "  ${GREEN}✓${RESET} %s - %s\n" "$dep_short" "$dep_title"
                 else
                     printf "  ${RED}✗${RESET} %s - %s\n" "$dep_short" "$dep_title"
@@ -3312,7 +3384,7 @@ JSON
             done
         fi
         
-        if is_task_completed "$sha"; then
+        if [ "$(jq -r .complete <<<"$task_status")" = true ]; then
             printf "\n${GREEN}✓ Task completed${RESET}\n"
         else
             printf "\n${YELLOW}○ Task pending${RESET}\n"
@@ -3363,8 +3435,16 @@ cmd_deps() {
     fi
     
     sha=$(resolve_sha "$sha") || return 1
-    local dependency_status deps
-    dependency_status=$(taskdag_task_dependency_status_json HEAD "$sha") || return 2
+    local dependency_status requirements_status deps
+    local consumer_args=(--tip HEAD)
+    [ "$do_fetch" = false ] && consumer_args+=(--no-fetch)
+    local head_oid
+    head_oid=$(git rev-parse HEAD^{commit}) || return 2
+    if [ "$TASKDAG_CONSUMER_READY" != true ] || [ "$TASKDAG_CONSUMER_TIP" != "$head_oid" ]; then
+        taskdag_consumer_prepare deps "${consumer_args[@]}" || return 2
+    fi
+    requirements_status=$(taskdag_requirements_status_json "task:${TASKDAG_RECON_CUR}@${sha}") || return 2
+    dependency_status=$(jq -cS '{dependencies:(.requirements|map({sha:(.node|split("@")[-1]),completed:.complete})),ready:.requirementsSatisfied,reasons}' <<<"$requirements_status") || return 2
     deps=$(printf '%s' "$dependency_status" | jq -r '.dependencies[].sha')
 
     # Informational: a blocked structural (breakdown) ancestor makes the
@@ -3509,7 +3589,7 @@ cmd_dag() {
     
     echo ""
     printf "${BOLD}Task Details:${RESET}\n"
-    cmd_show "$sha" --no-fetch
+    cmd_show "$sha"
 }
 
 # Command: context - one blessed "read my assigned task" command (design §3
@@ -3596,6 +3676,10 @@ cmd_context() {
 
     # 3. Resolve + gather details.
     sha=$(resolve_sha "$sha") || return 1
+    local consumer_args=(--tip HEAD) task_status
+    [ "$do_fetch" = false ] && consumer_args+=(--no-fetch)
+    taskdag_consumer_prepare context "${consumer_args[@]}" || return 2
+    task_status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${sha}" --include-claimed) || return 2
     local short; short=$(git rev-parse --short "$sha")
     local msg; msg=$(parse_commit_metadata "$sha")
     local title; title=$(get_task_title "$sha")
@@ -3606,7 +3690,7 @@ cmd_context() {
     local type; type=$(extract_field "$msg" "Type")
     local parent_task; parent_task=$(extract_field "$msg" "Parent-Task")
     local first_parent; first_parent=$(get_first_parent "$sha")
-    local deps; deps=$(get_dep_parents "$sha")
+    local deps; deps=$(jq -r '.requirements[].node' <<<"$task_status")
     # Local refs pointing at this task (the "related local refs" surface).
     local refs; refs=$(git for-each-ref --format='%(refname:short)' --points-at "$sha" | grep '^tasks/' || true)
 
@@ -3637,10 +3721,11 @@ cmd_context() {
         printf "${BOLD}Dependencies:${RESET}\n"
         echo "$deps" | while read -r dep; do
             [ -z "$dep" ] && continue
-            local dep_title dep_short
-            dep_title=$(get_task_title "$dep" 2>/dev/null || echo "(not present locally)")
-            dep_short=$(git rev-parse --short "$dep" 2>/dev/null || echo "$dep")
-            if is_task_completed "$dep" 2>/dev/null; then
+            local dep_title dep_short dep_ref
+            dep_ref=${dep##*@}
+            dep_title=$(get_task_title "$dep_ref" 2>/dev/null || echo "$dep")
+            dep_short=$(git rev-parse --short "$dep_ref" 2>/dev/null || echo "$dep")
+            if jq -e --arg n "$dep" '.requirements[]|select(.node==$n and .complete)' <<<"$task_status" >/dev/null; then
                 printf "  ${GREEN}✓${RESET} %s - %s\n" "$dep_short" "$dep_title"
             else
                 printf "  ${RED}✗${RESET} %s - %s\n" "$dep_short" "$dep_title"
@@ -3648,7 +3733,7 @@ cmd_context() {
         done
     fi
 
-    if is_task_completed "$sha"; then
+    if [ "$(jq -r .complete <<<"$task_status")" = true ]; then
         printf "${GREEN}✓ Task completed${RESET}\n"
     else
         printf "${YELLOW}○ Task pending${RESET}\n"
@@ -3942,6 +4027,7 @@ EOF
     # dependency (idx:) is never satisfied at birth; an external (sha:)
     # dependency counts only if that commit is already a completed task.
     if [ "$claim_first" = true ]; then
+        taskdag_consumer_prepare breakdown-claim-first --tip HEAD || return 2
         local ci any_spec_claim=false
         for (( ci=0; ci<count; ci++ )); do
             [ "${claims[ci]}" = true ] && any_spec_claim=true
@@ -3957,7 +4043,7 @@ EOF
             for token in ${dep_plans[ci]}; do
                 case "$token" in
                     idx:*) ready=false; break ;;
-                    sha:*) is_task_completed "${token#sha:}" || { ready=false; break; } ;;
+                    sha:*) taskdag_node_complete "task:${TASKDAG_RECON_CUR}@${token#sha:}" || { ready=false; break; } ;;
                 esac
             done
             if [ "$ready" = true ]; then first_ready=$ci; break; fi
@@ -4310,9 +4396,26 @@ EOF
         refspecs+=(":$parent_active_ref")        # consume the parent's claim
     fi
 
-    # ── publish all frontier refs to origin atomically, create-only ──
-    local push_output push_rc=0
-    push_output=$(git push --atomic "${lease_args[@]}" origin "${refspecs[@]}" 2>&1) || push_rc=$?
+    # ── publish all frontier refs atomically ──────────────────────────
+    # Canonical epochs serialize this scheduling mutation with graph,
+    # block, claim, reap, and completion decisions by advancing the shared
+    # activation authority in the same push.
+    local push_output push_rc=0 breakdown_updates='[]' spec ref new old lease
+    taskdag_consumer_prepare breakdown-pre-push || return 3
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        for spec in "${refspecs[@]}"; do
+            new=${spec%%:*}; ref=${spec#*:}; old=""
+            for lease in "${lease_args[@]}"; do
+                case "$lease" in "--force-with-lease=$ref:"*) old=${lease#"--force-with-lease=$ref:"} ;; esac
+            done
+            breakdown_updates=$(jq -cS --argjson u "$breakdown_updates" --arg ref "$ref" --arg old "$old" --arg new "$new" \
+                '$u+[{ref:$ref,old:$old,new:$new}] | sort_by(.ref)') || return 3
+        done
+        taskdag_consumer_fenced_scheduling_push breakdown "$claimer" "$breakdown_updates" || push_rc=$?
+        push_output="canonical semantic-generation CAS failed"
+    else
+        push_output=$(git push --atomic "${lease_args[@]}" origin "${refspecs[@]}" 2>&1) || push_rc=$?
+    fi
     if [ "$push_rc" -ne 0 ]; then
         echo "Error: failed to publish task refs to origin (nothing was created" >&2
         echo "       on origin; the local commit objects are unreferenced)." >&2
@@ -4733,7 +4836,7 @@ Batch form (--leaves): complete several sibling leaves implemented as a
   the result is an honest linear graph (base -> S -> M_S -> C' -> M_C) with
   no history left dangling and no message-encoded provenance. This is a
   LOCAL rewrite of your unpushed commits (old tip stays in the reflog);
-  the subsequent 'git push origin HEAD:master' is still a fast-forward.
+  the subsequent 'task-dag publish' remains a fast-forward.
 
 Options:
   --force          Complete even if a task's active claim is held by
@@ -4743,7 +4846,7 @@ Safety: 'complete' advances HEAD with 'git update-ref' CAS (never
 'git reset --hard'), so uncommitted work is preserved; the batch form only
 rewrites commits proven unpushed against a freshly-fetched origin/master;
 and it refuses to complete a task another live worker has claimed. It changes
-only local HEAD. Publish with exactly 'git push origin HEAD:master'; the
+only local HEAD. Publish with exactly 'task-dag publish'; the
 server-side reconciler removes scheduling refs after master proves completion.
 EOF
                 return 0
@@ -4759,6 +4862,11 @@ EOF
                 ;;
         esac
     done
+
+    # Bind this whole completion operation to one activation/facts snapshot.
+    # Internal --no-fetch dependency checks reuse it rather than accidentally
+    # interpreting an absent local activation ref as a pre-activation epoch.
+    taskdag_consumer_prepare complete --tip HEAD || return 2
 
     # ── Batch form: --leaves routes to the graft-based multi-leaf path ──
     if [ -n "$leaves_spec" ]; then
@@ -4779,6 +4887,14 @@ EOF
     task_sha=$(resolve_sha "$task_sha") || return 1
     local short_sha existing_completion
     short_sha=$(git rev-parse --short "$task_sha")
+    taskdag_consumer_prepare complete-origin || return 2
+    local complete_rc=0
+    taskdag_task_is_complete_prepared "$task_sha" || complete_rc=$?
+    [ "$complete_rc" -ne 2 ] || return 2
+    if [ "$complete_rc" -eq 0 ]; then
+        echo "Task $short_sha is already canonically complete (including supersedence); no new completion created."
+        return 0
+    fi
     existing_completion=$(completion_merge_for_task_at_commit HEAD "$task_sha" 2>/dev/null || true)
     if [ -n "$existing_completion" ]; then
         echo "Task $short_sha already has a local completion at ${existing_completion:0:12}; no new commit created."
@@ -4989,6 +5105,11 @@ EOF
     # completion commit only AFTER HEAD is successfully advanced, so a
     # refused/CAS-lost advance never leaves the caller thinking a dangling
     # (unreferenced, GC-able) commit is installed.
+    taskdag_consumer_prepare complete-pre-head --tip "$completion_base" || return 2
+    taskdag_completion_allowed "$task_sha" || {
+        echo "Error: task became complete or its requirements changed before HEAD advance; refusing completion." >&2
+        return 2
+    }
     advance_head_to_completion "$completion_base" "$new_commit" || return 1
 
     echo "Created completion commit: $new_commit"
@@ -5107,7 +5228,7 @@ irrelevant work.
 Guards fail closed: requires explicit --evidence https://... and
 --authorization, refuses pending roots / epic tasks / decomposed nodes, checks
 dependencies, and enforces active-claim ownership (unless --force). The command
-changes only local HEAD. Publish with exactly 'git push origin HEAD:master'; the
+changes only local HEAD. Publish with exactly 'task-dag publish'; the
 server-side reconciler then removes frontier/active/blocked refs. Blocked leaves
 are allowed and remain blocked until that durable-master reconciliation.
 EOF
@@ -5176,6 +5297,14 @@ EOF
     local origin_master current_head
     origin_master=$(git rev-parse --verify origin/master) || return 2
     current_head=$(git rev-parse --verify HEAD^{commit}) || return 1
+    taskdag_consumer_prepare complete-ops --tip "$origin_master" || return 2
+    local complete_rc=0
+    taskdag_task_is_complete_prepared "$task_sha" || complete_rc=$?
+    [ "$complete_rc" -ne 2 ] || return 2
+    if [ "$complete_rc" -eq 0 ]; then
+        echo "Task $short_sha is already canonically complete (including supersedence); no ops completion created."
+        return 0
+    fi
 
     local task_type
     task_type=$(extract_field "$(parse_commit_metadata "$task_sha")" "Type" 2>/dev/null || true)
@@ -5284,6 +5413,11 @@ EOF
     new_commit=$(git commit-tree "$tree" -p "$origin_master" -p "$task_sha" -F "$msg_file") || { rm -f "$msg_file"; return 1; }
     rm -f "$msg_file"
 
+    taskdag_consumer_prepare complete-ops-pre-head --tip "$origin_master" || return 2
+    taskdag_completion_allowed "$task_sha" || {
+        echo "Error: task became complete or its requirements changed before HEAD advance; refusing ops completion." >&2
+        return 2
+    }
     advance_head_to_completion "$origin_master" "$new_commit" || return 1
     echo "Created ops completion commit: $new_commit"
 
@@ -5309,7 +5443,7 @@ EOF
 # This rewrites LOCAL, UNPUSHED commits only (proven against a freshly
 # fetched origin/master); the final tree equals HEAD's, so the worktree/
 # index are untouched, the old tip stays in the reflog + a backup ref, and
-# the later `git push origin HEAD:master` is still a fast-forward.
+# the later `task-dag publish` is still a fast-forward.
 #   $1 = leaves spec ("<leaf>:<impl>,<leaf>:<impl>,…")
 #   $2 = do_force (true|false)
 cmd_complete_batch() {
@@ -5357,6 +5491,16 @@ cmd_complete_batch() {
         is=$(git rev-parse --verify "${impls[i]}^{commit}" 2>/dev/null) || {
             echo "Error: cannot resolve impl '${impls[i]}' for leaf '${leaves[i]}'." >&2; return 1; }
         task_shas+=("$ts"); impl_shas+=("$is"); short_shas+=("$(git rev-parse --short "$ts")")
+    done
+    taskdag_consumer_prepare complete-batch-origin --tip "$origin_master" || return 2
+    for (( i=0; i<n; i++ )); do
+        local complete_rc=0
+        taskdag_task_is_complete_prepared "${task_shas[i]}" || complete_rc=$?
+        [ "$complete_rc" -ne 2 ] || return 2
+        if [ "$complete_rc" -eq 0 ]; then
+            echo "Error: leaf ${short_shas[i]} is already canonically complete (including supersedence); refusing the batch." >&2
+            return 2
+        fi
     done
 
     # ── de-dupe: distinct leaves AND distinct impls ──────────────────
@@ -5496,21 +5640,31 @@ cmd_complete_batch() {
     mapfile -t order < <(
         for (( i=0; i<n; i++ )); do printf '%s %s\n' "${chain_pos[${impl_shas[i]}]}" "$i"; done | sort -n | awk '{print $2}'
     )
-    local -A completed_in_batch=()
-    local oi dep deps
-    for oi in "${order[@]}"; do
-        deps=$(get_dep_parents "${task_shas[oi]}" || true)
-        while IFS= read -r dep; do
-            [ -n "$dep" ] || continue
-            if is_task_completed "$dep"; then continue; fi
-            if [ -n "${completed_in_batch[$dep]+set}" ]; then continue; fi
-            echo "Error: leaf ${short_shas[oi]} depends on ${dep:0:12}, which is neither already" >&2
-            echo "       completed nor an earlier leaf (in graft order) in this batch." >&2
-            echo "       Ensure the dependency's impl is stacked BELOW this leaf's impl." >&2
-            return 2
-        done <<< "$deps"
-        completed_in_batch["${task_shas[oi]}"]=1
-    done
+    batch_requirements_satisfied() {
+        local -A completed_in_batch=()
+        local oi dep deps requirements_status dep_complete
+        for oi in "${order[@]}"; do
+            requirements_status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${task_shas[oi]}" --include-claimed) || return 2
+            [ "$(jq -r '.complete|not' <<<"$requirements_status")" = true ] || {
+                echo "Error: leaf ${short_shas[oi]} became canonically complete; refusing a duplicate completion." >&2
+                return 2
+            }
+            deps=$(jq -c '.requirements[]?' <<<"$requirements_status")
+            while IFS= read -r dep; do
+                [ -n "$dep" ] || continue
+                dep_complete=$(jq -r .complete <<<"$dep")
+                dep=$(jq -r .node <<<"$dep")
+                [ "$dep_complete" = true ] && continue
+                if [[ "$dep" = task:${TASKDAG_RECON_CUR}@* ]] && [ -n "${completed_in_batch[${dep##*@}]+set}" ]; then continue; fi
+                echo "Error: leaf ${short_shas[oi]} depends on ${dep}, which is neither already" >&2
+                echo "       completed nor an earlier leaf (in graft order) in this batch." >&2
+                echo "       Ensure the dependency's impl is stacked BELOW this leaf's impl." >&2
+                return 2
+            done <<< "$deps"
+            completed_in_batch["${task_shas[oi]}"]=1
+        done
+    }
+    batch_requirements_satisfied || return $?
 
     # ── graft: walk the chain oldest→newest, replaying each commit and
     #    inserting a completion merge immediately above each impl ──────
@@ -5547,6 +5701,8 @@ cmd_complete_batch() {
     # The backup ref is MANDATORY: no backup, no rewrite. A local non-FF
     # rewrite of unpushed commits must always leave a named recovery ref
     # (belt-and-braces with the reflog) before HEAD moves.
+    taskdag_consumer_prepare complete-batch-pre-head --tip "$old_head" || return 2
+    batch_requirements_satisfied || return $?
     local backup_ref="refs/task-dag-backup/complete-batch/$(date +%s)-$$-${old_head:0:12}"
     if ! git update-ref -m 'task-dag complete --leaves: backup old HEAD' "$backup_ref" "$old_head" ""; then
         echo "Error: could not create recovery backup ref $backup_ref; refusing to rewrite HEAD (no refs moved)." >&2
@@ -5609,7 +5765,7 @@ page_retroactive_link() {
 
     local msg="RETROACTIVE ADMIN LINK (NOT normal task completion). Repo ${repo:-unknown}: historical commit ${hist_short} was linked after-the-fact to task ${short_sha} \"${task_title}\""
     [ -n "$issue_num" ] && msg="${msg} on issue #${issue_num}"
-    msg="${msg}. The link commit ${link_commit:0:12} was created locally and is not yet authoritative or published; scheduling refs are unchanged. The caller was instructed to run git push origin HEAD:master. Historical commit: ${hist_link}."
+    msg="${msg}. The link commit ${link_commit:0:12} was created locally and is not yet authoritative or published; scheduling refs are unchanged. The caller was instructed to run task-dag publish. Historical commit: ${hist_link}."
     [ -n "$issue_url" ] && msg="${msg} Issue: ${issue_url}."
 
     # Flags BEFORE the message (ntfy stops parsing flags after the first
@@ -5659,7 +5815,7 @@ How it works:
   with the task as its 2nd parent (so the DAG marks the task done) and a
   Historical-Commit: <sha> trailer recording the real work. master history
   is preserved. The command changes only local HEAD; publish with exactly
-  'git push origin HEAD:master'. The server reconciler cleans task refs only
+  'task-dag publish'. The server reconciler cleans task refs only
   after the link is durable on master.
 
 Required:
@@ -5756,6 +5912,7 @@ EOF
 
     # ── Dependency guard (same as complete): the task's dependency tasks
     # must themselves be completed/linked. ──
+    taskdag_consumer_prepare complete-historical --tip HEAD || return 2
     if ! cmd_deps "$task_sha" --check-complete --no-fetch >/dev/null 2>&1; then
         echo "Error: dependencies not met for task $task_sha (its dependency tasks are not yet completed/linked)." >&2
         cmd_deps "$task_sha" --no-fetch >&2
@@ -5771,6 +5928,14 @@ EOF
     local origin_master head_sha
     origin_master=$(git rev-parse FETCH_HEAD) || return 1
     head_sha=$(git rev-parse HEAD) || return 1
+    taskdag_consumer_prepare complete-historical-origin --tip "$origin_master" || return 2
+    local complete_rc=0
+    taskdag_task_is_complete_prepared "$task_sha" || complete_rc=$?
+    [ "$complete_rc" -ne 2 ] || return 2
+    if [ "$complete_rc" -eq 0 ]; then
+        echo "Task ${task_sha:0:12} is already canonically complete (including supersedence); no historical link created." >&2
+        return 0
+    fi
 
     local local_existing
     local_existing=$(completion_merge_for_task_at_commit HEAD "$task_sha" 2>/dev/null || true)
@@ -5792,7 +5957,7 @@ EOF
         if git merge-base --is-ancestor "$origin_master" "$head_sha" 2>/dev/null; then
             echo "Error: HEAD ($head_sha) is AHEAD of origin/master ($origin_master)." >&2
             echo "If a previous complete-historical run created a link commit that was never" >&2
-            echo "pushed, publish it with 'git push origin HEAD:master' instead of rerunning." >&2
+            echo "pushed, publish it with 'task-dag publish' instead of rerunning." >&2
             echo "Otherwise reset to origin/master in a fresh checkout and retry." >&2
         else
             echo "Error: HEAD ($head_sha) is not at origin/master ($origin_master)." >&2
@@ -5852,6 +6017,11 @@ Related: $issue_url"
 
     # Pure ref move (base == HEAD, identical tree) — preserves master
     # history and any dirty worktree; no master rewrite.
+    taskdag_consumer_prepare complete-historical-pre-head --tip "$head_sha" || return 2
+    taskdag_completion_allowed "$task_sha" || {
+        echo "Error: task became complete or its requirements changed before HEAD advance; refusing historical completion." >&2
+        return 2
+    }
     advance_head_to_completion "$head_sha" "$new_commit" || return 1
 
     # If this link finished a purely-local epic, append the local Closes-Epic
@@ -6859,7 +7029,18 @@ EOF
     fi
     refspecs+=("$new_meta:$meta_ref")
 
-    if git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" 2>/dev/null; then
+    local block_push_rc=0 block_updates
+    taskdag_consumer_prepare block-pre-cas || return 3
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        block_updates=$(jq -ncS \
+            --arg br "$blocked_ref" --arg bo "$remote_blocked" --arg bn "$task_sha" \
+            --arg mr "$meta_ref" --arg mo "$remote_meta" --arg mn "$new_meta" \
+            '[{ref:$br,old:$bo,new:$bn},{ref:$mr,old:$mo,new:$mn}] | sort_by(.ref)') || return 3
+        taskdag_consumer_fenced_scheduling_push block "$actor" "$block_updates" || block_push_rc=$?
+    else
+        git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" 2>/dev/null || block_push_rc=$?
+    fi
+    if [ "$block_push_rc" -eq 0 ]; then
         # Origin is authoritative now — sync local refs to match.
         git update-ref "$blocked_ref" "$task_sha"
         git update-ref "$meta_ref" "$new_meta"
@@ -6952,7 +7133,18 @@ cmd_unblock() {
         refspecs+=(":$meta_ref")
     fi
 
-    if [ "${#refspecs[@]}" -eq 0 ] || git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" 2>/dev/null; then
+    local unblock_push_rc=0 unblock_updates='[]'
+    taskdag_consumer_prepare unblock-pre-cas || return 3
+    if [ "${#refspecs[@]}" -gt 0 ]; then
+        if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+            [ -n "$remote_blocked" ] && unblock_updates=$(jq -cS --argjson u "$unblock_updates" --arg ref "$blocked_ref" --arg old "$remote_blocked" '$u+[{ref:$ref,old:$old,new:""}]')
+            [ -n "$remote_meta" ] && unblock_updates=$(jq -cS --argjson u "$unblock_updates" --arg ref "$meta_ref" --arg old "$remote_meta" '$u+[{ref:$ref,old:$old,new:""}]')
+            taskdag_consumer_fenced_scheduling_push unblock "${TASK_DAG_CLAIMER:-unblock}" "$unblock_updates" || unblock_push_rc=$?
+        else
+            git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" 2>/dev/null || unblock_push_rc=$?
+        fi
+    fi
+    if [ "$unblock_push_rc" -eq 0 ]; then
         git show-ref --verify --quiet "$blocked_ref" && git update-ref -d "$blocked_ref"
         git show-ref --verify --quiet "$meta_ref" && git update-ref -d "$meta_ref"
         printf "${GREEN}✓ Unblocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
@@ -7790,6 +7982,7 @@ main() {
         complete) cmd_complete "$@" ;;
         complete-ops) cmd_complete_ops "$@" ;;
         complete-historical) cmd_complete_historical "$@" ;;
+        publish) cmd_publish "$@" ;;
         block) cmd_block "$@" ;;
         unblock) cmd_unblock "$@" ;;
         blocked) cmd_blocked "$@" ;;
@@ -8014,10 +8207,81 @@ owned_unresolved_active_claims() {
         fi
         tsk=$(get_first_parent "$sha" 2>/dev/null || true)
         [ -n "$tsk" ] || continue
-        task_is_completed_at_commit "$tip" "$tsk" && continue
+        taskdag_node_complete "task:${TASKDAG_RECON_CUR}@${tsk}" && continue
         out+="${ref##refs/heads/tasks/active/} "
     done < <(git for-each-ref refs/heads/tasks/active/ --format='%(objectname) %(refname)')
     printf '%s' "$out"
+}
+
+sanctioned_tip_requirements_satisfied() {
+    local tip=$1 first second issue status close_count
+    is_sanctioned_tip_commit "$tip" || return 1
+    first=$(get_first_parent "$tip") || return 2
+    second=$(get_parents "$tip" | sed -n '2p')
+    taskdag_consumer_prepare sanctioned-tip --tip "$first" || return 2
+    close_count=$(git log -1 --format='%B' "$tip" | grep -cE '^Closes-Epic:[[:space:]]*#[0-9]+[[:space:]]*$' || true)
+    if [ "$close_count" -eq 1 ]; then
+        issue=$(git log -1 --format='%B' "$tip" | sed -nE 's/^Closes-Epic:[[:space:]]*#([0-9]+)[[:space:]]*$/\1/p')
+        [ "$(git rev-parse --verify -q "refs/heads/tasks/pending/${issue}^{commit}" 2>/dev/null || true)" = "$second" ] || return 1
+        status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${second}" "$issue") || return 2
+        [ "$(jq -r '.complete and (.blocked|not) and .requirementsSatisfied' <<<"$status")" = true ] || return 1
+    else
+        status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${second}" --include-claimed) || return 2
+        [ "$(jq -r '(.complete|not) and .requirementsSatisfied' <<<"$status")" = true ] || return 1
+    fi
+}
+
+cmd_publish() {
+    local tip old first updates rc=0
+    case "${1:-}" in
+        -h|--help) echo "Usage: task-dag publish [<completion-or-close-tip>]"; return 0 ;;
+        "") tip=HEAD ;;
+        *) tip=$1; [ "$#" -eq 1 ] || { echo "Usage: task-dag publish [<completion-or-close-tip>]" >&2; return 2; } ;;
+    esac
+    tip=$(git rev-parse --verify "${tip}^{commit}") || return 2
+    first=$(get_first_parent "$tip") || return 2
+    # Observe current master before validating the candidate. A retry after an
+    # accepted-but-ambiguous publish is success even if close cleanup already
+    # removed pending/N. Otherwise the current master must be contained in the
+    # candidate's first-parent history; never lease a newer unrelated master
+    # and force-replace it with a stale completion.
+    taskdag_consumer_prepare publish-current || return 2
+    old=$TASKDAG_CONSUMER_MASTER_TIP
+    if git merge-base --is-ancestor "$tip" "$old" 2>/dev/null; then
+        echo "Canonical task-dag completion is already present on origin/master: $tip"
+        return 0
+    fi
+    git merge-base --is-ancestor "$old" "$first" 2>/dev/null || {
+        echo "Error: origin/master advanced outside this completion's first-parent history; rebase and recreate it." >&2
+        return 2
+    }
+    sanctioned_tip_requirements_satisfied "$tip" || {
+        echo "Error: tip is not an exact canonical completion/close, or its canonical requirements changed." >&2
+        return 2
+    }
+    old=$TASKDAG_CONSUMER_MASTER_TIP
+    if git merge-base --is-ancestor "$tip" "$old" 2>/dev/null; then
+        echo "Canonical task-dag completion is already present on origin/master: $tip"
+        return 0
+    fi
+    git merge-base --is-ancestor "$old" "$first" 2>/dev/null || {
+        echo "Error: origin/master advanced while validating this completion; rebase and recreate it." >&2
+        return 2
+    }
+    if [ "$TASKDAG_CONSUMER_MODE" = legacy ]; then
+        git push origin "$tip:refs/heads/master"
+        return $?
+    fi
+    updates=$(jq -ncS --arg ref refs/heads/master --arg old "$old" --arg new "$tip" '[{ref:$ref,old:$old,new:$new}]') || return 2
+    export TASKDAG_FENCED_PUBLISH=1
+    taskdag_consumer_fenced_scheduling_push publish-completion "${TASK_DAG_CLAIMER:-publisher}" "$updates" || rc=$?
+    unset TASKDAG_FENCED_PUBLISH
+    [ "$rc" -eq 0 ] || {
+        echo "Error: canonical completion publication lost its semantic-generation fence; re-prepare and retry." >&2
+        return "$rc"
+    }
+    git update-ref refs/remotes/origin/master "$tip" 2>/dev/null || true
+    echo "Published canonical task-dag completion to origin/master: $tip"
 }
 
 cmd_guard_pre_push() {
@@ -8032,8 +8296,8 @@ Body of a repo 'pre-push' hook. Git invokes the hook as
 Refuses (exit 1) a push that lands PLAIN implementation work on master while
 you still hold an unresolved task-dag claim in this repo — i.e. you skipped
 'task-dag complete'. All other pushes pass (cross-repo Satisfies: work,
-maintenance commits, and properly-completed pushes). Fails OPEN (exit 0 +
-stderr note) when it cannot evaluate confidently. Wire it up as:
+maintenance commits, and properly-completed pushes). A prepared-worker master
+push fails closed when its task semantics cannot be evaluated. Wire it up as:
 
     exec task-dag guard-pre-push "\$@"
 
@@ -8051,13 +8315,10 @@ EOF
         return 0
     fi
 
-    # Identity: require an explicit claimer (prepared-worker context). No
-    # \$USER fallback — that would over-match ordinary human/maintenance pushes.
+    # Identity applies only to the plain-work/owned-claim check. Semantic tips
+    # are classified for every origin/master push so activated raw completion
+    # publication cannot bypass the generation fence when identity is unset.
     local claimer="${TASK_DAG_CLAIMER:-}"
-    if [ -z "$claimer" ]; then
-        echo "[pre-push] TASK_DAG_CLAIMER unset; skipping the task-dag complete-before-push guard." >&2
-        return 0
-    fi
     local claimer_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
 
     local blocked=0
@@ -8070,7 +8331,8 @@ EOF
 
         local local_commit
         local_commit=$(git rev-parse --verify "${local_sha}^{commit}" 2>/dev/null) || {
-            echo "[pre-push] cannot resolve pushed object ${local_sha}; skipping guard for this ref." >&2
+            echo "[pre-push] cannot resolve pushed object ${local_sha}; refusing (fail closed)." >&2
+            blocked=1
             continue
         }
 
@@ -8079,25 +8341,45 @@ EOF
         case "$remote_sha" in
             *[!0]*)
                 remote_commit=$(git rev-parse --verify "${remote_sha}^{commit}" 2>/dev/null) || {
-                    echo "[pre-push] remote base ${remote_sha} unavailable (shallow clone?); skipping guard." >&2
+                    echo "[pre-push] remote base ${remote_sha} unavailable (shallow clone?); refusing (fail closed)." >&2
+                    blocked=1
                     continue
                 }
                 ;;
             *)
-                echo "[pre-push] first push of master (no remote base); skipping complete-before-push guard." >&2
+                echo "[pre-push] first push of master has no semantic base; refusing prepared-worker push." >&2
+                blocked=1
                 continue
                 ;;
         esac
 
-        # Only care if the push actually adds real implementation work.
-        if ! range_has_impl_commit "${remote_commit}..${local_commit}"; then
+        # Classify semantic tips before the implementation-range shortcut:
+        # ops, historical, and close-only publications may add no code.
+        if is_sanctioned_tip_commit "$local_commit"; then
+            if ! sanctioned_tip_requirements_satisfied "$local_commit"; then
+                echo "[pre-push] completion/close shape or canonical requirements changed; refusing stale publication." >&2
+                blocked=1
+                continue
+            fi
+            if [ "$TASKDAG_CONSUMER_MODE" = canonical ] && [ "${TASKDAG_FENCED_PUBLISH:-}" != 1 ]; then
+                echo "[pre-push] canonical epochs require 'task-dag publish' so master and the semantic generation advance atomically." >&2
+                blocked=1
+                continue
+            fi
             continue
         fi
-        # A properly-completed push: the tip is a completion/close shape.
-        if is_sanctioned_tip_commit "$local_commit"; then
+        # Only care about a non-semantic push if it adds implementation work.
+        if ! range_has_impl_commit "${remote_commit}..${local_commit}"; then continue; fi
+        if ! taskdag_consumer_prepare guard-pre-push --tip "$local_commit"; then
+            echo "[pre-push] cannot attest canonical task semantics; refusing this master push (fail closed)." >&2
+            blocked=1
             continue
         fi
         # Plain-impl tip: only a violation if I hold an unresolved claim here.
+        if [ -z "$claimer" ]; then
+            echo "[pre-push] TASK_DAG_CLAIMER unset; skipping the owned-claim check for plain work." >&2
+            continue
+        fi
         local held
         held=$(owned_unresolved_active_claims "$claimer" "$claimer_host" "$local_commit")
         if [ -n "$held" ]; then

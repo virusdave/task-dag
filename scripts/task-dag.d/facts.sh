@@ -230,9 +230,9 @@ taskdag_load_facts() {
 #   rc 1 -> not done (incl. foreign-repo nodes, not locally derivable)
 #   rc 2 -> invalid node, unresolvable current repo, or unresolvable tip
 taskdag_node_done() {
-    local node
+    local node tip=${2:-}
     node=$(taskdag_normalize_node "$1") || { echo "Error: invalid node: $1" >&2; return 2; }
-    taskdag_load_facts || return 2
+    taskdag_load_facts "$tip" || return 2
     local cur
     cur=$(taskdag_current_repo) || { echo "Error: cannot resolve current repo to scope done facts" >&2; return 2; }
 
@@ -280,22 +280,30 @@ taskdag_issue_closed_at_tip() {
     [ "${TASKDAG_ISSUE_CLOSE_ROOTS[$issue]:-}" = "$root" ]
 }
 
-# taskdag_edges_with_facts [--no-fetch]: read the active edge set and annotate
+# taskdag_edges_with_facts [--no-fetch] [--tip <commit>]: read the active edge
+# set and annotate
 # each edge with `satisfied` = done(.to). Emits a compact JSON array (same
 # shape as the reader, plus a boolean `satisfied` per edge), sorted by edgeId
 # (inherited from the reader). Fail-closed: an unresolvable current repo or
 # tip is an error, never a silently-false fact set.
 taskdag_edges_with_facts() {
-    local edges
-    edges=$(taskdag_read_edges "$@") || return 1
-    taskdag_load_facts || return 2
+    local edges tip="" reader_args=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --tip) tip=${2:-}; [ -n "$tip" ] || return 2; shift 2 ;;
+            --tip=*) tip=${1#*=}; shift ;;
+            *) reader_args+=("$1"); shift ;;
+        esac
+    done
+    edges=$(taskdag_read_edges "${reader_args[@]}") || return 1
+    taskdag_load_facts "$tip" || return 2
     # Resolve current repo up front so a mid-loop failure can't half-annotate.
     taskdag_current_repo >/dev/null || { echo "Error: cannot resolve current repo to derive edge facts" >&2; return 2; }
 
     local map='{}' node rc d
     while IFS= read -r node; do
         [ -n "$node" ] || continue
-        taskdag_node_done "$node"; rc=$?
+        taskdag_node_done "$node" "$tip"; rc=$?
         case "$rc" in
             0) d=true ;;
             1) d=false ;;

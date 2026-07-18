@@ -344,6 +344,13 @@ git -C "$ROOT/wc" update-ref -d refs/heads/tasks/v1/activation
 (cd "$ROOT/wc" && "$TD" validate --strict >/dev/null 2>&1); rc=$?
 [ "$rc" -eq 3 ] && ok "strict materialisation requires the exact activation authority" || bad "strict materialisation accepted absent activation authority"
 git -C "$ROOT/wc" update-ref refs/heads/tasks/v1/activation "$real_activation_tip"
+delete_target=$(printf 'delete target\n' | git -C "$ROOT/wc" commit-tree "$empty")
+git -C "$ROOT/wc" push -q origin "$delete_target:refs/heads/fixture-delete"
+delete_token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+delete_updates=$(jq -ncS --arg old "$delete_target" '[{ref:"refs/heads/fixture-delete",old:$old,new:""}]')
+(cd "$ROOT/wc" && taskdag_activation_fenced_multi_push "$delete_token" fixture delete fixture 2026-07-17T00:00:10Z "$delete_updates"); rc=$?
+[ "$rc" -eq 0 ] && ! git --git-dir="$ROOT/origin" show-ref --verify --quiet refs/heads/fixture-delete \
+  && ok "fenced multi-push supports leased ref deletion" || bad "fenced ref deletion rc=$rc"
 git -C "$ROOT/wc" update-ref refs/heads/tasks/v1/activation-junk FETCH_HEAD
 (cd "$ROOT/wc" && "$TD" validate --strict >/dev/null 2>&1); rc=$?
 [ "$rc" -eq 3 ] && ok "strict validator rejects broad activation namespace" || bad "broad activation ref rc=$rc"

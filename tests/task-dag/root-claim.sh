@@ -442,7 +442,7 @@ Type: epic")
 git update-ref refs/heads/tasks/pending/1208 "$EPIC_BLOCKED"
 git push -q origin refs/heads/tasks/pending/1208
 "$TD" block "$EPIC_BLOCKED" --operator --reason="fixture blocked root" >/dev/null 2>&1
-if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1208)' >/dev/null; then
+if "$TD" roots --pickable --json | jq -e '.[] | select(.issue==1208)' >/dev/null; then
   bad "16a: blocked root #1208 appeared in roots --pickable"
 else
   ok "16a: blocked root is omitted from roots --pickable"
@@ -455,7 +455,7 @@ else
   bad "16b: blocked root claim rc=$rc18 root-active=$(remote_has refs/heads/tasks/root-active/1208 && echo yes || echo no)"
 fi
 "$TD" unblock "$EPIC_BLOCKED" >/dev/null 2>&1
-if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1208)' >/dev/null \
+if "$TD" roots --pickable --json | jq -e '.[] | select(.issue==1208)' >/dev/null \
    && "$TD" claim-root 1208 >/dev/null 2>&1; then
   ok "16c: unblocked root becomes pickable and claimable"
 else
@@ -479,7 +479,7 @@ Status: pending
 Type: epic")
 git update-ref refs/heads/tasks/pending/1209 "$EPIC_DEP"
 git push -q origin refs/heads/tasks/pending/1209
-if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1209)' >/dev/null; then
+if "$TD" roots --pickable --json | jq -e '.[] | select(.issue==1209)' >/dev/null; then
   bad "16d: dependency-pending root #1209 appeared in roots --pickable"
 else
   ok "16d: dependency-pending root is omitted from roots --pickable"
@@ -493,7 +493,8 @@ else
 fi
 echo dep-root-work > dep-root-work.txt; git add dep-root-work.txt; git commit -qm "dep root work"
 "$TD" complete "$DEP_ROOT" >/dev/null 2>&1
-if "$TD" roots --pickable --json --no-fetch | jq -e '.[] | select(.issue==1209)' >/dev/null \
+git push -q origin HEAD:master
+if "$TD" roots --pickable --json | jq -e '.[] | select(.issue==1209)' >/dev/null \
    && "$TD" claim-root 1209 >/dev/null 2>&1; then
   ok "16f: root becomes pickable and claimable after dependency completion"
 else

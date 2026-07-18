@@ -120,9 +120,8 @@ All task-dag obligations for this epic are satisfied.
 
 Closes-Epic: #${issue}"
     close_sha=$(printf '%s' "$msg" | git commit-tree "$tree" -p "$base" -p "$root_sha") || return 1
-    git push origin "--force-with-lease=refs/heads/master:${base}" \
-        "${close_sha}:refs/heads/master" >/dev/null \
-        || { echo "Error: failed to push auto-close commit for epic #${issue}" >&2; return 1; }
+    cmd_publish "$close_sha" >/dev/null \
+        || { echo "Error: failed to publish auto-close commit for epic #${issue}" >&2; return 1; }
     readback=$(git ls-remote origin refs/heads/master 2>/dev/null | awk '{print $1}')
     [ "$readback" = "$close_sha" ] \
         || { echo "Error: auto-close push for epic #${issue} was not confirmed" >&2; return 1; }
@@ -237,6 +236,11 @@ taskdag_synth_supersede_completion() {
     [ -z "$children" ] || { echo "Error: refusing to synth-complete decomposed task/epic ${task:0:12}; supersede completion for epics is not safe in this phase" >&2; return 2; }
 
     taskdag_node_done "$from" >/dev/null 2>&1 && return 0
+    taskdag_consumer_prepare supersede-convergence || return 2
+    # Canonical complete() already treats the satisfied `satisfies` edge as
+    # authoritative. A second master witness would duplicate that semantic
+    # decision and race an ordinary completion publication.
+    [ "$TASKDAG_CONSUMER_MODE" = canonical ] && return 0
     short=$(git rev-parse --short "$task") || return 2
     active_ref="refs/heads/tasks/active/$short"
     if git show-ref --verify --quiet "$active_ref" || git ls-remote --exit-code origin "$active_ref" >/dev/null 2>&1; then

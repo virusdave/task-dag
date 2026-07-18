@@ -101,7 +101,7 @@ _taskdag_activation_validate_record_file() {
 
 _taskdag_activation_guard_message() {
     local authority=$1 active=$2 epoch=$3 digest=$4 guard_version=$5 writer=$6 operation=$7 actor=$8 timestamp=$9 updates=${10}
-    jq -e 'type=="array" and length>0 and .==(.|sort_by(.ref)) and (map(.ref)|length==(unique|length)) and all(.[]; keys==["new","old","ref"] and (.ref|test("^refs/heads/")) and ((.old=="") or (.old|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))) and (.new|test("^([0-9a-f]{40}|[0-9a-f]{64})$")))' <<<"$updates" >/dev/null || return 2
+    jq -e 'type=="array" and length>0 and .==(.|sort_by(.ref)) and (map(.ref)|length==(unique|length)) and all(.[]; keys==["new","old","ref"] and (.ref|test("^refs/heads/")) and ((.old=="") or (.old|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))) and (.new=="" or (.new|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))))' <<<"$updates" >/dev/null || return 2
     printf 'Task-Dag-Activation-Guard: v1\nActivation-Epoch: %s\nActivation-Record-Digest: %s\nGuard-Version: %s\nActivation-Commit: %s\nExpected-Authority-Tip: %s\nWriter-Class: %s\nOperation: %s\nActor: %s\nAuthoritative-Timestamp: %s\nTarget-Updates: %s\n' \
       "$epoch" "$digest" "$guard_version" "$active" "$authority" "$writer" "$operation" "$actor" "$timestamp" "$(jq -cS . <<<"$updates")"
 }
@@ -127,7 +127,7 @@ _taskdag_activation_parse_guard() {
     jq -ne --arg actor "$actor" '$actor|test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not' >/dev/null || return 1
     [[ "$timestamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
     jq -ne --arg timestamp "$timestamp" '($timestamp|fromdateiso8601|todateiso8601)==$timestamp' >/dev/null 2>&1 || return 1
-    jq -e 'type=="array" and length>0 and .==(.|sort_by(.ref)) and (map(.ref)|length==(unique|length)) and all(.[]; keys==["new","old","ref"] and (.ref|test("^refs/heads/")) and (.old=="" or (.old|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))) and (.new|test("^([0-9a-f]{40}|[0-9a-f]{64})$")))' <<<"$updates" >/dev/null 2>&1 || return 1
+    jq -e 'type=="array" and length>0 and .==(.|sort_by(.ref)) and (map(.ref)|length==(unique|length)) and all(.[]; keys==["new","old","ref"] and (.ref|test("^refs/heads/")) and (.old=="" or (.old|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))) and (.new=="" or (.new|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))))' <<<"$updates" >/dev/null 2>&1 || return 1
     canonical=$(_taskdag_activation_guard_message "$authority" "$active" "$epoch" "$digest" "$version" "$writer" "$operation" "$actor" "$timestamp" "$updates") || return 1
     [ "$msg" = "${canonical%$'\n'}" ] || return 1
 }
@@ -243,6 +243,7 @@ _taskdag_activation_fetch_authority() {
         # after ls-remote; rejecting that valid successor would prevent the
         # ancestry classifier from proving an already accepted candidate.
         old=$(git rev-parse FETCH_HEAD) || return 2
+        git update-ref refs/task-dag/activation-observed "$old" || return 2
     fi
     printf '%s\n' "$old"
 }
@@ -292,7 +293,7 @@ taskdag_activation_fenced_multi_push() { # <token-json> <writer> <operation> <ac
     jq -e 'type=="array" and length>0 and .==sort_by(.ref) and (map(.ref)|length==(unique|length)) and all(.[];
       keys==["new","old","ref"] and (.ref|test("^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$")) and
       (.ref!="refs/heads/tasks/v1/activation") and (.old=="" or (.old|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))) and
-      (.new|test("^([0-9a-f]{40}|[0-9a-f]{64})$")))' <<<"$updates" >/dev/null 2>&1 || return 2
+      (.new=="" or (.new|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))))' <<<"$updates" >/dev/null 2>&1 || return 2
     tree=$(git rev-parse "$active^{tree}") || return 3
     message=$(_taskdag_activation_guard_message "$current" "$active" "$(jq -r .epoch <<<"$token")" "$(jq -r .digest <<<"$token")" "$(jq -r .guardVersion <<<"$token")" "$writer" "$operation" "$actor" "$timestamp" "$updates") || return 2
     guard=$(printf '%s' "$message" | git commit-tree "$tree" -p "$active") || return 2

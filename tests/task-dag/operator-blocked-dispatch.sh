@@ -41,6 +41,10 @@ GHLOG="$ROOT/gh-calls.log"
 : > "$GHLOG"
 cat > "$ROOT/bin/gh" <<EOF
 #!/usr/bin/env bash
+if [ "\${1:-}" = repo ] && [ "\${2:-}" = view ]; then
+  echo test/test
+  exit 0
+fi
 echo "\$*" >> "$GHLOG"
 exit 0
 EOF

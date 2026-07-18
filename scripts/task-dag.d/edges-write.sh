@@ -273,11 +273,25 @@ _taskdag_graph_cas() {
             }
         fi
 
-        # (5) direct FF-only CAS push. The lease pins the expected old tip
-        #     (empty ⇒ the ref must not yet exist), so a concurrent writer
-        #     that already advanced the tip loses and we refetch/recompute.
+        # (5) FF-only CAS push. After activation, the graph update also
+        #     advances the shared semantic generation (activation authority),
+        #     so a claim/completion prepared against the old graph cannot land
+        #     concurrently. Before activation preserve the legacy direct CAS.
         lease="--force-with-lease=${TASKDAG_GRAPH_REF}:${old}"
-        if push_output=$(git push --atomic origin "$lease" "${newcommit}:${TASKDAG_GRAPH_REF}" 2>&1); then
+        local updates graph_push_rc=0
+        taskdag_consumer_prepare graph-cas || return 1
+        [ "$TASKDAG_CONSUMER_GRAPH_TIP" = "$old" ] || { taskdag_cas_sleep 1; continue; }
+        if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+            updates=$(jq -ncS --arg ref "$TASKDAG_GRAPH_REF" --arg old "$old" --arg new "$newcommit" \
+                '[{ref:$ref,old:$old,new:$new}]') || return 1
+            taskdag_consumer_fenced_scheduling_push graph-cas "${TASK_DAG_CLAIMER:-graph-writer}" "$updates" \
+                || graph_push_rc=$?
+            push_output="canonical semantic-generation CAS failed"
+        else
+            push_output=$(git push --atomic origin "$lease" "${newcommit}:${TASKDAG_GRAPH_REF}" 2>&1) \
+                || graph_push_rc=$?
+        fi
+        if [ "$graph_push_rc" -eq 0 ]; then
             # Double-checked locking: confirm origin actually holds OUR commit.
             readback=$(git ls-remote origin "$TASKDAG_GRAPH_REF" 2>/dev/null | awk '{print $1}')
             if [ -z "$readback" ]; then

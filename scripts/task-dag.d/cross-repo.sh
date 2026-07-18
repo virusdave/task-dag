@@ -183,6 +183,11 @@ _xrepo_ensure_issue_epic() {
     fi
 
     # ---- Epic missing: backfill it. ----
+    # Prepare before authoring or publishing anything: after activation,
+    # disabled epochs must reject the backfill and enabled epochs must move
+    # both epic refs together with the shared semantic generation.
+    taskdag_consumer_prepare ensure-issue-epic || return 2
+
     local bf_title="${ISSUE_TITLE:-}" bf_author="${ISSUE_AUTHOR:-}"
     local bf_url="${ISSUE_URL:-}" bf_body="${ISSUE_BODY:-}"
     if [ -z "$bf_title" ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -226,9 +231,19 @@ _xrepo_ensure_issue_epic() {
     epic_sha="$(git commit-tree "$bf_tree" -p "$bf_parent" -F "$bf_msg")"
     rm -f "$bf_msg"
 
-    git update-ref "$pending_ref" "$epic_sha"
-    git update-ref "$gh_issues_ref" "$epic_sha"
-    if ! git push --atomic origin "$pending_ref" "$gh_issues_ref" 1>&2; then
+    local publish_rc=0
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        local updates
+        updates=$(jq -ncS --arg pending "$pending_ref" --arg issue_ref "$gh_issues_ref" --arg epic "$epic_sha" \
+            '[{ref:$pending,old:"",new:$epic},{ref:$issue_ref,old:"",new:$epic}] | sort_by(.ref)') || return 2
+        taskdag_consumer_fenced_scheduling_push ensure-issue-epic \
+            "${TASK_DAG_CLAIMER:-comment-ingest}" "$updates" || publish_rc=$?
+    else
+        git update-ref "$pending_ref" "$epic_sha"
+        git update-ref "$gh_issues_ref" "$epic_sha"
+        git push --atomic origin "$pending_ref" "$gh_issues_ref" 1>&2 || publish_rc=$?
+    fi
+    if [ "$publish_rc" -ne 0 ]; then
         # A concurrent first-seen run (issue-to-task or another ensure)
         # may have won the race; adopt whatever epic now exists on origin.
         local after_pending
@@ -242,6 +257,8 @@ _xrepo_ensure_issue_epic() {
         _xrepo_die "ensure-epic: failed to backfill missing epic for #${issue}"
         return 2
     fi
+    git update-ref "$pending_ref" "$epic_sha"
+    git update-ref "$gh_issues_ref" "$epic_sha"
     _xrepo_log "ensure-epic: backfilled missing epic for #${issue} (${epic_sha}); pushed ${pending_ref} + ${gh_issues_ref} (was never created on first sighting)"
     printf '%s' "$epic_sha"
     return 0
@@ -1391,7 +1408,24 @@ _xrepo_ingest_observed_comment() {
         args+=("--force-with-lease=$effect_ref:" "$effect_sha:$effect_ref")
     fi
     args+=("$receipt_sha:$comment_ref")
-    if ! git push origin "${args[@]}"; then
+    local publish_rc=0
+    if [ "$disposition" = human ]; then
+        taskdag_consumer_prepare ingest-human-comment-pre-push || return 2
+        if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+            local updates
+            updates=$(jq -ncS --arg rr "$comment_ref" --arg receipt "$receipt_sha" \
+                --arg er "$effect_ref" --arg effect "$effect_sha" --argjson exists "$effect_exists" \
+                '[{ref:$rr,old:"",new:$receipt}]
+                 + (if ($er!="" and ($exists|not)) then [{ref:$er,old:"",new:$effect}] else [] end)
+                 | sort_by(.ref)') || return 2
+            taskdag_consumer_fenced_scheduling_push ingest-human-comment "${TASK_DAG_CLAIMER:-comment-ingest}" "$updates" || publish_rc=$?
+        else
+            git push origin "${args[@]}" || publish_rc=$?
+        fi
+    else
+        git push origin "${args[@]}" || publish_rc=$?
+    fi
+    if [ "$publish_rc" -ne 0 ]; then
         remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2
         if [ -z "$remote_sha" ] && [ "$disposition" = completion ] && [ "$effect_exists" != true ]; then
             # A concurrent completion for another comment can win only the
@@ -1928,7 +1962,7 @@ cmd_close_epic() {
 
     echo "created close commit ${close_sha}"
     git update-ref refs/heads/master "$close_sha"
-    git push origin "${close_sha}:refs/heads/master"
+    cmd_publish "$close_sha"
     echo "pushed master"
 }
 
@@ -2220,7 +2254,7 @@ EOF
     rm -f "$close_msg_file"
 
     echo "created close commit ${close_sha}"
-    git push origin "${close_sha}:refs/heads/master"
+    cmd_publish "$close_sha"
     echo "pushed master — issue #${top_issue} will close via close-completed-issues.yml"
 }
 
@@ -2455,6 +2489,6 @@ EOF
     rm -f "$close_msg_file"
 
     echo "created close commit ${close_sha}"
-    git push origin "${close_sha}:refs/heads/master"
+    cmd_publish "$close_sha"
     echo "pushed master — issue #${top_issue} will close via close-completed-issues.yml"
 }

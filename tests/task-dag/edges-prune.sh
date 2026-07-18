@@ -106,7 +106,7 @@ complete_issue() {
 Closes-Epic: #$n" </dev/null)
     git update-ref refs/heads/master "$merge"
     git update-ref "refs/heads/gh/issues/$n" "$side"
-    git push -q origin master
+    git push -q origin master "refs/heads/gh/issues/$n"
 }
 
 FROM="task:owner/repo@$FORTY"
@@ -198,7 +198,7 @@ fi
 # tombstone). After pruning a satisfied edge, re-adding the SAME edge-id
 # succeeds and re-materialises the active edge — there is no lingering
 # terminal witness. (A tombstoned edge, by contrast, can never be re-added.)
-"$TD" dep prune "$eid_c2" --no-fetch >/dev/null 2>&1
+prune_c2_out=$("$TD" dep prune "$eid_c2" 2>&1); prune_c2_rc=$?
 pruned_c2=yes; git cat-file -e "${TASKDAG_GRAPH_REF}:edges/${eid_c2}.json" 2>/dev/null && pruned_c2=no
 readd_out=$("$TD" dep add --from "$FROM" --to "issue:owner/repo#7" --relation requires \
     --repo-id 4242 --witness w5b 2>&1); readd_rc=$?
@@ -206,10 +206,10 @@ readd_present=no; git cat-file -e "${TASKDAG_GRAPH_REF}:edges/${eid_c2}.json" 2>
 if [ "$pruned_c2" = yes ] && [ "$readd_rc" -eq 0 ] && [ "$readd_present" = yes ]; then
     ok "C3: re-adding a PLAIN-pruned edge succeeds (prune is GC, not terminal)"
 else
-    bad "C3: re-add after prune wrong (pruned=$pruned_c2 rc=$readd_rc present=$readd_present out=$readd_out)"
+    bad "C3: re-add after prune wrong (prune_rc=$prune_c2_rc prune_out=$prune_c2_out pruned=$pruned_c2 rc=$readd_rc present=$readd_present out=$readd_out)"
 fi
 # Clean it back out again so later counts are stable.
-"$TD" dep prune "$eid_c2" --no-fetch >/dev/null 2>&1
+"$TD" dep prune "$eid_c2" >/dev/null 2>&1
 
 # ===========================================================================
 # Part D — the prune primitive / `dep prune` command.
@@ -234,18 +234,18 @@ forge_edge() {  # <from> <to> <relation> <mode>
 
 eid_forge_sat=$(forge_edge "$FROM" "issue:owner/repo#7" requires all)
 before=$("$TD" edges --json --no-fetch | jq 'length')
-"$TD" dep prune --no-fetch >/dev/null 2>&1
+prune_all_out=$("$TD" dep prune 2>&1); prune_all_rc=$?
 after=$("$TD" edges --json --no-fetch | jq 'length')
 still=yes; git cat-file -e "${TASKDAG_GRAPH_REF}:edges/${eid_forge_sat}.json" 2>/dev/null || still=no
 if [ "$before" -ge 1 ] && [ "$still" = no ] && [ "$after" -lt "$before" ]; then
     ok "D1: dep prune removes satisfied edges (bounded-set backstop)"
 else
-    bad "D1: dep prune wrong (before=$before after=$after still=$still)"
+    bad "D1: dep prune wrong (rc=$prune_all_rc out=$prune_all_out before=$before after=$after still=$still)"
 fi
 
 # D2: prune REFUSES an unsatisfied edge (that path needs a tombstone via drop).
 eid_forge_unsat=$(forge_edge "$FROM" "task:peer/repo@$FORTYD" requires all)
-prune_out=$("$TD" dep prune "$eid_forge_unsat" --no-fetch 2>&1); prune_rc=$?
+prune_out=$("$TD" dep prune "$eid_forge_unsat" 2>&1); prune_rc=$?
 still2=no; git cat-file -e "${TASKDAG_GRAPH_REF}:edges/${eid_forge_unsat}.json" 2>/dev/null && still2=yes
 if [ "$prune_rc" -ne 0 ] && [ "$still2" = yes ] && echo "$prune_out" | grep -qi 'not prunable'; then
     ok "D2: prune of a not-yet-prunable edge fails loud (no unwitnessed deletion)"

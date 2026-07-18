@@ -142,6 +142,10 @@ _cmd_dep_prune() {
         fi
     fi
 
+    local consumer_args=()
+    [ "$do_fetch" = false ] && consumer_args+=(--no-fetch --tip HEAD)
+    taskdag_consumer_prepare dep-prune "${consumer_args[@]}" || return 1
+
     if [ -n "$eid" ]; then
         taskdag_prune_edge "$eid"
     else

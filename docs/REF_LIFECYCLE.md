@@ -322,7 +322,8 @@ impl in the pre-graft `origin/master..HEAD` range. This is a **local,
 non-fast-forward rewrite of unpushed commits only** — the final tree equals the old
 `HEAD`'s, so the worktree/index are untouched, the old tip is saved under
 `refs/task-dag-backup/complete-batch/*` (and the reflog), and the later
-`git push origin HEAD:master` is still a fast-forward.
+`task-dag publish` is still a fast-forward publication of master together
+with the semantic generation.
 
 Safety gates (all enforced before any ref moves):
 
@@ -476,8 +477,9 @@ repairable projection of `master`, not the source of task truth.
 Completion commands (`complete`, batch `complete --leaves`, `complete-ops`, and
 `complete-historical`) mutate only local `HEAD`. They neither publish master nor
 delete local or remote scheduling refs; each prints the canonical next action,
-`git push origin HEAD:master`. That explicit push makes completion parentage
-durable. `graph-converge`, triggered by the push and by scheduled/manual repair,
+`task-dag publish`. That fenced publication makes completion parentage durable
+while atomically advancing the semantic generation. `graph-converge`, triggered
+by the push and by scheduled/manual repair,
 is the sole owner of completed-leaf scheduling-ref cleanup. Thus a crash or
 rejected push leaves the task visible and claim state intact, while a successful
 push followed by failed convergence remains repairable from durable master.
@@ -581,8 +583,8 @@ task-dag complete-ops <task-sha> \
 parent is the freshly-fetched `origin/master` tip, second parent is the leaf
 task commit, and the tree equals the first parent's tree. That parent edge is
 the candidate completion fact; it becomes durable when the caller runs exactly
-`git push origin HEAD:master`. The server reconciler then removes scheduling
-refs. The message carries the existing completion trailers (`Task-Commit:` and
+`task-dag publish`. The server reconciler then removes scheduling refs. The
+message carries the existing completion trailers (`Task-Commit:` and
 `Status: completed`) plus mandatory `Ops-*` audit trailers for evidence,
 authorization, actor, host, and time.
 

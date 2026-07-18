@@ -59,7 +59,7 @@ sel() { jq -e --arg s "$1" '.[] | select(.shortSha==$s)'; }
 T1=$(mk_task "plain frontier task")
 [ -n "$T1" ] || { echo "could not create task"; echo "PASS=0 FAIL=1"; exit 1; }
 T1_FULL=$(git rev-parse "refs/heads/tasks/frontier/$T1")
-J=$("$TD" frontier --no-fetch --json 2>/dev/null)
+J=$("$TD" frontier --json 2>/dev/null)
 if echo "$J" | jq -e . >/dev/null 2>&1; then
   ok "1: frontier --json emits valid JSON"
 else
@@ -78,7 +78,8 @@ fi
 TITLE2='Canon: one strong "always use the tooling" rule \ end'
 T2=$(mk_task "$TITLE2")
 T2_FULL=$(git rev-parse "refs/heads/tasks/frontier/$T2")
-J2=$("$TD" frontier --no-fetch --json 2>/dev/null)
+git push -q origin "refs/heads/tasks/frontier/$T2"
+J2=$("$TD" frontier --json 2>/dev/null)
 if echo "$J2" | jq -e . >/dev/null 2>&1; then
   ok "2: quote/backslash title keeps frontier --json valid"
 else
@@ -112,7 +113,8 @@ Status: pending
 Type: task")
 BAD_SHORT=$(git rev-parse --short "$BAD_ISSUE_TASK")
 git update-ref "refs/heads/tasks/frontier/$BAD_SHORT" "$BAD_ISSUE_TASK"
-J4=$("$TD" frontier --no-fetch --json 2>/dev/null)
+git push -q origin "refs/heads/tasks/frontier/$BAD_SHORT"
+J4=$("$TD" frontier --json 2>/dev/null)
 if echo "$J4" | jq -e . >/dev/null 2>&1; then
   ok "4: malformed Issue: trailer keeps frontier --json valid"
 else
@@ -136,8 +138,9 @@ git update-ref refs/heads/master "$desc_done"; git reset -q --soft "$desc_done"
 WAIT=$(git commit-tree "$EMPTY_TREE" -p "$EPIC" -p "$DEP" -m "Task: waits for strict dependency")
 WAIT_SHORT=$(git rev-parse --short "$WAIT")
 git update-ref "refs/heads/tasks/frontier/$WAIT_SHORT" "$WAIT"
-J5=$("$TD" frontier --no-fetch --json 2>/dev/null)
-"$TD" deps "$WAIT" --no-fetch --check-complete >/dev/null 2>&1; deps_rc=$?
+git push -q origin "refs/heads/tasks/frontier/$WAIT_SHORT"
+J5=$("$TD" frontier --json 2>/dev/null)
+"$TD" deps "$WAIT" --check-complete >/dev/null 2>&1; deps_rc=$?
 if ! echo "$J5" | jq -e --arg s "$WAIT" 'any(.[]; .sha == $s)' >/dev/null \
   && [ "$deps_rc" -eq 2 ]; then
   ok "5: frontier and deps agree that arbitrary ancestry does not complete a dependency"
@@ -148,8 +151,9 @@ fi
 tip=$(git rev-parse HEAD); tree=$(git rev-parse "${tip}^{tree}")
 dep_done=$(git commit-tree "$tree" -p "$tip" -p "$DEP" -m "Complete exact dependency")
 git update-ref refs/heads/master "$dep_done"; git reset -q --soft "$dep_done"
-J5_DONE=$("$TD" frontier --no-fetch --json 2>/dev/null)
-"$TD" deps "$WAIT" --no-fetch --check-complete >/dev/null 2>&1; deps_rc=$?
+git push -q origin master:master
+J5_DONE=$("$TD" frontier --json 2>/dev/null)
+"$TD" deps "$WAIT" --check-complete >/dev/null 2>&1; deps_rc=$?
 if echo "$J5_DONE" | jq -e --arg s "$WAIT" 'any(.[]; .sha == $s)' >/dev/null \
   && [ "$deps_rc" -eq 0 ]; then
   ok "5: frontier and deps agree when the exact dependency witness exists"

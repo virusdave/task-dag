@@ -134,8 +134,9 @@ git push -q origin HEAD:master
 # TEST 2: idempotency — re-running on an already-linked task is a no-op + no page
 # ---------------------------------------------------------------------------
 P0=$(page_count)
+IDEMPOTENT_HEAD=$(git rev-parse HEAD)
 out=$("$TD" complete-historical "$T1" --commit="$HSHA" 2>"$ROOT/err2"); rc=$?
-if [ $rc -eq 0 ] && grep -qi "already has a local completion" "$ROOT/err2"; then ok "idempotent: rc=0 + local completion message"; else bad "idempotent: rc=$rc err=$(cat "$ROOT/err2")"; fi
+if [ $rc -eq 0 ] && [ "$(git rev-parse HEAD)" = "$IDEMPOTENT_HEAD" ]; then ok "idempotent: rerun creates no commit"; else bad "idempotent: rc=$rc HEAD changed"; fi
 if [ "$(page_count)" -eq "$P0" ]; then ok "idempotent: no extra page sent"; else bad "idempotent: extra page sent"; fi
 
 # ---------------------------------------------------------------------------
@@ -255,12 +256,12 @@ git fetch -q origin master
 if [ $rc -eq 0 ] && [ -z "$(git log HEAD -1 --grep='^Closes-Epic: #5252$' --format='%H')" ] \
    && [ -z "$(git log origin/master -1 --grep='^Closes-Epic: #5252$' --format='%H')" ] \
    && echo "$out" | grep -q 'completion recorded; epic close deferred by migration drain' \
-   && echo "$out" | grep -q '^git push origin HEAD:master$'; then
+   && echo "$out" | grep -q '^task-dag publish$'; then
   ok "historical final leaf records completion and explicitly defers epic close"
 else
   bad "historical final leaf violated local publication contract (rc=$rc out=$out)"
 fi
-git push -q origin HEAD:master
+"$TD" publish >/dev/null
 if [ -z "$(git log origin/master -1 --grep='^Closes-Epic: #5252$' --format='%H')" ] \
   && [ -n "$(git log origin/master -1 --grep='^Historical-Commit:' --format='%H')" ]; then
   ok "explicit push publishes historical completion without legacy close projection"

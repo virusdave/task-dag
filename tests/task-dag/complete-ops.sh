@@ -67,7 +67,7 @@ if [ -n "$LEAF" ]; then
   if [ "$rc" -eq 0 ]; then ok "1a: complete-ops succeeds on a blocked leaf"; else bad "1a: complete-ops failed (rc=$rc): $out"; fi
   CM=$(git log HEAD --merges --format='%H %P' | awk -v t="$LEAF_SHA" '{for(i=2;i<=NF;i++) if($i==t){print $1; exit}}')
   REMOTE_AFTER=$(git ls-remote origin refs/heads/master | awk '{print $1}')
-  if [ -n "$CM" ] && [ "$BEFORE" = "$REMOTE_AFTER" ] && echo "$out" | grep -q '^git push origin HEAD:master$'; then
+  if [ -n "$CM" ] && [ "$BEFORE" = "$REMOTE_AFTER" ] && echo "$out" | grep -q '^task-dag publish$'; then
     ok "1b: local completion merge created without moving origin/master"
   else
     bad "1b: completion was not local-only or omitted explicit push"
@@ -95,7 +95,7 @@ if [ -n "$LEAF" ]; then
   else
     bad "1e: local completion mutated scheduling refs (frontier=$f blocked=$b meta=$bm)"
   fi
-  git push -q origin HEAD:master
+  "$TD" publish >/dev/null
   if [ "$(git ls-remote origin "refs/heads/tasks/blocked/$LEAF_SHA" | wc -l)" -eq 1 ]; then
     ok "1f: explicit push publishes without deleting scheduling refs"
   else

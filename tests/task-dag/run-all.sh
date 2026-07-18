@@ -101,7 +101,8 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$here/projection-backstop.sh" "$here/completed-ref-reconcile.sh" "$here/graph-converge.sh" \
         "$here/validate-closed-issue-audit.sh" "$here/context-cmd.sh" \
         "$here/wrappers.sh" "$here/caller-workflow-preflight.sh" \
-        "$here/install-completion-order-hook.sh" "$here/reconcile-comments.sh" || exit 1
+        "$here/install-completion-order-hook.sh" "$here/reconcile-comments.sh" \
+        "$here/consumer-cutover.sh" || exit 1
 }
 echo "== bash -n =="
 bash -n "$TD" \
@@ -129,7 +130,8 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/sync-comment-to-tasks.sh" \
     && bash -n "$(dirname "$TD")/validate-caller-workflow.sh" \
     && bash -n "$here/install-completion-order-hook.sh" \
-    && bash -n "$here/reconcile-comments.sh" || exit 1
+    && bash -n "$here/reconcile-comments.sh" \
+    && bash -n "$here/consumer-cutover.sh" || exit 1
 
 parallel_tests=(
     reconcile.sh
@@ -181,6 +183,7 @@ parallel_tests=(
     materialise.sh
     materialise-census.sh
     activation.sh
+    consumer-cutover.sh
     blocked-overlay.sh
     tree-fix-trailers.sh
     no-handbuilt-json.sh

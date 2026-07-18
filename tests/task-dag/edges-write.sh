@@ -217,6 +217,12 @@ cexhaust() {
     source "$LIBDIR/edges.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/edges-write.sh"
+    # Model the pre-activation consumer adapter that the full CLI sources.
+    taskdag_consumer_prepare() {
+        TASKDAG_CONSUMER_MODE=legacy
+        TASKDAG_CONSUMER_GRAPH_TIP=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
+        TASKDAG_CONSUMER_READY=true
+    }
     # Neutralize the sync so the writer never learns origin's real tip: `old`
     # (from the local ref) stays behind origin → every FF lease is rejected.
     taskdag_sync_graph_ref() { return 0; }

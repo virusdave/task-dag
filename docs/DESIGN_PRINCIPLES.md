@@ -113,7 +113,7 @@ parent), so completion detection stays a parent-edge query; only the
 *impl-commit provenance* is message-borne, and only because the DAG cannot
 carry it after the fact. This exception is admin-recovery only. It creates the
 link locally and pages the operator once, explicitly saying the link is not
-authoritative until the caller runs `git push origin HEAD:master`; an
+authoritative until the caller runs `task-dag publish`; an
 idempotent rerun does not page.
 
 ### The no-implementation sanctioned path: `complete-ops`
@@ -136,7 +136,10 @@ authoritative done fact.
 
 Every completion command creates only a local candidate on `HEAD`. It never
 pushes `master`, removes scheduling refs, or posts a completion status comment.
-The caller publishes the candidate with exactly `git push origin HEAD:master`.
+The caller publishes the candidate with exactly `task-dag publish`. Before
+activation that command preserves the legacy fast-forward push. After
+activation it validates the exact completion/close shape and pre-tip canonical
+status, then atomically advances master and the shared semantic generation.
 Only then is completion parentage authoritative. Server-side `graph-converge`
 derives and lease-cleans `frontier`, `active`, `blocked`, and `blocked-meta`
 projections from durable master. A crash or rejected push therefore leaves work

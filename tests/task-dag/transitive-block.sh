@@ -124,7 +124,7 @@ CSHORT=$(mk_child "$PARENT" "child subtask")
 [ -n "$CSHORT" ] || { echo "could not create CHILD"; echo "PASS=0 FAIL=1"; exit 1; }
 
 # Sanity: before any block, CHILD is on the frontier (dependency-free leaf).
-if frontier_has "$CSHORT" --no-fetch; then
+if frontier_has "$CSHORT"; then
   ok "0: child is pickable before any block (baseline)"
 else
   bad "0: child unexpectedly not pickable before any block"

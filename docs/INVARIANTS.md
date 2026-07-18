@@ -547,6 +547,48 @@ supersede edge **wrappers** are shipped reviewed sibling layers above this
 read-only predicate module. They must stay thin consumers of the predicate /
 edge-writer contracts, not duplicate fact derivation or invent new refs.
 
+### Epoch-aware live consumers
+
+`taskdag_consumer_prepare` is the one bridge used by dispatch-facing CLI
+consumers. It binds an operation to a validated activation authority, a
+runtime-compatibility check, one facts tip, one graph view, and one complete
+task-ref snapshot. It compares those local inputs with one origin
+advertisement after preparation and retries rather than exposing a mixed
+epoch/ref view. Once an activation history exists, both enabled
+and disabled epochs select canonical graph semantics; disabling an epoch
+fences producers but never revives legacy interpretation.
+
+Before the first activation, the bridge preserves parent-encoded requirements
+and completion behavior so old repositories remain readable. After activation,
+`frontier`, `roots`, direct leaf/root claims, `deps`, and `complete` consume the
+same status/requirements adapters over `complete()` and canonical facts. In an
+activated epoch, canonical graph, block, breakdown, claim, release, reap, and
+master completion/close writers advance the activation authority as a shared
+semantic generation in the same atomic push as their effect. A stale
+decision's authority lease therefore loses even when its own target ref did
+not move; disabled epochs reject scheduling effects. Canonical completion and
+close tips are published with `task-dag publish`, which validates their exact
+two-parent shape and pre-tip status before atomically moving master and the
+semantic generation. The managed task-dag pre-push hook rejects raw master
+publication after activation; canonical tooling must use `task-dag publish`.
+
+Human comment ingestion for an issue whose epic refs are absent deliberately
+uses two fenced generations. The first atomically creates matching
+`tasks/pending/<N>` and `gh/issues/<N>` refs; the second creates the comment
+frontier effect and receipt. The state between generations is a valid pending
+epic with no ingested comment. A crash there is safe: retry adopts the epic and
+publishes the second generation. Create-only leases and authoritative readback
+make concurrent or ambiguously acknowledged retries converge; a disabled epoch
+rejects the first generation before any remote semantic effect.
+
+Explicit `--no-fetch` operations use only a previously observed local
+activation, graph, facts, and task refs. A nested offline helper may reuse its
+enclosing operation's just-observed pre-activation absence, but standalone
+offline absence is not proof and fails closed. Once
+`refs/task-dag/activation-observed` exists, disappearance of the online
+authority also fails closed rather than reviving legacy semantics. Missing,
+malformed, incompatible, or changing online authority fails closed.
+
 ---
 
 ## Per-kind commit shapes (the deeper contract)

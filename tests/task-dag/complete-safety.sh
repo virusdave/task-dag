@@ -110,12 +110,12 @@ if [ -n "$T3" ]; then
   out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T3" 2>&1)
   a=$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)
   AFTER=$(git ls-remote origin refs/heads/master | awk '{print $1}')
-  if [ "$a" -eq 1 ] && [ "$BEFORE" = "$AFTER" ] && echo "$out" | grep -q '^git push origin HEAD:master$'; then
+  if [ "$a" -eq 1 ] && [ "$BEFORE" = "$AFTER" ] && echo "$out" | grep -q '^task-dag publish$'; then
     ok "C2: complete leaves origin/master and active claim unchanged and prints explicit push"
   else
     bad "C2: complete mutated origin or omitted push instruction (active=$a before=$BEFORE after=$AFTER out=$out)"
   fi
-  git push -q origin HEAD:master
+  "$TD" publish >/dev/null
   [ "$(git ls-remote origin "refs/heads/tasks/active/$T3" | wc -l)" -eq 1 ] \
     && ok "C2: explicit push publishes without deleting scheduling refs" \
     || bad "C2: explicit push unexpectedly deleted scheduling refs"
@@ -258,7 +258,7 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
   # (b) batch --leaves completes BOTH stacked siblings in one shot
   out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$S_LEAF:$S,$C_LEAF:$C" 2>&1); rc=$?
   if [ $rc -eq 0 ]; then ok "7: complete --leaves completes both stacked siblings (rc=0)"; else bad "7: complete --leaves failed (rc=$rc): $out"; fi
-  if echo "$out" | grep -q '^git push origin HEAD:master$' \
+  if echo "$out" | grep -q '^task-dag publish$' \
      && git ls-remote --exit-code origin "refs/heads/tasks/active/$S_LEAF" >/dev/null 2>&1; then
     ok "7: batch remains local and prints the explicit push"
   else

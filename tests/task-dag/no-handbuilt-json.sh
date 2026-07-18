@@ -105,7 +105,7 @@ R1_ALLOW=(
 R4_ALLOW=(
 'ede201cbde149d318fd88bd0c01fe0ed2ecec523d0783889bfa5b2e5523136de'  # task-dag `list --json` entry
 '2b381e104b153954a22e68c8a502be1df0fd8251ebd68020f9acc104a924b30e'  # reap `--json` entry
-'e3b00b50fec75e79f2e6fb0fe3d3fb33645131d7cc3f3d0c3eeafe88f9b3c5d1'  # show `--json` object
+'caf0c5d2a0b419077e7502fb26540d281c86f599c1a7c4464625b3d830db91ea'  # show `--json` object
 '3f4e3f16bb1877bf733d467d32f0d92cf9a16038a5f4d8c8ae4d5376d7c33fa7'  # deps `--json` dependency entry
 )
 

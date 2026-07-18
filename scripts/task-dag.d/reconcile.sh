@@ -69,15 +69,161 @@
 #   • the containment child map (first-parent -> newline-joined child SHAs),
 #   • the resolved current repo (to address current-repo task nodes).
 TASKDAG_RECON_EDGES_JSON=""
+TASKDAG_RECON_FACTS_TIP=""
 declare -gA TASKDAG_RECON_FP_CHILDREN=()
 declare -gA TASKDAG_RECON_NODE_STATE=()
 TASKDAG_RECON_CUR=""
 TASKDAG_RECON_READY=false   # set by prepare; guards use-before-prepare
 
+# One attested semantic snapshot per live consumer operation. Pre-activation
+# readers retain the parent-encoded bridge; once any activation exists they
+# use graph semantics forever (including disabled rollback epochs).
+TASKDAG_CONSUMER_READY=false
+TASKDAG_CONSUMER_MODE=""
+TASKDAG_CONSUMER_ID=""
+TASKDAG_CONSUMER_TIP=""
+TASKDAG_CONSUMER_ACTIVATION='null'
+TASKDAG_CONSUMER_GRAPH_TIP=""
+TASKDAG_CONSUMER_MASTER_TIP=""
+
+_taskdag_consumer_local_activation_authority() {
+    local observed=""
+    observed=$(git rev-parse --verify -q 'refs/task-dag/activation-observed^{commit}' 2>/dev/null || true)
+    [ -n "$observed" ] || observed=$(git rev-parse --verify -q "${TASKDAG_ACTIVATION_REF}^{commit}" 2>/dev/null || true)
+    if [ -z "$observed" ]; then
+        echo "Error: offline activation absence is unproven; prepare online before using semantic consumers" >&2
+        return 2
+    fi
+    printf '%s\n' "$observed"
+}
+
+_taskdag_consumer_activation_token_at() {
+    local tip=$1 info active authority path digest record
+    info=$(taskdag_activation_validate_history "$tip") || return 2
+    IFS=$'\t' read -r active authority path digest <<<"$info"
+    record=$(git show "$active:$path") || return 2
+    jq -ncS --argjson record "$record" --arg activationCommit "$active" --arg authorityTip "$authority" --arg digest "$digest" \
+      '{activationCommit:$activationCommit,authorityTip:$authorityTip,digest:$digest,record:$record}'
+}
+
+_taskdag_consumer_remote_advertisement() {
+    git ls-remote --refs origin refs/heads/master "$TASKDAG_ACTIVATION_REF" "$TASKDAG_GRAPH_REF" \
+      'refs/heads/tasks/frontier/*' 'refs/heads/tasks/active/*' 'refs/heads/tasks/blocked/*' \
+      'refs/heads/tasks/blocked-meta/*' 'refs/heads/tasks/root-active/*' 'refs/heads/tasks/pending/*' \
+      'refs/heads/gh/issues/*'
+}
+
+_taskdag_consumer_advertised_oid() { awk -v r="$2" '$2==r {print $1}' <<<"$1"; }
+
+_taskdag_consumer_task_refs_match() {
+    local advertisement=$1 remote local_refs
+    remote=$(awk '$2 ~ /^refs\/heads\/(tasks\/(frontier|active|blocked|blocked-meta|root-active|pending)\/|gh\/issues\/)/ {print $1" "$2}' <<<"$advertisement" | sort)
+    local_refs=$(git for-each-ref --format='%(objectname) %(refname)' \
+      refs/heads/tasks/frontier/ refs/heads/tasks/active/ refs/heads/tasks/blocked/ \
+      refs/heads/tasks/blocked-meta/ refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
+      refs/heads/gh/issues/ | sort)
+    [ "$remote" = "$local_refs" ]
+}
+
+taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
+    local consumer=${1:-} requested_tip="" nofetch=false before after token runtime attempt arg advertisement graph_tip master_tip
+    local prior_ready=${TASKDAG_CONSUMER_READY:-false} prior_mode=${TASKDAG_CONSUMER_MODE:-}
+    [ -n "$consumer" ] || return 2
+    shift
+    while [ "$#" -gt 0 ]; do
+        arg=$1; shift
+        case "$arg" in
+            --tip) requested_tip=${1:-}; [ -n "$requested_tip" ] || return 2; shift ;;
+            --tip=*) requested_tip=${arg#*=} ;;
+            --no-fetch) nofetch=true ;;
+            *) return 2 ;;
+        esac
+    done
+    TASKDAG_CONSUMER_READY=false
+    for attempt in 1 2 3; do
+        if [ "$nofetch" = true ] && [ "$prior_ready" = true ] && [ "$prior_mode" = legacy ] \
+          && ! git show-ref --verify --quiet refs/task-dag/activation-observed \
+          && ! git show-ref --verify --quiet "$TASKDAG_ACTIVATION_REF"; then
+            # A nested offline helper may reuse the enclosing operation's
+            # freshly observed pre-activation absence. This is process-local
+            # evidence only; a standalone offline command still fails closed.
+            before=""
+        elif [ "$nofetch" = true ]; then before=$(_taskdag_consumer_local_activation_authority) || return 2
+        else before=$(_taskdag_activation_fetch_authority) || return 2
+        fi
+        token=null
+        if [ -n "$before" ]; then
+            if [ "$nofetch" = true ]; then token=$(_taskdag_consumer_activation_token_at "$before") || return 2
+            else token=$(_taskdag_activation_authority_token) || return 2
+            fi
+            [ "$(jq -r .authorityTip <<<"$token")" = "$before" ] || continue
+            runtime=$(_taskdag_activation_runtime_commit) || return 2
+            git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor \
+                "$(jq -r .record.minimumCompatibleTaskDagCommit <<<"$token")" "$runtime" || return 2
+            TASKDAG_CONSUMER_MODE=canonical
+        else
+            # Cutover is permanent for a checkout once it has observed any
+            # valid authority.  A deleted/hidden remote ref after that point
+            # is rollback damage or an indeterminate advertisement, never
+            # evidence that legacy semantics are safe again.
+            if git show-ref --verify --quiet refs/task-dag/activation-observed; then
+                echo "Error: semantic activation disappeared after canonical cutover; refusing legacy fallback" >&2
+                return 2
+            fi
+            TASKDAG_CONSUMER_MODE=legacy
+        fi
+        if [ -n "$requested_tip" ]; then
+            if [ "$nofetch" = true ]; then taskdag_recon_prepare --no-fetch --tip "$requested_tip" || return 2
+            else taskdag_recon_prepare --tip "$requested_tip" || return 2
+            fi
+        else
+            if [ "$nofetch" = true ]; then taskdag_recon_prepare --no-fetch || return 2
+            else taskdag_recon_prepare || return 2
+            fi
+        fi
+        if [ "$nofetch" = true ]; then
+            if [ -z "$before" ]; then after=""
+            else after=$(_taskdag_consumer_local_activation_authority) || return 2
+            fi
+            graph_tip=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
+            master_tip=$(taskdag_resolve_facts_tip) || return 2
+        else
+            advertisement=$(_taskdag_consumer_remote_advertisement) || return 2
+            after=$(_taskdag_consumer_advertised_oid "$advertisement" "$TASKDAG_ACTIVATION_REF")
+            graph_tip=$(_taskdag_consumer_advertised_oid "$advertisement" "$TASKDAG_GRAPH_REF")
+            master_tip=$(_taskdag_consumer_advertised_oid "$advertisement" refs/heads/master)
+            [ "$graph_tip" = "$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)" ] || continue
+            _taskdag_consumer_task_refs_match "$advertisement" || continue
+            [ -n "$requested_tip" ] || [ "$master_tip" = "$TASKDAG_RECON_FACTS_TIP" ] || continue
+        fi
+        [ "$before" = "$after" ] || continue
+        if [ -n "$requested_tip" ]; then
+            requested_tip=$(git rev-parse --verify -q "${requested_tip}^{commit}") || return 2
+            [ "$TASKDAG_FACTS_TIP_OID" = "$requested_tip" ] || return 2
+        fi
+        TASKDAG_CONSUMER_ID=$consumer
+        TASKDAG_CONSUMER_TIP=$TASKDAG_FACTS_TIP_OID
+        TASKDAG_CONSUMER_ACTIVATION=$token
+        TASKDAG_CONSUMER_GRAPH_TIP=$graph_tip
+        TASKDAG_CONSUMER_MASTER_TIP=$master_tip
+        TASKDAG_CONSUMER_READY=true
+        return 0
+    done
+    echo "Error: semantic activation changed repeatedly during consumer preparation" >&2
+    return 2
+}
+
+taskdag_consumer_require_prepared() {
+    [ "$TASKDAG_CONSUMER_READY" = true ] || {
+        echo "Error: semantic consumer used without an attested snapshot" >&2
+        return 2
+    }
+}
+
 # Canonical parent-encoded dependency verdict used by legacy-shaped task
 # commits while graph migration is drained. Callers consume this JSON instead
 # of reconstructing readiness. The authority tip is mandatory.
-taskdag_task_dependency_status_json() {
+_taskdag_legacy_parent_dependency_status_json() {
     local tip="$1" task="$2" dep complete=true reasons='[]' deps='[]' done
     git rev-parse --verify -q "${tip}^{commit}" >/dev/null 2>&1 || return 2
     while IFS= read -r dep; do
@@ -92,6 +238,96 @@ taskdag_task_dependency_status_json() {
     jq -nc --arg task "$task" --arg tip "$(git rev-parse "${tip}^{commit}")" \
         --argjson ready "$complete" --argjson reasons "$reasons" --argjson dependencies "$deps" \
         '{schema:1,task:$task,authorityTip:$tip,dependencies:$dependencies,ready:$ready,reasons:$reasons}'
+}
+
+taskdag_requirements_status_json() {
+    local node=$1 task="" dep complete=true reasons='[]' deps='[]' rc normalized
+    taskdag_consumer_require_prepared || return 2
+    normalized=$(taskdag_normalize_node "$node") || return 2
+    if [ "$TASKDAG_CONSUMER_MODE" = legacy ]; then
+        case "$normalized" in
+            task:${TASKDAG_RECON_CUR}@*) task=${normalized##*@} ;;
+            *) jq -ncS '{requirements:[],requirementsSatisfied:true,reasons:[]}'; return 0 ;;
+        esac
+        _taskdag_legacy_parent_dependency_status_json "$TASKDAG_CONSUMER_TIP" "$task" \
+          | jq -cS '{requirements:(.dependencies|map({node:("task:'"$TASKDAG_RECON_CUR"'@"+.sha),complete:.completed})),requirementsSatisfied:.ready,reasons}'
+        return ${PIPESTATUS[0]}
+    fi
+    while IFS= read -r dep; do
+        [ -n "$dep" ] || continue
+        rc=0; taskdag_node_complete "$dep" || rc=$?
+        [ "$rc" -eq 2 ] && return 2
+        if [ "$rc" -eq 0 ]; then
+            deps=$(jq -c --arg node "$dep" '.+[{node:$node,complete:true}]' <<<"$deps") || return 2
+        else
+            complete=false
+            deps=$(jq -c --arg node "$dep" '.+[{node:$node,complete:false}]' <<<"$deps") || return 2
+            reasons=$(jq -c --arg node "$dep" '.+[{code:"incomplete-requirement",node:$node}]' <<<"$reasons") || return 2
+        fi
+    done < <(jq -r --arg n "$normalized" '.[]|select(.from==$n and .relation=="requires")|.to' <<<"$TASKDAG_RECON_EDGES_JSON")
+    jq -ncS --argjson requirements "$deps" --argjson requirementsSatisfied "$complete" --argjson reasons "$reasons" \
+        '{requirements:$requirements,requirementsSatisfied:$requirementsSatisfied,reasons:$reasons}'
+}
+
+taskdag_task_status_json() { # <task-node> [--include-claimed]
+    local node=$1 include_claimed=false normalized sha short complete=false blocked=false claimed=false ancestor="" ready=false reasons='[]' req rc
+    [ "${2:-}" = --include-claimed ] && include_claimed=true
+    taskdag_consumer_require_prepared || return 2
+    normalized=$(taskdag_normalize_node "$node") || return 2
+    if [ "$TASKDAG_CONSUMER_MODE" = legacy ]; then
+        case "$normalized" in task:${TASKDAG_RECON_CUR}@*) sha=${normalized##*@} ;; *) return 2 ;; esac
+        taskdag_task_completed_at_tip "$TASKDAG_CONSUMER_TIP" "$sha" && complete=true
+    else
+        sha=$(taskdag_recon_resolve_task_node "$normalized") || return 2
+        rc=0; taskdag_node_complete "$normalized" || rc=$?; [ "$rc" -eq 2 ] && return 2; [ "$rc" -eq 0 ] && complete=true
+    fi
+    req=$(taskdag_requirements_status_json "$normalized") || return 2
+    is_task_blocked "$sha" && blocked=true
+    ancestor=$(blocked_structural_ancestor "$sha" 2>/dev/null || true)
+    short=$(git rev-parse --short "$sha") || return 2
+    git show-ref --verify --quiet "refs/heads/tasks/active/$short" && claimed=true
+    reasons=$(jq -c '.reasons' <<<"$req") || return 2
+    [ "$complete" = true ] && reasons=$(jq -c '.+[{code:"complete"}]' <<<"$reasons")
+    [ "$blocked" = true ] && reasons=$(jq -c '.+[{code:"blocked"}]' <<<"$reasons")
+    if [ -n "$ancestor" ] && ! is_human_comment_task "$sha"; then reasons=$(jq -c --arg task "$ancestor" '.+[{code:"ancestor-blocked",task:$task}]' <<<"$reasons"); fi
+    [ "$claimed" = true ] && [ "$include_claimed" = false ] && reasons=$(jq -c '.+[{code:"claimed"}]' <<<"$reasons")
+    if [ "$complete" = false ] && [ "$(jq -r .requirementsSatisfied <<<"$req")" = true ] && [ "$blocked" = false ] \
+      && { [ -z "$ancestor" ] || is_human_comment_task "$sha"; } \
+      && { [ "$claimed" = false ] || [ "$include_claimed" = true ]; }; then ready=true; fi
+    jq -ncS --arg node "$normalized" --arg task "$sha" --arg mode "$TASKDAG_CONSUMER_MODE" --arg tip "$TASKDAG_CONSUMER_TIP" \
+      --argjson activation "$TASKDAG_CONSUMER_ACTIVATION" --argjson complete "$complete" --argjson blocked "$blocked" \
+      --arg blockedAncestor "$ancestor" --argjson claimed "$claimed" --argjson ready "$ready" --argjson requirements "$(jq -c .requirements <<<"$req")" \
+      --argjson requirementsSatisfied "$(jq -c .requirementsSatisfied <<<"$req")" --argjson reasons "$reasons" \
+      '{schema:1,node:$node,task:$task,complete:$complete,requirements:$requirements,requirementsSatisfied:$requirementsSatisfied,blocked:$blocked,blockedAncestor:(if $blockedAncestor=="" then null else $blockedAncestor end),claimed:$claimed,ready:$ready,reasons:$reasons,attestation:{mode:$mode,factsTip:$tip,activation:$activation}}'
+}
+
+taskdag_root_status_json() { # <root-node> <issue>
+    local node=$1 issue=$2 normalized sha complete=false blocked=false claimed=false decomposed=false pickable=false req rc reasons='[]'
+    taskdag_consumer_require_prepared || return 2
+    normalized=$(taskdag_normalize_node "$node") || return 2
+    if [ "$TASKDAG_CONSUMER_MODE" = legacy ]; then
+        case "$normalized" in task:${TASKDAG_RECON_CUR}@*) sha=${normalized##*@} ;; *) return 2 ;; esac
+        taskdag_task_completed_at_tip "$TASKDAG_CONSUMER_TIP" "$sha" && complete=true
+    else
+        sha=$(taskdag_recon_resolve_task_node "$normalized") || return 2
+        rc=0; taskdag_node_complete "$normalized" || rc=$?; [ "$rc" -eq 2 ] && return 2; [ "$rc" -eq 0 ] && complete=true
+    fi
+    req=$(taskdag_requirements_status_json "$normalized") || return 2
+    task_has_children "$sha" >/dev/null 2>&1 && decomposed=true
+    is_task_blocked "$sha" && blocked=true
+    git show-ref --verify --quiet "refs/heads/tasks/root-active/$issue" && claimed=true
+    reasons=$(jq -c '.reasons' <<<"$req")
+    [ "$complete" = true ] && reasons=$(jq -c '.+[{code:"complete"}]' <<<"$reasons")
+    [ "$decomposed" = true ] && reasons=$(jq -c '.+[{code:"decomposed"}]' <<<"$reasons")
+    [ "$claimed" = true ] && reasons=$(jq -c '.+[{code:"claimed"}]' <<<"$reasons")
+    [ "$blocked" = true ] && reasons=$(jq -c '.+[{code:"blocked"}]' <<<"$reasons")
+    if [ "$complete" = false ] && [ "$decomposed" = false ] && [ "$claimed" = false ] && [ "$blocked" = false ] \
+      && [ "$(jq -r .requirementsSatisfied <<<"$req")" = true ]; then pickable=true; fi
+    jq -ncS --arg node "$normalized" --arg task "$sha" --arg mode "$TASKDAG_CONSUMER_MODE" --arg tip "$TASKDAG_CONSUMER_TIP" \
+      --argjson activation "$TASKDAG_CONSUMER_ACTIVATION" --argjson complete "$complete" --argjson decomposed "$decomposed" \
+      --argjson claimed "$claimed" --argjson blocked "$blocked" --argjson requirements "$(jq -c .requirements <<<"$req")" \
+      --argjson requirementsSatisfied "$(jq -c .requirementsSatisfied <<<"$req")" --argjson pickable "$pickable" --argjson reasons "$reasons" \
+      '{schema:1,node:$node,task:$task,complete:$complete,decomposed:$decomposed,claimed:$claimed,blocked:$blocked,requirements:$requirements,requirementsSatisfied:$requirementsSatisfied,pickable:$pickable,reasons:$reasons,attestation:{mode:$mode,factsTip:$tip,activation:$activation}}'
 }
 
 # taskdag_recon_build_child_map: build the containment (first-parent) child
@@ -126,14 +362,23 @@ taskdag_recon_build_child_map() {
 # input. The containment map is read from LOCAL task refs (like `frontier`);
 # a caller wanting an online containment view fetches task refs first.
 taskdag_recon_prepare() {
-    local nofetch=false
-    [ "${1:-}" = --no-fetch ] && nofetch=true
+    local nofetch=false tip="" arg
+    while [ "$#" -gt 0 ]; do
+        arg=$1; shift
+        case "$arg" in
+            --no-fetch) nofetch=true ;;
+            --tip) tip=${1:-}; [ -n "$tip" ] || return 2; shift ;;
+            --tip=*) tip=${arg#*=} ;;
+            *) echo "Error: unknown reconcile option: $arg" >&2; return 2 ;;
+        esac
+    done
     command -v jq >/dev/null 2>&1 || { echo "Error: jq is required to reconcile the dependency graph" >&2; return 2; }
 
     # Reset per-invocation state UP FRONT so a failed (re-)prepare can never
     # leave a stale/partial view marked ready for a caller that ignores rc.
     TASKDAG_RECON_READY=false
     TASKDAG_RECON_EDGES_JSON=""
+    TASKDAG_RECON_FACTS_TIP=""
     TASKDAG_RECON_CUR=""
     TASKDAG_RECON_FP_CHILDREN=()
     TASKDAG_RECON_NODE_STATE=()
@@ -150,9 +395,13 @@ taskdag_recon_prepare() {
         fetch_task_refs_strict >/dev/null 2>&1 || { echo "Error: could not sync task refs from origin (indeterminate); refusing to reconcile against a partial local DAG (use --no-fetch for the local view)" >&2; return 2; }
     fi
 
-    local args=()
+    local args=() facts_args=()
     [ "$nofetch" = true ] && args+=(--no-fetch)
-    TASKDAG_RECON_EDGES_JSON=$(taskdag_edges_with_facts "${args[@]}") || return 2
+    facts_args=("${args[@]}")
+    [ -n "$tip" ] && facts_args+=(--tip "$tip")
+    TASKDAG_RECON_EDGES_JSON=$(taskdag_edges_with_facts "${facts_args[@]}") || return 2
+    TASKDAG_RECON_FACTS_TIP=$(taskdag_resolve_facts_tip "$tip") || return 2
+    TASKDAG_FACTS_TIP_OID=$TASKDAG_RECON_FACTS_TIP
 
     TASKDAG_RECON_CUR=$(taskdag_current_repo) || { echo "Error: cannot resolve current repo to reconcile the graph" >&2; return 2; }
     taskdag_recon_build_child_map
@@ -270,7 +519,7 @@ taskdag__node_complete_impl() {
         # following satisfies edges so a valid seed can terminate an
         # otherwise cyclic supersedence graph.
         local rc=0
-        taskdag_node_done "$node" || rc=$?
+        taskdag_node_done "$node" "$TASKDAG_RECON_FACTS_TIP" || rc=$?
         [ "$rc" -eq 2 ] && return 2
         [ "$rc" -eq 0 ] && return 0
     fi
