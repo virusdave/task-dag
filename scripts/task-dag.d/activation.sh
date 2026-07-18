@@ -30,6 +30,16 @@ _taskdag_activation_no_duplicate_keys() {
     _taskdag_materialise_no_duplicate_keys "$1"
 }
 
+_taskdag_activation_snapshot_file() { # source destination
+    local source=$1 destination=$2 source_fd
+    [ -f "$source" ] && [ ! -L "$source" ] || return 2
+    exec {source_fd}<"$source" || return 2
+    [ "$(realpath -e -- "/proc/self/fd/$source_fd" 2>/dev/null)" = "$(realpath -e -- "$source" 2>/dev/null)" ] \
+      || { exec {source_fd}<&-; return 2; }
+    cat <&$source_fd >"$destination" || { exec {source_fd}<&-; return 2; }
+    exec {source_fd}<&-
+}
+
 _taskdag_activation_validate_spec_file() {
     local file=$1
     [ "$(wc -c <"$file")" -le "$TASKDAG_ACTIVATION_MAX_SPEC" ] || return 1
@@ -347,16 +357,14 @@ taskdag_activation_fenced_push() { # compatibility wrapper
 }
 
 cmd_activation_apply() {
-    local spec="" tmp snapshot old info active path digest epoch predecessor record index tree commit now existing spec_fd
+    local spec="" expect_old="" tmp snapshot old info active path digest epoch predecessor record index tree commit now existing
     case "${1:-}" in -h|--help) echo "Usage: task-dag activation apply --spec-file FILE"; return 0;; esac
-    [ "$#" -eq 2 ] && [ "$1" = --spec-file ] && spec=$2 || { echo "Usage: task-dag activation apply --spec-file FILE" >&2; return 2; }
-    [ -f "$spec" ] && [ ! -L "$spec" ] || { _taskdag_activation_error "--spec-file must name a regular non-symlink file"; return 2; }
+    while [ $# -gt 0 ]; do case "$1" in --spec-file) spec=$2; shift 2;; --expect-old) expect_old=$2; shift 2;; *) echo "Usage: task-dag activation apply --spec-file FILE [--expect-old absent|OID]" >&2; return 2;; esac; done
+    [ -n "$spec" ] && { [ -z "$expect_old" ] || [ "$expect_old" = absent ] || [[ "$expect_old" =~ ^[0-9a-f]{40,64}$ ]]; } \
+      || { echo "Usage: task-dag activation apply --spec-file FILE [--expect-old absent|OID]" >&2; return 2; }
     tmp=$(mktemp -d) || return 2; snapshot="$tmp/spec"
-    exec {spec_fd}<"$spec" || { rm -rf "$tmp"; return 2; }
-    [ "$(realpath -e -- "/proc/self/fd/$spec_fd" 2>/dev/null)" = "$(realpath -e -- "$spec" 2>/dev/null)" ] \
-      || { exec {spec_fd}<&-; rm -rf "$tmp"; _taskdag_activation_error "spec file changed during secure open"; return 2; }
-    cat <&$spec_fd >"$snapshot" || { exec {spec_fd}<&-; rm -rf "$tmp"; return 2; }
-    exec {spec_fd}<&-
+    _taskdag_activation_snapshot_file "$spec" "$snapshot" \
+      || { rm -rf "$tmp"; _taskdag_activation_error "spec must be a stable regular non-symlink file"; return 2; }
     _taskdag_activation_validate_spec_file "$snapshot" \
       || { rm -rf "$tmp"; _taskdag_activation_error "unsupported spec shape, value, or bound"; return 2; }
     old=$(_taskdag_activation_fetch_authority) || { rm -rf "$tmp"; return 2; }
@@ -377,6 +385,10 @@ cmd_activation_apply() {
             cmd_activation_status --json; rm -rf "$tmp"; return 0
         fi
         git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor "$(jq -r .minimumCompatibleTaskDagCommit <<<"$existing")" "$(jq -r .minimumCompatibleTaskDagCommit "$record")" || { rm -rf "$tmp"; _taskdag_activation_error "minimum compatible commit cannot move backward"; return 3; }
+    fi
+    if [ -n "$expect_old" ]; then
+        if [ "$expect_old" = absent ]; then [ -z "$old" ] || { rm -rf "$tmp"; return 3; }
+        else [ "$old" = "$expect_old" ] || { rm -rf "$tmp"; return 3; }; fi
     fi
     index="$tmp/index"; GIT_INDEX_FILE="$index" git read-tree "${active:-$(git mktree </dev/null)}"
     path=$(printf 'records/%016d.json' "$epoch")
@@ -428,7 +440,10 @@ cmd_activation() {
       apply) cmd_activation_apply "$@" ;;
       status) cmd_activation_status "$@" ;;
       check-compatible) cmd_activation_check_compatible "$@" ;;
-      -h|--help|help|'') echo "Usage: task-dag activation apply|status|check-compatible ..." ;;
-      *) echo "Usage: task-dag activation apply|status|check-compatible ..." >&2; return 2 ;;
+      fleet-plan) cmd_activation_fleet_plan "$@" ;;
+      fleet-status) cmd_activation_fleet_status "$@" ;;
+      fleet-apply) cmd_activation_fleet_apply "$@" ;;
+      -h|--help|help|'') echo "Usage: task-dag activation apply|status|check-compatible|fleet-plan|fleet-status|fleet-apply ..." ;;
+      *) echo "Usage: task-dag activation apply|status|check-compatible|fleet-plan|fleet-status|fleet-apply ..." >&2; return 2 ;;
     esac
 }

@@ -84,6 +84,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/mailbox.sh" \
         "$(dirname "$TD")/task-dag.d/materialise.sh" \
         "$(dirname "$TD")/task-dag.d/activation.sh" \
+        "$(dirname "$TD")/task-dag.d/activation-fleet.sh" \
         "$(dirname "$TD")/operator-blocked-dashboard.sh" \
         "$(dirname "$TD")/operator-blocked-dashboard-publish.sh" \
         "$(dirname "$TD")/../.github/scripts/close-completed-issues.sh" \
@@ -121,6 +122,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/mailbox.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/materialise.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/activation.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/activation-fleet.sh" \
     && bash -n "$(dirname "$TD")/operator-blocked-dashboard.sh" \
     && bash -n "$(dirname "$TD")/operator-blocked-dashboard-publish.sh" \
     && bash -n "$(dirname "$TD")/../.github/scripts/close-completed-issues.sh" \
@@ -143,6 +145,7 @@ parallel_tests=(
     consumer-cutover.sh
     ci-repair-evidence.sh
     activation.sh
+    activation-fleet.sh
     complete-ops.sh
     complete-historical.sh
     mailbox.sh

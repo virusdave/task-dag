@@ -380,6 +380,41 @@ Canonical activation is now represented only by
 editing the ref. Records are permanent monotonic epochs; writer guard commits
 are replaceable same-tree children and are bypassed by the next epoch.
 
+Fleet rollout must use `task-dag activation fleet-plan`, `fleet-status`, and
+`fleet-apply`, never a hand-built loop over `activation apply`. `fleet-plan`
+freezes top-level's pristine `origin/master` registry, every registered
+origin's symbolic HEAD and commit, GitHub repository node identities, the
+exact registry origin URLs, exact task-dag runtime, and GitHub server time into
+one reviewable spec. Status and apply revalidate those endpoint identities and
+frozen origin tips; apply repeats the check immediately before mutation.
+The plan also binds each repository's exact predecessor authority tip, record
+digest, and state. A delayed retry can therefore recognize only its reviewed
+predecessor, its own disabled intermediate, or its own target; a later
+rollback or unrelated transition makes the stale plan fail closed.
+`fleet-apply` first converges every previously absent repository to the same
+disabled canonical epoch. Only after that fleet-wide barrier verifies does it
+enable repositories. Every repository therefore moves independently from one
+valid state to another; a process/network failure can pause part of the fleet
+but retrying the same immutable spec resumes from durable origin state without
+creating duplicate epochs. `fleet-status` reports absent, partial-disabled,
+disabled, partial-enabled, enabled, or conflict and rejects any authority with
+different frozen provenance. A conflict requires operator review; do not
+replace or synthesize activation refs by hand.
+
+Typical rollout from pristine checkouts:
+
+```sh
+task-dag activation fleet-plan \
+  --registry-checkout "$top_level" --work-root "$work" --output "$plan"
+jq . "$plan"                         # mandatory human/reviewer inspection
+task-dag activation fleet-status --spec-file "$plan" --work-root "$work"
+task-dag activation fleet-apply  --spec-file "$plan" --work-root "$work"
+```
+
+Rollback uses a separately reviewed disabled spec through the same canonical
+fleet machinery (`fleet-plan --state disabled`, then `fleet-apply`); never
+delete activation history or restore legacy readers.
+
 The private canonical-v1 materialisation reservation core requires an enabled,
 runtime-compatible activation snapshot. It persists activation provenance in
 batch and slot records and advances the materialisation authority together
