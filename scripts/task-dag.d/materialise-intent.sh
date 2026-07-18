@@ -105,6 +105,49 @@ taskdag_materialise_marker_ref() {
     fi
 }
 
+taskdag_materialise_operation_marker_ref() { printf 'refs/heads/gh/materialisation-markers/%s\n' "$1"; }
+
+_taskdag_materialise_operation_marker_record() { # declaration adopted-issue
+    local declaration=$1 adopted=$2
+    jq -ncS --argjson declaration "$declaration" --argjson adopted "$adopted" '{schema:1,operationId:$declaration.operationId,declarationDigest:$declaration.declarationDigest,sourceRepo:$declaration.sourceRepo,parentIssue:$declaration.parentIssue,peerRepo:$declaration.peerRepo,peerIssue:$adopted,delegationNote:(if ($declaration|has("delegationNote")) then {present:true,value:$declaration.delegationNote} else {present:false} end)}'
+}
+
+taskdag_materialise_operation_marker_validate() { # commit declaration adopted-issue
+    local commit=$1 declaration=$2 adopted=$3 msg encoded actual expected empty
+    [ "$(git rev-list --parents -1 "$commit" 2>/dev/null | wc -w)" -eq 1 ] || return 1
+    empty=$(git mktree </dev/null) || return 1
+    [ "$(git rev-parse "$commit^{tree}" 2>/dev/null)" = "$empty" ] || return 1
+    msg=$(git log -1 --format=%B "$commit") || return 1
+    [ "$(grep -c '^kind: gh-materialisation-marker-v1$' <<<"$msg")" -eq 1 ] || return 1
+    [ "$(grep -c '^Materialisation-Record: ' <<<"$msg")" -eq 1 ] || return 1
+    encoded=$(sed -n 's/^Materialisation-Record: //p' <<<"$msg")
+    actual=$(printf '%s' "$encoded" | base64 -d 2>/dev/null) || return 1
+    expected=$(_taskdag_materialise_operation_marker_record "$declaration" "$adopted") || return 1
+    [ "$actual" = "$expected" ]
+}
+
+taskdag_materialise_operation_marker_write() { # declaration adopted-issue; prints ref<TAB>commit
+    local declaration=$1 adopted=$2 operation ref record encoded empty commit remote rc=0 tmp
+    operation=$(jq -r .operationId <<<"$declaration"); ref=$(taskdag_materialise_operation_marker_ref "$operation")
+    remote=$(git ls-remote --exit-code origin "$ref" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        record=$(_taskdag_materialise_operation_marker_record "$declaration" "$adopted") || return 3
+        encoded=$(printf '%s' "$record" | base64 -w0) || return 3
+        empty=$(git mktree </dev/null) || return 3
+        commit=$(printf 'kind: gh-materialisation-marker-v1\nMaterialisation-Record: %s\n' "$encoded" | git commit-tree "$empty") || return 3
+        git push origin "$commit:$ref" >/dev/null 2>&1 || :
+    elif [ "$rc" -eq 0 ]; then commit=${remote%%[[:space:]]*}
+    else return 3
+    fi
+    remote=$(git ls-remote --refs origin "$ref" | awk 'NF==2{print $1}') || return 3
+    [ -n "$remote" ] || return 3
+    tmp="refs/task-dag-tmp/materialisation-marker/$remote"; git update-ref -d "$tmp" 2>/dev/null || true
+    git fetch -q --no-tags origin "+$ref:$tmp" || return 3
+    taskdag_materialise_operation_marker_validate "$tmp" "$declaration" "$adopted" || { git update-ref -d "$tmp" 2>/dev/null || true; return 3; }
+    git update-ref -d "$tmp" 2>/dev/null || true
+    printf '%s\t%s\n' "$ref" "$remote"
+}
+
 taskdag_validate_materialise_marker_commit() {
     local commit="$1" issue="$2" peer="$3" slug="$4" msg peer_issue
     local marker_kind marker_parent marker_peer marker_slug marker_tree empty_tree
@@ -162,9 +205,10 @@ taskdag_materialise_marker_issue() {
 }
 
 taskdag_materialise_delegation_valid() {
-    local ref="$1" root_sha="$2" peer="$3" peer_issue="$4"
-    local remote_sha="" rc=0 tmp msg tree empty_tree parent delegated_peer delegated_issue
-    local parent_total kind_count repo_count issue_count
+    local ref="$1" root_sha="$2" peer="$3" peer_issue="$4" expected_note="${5-}" enforce_note=false
+    local remote_sha="" rc=0 tmp msg tree empty_tree parent delegated_peer delegated_issue delegated_note
+    local parent_total kind_count repo_count issue_count note_count
+    [ "$#" -lt 5 ] || enforce_note=true
     remote_sha=$(remote_ref_sha_checked "$ref") || rc=$?
     [ "$rc" -eq 0 ] && [ -n "$remote_sha" ] || return 1
     tmp="refs/task-dag-tmp/materialise-delegation/${remote_sha}"
@@ -178,9 +222,11 @@ taskdag_materialise_delegation_valid() {
     empty_tree=$(git mktree </dev/null) || return 1
     delegated_peer=$(printf '%s\n' "$msg" | awk '/^delegated:$/ { inside=1; next } inside && /^  repo:[[:space:]]*/ { sub(/^  repo:[[:space:]]*/, ""); print } inside && !/^  / { inside=0 }' | head -1)
     delegated_issue=$(printf '%s\n' "$msg" | awk '/^delegated:$/ { inside=1; next } inside && /^  number:[[:space:]]*/ { sub(/^  number:[[:space:]]*/, ""); print } inside && !/^  / { inside=0 }' | head -1)
+    delegated_note=$(printf '%s\n' "$msg" | awk '/^delegated:$/ { inside=1; next } inside && /^  note:[[:space:]]*/ { sub(/^  note:[[:space:]]*/, ""); print } inside && !/^  / { inside=0 }' | head -1)
     kind_count=$(printf '%s\n' "$msg" | grep -c '^kind:' || true)
     repo_count=$(printf '%s\n' "$msg" | awk '/^delegated:$/ { inside=1; next } inside && /^  repo:/ { n++ } inside && !/^  / { inside=0 } END { print n+0 }')
     issue_count=$(printf '%s\n' "$msg" | awk '/^delegated:$/ { inside=1; next } inside && /^  number:/ { n++ } inside && !/^  / { inside=0 } END { print n+0 }')
+    note_count=$(printf '%s\n' "$msg" | awk '/^delegated:$/ { inside=1; next } inside && /^  note:/ { n++ } inside && !/^  / { inside=0 } END { print n+0 }')
     [ "$tree" = "$empty_tree" ] \
         && [ "$parent_total" -eq 1 ] \
         && [ "$parent" = "$root_sha" ] \
@@ -189,7 +235,9 @@ taskdag_materialise_delegation_valid() {
         && [ "$delegated_peer" = "$peer" ] \
         && [ "$repo_count" -eq 1 ] \
         && [ "$issue_count" -eq 1 ] \
-        && [ "$delegated_issue" = "$peer_issue" ]
+        && [ "$delegated_issue" = "$peer_issue" ] \
+        && { [ "$enforce_note" = false ] || { [ "$delegated_note" = "$expected_note" ] \
+          && { [ -n "$expected_note" ] && [ "$note_count" -eq 1 ] || [ -z "$expected_note" ] && [ "$note_count" -eq 0 ]; }; }; }
 }
 
 # Validate the current graph with the canonical reader, then recognize the
@@ -219,6 +267,47 @@ taskdag_materialise_edge_durable() {
         esac
     done <<< "$commits"
     return 1
+}
+
+# Close barrier for command-reserved and census-imported immutable intents.
+# This is independent of legacy trailer discovery: every declaration for the
+# parent in the validated authority must reach final and retain all exact
+# operation-bound projections before the parent can close.
+taskdag_materialisation_authority_durable() { # issue root-sha
+    local issue=$1 root_sha=$2 remote rc=0 tip token current path declaration slot state_path state peer peer_issue marker marker_sha tmp delegation from to eid
+    remote=$(git ls-remote --exit-code origin "$TASKDAG_MATERIALISATION_REF" 2>/dev/null) || rc=$?
+    [ "$rc" -ne 2 ] || return 2
+    [ "$rc" -eq 0 ] || return 2
+    tip=${remote%%[[:space:]]*}; [ -n "$tip" ] || return 2
+    git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2
+    tip=$(git rev-parse FETCH_HEAD) || return 2
+    token=$(taskdag_activation_snapshot_token) || return 2
+    current=$(taskdag_current_repo) || return 2
+    [ -z "$(taskdag_materialisation_online_tree_violations "$tip" "$(jq -r .authorityTip <<<"$token")" "$(tr '[:upper:]' '[:lower:]' <<<"$current")")" ] || return 2
+    while IFS= read -r path; do
+        declaration=$(git show "$tip:$path") || return 2
+        [ "$(jq -r .sourceRepo.name <<<"$declaration" | tr '[:upper:]' '[:lower:]')" = "$(tr '[:upper:]' '[:lower:]' <<<"$current")" ] || continue
+        [ "$(jq -r .parentIssue.number <<<"$declaration")" = "$issue" ] || continue
+        slot=$(jq -r .slotId <<<"$declaration")
+        state_path=$(git ls-tree -r --name-only "$tip" "slots/$slot/states" | sort | tail -1); [ -n "$state_path" ] || return 1
+        state=$(git show "$tip:$state_path") || return 2
+        [ "$(jq -r .state <<<"$state")" = final ] || return 1
+        peer=$(jq -r .peerRepo.name <<<"$declaration"); peer_issue=$(jq -r .adoptedIssue.number <<<"$state")
+        marker=$(jq -r .markerRef <<<"$state"); marker_sha=$(git ls-remote --refs origin "$marker" | awk 'NF==2{print $1}') || return 2
+        [ "$marker_sha" = "$(jq -r .markerCommit <<<"$state")" ] || return 1
+        tmp="refs/task-dag-tmp/materialisation-close/$marker_sha"; git update-ref -d "$tmp" 2>/dev/null || true
+        git fetch -q --no-tags origin "+$marker:$tmp" || return 2
+        taskdag_materialise_operation_marker_validate "$tmp" "$declaration" "$(jq -c .adoptedIssue <<<"$state")" || { git update-ref -d "$tmp" 2>/dev/null || true; return 1; }
+        git update-ref -d "$tmp" 2>/dev/null || true
+        delegation="refs/heads/tasks/delegated/$issue/$peer/$peer_issue"
+        [ "$(jq -r .delegationRef <<<"$state")" = "$delegation" ] || return 1
+        taskdag_materialise_delegation_valid "$delegation" "$root_sha" "$peer" "$peer_issue" "$(jq -r '.delegationNote // ""' <<<"$declaration")" || return 1
+        taskdag_sync_graph_ref || return 2
+        from="task:$current@$root_sha"; to="issue:$peer#$peer_issue"; eid=$(taskdag_edge_id "$from" "$to" requires all) || return 2
+        [ "$(jq -r .edgeId <<<"$state")" = "$eid" ] || return 1
+        taskdag_materialise_edge_durable "$eid" || return 1
+    done < <(git ls-tree -r --name-only "$tip" declarations | sort)
+    TASKDAG_MATERIALISATION_VALIDATED_TIP=$tip
 }
 
 # Return 0 only when every Materialise-Child-Epic group for <issue> reachable
@@ -280,5 +369,5 @@ taskdag_materialisation_intents_durable() {
             fi
         done <<< "$group_lines"
     done <<< "$commits"
-    return 0
+    taskdag_materialisation_authority_durable "$issue" "$root_sha"
 }

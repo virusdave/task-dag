@@ -18,13 +18,18 @@ taskdag_activation_fenced_push() {
   local target=$6 old=$7 new=$8
   git push -q origin --force-with-lease="$target:$old" "$new:$target" 2>/dev/null
 }
+taskdag_activation_fenced_multi_push() {
+  local updates=$6 ref old new
+  ref=$(jq -r '.[0].ref' <<<"$updates"); old=$(jq -r '.[0].old' <<<"$updates"); new=$(jq -r '.[0].new' <<<"$updates")
+  git push -q origin --force-with-lease="$ref:$old" "$new:$ref" 2>/dev/null
+}
 taskdag_activation_validate_history() { [[ "$1" = 2222222222222222222222222222222222222222 || "$1" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]; }
 taskdag_activation_validate_provenance() {
   [[ "$1" = 2222222222222222222222222222222222222222 || "$1" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] \
     && jq -e '.guardVersion==1 and ((.epoch==1 and .digest=="3333333333333333333333333333333333333333333333333333333333333333") or (.epoch==2 and .digest=="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))' <<<"$2" >/dev/null
 }
 _xrepo_current_repo() { printf '%s\n' o/source; }
-export -f taskdag_activation_snapshot_token taskdag_activation_fenced_push \
+export -f taskdag_activation_snapshot_token taskdag_activation_fenced_push taskdag_activation_fenced_multi_push \
   taskdag_activation_validate_history taskdag_activation_validate_provenance \
   _xrepo_current_repo
 
@@ -426,6 +431,125 @@ jq_failure_out=$(
 if ! rg -n 'gh issue create|curl .*(POST|-X[[:space:]]+POST)' "$(dirname "$TD")/task-dag.d/materialise.sh" >/dev/null; then
   ok "materialisation module has no issue POST"
 else bad "materialisation module contains issue POST"; fi
+
+# The transition CAS distinguishes its exact winner from an equivalent/stale
+# observer. Only that winner is allowed to issue the one provider POST.
+(
+  cd "$ROOT/wc" || exit 1
+  source "$(dirname "$TD")/task-dag.d/materialise.sh"
+  source "$(dirname "$TD")/task-dag.d/materialise-producer.sh"
+  source "$(dirname "$TD")/task-dag.d/materialise-reconcile.sh"
+  token=$(taskdag_activation_snapshot_token)
+  slot=$(git ls-tree -r --name-only "$tip2" | sed -n '/^slots\/.*\/states\/0000000000000000\.json$/{p;q;}'); slot=${slot#slots/}; slot=${slot%%/*}
+  prior=$(git show "$tip2:slots/$slot/states/0000000000000000.json")
+  declaration=$(git show "$tip2:declarations/$(jq -r .declarationDigest <<<"$prior").json")
+  producer=$(jq -ncS '{schema:1,state:"enabled",activationEpoch:1,activationRecordDigest:("3"*64),censusDigest:("6"*64),censusBlob:("7"*40),importBatchBlob:("8"*40),registrySnapshotId:("sha256:"+("9"*64)),repositories:["o/peer","o/source"],runtimeCommit:("5"*40),appCreatorNodeId:"BOT_fixture",actor:"fixture",authoritativeTimestamp:"2026-07-18T00:00:00Z"}')
+  producer_blob=$(printf '%s\n' "$producer" | git hash-object -w --stdin)
+  producer_tree=$(printf '100644 blob %s\tproducer-enable.json\n' "$producer_blob" | git mktree)
+  producer_commit=$(printf 'Fixture producer\n' | git commit-tree "$producer_tree")
+  git update-ref "$TASKDAG_MATERIALISE_PRODUCER_REF" "$producer_commit"
+  git push -q origin "$producer_commit:$TASKDAG_MATERIALISE_PRODUCER_REF"
+  producer_digest=$(printf '%s\n' "$producer" | sha256sum | awk '{print $1}')
+  prior_digest=$(printf '%s\n' "$prior" | sha256sum | awk '{print $1}')
+  common=$(jq -ncS --argjson prior "$prior" --arg actor fixture --arg now 2026-07-18T00:00:00Z --arg tip "$tip2" --arg authorityTip "$(jq -r .authorityTip <<<"$token")" --arg priorDigest "$prior_digest" --arg producerDigest "$producer_digest" --arg repository "$(jq -r .peerRepo.name <<<"$declaration")" --arg repositoryId "$(jq -r .peerRepo.id <<<"$declaration")" '{schema:1,state:"create-in-flight-or-uncertain",slotId:$prior.slotId,declarationDigest:$prior.declarationDigest,operationId:$prior.operationId,generation:1,fence:2,activation:$prior.activation,actor:$actor,authoritativeTimestamp:$now,predecessorStateDigest:$priorDigest,originReadback:{activationAuthorityTip:$authorityTip,materialisationTip:$tip},producerRecordDigest:$producerDigest,provider:{repository:$repository,repositoryId:$repositoryId,timeFloor:$now}}')
+  first=$(jq -cS '.+{createAttemptId:("a"*64)}' <<<"$common")
+  second=$(jq -cS '.+{createAttemptId:("b"*64)}' <<<"$common")
+  if _taskdag_materialise_append_state "$tip2" "$token" "$slot" "$first"; then first_rc=0; else first_rc=$?; fi
+  if _taskdag_materialise_append_state "$tip2" "$token" "$slot" "$second"; then second_rc=0; else second_rc=$?; fi
+  current=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk 'NF==2{print $1}')
+  git fetch -q origin "$TASKDAG_MATERIALISATION_REF"
+  [ "$first_rc" -eq 0 ] && [ "$second_rc" -eq 10 ] \
+    && [ "$(git show "$current:slots/$slot/states/0000000000000001.json" | jq -r .createAttemptId)" = "$(printf 'a%.0s' {1..64})" ] \
+    && [ -z "$(taskdag_materialisation_tree_violations "$current" "$(jq -r .authorityTip <<<"$token")" o/source)" ]
+
+  first=$(git show "$current:slots/$slot/states/0000000000000001.json")
+  body="$ROOT/recovery-body"
+  { git show "$current:bodies/$(jq -r .bodySha256 <<<"$declaration").body"; printf '\n\n<!-- task-dag-materialisation:v1 operation=%s declaration=%s -->\n' "$(jq -r .operationId <<<"$first")" "$(jq -r .declarationDigest <<<"$first")"; } >"$body"
+  adopted=$(jq -ncS --argjson prior "$first" --arg actor fixture --arg now 2026-07-18T00:00:01Z --arg tip "$current" --arg authorityTip "$(jq -r .authorityTip <<<"$token")" --arg priorDigest "$(printf '%s\n' "$first" | sha256sum | awk '{print $1}')" --arg bodySha "$(sha256sum "$body" | awk '{print $1}')" --arg title "$(jq -r .title <<<"$declaration")" '{schema:1,state:"issue-adopted",slotId:$prior.slotId,declarationDigest:$prior.declarationDigest,operationId:$prior.operationId,generation:2,fence:3,activation:$prior.activation,actor:$actor,authoritativeTimestamp:$now,predecessorStateDigest:$priorDigest,originReadback:{activationAuthorityTip:$authorityTip,materialisationTip:$tip},createAttemptId:$prior.createAttemptId,adoptedIssue:{repositoryId:$prior.provider.repositoryId,issueNodeId:"PI_fixture",number:7},providerReceipt:{repositoryId:$prior.provider.repositoryId,creatorNodeId:"BOT_fixture",observedAt:$now,paginationQuery:"fixture",pagesFetched:1,exhausted:true,matchCount:1,matchedIdentity:{issueNodeId:"PI_fixture",number:7,createdAt:$now,title:$title,bodySha256:$bodySha,operationId:$prior.operationId,declarationDigest:$prior.declarationDigest}}}')
+  _taskdag_materialise_append_state "$current" "$token" "$slot" "$adopted"
+  adopted_tip=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk 'NF==2{print $1}')
+  git fetch -q origin "$TASKDAG_MATERIALISATION_REF"
+  git update-ref -d "$TASKDAG_MATERIALISE_PRODUCER_REF"
+  taskdag_materialise_fetch_producer_if_required "$adopted_tip"
+  [ "$(git rev-parse "$TASKDAG_MATERIALISE_PRODUCER_REF")" = "$producer_commit" ]
+  [ -z "$(taskdag_materialisation_tree_violations "$adopted_tip" "$(jq -r .authorityTip <<<"$token")" o/source)" ]
+  while IFS=$'\t' read -r mutation expected; do
+    tampered=$(jq -cS "$mutation" <<<"$adopted")
+    tampered_blob=$(printf '%s\n' "$tampered" | git hash-object -w --stdin)
+    idx="$ROOT/recovery-index"; GIT_INDEX_FILE="$idx" git read-tree "$adopted_tip^{tree}"
+    GIT_INDEX_FILE="$idx" git update-index --cacheinfo "100644,$tampered_blob,slots/$slot/states/0000000000000002.json"
+    tampered_tree=$(GIT_INDEX_FILE="$idx" git write-tree); rm -f "$idx"
+    tampered_tip=$(printf 'Tamper receipt\n' | git commit-tree "$tampered_tree" -p "$adopted_tip")
+    violations=$(taskdag_materialisation_tree_violations "$tampered_tip" "$(jq -r .authorityTip <<<"$token")" o/source)
+    grep -q "$expected" <<<"$violations" || exit 1
+  done <<'TAMPERS'
+.providerReceipt.matchedIdentity.bodySha256=("0"*64)	recovery body digest mismatch
+.createAttemptId=("f"*64)	changed create or provider identity
+.adoptedIssue.repositoryId="other" | .providerReceipt.repositoryId="other"	changed create or provider identity
+.adoptedIssue.issueNodeId="" | .providerReceipt.matchedIdentity.issueNodeId=""	invalid fresh transition
+TAMPERS
+); rc=$?
+[ "$rc" -eq 0 ] && ok "unique create winner and exact durable recovery receipt validate" || bad "create ownership or recovery receipt validation failed"
+
+# Recovery compares every exact identity field and visible body bytes; zero
+# and duplicate exact matches remain fail-closed rather than authorizing POST.
+(
+  source "$(dirname "$TD")/task-dag.d/materialise-reconcile.sh"
+  expected="$ROOT/exact-body"; printf 'body\n\n<!-- task-dag-materialisation:v1 operation=op declaration=dd -->\n' >"$expected"
+  declaration='{"title":"Title"}'
+  issue=$(jq -nc --rawfile body "$expected" '{title:"Title",body:$body,node_id:"I_1",number:1,created_at:"2026-07-18T00:00:01Z",user:{node_id:"BOT"}}')
+  _taskdag_materialise_exact_matches "[$issue]" "$declaration" "$expected" 2026-07-18T00:00:00Z BOT "$ROOT/matches"
+  [ "$(wc -l <"$ROOT/matches")" -eq 1 ]
+  _taskdag_materialise_exact_matches "[$issue,$issue]" "$declaration" "$expected" 2026-07-18T00:00:00Z BOT "$ROOT/matches"
+  [ "$(wc -l <"$ROOT/matches")" -eq 2 ]
+  _taskdag_materialise_exact_matches "[$(jq -c '.body="different"' <<<"$issue")]" "$declaration" "$expected" 2026-07-18T00:00:00Z BOT "$ROOT/matches"
+  [ ! -s "$ROOT/matches" ]
+); rc=$?
+[ "$rc" -eq 0 ] && ok "recovery distinguishes one, zero, and multiple exact matches" || bad "recovery identity predicate accepted an inexact match"
+
+# Aggregate reconciliation must never let a later uncertain slot downgrade an
+# earlier hard semantic failure.
+set +e
+(
+  source "$(dirname "$TD")/task-dag.d/materialise-reconcile.sh"
+  _taskdag_materialise_fetch_authority() { printf 'tip\t{}\t{}\n'; }
+  _taskdag_materialise_reconcile_slot() { [ "$1" = "$(printf 'a%.0s' {1..64})" ] && return 3; return 75; }
+  git() {
+    if [ "$1" = ls-tree ]; then
+      printf 'slots/%s/states/0000000000000000.json\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})"
+      return 0
+    fi
+    command git "$@"
+  }
+  cmd_materialise_reconcile
+); rc=$?
+set -e
+[ "$rc" -eq 3 ] && ok "aggregate reconciliation keeps hard failure sticky" || bad "later uncertainty downgraded hard failure (rc=$rc)"
+
+# Finalization orchestration must use the private canonical projection and
+# append `final` only after exact marker/delegation/edge readbacks succeed.
+set +e
+(
+  source "$(dirname "$TD")/task-dag.d/materialise-reconcile.sh"
+  op=$(printf '1%.0s' {1..64}); dd=$(printf '2%.0s' {1..64}); sid=$(printf '3%.0s' {1..64})
+  TEST_MARKER="refs/heads/gh/materialisation-markers/$op"; TEST_COMMIT=$(printf '4%.0s' {1..40}); TEST_EDGE=$(printf '5%.0s' {1..64})
+  adopted=$(jq -ncS --arg op "$op" --arg dd "$dd" --arg sid "$sid" --arg marker "$TEST_MARKER" --arg commit "$TEST_COMMIT" '{schema:1,state:"marker-durable-delegation-pending",slotId:$sid,declarationDigest:$dd,operationId:$op,generation:2,fence:3,activation:{epoch:1,digest:("a"*64),guardVersion:1},actor:"fixture",authoritativeTimestamp:"2026-07-18T00:00:00Z",predecessorStateDigest:("b"*64),originReadback:{activationAuthorityTip:("c"*40),materialisationTip:("d"*40)},adoptedIssue:{repositoryId:"peer-id",issueNodeId:"issue-id",number:9},markerRef:$marker,markerCommit:$commit}')
+  declaration=$(jq -ncS --arg op "$op" --arg dd "$dd" --arg sid "$sid" '{operationId:$op,declarationDigest:$dd,slotId:$sid,parentIssue:{number:7},peerRepo:{name:"peer/repo"},delegationNote:"note"}')
+  token=$(jq -ncS '{epoch:1,digest:("a"*64),guardVersion:1,authorityTip:("c"*40)}')
+  _taskdag_materialise_delegate_projection() { :; }
+  taskdag_materialise_delegation_valid() { [ "$5" = note ]; }
+  taskdag_sync_graph_ref() { :; }
+  taskdag_edge_id() { printf '%s\n' "$TEST_EDGE"; }
+  taskdag_materialise_edge_durable() { [ "$1" = "$TEST_EDGE" ]; }
+  taskdag_materialise_operation_marker_write() { printf '%s\t%s\n' "$TEST_MARKER" "$TEST_COMMIT"; }
+  _taskdag_materialise_latest_state() { printf '%s\n' "$adopted"; }
+  _taskdag_materialise_append_state() { jq -e '.state=="final" and .delegationRef=="refs/heads/tasks/delegated/7/peer/repo/9" and .edgeId==$edge' --arg edge "$TEST_EDGE" <<<"$4" >/dev/null; }
+  _xrepo_current_repo() { printf 'source/repo\n'; }
+  git() { [ "$1" = rev-parse ] && { printf 'root-sha\n'; return 0; }; command git "$@"; }
+  _taskdag_materialise_finalize "$(printf 'd%.0s' {1..40})" "$token" "$sid" "$adopted" "$declaration"
+); rc=$?
+set -e
+[ "$rc" -eq 0 ] && ok "finalization waits for canonical projection readback" || bad "finalization orchestration failed (rc=$rc)"
 
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

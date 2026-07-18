@@ -14,7 +14,7 @@ registry_commit=1111111111111111111111111111111111111111
 registry_blob=2222222222222222222222222222222222222222
 registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
 registry_file="$ROOT/registry"; printf '%s\n' "$registry" >"$registry_file"
-TASKDAG_SCRIPT_DIR="$(dirname "$TD")"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
+TASKDAG_SCRIPT_DIR="$(dirname "$TD")"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-producer.sh"
 _xrepo_current_repo() { printf '%s\n' virusdave/task-dag; }
 registry_id=$(_taskdag_activation_registry_id "$registry_file")
 jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" '{actor:"fixture",authoritativeTimestamp:"2026-07-17T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/spec"
@@ -40,6 +40,11 @@ else bad "epoch-one golden identity changed (record=$epoch1_digest registry=$reg
 empty=$(git -C "$ROOT/wc" mktree </dev/null)
 one=$(printf 'one\n' | git -C "$ROOT/wc" commit-tree "$empty")
 token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+snapshot_record=$(cd "$ROOT/wc" && taskdag_activation_record_for_snapshot "$token")
+if [ "$(jq -r .registrySnapshot.id <<<"$snapshot_record")" = "$registry_id" ] \
+  && [ "$(jq -r .epoch <<<"$snapshot_record")" = "$(jq -r .epoch <<<"$token")" ]; then
+  ok "snapshot token resolves its exact immutable activation record"
+else bad "snapshot token lost its registry-bound activation record"; fi
 authority_before=$(git --git-dir="$ROOT/origin" rev-parse "$TASKDAG_ACTIVATION_REF")
 for forged in \
   "$(jq -c '.origin="other-origin"' <<<"$token")" \
@@ -255,7 +260,7 @@ real_slot=$(jq -r '.members[0].slotId' "$ROOT/real-material-result")
 real_provenance=$(git --git-dir="$ROOT/origin" show "$real_material_tip:batches/$real_batch.json" | jq -c .activation)
 if [ "$rc" -eq 0 ] && [ "$material_rc" -eq 0 ] \
   && [ "$(git --git-dir="$ROOT/origin" rev-parse "$real_activation_tip^{tree}")" = "$(git --git-dir="$ROOT/origin" rev-parse "$real_active^{tree}")" ] \
-  && [ "$real_provenance" = "$(git --git-dir="$ROOT/origin" show "$real_material_tip:slots/$real_slot/state.json" | jq -c .activation)" ] \
+  && [ "$real_provenance" = "$(git --git-dir="$ROOT/origin" show "$real_material_tip:slots/$real_slot/states/0000000000000000.json" | jq -c .activation)" ] \
   && (cd "$ROOT/wc" && taskdag_activation_validate_provenance "$real_activation_tip" "$real_provenance"); then
   ok "real enabled materialisation atomically advances both fenced authorities"
 else bad "real enabled materialisation fence/provenance integration failed"; fi
@@ -275,13 +280,13 @@ forged_epoch=$(jq -r .epoch "$disabled_record")
 jq --arg digest "$forged_digest" --argjson epoch "$forged_epoch" '.activation.digest=$digest | .activation.epoch=$epoch' "$ROOT/forged-batch" >"$ROOT/forged-batch.n" && mv "$ROOT/forged-batch.n" "$ROOT/forged-batch"
 forged_batch_id=$(_taskdag_materialise_id batch "$(jq -c .members "$ROOT/forged-batch")" "$(jq -c .provenance "$ROOT/forged-batch")" "$(jq -c .activation "$ROOT/forged-batch")")
 jq -cS --arg batch "$forged_batch_id" '.batchId=$batch' "$ROOT/forged-batch" >"$ROOT/forged-batch.n" && mv "$ROOT/forged-batch.n" "$ROOT/forged-batch"
-git --git-dir="$ROOT/origin" show "$real_material_tip:slots/$real_slot/state.json" \
+git --git-dir="$ROOT/origin" show "$real_material_tip:slots/$real_slot/states/0000000000000000.json" \
   | jq -cS --arg digest "$forged_digest" --argjson epoch "$forged_epoch" --arg batch "$forged_batch_id" '.activation.digest=$digest | .activation.epoch=$epoch | .batchId=$batch' >"$ROOT/forged-slot"
 forged_index="$ROOT/forged-material-index"
 GIT_INDEX_FILE="$forged_index" git -C "$ROOT/wc" read-tree "$real_material_tip"
 GIT_INDEX_FILE="$forged_index" git -C "$ROOT/wc" update-index --force-remove "batches/$real_batch.json"
 GIT_INDEX_FILE="$forged_index" git -C "$ROOT/wc" update-index --add --cacheinfo "100644,$(git -C "$ROOT/wc" hash-object -w "$ROOT/forged-batch"),batches/$forged_batch_id.json"
-GIT_INDEX_FILE="$forged_index" git -C "$ROOT/wc" update-index --add --cacheinfo "100644,$(git -C "$ROOT/wc" hash-object -w "$ROOT/forged-slot"),slots/$real_slot/state.json"
+GIT_INDEX_FILE="$forged_index" git -C "$ROOT/wc" update-index --add --cacheinfo "100644,$(git -C "$ROOT/wc" hash-object -w "$ROOT/forged-slot"),slots/$real_slot/states/0000000000000000.json"
 forged_tree=$(GIT_INDEX_FILE="$forged_index" git -C "$ROOT/wc" write-tree)
 forged_material=$(printf 'forged activation provenance\n' | git -C "$ROOT/wc" commit-tree "$forged_tree")
 forged_out=$(cd "$ROOT/wc" && taskdag_materialisation_tree_violations "$forged_material" "$real_activation_tip")

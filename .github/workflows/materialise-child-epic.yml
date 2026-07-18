@@ -1,36 +1,25 @@
-name: Materialise Child Epic From Commit Trailer
+name: Reconcile Durable Child Epic Intents
 
 # REUSABLE workflow (on: workflow_call). Call it from a peer repo's
 # .github/workflows/task-dag.yml on `push: branches: [master]` to make that
 # repo able to spawn cross-repo child epics.
 #
-# When a push lands on the caller's master, this scans the new commits
-# (inputs.base_sha..inputs.head_sha) for `Materialise-Child-Epic:` trailer
-# groups and, for each:
+# Each invocation reconciles immutable, pre-reserved intents already stored
+# on tasks/v1/materialisation. The reconciler is the sole issue POST actuator:
+# it mints a peer-scoped App token, durably fences one create attempt,
+# exhaustively recovers by exact sentinel identity, and then runs canonical
+# marker, delegation, and edge finalization.
 #
-#   1. Mints a `task-dag` GitHub App installation token scoped to the peer
-#      repo named in the trailer (the App must be installed on that peer
-#      with Issues: read & write).
-#   2. Creates the peer-repo issue from the trailer-specified body file
-#      (read from the trailer commit's tree in the caller checkout).
-#   3. Registers the delegation back on the parent epic (in THIS caller /
-#      source repo) via the canonical `task-dag delegate`.
+# The canonical runtime is checked out from public virusdave/task-dag at the
+# exact commit in `inputs.ref`, so its mutator, guard, and policy cannot come
+# from mixed revisions. The caller does not need to vendor the scripts.
 #
-# This works for ANY wired peer, not just virusdave/top-level: the source
-# repo is `github.repository` and its token is passed as SOURCE_TOKEN.
+# The exact runtime commit must match the immutable producer-enable record;
+# moving branches and mixed revisions are rejected before effects.
 #
-# The canonical runtime is downloaded as one archive from public
-# virusdave/task-dag at `inputs.ref`, so its mutator, guard, and policy cannot
-# come from mixed revisions. The caller does not need to vendor the scripts.
-#
-# Idempotency: each materialisation pushes a marker ref pointing at an
-# empty-tree metadata commit recording the assigned peer issue number.
-# Groups without a `Child-Epic-Slug:` trailer use the legacy
-#   refs/heads/gh/child-epics/<parent>/<owner>/<repo>
-# ref (one child epic per (parent, peer repo)); groups WITH a slug use
-#   refs/heads/gh/child-epic-slots/<parent>/<owner>/<repo>/<slug>
-# which permits multiple child epics per (parent, peer repo). See the
-# script header in materialise-child-epics.sh for the full trailer contract.
+# Each final materialisation validates an operation-bound empty-tree marker,
+# canonical delegation ref, and canonical dependency edge before recording
+# `final` in the immutable slot state chain.
 
 on:
   workflow_call:
@@ -44,10 +33,10 @@ on:
         required: true
         type: string
       ref:
-        description: 'task-dag ref to fetch the materialise script from (branch, tag, or SHA)'
+        description: 'Exact 40-hex task-dag commit containing the authorized reconciler'
         required: false
         type: string
-        default: master
+        default: ''
     secrets:
       app_id:
         description: |
@@ -73,6 +62,9 @@ permissions:
 
 jobs:
   materialise:
+    # Compatibility-safe staging: old callers omit ref and perform no work.
+    # The coordinated rollout pins both `uses:` and this input before enabling.
+    if: ${{ inputs.ref != '' }}
     runs-on: ubuntu-latest
     concurrency:
       group: materialise-child-epic-${{ github.repository }}-${{ inputs.base_sha }}-${{ inputs.head_sha }}
@@ -84,35 +76,39 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download canonical task-dag bundle
+      - name: Check out pinned canonical task-dag runtime
+        uses: actions/checkout@v4
+        with:
+          repository: virusdave/task-dag
+          ref: ${{ inputs.ref }}
+          path: .task-dag-runtime
+          fetch-depth: 1
+
+      - name: Verify pinned canonical task-dag runtime
         env:
           TASK_DAG_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          mkdir -p /tmp/task-dag-cli
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
-            "https://github.com/virusdave/task-dag/archive/${TASK_DAG_REF}.tar.gz" \
-            | tar -xz --strip-components=1 -C /tmp/task-dag-cli
-          chmod 0755 /tmp/task-dag-cli/scripts/task-dag \
-            /tmp/task-dag-cli/.github/scripts/materialise-child-epics.sh
+          [[ "$TASK_DAG_REF" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error ::task-dag reconciler runtime must be pinned to an exact 40-hex commit"
+            exit 2
+          }
+          test "$(git -C .task-dag-runtime rev-parse HEAD)" = "$TASK_DAG_REF"
+          chmod 0755 .task-dag-runtime/scripts/task-dag
 
-      - name: Materialise child epics from commit trailers
+      - name: Reconcile immutable materialisation intents
         env:
-          BEFORE_SHA: ${{ inputs.base_sha }}
-          AFTER_SHA: ${{ inputs.head_sha }}
-          GH_REPO: ${{ github.repository }}
-          SOURCE_TOKEN: ${{ github.token }}
-          APP_ID: ${{ secrets.app_id }}
-          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-          TASK_DAG: /tmp/task-dag-cli/scripts/task-dag
+          GH_TOKEN: ${{ github.token }}
+          TASKDAG_APP_ID: ${{ secrets.app_id }}
+          TASKDAG_APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
         run: |
           set -euo pipefail
           set +e
-          bash /tmp/task-dag-cli/.github/scripts/materialise-child-epics.sh
+          "$GITHUB_WORKSPACE/.task-dag-runtime/scripts/task-dag" materialise-reconcile
           rc=$?
           set -e
           if [ "$rc" -eq 75 ]; then
-            echo "Child-epic materialisation deferred successfully during semantic migration drain."
+            echo "One or more materialisations remain safely uncertain or pending; watchdog reconciliation will continue."
             exit 0
           fi
           exit "$rc"

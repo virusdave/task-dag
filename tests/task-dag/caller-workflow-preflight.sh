@@ -27,8 +27,8 @@ PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
-if bash "$VALIDATE" --require-materialise --require-comment-sync-app "$SELF_CALLER" >/dev/null 2>&1; then
-    ok "1: self-hosting caller satisfies the full required contract"
+if bash "$VALIDATE" --require-comment-sync-app "$SELF_CALLER" >/dev/null 2>&1; then
+    ok "1: dormant self-hosting caller satisfies the pre-rollout contract"
 else
     bad "1: self-hosting caller failed validation"
 fi
@@ -75,6 +75,14 @@ if bash "$VALIDATE" --require-materialise --require-comment-sync-app "$TMP/misma
     bad "6: caller with a mismatched comment runtime ref unexpectedly passed"
 else
     ok "6: comment runtime ref must match the reusable workflow ref"
+fi
+
+cp "$TMP/docs-template.yml" "$TMP/missing-materialise-ref.yml"
+sed -i '/^[[:space:]]*ref: 0123456789abcdef/d' "$TMP/missing-materialise-ref.yml"
+if bash "$VALIDATE" --require-materialise --require-comment-sync-app "$TMP/missing-materialise-ref.yml" >/dev/null 2>&1; then
+    bad "7: materialise caller without an exact runtime ref unexpectedly passed"
+else
+    ok "7: materialise caller must supply its authorized runtime commit"
 fi
 
 if ruby -ryaml - "$REUSABLE" <<'RUBY'

@@ -82,6 +82,7 @@ jq -ncS --arg floor "$activation_floor" --arg parent "$parent_tip" --arg pc "$pe
 authority=$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/activation); active=$authority
 git --git-dir="$I/origin" show "$active:records/0000000000000001.json" >"$I/activation-record"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-producer.sh"
 make_declaration() { # disposition, title, body, slug, output
   local disposition=$1 title=$2 body=$3 slug=$4 out=$5 body_sha body_len slot declaration operation slug_presence
   body_sha=$(printf %s "$body" | sha256sum | awk '{print $1}'); body_len=$(printf %s "$body" | wc -c)
@@ -161,6 +162,20 @@ before_material=$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materi
 [ "$retry_rc" -eq 0 ] && [ "$before_material" = "$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materialisation)" ] && [ "$before_close" = "$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/delegated-close/v1/1/peer/repo/2)" ] && ok "exact import retry converges" || bad "exact import retry did not converge"
 
 census_digest=$(cat "$I/digest"); adopt_slot=$(jq -r .slotId "$I/adopt-declaration"); rearm_slot=$(jq -r .slotId "$I/rearm-declaration"); initial_slot=$(jq -r .slotId "$I/initial-declaration")
+jq -ncS --arg runtime "$(_taskdag_materialise_runtime_commit)" --arg census "$census_digest" '{actor:"fixture",appCreatorNodeId:"BOT_fixture",authoritativeTimestamp:"2026-07-18T00:00:00Z",censusDigest:$census,runtimeCommit:$runtime}' >"$I/producer-spec"
+eval "$(declare -f taskdag_activation_fenced_multi_push | sed '1s/taskdag_activation_fenced_multi_push/_fixture_real_fenced_multi_push/')"
+taskdag_activation_fenced_multi_push() {
+  _fixture_real_fenced_multi_push "$@" || return
+  return 2 # Simulate a transport failure after the remote accepted the CAS.
+}
+if (cd "$I/parent" && cmd_materialise_producer_enable --spec-file "$I/producer-spec" >/dev/null) \
+  && (cd "$I/parent" && taskdag_materialise_producer_check >/dev/null); then
+  ok "producer enable converges after accepted ambiguous push"
+else
+  bad "producer enable did not converge after accepted ambiguous push"
+fi
+unset -f taskdag_activation_fenced_multi_push
+eval "$(declare -f _fixture_real_fenced_multi_push | sed '1s/_fixture_real_fenced_multi_push/taskdag_activation_fenced_multi_push/')"
 material_tip() { git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materialisation; }
 state_json() { git --git-dir="$I/origin" show "$(material_tip):slots/$1/states/$(printf '%016d' "$2").json"; }
 tree_clean() { local violations; violations=$(cd "$I/parent" && taskdag_materialisation_tree_violations "$(material_tip)" "$authority"); [ -z "$violations" ] || { printf '%s\n' "$violations" >&2; return 1; }; }

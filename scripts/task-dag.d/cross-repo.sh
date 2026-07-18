@@ -293,6 +293,23 @@ _xrepo_parse_repo_sha() {
 # ─────────────────────────────────────────────────────────────────────
 
 cmd_delegate() {
+    local top_issue="" target=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --issue) [ "$#" -ge 2 ] || return 2; top_issue="$2"; shift 2 ;;
+            --to)    [ "$#" -ge 2 ] || return 2; target="$2"; shift 2 ;;
+            --note)  [ "$#" -ge 2 ] || return 2; shift 2 ;;
+            *) _xrepo_die "delegate: unknown arg: $1"; return 2 ;;
+        esac
+    done
+    [ -n "$top_issue" ] || { _xrepo_die "delegate: --issue is required"; return 2; }
+    [ -n "$target" ] || { _xrepo_die "delegate: --to is required"; return 2; }
+    [[ "$top_issue" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "delegate: --issue must be a positive integer"; return 2; }
+    _xrepo_parse_repo_issue "$target" || return $?
+    taskdag_migration_guard materialise
+}
+
+_taskdag_materialise_delegate_projection() {
     local top_issue="" target="" note=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -306,8 +323,6 @@ cmd_delegate() {
     [ -n "$target"    ] || { _xrepo_die "delegate: --to is required";    return 2; }
     [[ "$top_issue" =~ ^[1-9][0-9]*$ ]] || { _xrepo_die "delegate: --issue must be a positive integer"; return 2; }
     _xrepo_parse_repo_issue "$target" || return $?
-    taskdag_migration_guard materialise || return $?
-
     _xrepo_need_cmd gh
     _xrepo_need_cmd jq
 

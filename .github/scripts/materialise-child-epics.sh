@@ -108,6 +108,13 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     echo "Materialise cross-repository child epics declared by commit metadata."
     exit 0
 fi
+# This entry point is retained only so stale callers fail visibly. It must
+# never parse legacy trailers or reach an issue API; immutable intents are
+# consumed exclusively by `task-dag materialise-reconcile`.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    echo "MIGRATION REQUIRED: materialise-child-epics.sh is retired; invoke pinned task-dag materialise-reconcile" >&2
+    exit 78
+fi
 MATERIALISE_LIBRARY_MODE=false
 if [ "${BASH_SOURCE[0]}" != "$0" ] && [ -n "${MATERIALISE_LIB_ONLY:-}" ]; then
     MATERIALISE_LIBRARY_MODE=true

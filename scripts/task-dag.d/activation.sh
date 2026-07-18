@@ -264,6 +264,20 @@ taskdag_activation_snapshot_token() {
       '{activationCommit:$activationCommit,authorityTip:$authorityTip,digest:$digest,epoch:$epoch,guardVersion:$guardVersion,minimumCompatibleTaskDagCommit:$minimumCompatibleTaskDagCommit,origin:$origin,runtimeCommit:$runtimeCommit,state:$state}'
 }
 
+# Recover the immutable activation record bound by an already captured token;
+# never fetch ambient authority here, so callers retain one coherent snapshot.
+taskdag_activation_record_for_snapshot() { # token-json
+    local token=$1 info active authority path digest record
+    info=$(taskdag_activation_validate_history "$(jq -r .authorityTip <<<"$token")") || return 3
+    IFS=$'\t' read -r active authority path digest <<<"$info"
+    [ "$active" = "$(jq -r .activationCommit <<<"$token")" ] \
+      && [ "$authority" = "$(jq -r .authorityTip <<<"$token")" ] \
+      && [ "$digest" = "$(jq -r .digest <<<"$token")" ] || return 3
+    record=$(git show "$active:$path") || return 3
+    [ "$(jq -r .epoch <<<"$record")" = "$(jq -r .epoch <<<"$token")" ] || return 3
+    printf '%s\n' "$record"
+}
+
 _taskdag_activation_authority_token() {
     local tip info active authority path digest record
     tip=$(_taskdag_activation_fetch_authority) || return $?; [ -n "$tip" ] || return 3

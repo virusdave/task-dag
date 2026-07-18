@@ -61,7 +61,10 @@ for spec in \
   "$REPO_ROOT/.github/scripts/cleanup-closed-issue-task-refs.sh 1"; do
     read -r -a args <<<"$spec"
     out="$(PATH="$ROOT/bin:$PATH" "${args[@]}" 2>&1)"; rc=$?
-    if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out"; then
+    if [ "$(basename "${args[0]}")" = materialise-child-epics.sh ] \
+      && [ "$rc" -eq 78 ] && grep -q '^MIGRATION REQUIRED:' <<<"$out"; then
+        ok "$(basename "${args[0]}") is retired before effects"
+    elif [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out"; then
         ok "$(basename "${args[0]}") drains before effects"
     else
         bad "$(basename "${args[0]}") rc=$rc: $out"
@@ -82,8 +85,11 @@ for script in \
   "$REPO_ROOT/.github/scripts/materialise-child-epics.sh" \
   "$REPO_ROOT/.github/scripts/close-completed-issues.sh"; do
     "$script" unexpected >/dev/null 2>&1; rc=$?
-    [ "$rc" -eq 2 ] && ok "$(basename "$script") validates arguments before drain" \
-      || bad "$(basename "$script") unexpected argument returned rc=$rc"
+    if [ "$(basename "$script")" = materialise-child-epics.sh ]; then
+      [ "$rc" -eq 78 ] && ok "materialise-child-epics.sh rejects every retired invocation" || bad "materialise-child-epics.sh unexpected argument returned rc=$rc"
+    else
+      [ "$rc" -eq 2 ] && ok "$(basename "$script") validates arguments before drain" || bad "$(basename "$script") unexpected argument returned rc=$rc"
+    fi
 done
 "$REPO_ROOT/.github/scripts/cleanup-closed-issue-task-refs.sh" 1 bad >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] && ok "cleanup validates hint SHAs before drain" || bad "cleanup bad hint returned rc=$rc"
@@ -106,14 +112,17 @@ printf effect >'$ROOT/materialise-override-effect'
 EOF
 MATERIALISE_INTENT_LIB="$ROOT/evil-intent.sh" \
   bash "$REPO_ROOT/.github/scripts/materialise-child-epics.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 75 ] && [ ! -e "$ROOT/materialise-override-effect" ] \
-  && ok "materialisation drains before an intent-parser override can execute" \
+[ "$rc" -eq 78 ] && [ ! -e "$ROOT/materialise-override-effect" ] \
+  && ok "retired materialisation rejects before an intent-parser override can execute" \
   || bad "materialisation override ran before drain or returned rc=$rc"
 MATERIALISE_LIB_ONLY=1 MATERIALISE_INTENT_LIB="$ROOT/evil-intent.sh" \
   bash "$REPO_ROOT/.github/scripts/materialise-child-epics.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 75 ] && [ ! -e "$ROOT/materialise-override-effect" ] \
-  && ok "executed materialisation cannot use library-mode env to bypass drain" \
+[ "$rc" -eq 78 ] && [ ! -e "$ROOT/materialise-override-effect" ] \
+  && ok "executed retired materialisation cannot use library-mode env to bypass rejection" \
   || bad "materialisation library-mode env bypassed drain or returned rc=$rc"
+TASKDAG_MATERIALISE_RECONCILER_INTERNAL=1 "$TD" delegate --issue 1 --to peer/repo#2 >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 75 ] && ok "exported reconciler-like environment cannot bypass public delegate drain" \
+  || bad "public delegate bypassed drain with exported environment (rc=$rc)"
 
 mkdir "$ROOT/offline-comment-repo" "$ROOT/offline-bin"
 git -C "$ROOT/offline-comment-repo" init -q

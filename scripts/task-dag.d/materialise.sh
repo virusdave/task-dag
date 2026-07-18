@@ -46,6 +46,107 @@ _taskdag_materialise_no_duplicate_keys() {
 _taskdag_materialise_sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 _taskdag_materialise_sha256_text() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
 
+_taskdag_materialise_reservation_violations() { # tip path state activation-authority
+    local tip=$1 path=$2 state=$3 activation_authority=$4 sid dd op batch timestamp expected
+    sid=${path#slots/}; sid=${sid%%/*}; dd=$(jq -r '.declarationDigest' <<<"$state"); op=$(jq -r '.operationId' <<<"$state"); batch=$(jq -r '.batchId' <<<"$state")
+    if ! jq -e --arg sid "$sid" '.schema==1 and .state=="batch-reserved-before-create" and .slotId==$sid and .generation==0 and .fence==1 and .predecessorStateDigest==null and (.activation|keys==["digest","epoch","guardVersion"] and (.epoch|type=="number" and floor==. and .>=1) and (.digest|test("^[0-9a-f]{64}$")) and .guardVersion==1) and (.actor|type=="string" and length>0 and length<=256 and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not)) and (.authoritativeTimestamp|type=="string" and length==20 and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and (.batchId|test("^[0-9a-f]{64}$")) and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")) and (.originReadback|keys==["activationAuthorityTip","materialisationTip"] and (.activationAuthorityTip|test("^[0-9a-f]{40}$"))) and ((.originReadback.materialisationTip==null) or (.originReadback.materialisationTip|test("^[0-9a-f]{40}$"))) and keys==["activation","actor","authoritativeTimestamp","batchId","declarationDigest","fence","generation","operationId","originReadback","predecessorStateDigest","schema","slotId","state"]' >/dev/null <<<"$state"; then
+        echo "✗ invalid slot state $path"
+        return
+    fi
+    timestamp=$(jq -r .authoritativeTimestamp <<<"$state")
+    taskdag_activation_validate_provenance "$activation_authority" "$(jq -c .activation <<<"$state")" || echo "✗ slot $sid has forged activation provenance"
+    jq -ne --arg timestamp "$timestamp" '($timestamp|fromdateiso8601|todateiso8601)==$timestamp' >/dev/null 2>&1 || echo "✗ slot $sid has an impossible timestamp"
+    expected=$(_taskdag_materialise_id operation "$sid" "$dd"); [ "$op" = "$expected" ] || echo "✗ slot $sid operation ID mismatch"
+    git cat-file -e "$tip:declarations/$dd.json" 2>/dev/null || echo "✗ slot $sid lacks declaration"
+    [ "$(git show "$tip:declarations/$dd.json" 2>/dev/null | jq -r .slotId)" = "$sid" ] || echo "✗ slot $sid does not match declaration"
+    [ "$(git show "$tip:batches/$batch.json" 2>/dev/null | jq -c .activation)" = "$(jq -c .activation <<<"$state")" ] || echo "✗ slot $sid activation provenance does not match batch"
+    git show "$tip:batches/$batch.json" 2>/dev/null | jq -e --arg dd "$dd" --arg sid "$sid" --arg op "$op" 'any(.members[];.declarationDigest==$dd and .slotId==$sid and .operationId==$op)' >/dev/null 2>&1 || echo "✗ slot $sid is absent from batch"
+}
+
+_taskdag_materialise_fresh_transition_violations() { # tip path state
+    local tip=$1 path=$2 state=$3 sid generation prior_path prior prior_digest from to declaration expected_marker expected_body_sha producer_record body_file
+    sid=${path#slots/}; sid=${sid%%/*}; generation=${path##*/}; generation=${generation%.json}; generation=$((10#$generation))
+    jq -e --arg sid "$sid" --argjson generation "$generation" '
+      .schema==1 and .slotId==$sid and .generation==$generation and .generation>=1 and .fence==(.generation+1) and
+      (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")) and
+      (.predecessorStateDigest|test("^[0-9a-f]{64}$")) and
+      (.actor|type=="string" and length>0 and length<=256) and
+      (.authoritativeTimestamp|type=="string" and length==20 and ((fromdateiso8601|todateiso8601)==.)) and
+      (.originReadback|keys==["activationAuthorityTip","materialisationTip"] and (.activationAuthorityTip|test("^([0-9a-f]{40}|[0-9a-f]{64})$")) and (.materialisationTip|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))) and
+      if .state=="create-in-flight-or-uncertain" then
+        (keys-["rearmAuthorizationDigest"])==["activation","actor","authoritativeTimestamp","createAttemptId","declarationDigest","fence","generation","operationId","originReadback","predecessorStateDigest","producerRecordDigest","provider","schema","slotId","state"] and
+        ((has("rearmAuthorizationDigest")|not) or (.rearmAuthorizationDigest|test("^[0-9a-f]{64}$"))) and
+        (.activation|keys==["digest","epoch","guardVersion"]) and (.createAttemptId|test("^[0-9a-f]{64}$")) and (.producerRecordDigest|test("^[0-9a-f]{64}$")) and
+        (.provider|keys==["repository","repositoryId","timeFloor"] and (.timeFloor|type=="string" and ((fromdateiso8601|todateiso8601)==.)))
+      elif .state=="issue-adopted" then
+        keys==["activation","actor","adoptedIssue","authoritativeTimestamp","createAttemptId","declarationDigest","fence","generation","operationId","originReadback","predecessorStateDigest","providerReceipt","schema","slotId","state"] and
+        (.adoptedIssue|keys==["issueNodeId","number","repositoryId"] and (.issueNodeId|type=="string" and length>0) and (.repositoryId|type=="string" and length>0) and (.number|type=="number" and floor==. and .>0)) and
+        (.providerReceipt|keys==["creatorNodeId","exhausted","matchCount","matchedIdentity","observedAt","pagesFetched","paginationQuery","repositoryId"] and .exhausted==true and .matchCount==1 and (.pagesFetched|type=="number" and floor==. and .>=1) and
+          (.repositoryId|type=="string" and length>0) and (.matchedIdentity|keys==["bodySha256","createdAt","declarationDigest","issueNodeId","number","operationId","title"] and (.issueNodeId|type=="string" and length>0)))
+      elif .state=="marker-durable-delegation-pending" then
+        keys==["activation","actor","adoptedIssue","authoritativeTimestamp","declarationDigest","fence","generation","markerCommit","markerRef","operationId","originReadback","predecessorStateDigest","schema","slotId","state"] and
+        (.markerCommit|test("^([0-9a-f]{40}|[0-9a-f]{64})$")) and (.markerRef|startswith("refs/heads/gh/materialisation-markers/"))
+      elif .state=="final" then
+        keys==["activation","actor","adoptedIssue","authoritativeTimestamp","declarationDigest","delegationRef","edgeId","fence","generation","markerCommit","markerRef","operationId","originReadback","predecessorStateDigest","schema","slotId","state"] and
+        (.edgeId|test("^[0-9a-f]{64}$")) and (.delegationRef|startswith("refs/heads/tasks/delegated/"))
+      else false end
+    ' >/dev/null <<<"$state" || { echo "✗ invalid fresh transition $path"; return; }
+    prior_path="slots/$sid/states/$(printf '%016d' "$((generation-1))").json"
+    prior=$(git show "$tip:$prior_path" 2>/dev/null) || { echo "✗ transition $path lacks predecessor state"; return; }
+    prior_digest=$(git show "$tip:$prior_path" | sha256sum | awk '{print $1}')
+    [ "$prior_digest" = "$(jq -r .predecessorStateDigest <<<"$state")" ] || echo "✗ transition $path predecessor digest mismatch"
+    [ "$(jq -r .declarationDigest <<<"$prior")" = "$(jq -r .declarationDigest <<<"$state")" ] || echo "✗ transition $path changed declaration"
+    [ "$(jq -r .operationId <<<"$prior")" = "$(jq -r .operationId <<<"$state")" ] || echo "✗ transition $path changed operation"
+    declaration=$(git show "$tip:declarations/$(jq -r .declarationDigest <<<"$state").json" 2>/dev/null) || { echo "✗ transition $path lacks declaration"; return; }
+    if [ "$(jq -r .state <<<"$state")" = create-in-flight-or-uncertain ]; then
+      [ "$(jq -r .provider.repository <<<"$state" | tr '[:upper:]' '[:lower:]')" = "$(jq -r .peerRepo.name <<<"$declaration" | tr '[:upper:]' '[:lower:]')" ] || echo "✗ transition $path changed provider repository"
+      [ "$(jq -r .provider.repositoryId <<<"$state")" = "$(jq -r .peerRepo.id <<<"$declaration")" ] || echo "✗ transition $path changed provider repository ID"
+      if jq -e 'has("rearmAuthorizationDigest")' >/dev/null <<<"$state"; then
+        [ "$(git show "$tip:slots/$sid/authorizations/$(printf '%016d' "$generation").json" 2>/dev/null | jq -r .authorizationDigest)" = "$(jq -r .rearmAuthorizationDigest <<<"$state")" ] \
+          || echo "✗ transition $path lacks its exact rearm authorization"
+      fi
+    elif [ "$(jq -r .state <<<"$state")" = issue-adopted ]; then
+      jq -e --arg dd "$(jq -r .declarationDigest <<<"$state")" --arg op "$(jq -r .operationId <<<"$state")" --arg title "$(jq -r .title <<<"$declaration")" '
+        .providerReceipt.repositoryId==.adoptedIssue.repositoryId and
+        .providerReceipt.matchedIdentity.issueNodeId==.adoptedIssue.issueNodeId and
+        .providerReceipt.matchedIdentity.number==.adoptedIssue.number and
+        .providerReceipt.matchedIdentity.declarationDigest==$dd and
+        .providerReceipt.matchedIdentity.operationId==$op and
+        .providerReceipt.matchedIdentity.title==$title' >/dev/null <<<"$state" || echo "✗ transition $path has inconsistent recovery evidence"
+      [ "$(jq -r .createAttemptId <<<"$state")" = "$(jq -r .createAttemptId <<<"$prior")" ] \
+        && [ "$(jq -r .adoptedIssue.repositoryId <<<"$state")" = "$(jq -r .provider.repositoryId <<<"$prior")" ] \
+        && [ "$(jq -r .adoptedIssue.repositoryId <<<"$state")" = "$(jq -r .peerRepo.id <<<"$declaration")" ] \
+        || echo "✗ transition $path changed create or provider identity"
+      body_file=$(mktemp) || { echo "✗ transition $path could not validate recovery body"; return; }
+      if ! git show "$tip:bodies/$(jq -r .bodySha256 <<<"$declaration").body" >"$body_file" 2>/dev/null; then
+        rm -f "$body_file"
+        echo "✗ transition $path lacks recovery body"
+        return
+      fi
+      expected_body_sha=$({ cat "$body_file"; printf '\n\n<!-- task-dag-materialisation:v1 operation=%s declaration=%s -->\n' "$(jq -r .operationId <<<"$state")" "$(jq -r .declarationDigest <<<"$state")"; } | sha256sum | awk '{print $1}')
+      rm -f "$body_file"
+      [ "$(jq -r .providerReceipt.matchedIdentity.bodySha256 <<<"$state")" = "$expected_body_sha" ] || echo "✗ transition $path has recovery body digest mismatch"
+      jq -e --arg floor "$(jq -r .provider.timeFloor <<<"$prior")" '
+        (.providerReceipt.matchedIdentity.createdAt|fromdateiso8601|todateiso8601)==.providerReceipt.matchedIdentity.createdAt and
+        .providerReceipt.matchedIdentity.createdAt >= $floor' >/dev/null <<<"$state" || echo "✗ transition $path predates its provider time floor"
+      producer_record=$(git show "$TASKDAG_MATERIALISE_PRODUCER_REF:producer-enable.json" 2>/dev/null) || { echo "✗ transition $path lacks producer authority"; producer_record='{}'; }
+      [ "$(printf '%s\n' "$producer_record" | sha256sum | awk '{print $1}')" = "$(jq -r .producerRecordDigest <<<"$prior")" ] \
+        && [ "$(jq -r .appCreatorNodeId <<<"$producer_record")" = "$(jq -r .providerReceipt.creatorNodeId <<<"$state")" ] \
+        || echo "✗ transition $path has recovery creator mismatch"
+    elif [[ "$(jq -r .state <<<"$state")" =~ ^(marker-durable-delegation-pending|final)$ ]]; then
+      expected_marker="refs/heads/gh/materialisation-markers/$(jq -r .operationId <<<"$state")"
+      [ "$(jq -r .markerRef <<<"$state")" = "$expected_marker" ] || echo "✗ transition $path has operation-mismatched marker"
+    fi
+    from=$(jq -r .state <<<"$prior"); to=$(jq -r .state <<<"$state")
+    case "$from:$to" in
+      batch-reserved-before-create:create-in-flight-or-uncertain|create-in-flight-or-uncertain:issue-adopted|issue-adopted:marker-durable-delegation-pending|marker-durable-delegation-pending:final) ;;
+      create-in-flight-or-uncertain:create-in-flight-or-uncertain)
+        jq -e 'has("rearmAuthorizationDigest")' >/dev/null <<<"$state" || echo "✗ transition $path repeats create authority without rearm"
+        ;;
+      *) echo "✗ transition $path has invalid state edge $from -> $to" ;;
+    esac
+}
+
 # Hash a domain-separated sequence of UTF-8 values.  Decimal byte lengths and
 # separators make framing unambiguous, including absent versus present-empty.
 _taskdag_materialise_id() {
@@ -129,6 +230,7 @@ taskdag_materialise_prepare() {
         [ "$body_len" -le "$TASKDAG_MATERIALISATION_MAX_BODY" ] || { rm -rf "$tmp"; _taskdag_materialise_error "body exceeds size limit"; return 2; }
         iconv -f UTF-8 -t UTF-8 "$snapshot" >/dev/null 2>&1 || { rm -rf "$tmp"; _taskdag_materialise_error "body must be valid UTF-8"; return 2; }
         jq -Rse 'test("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not' "$snapshot" >/dev/null 2>&1 || { rm -rf "$tmp"; _taskdag_materialise_error "body must be valid UTF-8 without unsafe controls or bidi controls"; return 2; }
+        ! grep -Fq '<!-- task-dag-materialisation:' "$snapshot" || { rm -rf "$tmp"; _taskdag_materialise_error "body contains the reserved materialisation sentinel"; return 2; }
         body_sha=$(_taskdag_materialise_sha256_file "$snapshot") || { rm -rf "$tmp"; return 2; }
         jq -r '[.sourceRepo.id,.parentIssue.id,(.parentIssue.number|tostring),.peerRepo.id,(if has("slug") then "present" else "absent" end),(.slug//"")][]' <<<"$decl" >"$field_file" || { rm -rf "$tmp"; _taskdag_materialise_error "cannot frame slot identity"; return 2; }
         mapfile -t _m_fields <"$field_file"
@@ -217,7 +319,7 @@ _taskdag_materialisation_snapshot_violations() {
       || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot read snapshot tree"; return 0; }
     while read -r mode type _ path; do
         [ "$mode" = 100644 ] && [ "$type" = blob ] || { echo "✗ $TASKDAG_MATERIALISATION_REF has non-regular path $path"; continue; }
-        [[ "$path" =~ ^(bodies/[0-9a-f]{64}\.body|declarations/[0-9a-f]{64}\.json|batches/[0-9a-f]{64}\.json|censuses/[0-9a-f]{64}\.json|import-batches/[0-9a-f]{64}\.json|slots/[0-9a-f]{64}/(state\.json|states/[0-9]{16}\.json|authorizations/[0-9]{16}\.json))$ ]] || echo "✗ $TASKDAG_MATERIALISATION_REF has unexpected path $path"
+        [[ "$path" =~ ^(bodies/[0-9a-f]{64}\.body|declarations/[0-9a-f]{64}\.json|batches/[0-9a-f]{64}\.json|censuses/[0-9a-f]{64}\.json|import-batches/[0-9a-f]{64}\.json|slots/[0-9a-f]{64}/(states/[0-9]{16}\.json|authorizations/[0-9]{16}\.json))$ ]] || echo "✗ $TASKDAG_MATERIALISATION_REF has unexpected path $path"
     done <"$work/snapshot-tree"
     cut -f2 "$work/snapshot-tree" >"$work/snapshot-paths" \
       || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot enumerate snapshot paths"; return 0; }
@@ -254,6 +356,14 @@ _taskdag_materialisation_snapshot_violations() {
                 || echo "✗ import batch $path has foreign or absent census slot $sid"
             done < <(jq -r '.slots[]' <<<"$prepared") ;;
           slots/*/states/*)
+            if [ "$(jq -r '.state // ""' <<<"$prepared")" = batch-reserved-before-create ]; then
+              _taskdag_materialise_reservation_violations "$tip" "$path" "$prepared" "$activation_authority"
+              continue
+            fi
+            if jq -e 'has("operationId") and has("authoritativeTimestamp") and .generation>=1' >/dev/null <<<"$prepared"; then
+              _taskdag_materialise_fresh_transition_violations "$tip" "$path" "$prepared"
+              continue
+            fi
             sid=${path#slots/}; sid=${sid%%/*}; generation=${path##*/}; generation=${generation%.json}; generation=$((10#$generation))
             jq -e --arg sid "$sid" --argjson generation "$generation" '.schema==1 and .slotId==$sid and .generation==$generation and
               (.state=="issue-adopted" or .state=="create-in-flight-or-uncertain" or .state=="blocked-repair") and
@@ -307,20 +417,27 @@ _taskdag_materialisation_snapshot_violations() {
           slots/*/authorizations/*)
             sid=${path#slots/}; sid=${sid%%/*}; generation=${path##*/}; generation=${generation%.json}; generation=$((10#$generation))
             jq -e --arg sid "$sid" --argjson generation "$generation" '.schema==1 and .state=="rearm-authorized" and .mode=="rearm" and .slotId==$sid and .generation==$generation and
-              keys==["actor","approval","authorizationDigest","censusDigest","evidence","generation","mode","predecessorStateDigest","schema","slotId","state","timestamp"] and
-              (.authorizationDigest|test("^[0-9a-f]{64}$")) and (.predecessorStateDigest|test("^[0-9a-f]{64}$")) and (.censusDigest|test("^[0-9a-f]{64}$"))' >/dev/null <<<"$prepared" \
+              ((keys==["actor","approval","authorizationDigest","censusDigest","evidence","generation","mode","predecessorStateDigest","schema","slotId","state","timestamp"] and (.censusDigest|test("^[0-9a-f]{64}$"))) or
+               (keys==["actor","approval","authorizationDigest","declarationDigest","evidence","generation","mode","operationId","predecessorStateDigest","schema","slotId","state","timestamp"] and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")))) and
+              (.authorizationDigest|test("^[0-9a-f]{64}$")) and (.predecessorStateDigest|test("^[0-9a-f]{64}$"))' >/dev/null <<<"$prepared" \
               || echo "✗ invalid rearm authorization $path"
             prior_path="slots/$sid/states/$(printf '%016d' "$((generation-1))").json"
             prior=$(git show "$tip:$prior_path" 2>/dev/null) || { echo "✗ authorization $path lacks predecessor state"; continue; }
             [ "$(git show "$tip:$prior_path" 2>/dev/null | sha256sum | awk '{print $1}')" = "$(jq -r .predecessorStateDigest <<<"$prepared")" ] \
               || echo "✗ authorization $path predecessor digest mismatch"
             [ "$(jq -r .state <<<"$prior")" = create-in-flight-or-uncertain ] || echo "✗ authorization $path has invalid predecessor state"
-            [ "$(jq -r .censusDigest <<<"$prior")" = "$(jq -r .censusDigest <<<"$prepared")" ] || echo "✗ authorization $path changed census"
+            if jq -e 'has("censusDigest")' >/dev/null <<<"$prepared"; then
+              [ "$(jq -r .censusDigest <<<"$prior")" = "$(jq -r .censusDigest <<<"$prepared")" ] || echo "✗ authorization $path changed census"
+            else
+              [ "$(jq -r .declarationDigest <<<"$prior")" = "$(jq -r .declarationDigest <<<"$prepared")" ] || echo "✗ authorization $path changed declaration"
+              [ "$(jq -r .operationId <<<"$prior")" = "$(jq -r .operationId <<<"$prepared")" ] || echo "✗ authorization $path changed operation"
+            fi
             expected=$(_taskdag_materialise_sha256_text "$(jq -cS 'del(.authorizationDigest)' <<<"$prepared")")
             [ "$expected" = "$(jq -r .authorizationDigest <<<"$prepared")" ] || echo "✗ authorization $path digest mismatch"
             if git cat-file -e "$tip:slots/$sid/states/$(printf '%016d' "$generation").json" 2>/dev/null; then
               git show "$tip:slots/$sid/states/$(printf '%016d' "$generation").json" 2>/dev/null | jq -e --arg digest "$(jq -r .authorizationDigest <<<"$prepared")" \
-                '.mode=="consume" and .state=="create-in-flight-or-uncertain" and .authorizationDigest==$digest' >/dev/null \
+                '.state=="create-in-flight-or-uncertain" and
+                  ((.mode=="consume" and .authorizationDigest==$digest) or .rearmAuthorizationDigest==$digest)' >/dev/null \
                 || echo "✗ authorization $path coexists with a non-consume state"
             fi ;;
           declarations/*)
@@ -355,13 +472,17 @@ _taskdag_materialisation_snapshot_violations() {
             [ "$(jq -r .operationId <<<"$prepared")" = "$expected" ] || echo "✗ declaration $dd operation ID mismatch"
             sid=$(jq -r .slotId <<<"$prepared")
             if git cat-file -e "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null; then
-              git cat-file -e "$tip:slots/$sid/state.json" 2>/dev/null && echo "✗ slot $sid mixes reservation and imported state models"
-              [ "$(git show "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null | jq -r .declarationDigest)" = "$dd" ] || echo "✗ declaration $dd lacks matching imported slot"
-              git grep -q "\"$sid\"" "$tip" -- 'import-batches/*.json' 2>/dev/null || echo "✗ declaration $dd is not reachable from an import batch"
+              initial_state=$(git show "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null)
+              [ "$(jq -r .declarationDigest <<<"$initial_state")" = "$dd" ] || echo "✗ declaration $dd lacks matching initial slot"
+              if jq -e 'has("censusDigest")' >/dev/null <<<"$initial_state"; then
+                git grep -q "\"$sid\"" "$tip" -- 'import-batches/*.json' 2>/dev/null || echo "✗ imported declaration $dd is not reachable from an import batch"
+              else
+                batch=$(jq -r '.batchId // ""' <<<"$initial_state")
+                git show "$tip:batches/$batch.json" 2>/dev/null | jq -e --arg sid "$sid" --arg dd "$dd" 'any(.members[];.slotId==$sid and .declarationDigest==$dd)' >/dev/null \
+                  || echo "✗ reserved declaration $dd is not reachable from its batch"
+              fi
             else
-              git ls-tree -r --name-only "$tip" "slots/$sid/states" "slots/$sid/authorizations" | grep -q . && echo "✗ slot $sid mixes reservation and imported state models"
-              [ "$(git show "$tip:slots/$sid/state.json" 2>/dev/null | jq -r .declarationDigest)" = "$dd" ] || echo "✗ declaration $dd lacks matching slot"
-              git grep -q "\"declarationDigest\":\"$dd\"" "$tip" -- 'batches/*.json' 2>/dev/null || echo "✗ declaration $dd is not reachable from a batch"
+              echo "✗ declaration $dd lacks matching slot initial state"
             fi ;;
           batches/*)
             if ! jq -e '
@@ -384,21 +505,9 @@ _taskdag_materialisation_snapshot_violations() {
               sid=$(jq -r .slotId <<<"$declaration_path"); op=$(jq -r .operationId <<<"$declaration_path"); declaration_path=$(jq -r .declarationDigest <<<"$declaration_path")
               git cat-file -e "$tip:declarations/$declaration_path.json" 2>/dev/null || echo "✗ batch $dd lacks declaration $declaration_path"
               [ "$(git show "$tip:declarations/$declaration_path.json" 2>/dev/null | jq -r .slotId)" = "$sid" ] || echo "✗ batch $dd member slot/declaration mismatch"
-              [ "$(git show "$tip:slots/$sid/state.json" 2>/dev/null | jq -r .declarationDigest)" = "$declaration_path" ] || echo "✗ batch $dd declaration $declaration_path lacks matching slot state"
+              [ "$(git show "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null | jq -r .declarationDigest)" = "$declaration_path" ] || echo "✗ batch $dd declaration $declaration_path lacks matching slot state"
               [ "$(_taskdag_materialise_id operation "$sid" "$declaration_path")" = "$op" ] || echo "✗ batch $dd member operation mismatch"
             done <"$work/snapshot-members" ;;
-          slots/*)
-            state=$prepared; sid=${path#slots/}; sid=${sid%/state.json}; dd=$(jq -r '.declarationDigest' <<<"$state"); op=$(jq -r '.operationId' <<<"$state"); batch=$(jq -r '.batchId' <<<"$state")
-            if ! jq -e --arg sid "$sid" '.schema==1 and .state=="batch-reserved-before-create" and .slotId==$sid and .generation==0 and .fence==1 and .predecessorStateDigest==null and (.activation|keys==["digest","epoch","guardVersion"] and (.epoch|type=="number" and floor==. and .>=1) and (.digest|test("^[0-9a-f]{64}$")) and .guardVersion==1) and (.actor|type=="string" and length>0 and length<=256 and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not)) and (.authoritativeTimestamp|type=="string" and length==20 and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and (.batchId|test("^[0-9a-f]{64}$")) and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")) and (.originReadback|keys==["activationAuthorityTip","materialisationTip"] and (.activationAuthorityTip|test("^[0-9a-f]{40}$"))) and ((.originReadback.materialisationTip==null) or (.originReadback.materialisationTip|test("^[0-9a-f]{40}$"))) and keys==["activation","actor","authoritativeTimestamp","batchId","declarationDigest","fence","generation","operationId","originReadback","predecessorStateDigest","schema","slotId","state"]' >/dev/null <<<"$state"; then echo "✗ invalid slot state $path"; continue; fi
-            timestamp=$(jq -r .authoritativeTimestamp <<<"$state")
-            taskdag_activation_validate_provenance "$activation_authority" "$(jq -c .activation <<<"$state")" \
-              || echo "✗ slot $sid has forged activation provenance"
-            jq -ne --arg timestamp "$timestamp" '($timestamp|fromdateiso8601|todateiso8601)==$timestamp' >/dev/null 2>&1 || echo "✗ slot $sid has an impossible timestamp"
-            expected=$(_taskdag_materialise_id operation "$sid" "$dd"); [ "$op" = "$expected" ] || echo "✗ slot $sid operation ID mismatch"
-            git cat-file -e "$tip:declarations/$dd.json" 2>/dev/null || echo "✗ slot $sid lacks declaration"
-            [ "$(git show "$tip:declarations/$dd.json" 2>/dev/null | jq -r .slotId)" = "$sid" ] || echo "✗ slot $sid does not match declaration"
-            [ "$(git show "$tip:batches/$batch.json" 2>/dev/null | jq -c .activation)" = "$(jq -c .activation <<<"$state")" ] || echo "✗ slot $sid activation provenance does not match batch"
-            git show "$tip:batches/$batch.json" 2>/dev/null | jq -e --arg dd "$dd" --arg sid "$sid" --arg op "$op" 'any(.members[];.declarationDigest==$dd and .slotId==$sid and .operationId==$op)' >/dev/null 2>&1 || echo "✗ slot $sid is absent from batch" ;;
         esac
     done <"$work/snapshot-json-paths"
     grep '^bodies/' "$work/snapshot-paths" >"$work/snapshot-body-paths" || :
@@ -466,7 +575,8 @@ taskdag_materialisation_tree_violations() {
               && [ "$(grep -cE '^import-batches/[0-9a-f]{64}\.json$' "$added")" -eq 1 ] \
               && ! grep -qEv '^(censuses/[0-9a-f]{64}\.json|import-batches/[0-9a-f]{64}\.json|bodies/[0-9a-f]{64}\.body|declarations/[0-9a-f]{64}\.json|slots/[0-9a-f]{64}/states/0000000000000000\.json)$' "$added" \
               || echo "✗ import generation $commit has an invalid delta"
-        elif grep -qE '^slots/.+/(states/[0-9]{16}|authorizations/[0-9]{16})\.json$' "$added"; then
+        elif grep -qE '^slots/.+/(states/[0-9]{16}|authorizations/[0-9]{16})\.json$' "$added" \
+          && ! grep -q '^batches/' "$added"; then
             [ "$(wc -l <"$added")" -eq 1 ] && [ "$(grep -cE '^slots/[0-9a-f]{64}/(states|authorizations)/[0-9]{16}\.json$' "$added")" -eq 1 ] \
               || echo "✗ transition generation $commit must add exactly one state or authorization"
         elif [ "$(grep -c '^batches/[0-9a-f]\{64\}\.json$' "$added")" -ne 1 ]; then
@@ -485,7 +595,7 @@ taskdag_materialisation_tree_violations() {
             done <"$validation_tmp/added-declarations"
             grep '^slots/' "$added" >"$validation_tmp/added-slots" || :
             while IFS= read -r path; do
-                sid=${path#slots/}; sid=${sid%/state.json}
+                sid=${path#slots/}; sid=${sid%%/*}
                 jq -e --arg sid "$sid" 'any(.members[];.slotId==$sid)' >/dev/null 2>&1 <<<"$batch_json" \
                   || echo "✗ generation $commit adds slot $sid outside its batch"
             done <"$validation_tmp/added-slots"
@@ -495,8 +605,8 @@ taskdag_materialisation_tree_violations() {
                   && ! grep -qx "declarations/$dd.json" "$added"; then
                     echo "✗ generation $commit batch member $dd lacks an atomic declaration"
                 fi
-                if { [ -z "$previous" ] || ! git cat-file -e "$previous:slots/$sid/state.json" 2>/dev/null; } \
-                  && ! grep -qx "slots/$sid/state.json" "$added"; then
+                if { [ -z "$previous" ] || ! git cat-file -e "$previous:slots/$sid/states/0000000000000000.json" 2>/dev/null; } \
+                  && ! grep -qx "slots/$sid/states/0000000000000000.json" "$added"; then
                     echo "✗ generation $commit batch member $sid lacks an atomic slot"
                 fi
             done <"$validation_tmp/members"
@@ -512,10 +622,10 @@ taskdag_materialisation_tree_violations() {
         fi
         expected_origin=${previous:-null}
         if [ -z "$previous" ]; then
-            git ls-tree -r --name-only "$commit" 'slots/*/state.json' >"$validation_tmp/new-slots" 2>/dev/null \
+            git ls-tree -r --name-only "$commit" 'slots/*/states/0000000000000000.json' >"$validation_tmp/new-slots" 2>/dev/null \
               || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot list root slots"; rm -rf "$validation_tmp"; return 0; }
         else
-            git diff-tree --no-commit-id --name-only --diff-filter=A -r "$previous" "$commit" -- 'slots/*/state.json' >"$validation_tmp/new-slots" 2>/dev/null \
+            git diff-tree --no-commit-id --name-only --diff-filter=A -r "$previous" "$commit" -- 'slots/*/states/0000000000000000.json' >"$validation_tmp/new-slots" 2>/dev/null \
               || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot list new slots"; rm -rf "$validation_tmp"; return 0; }
         fi
         while IFS= read -r path; do
@@ -546,6 +656,19 @@ taskdag_materialisation_tree_violations() {
     rm -rf "$validation_tmp"
 }
 
+# Online callers must acquire every immutable authority needed by the pure
+# validator before deciding from a freshly fetched materialisation tip.
+taskdag_materialisation_online_tree_violations() { # tip activation-authority expected-repository
+    if git grep -q '"providerReceipt":' "$1" -- 'slots/*/states/*.json' 2>/dev/null; then
+        if ! declare -F taskdag_materialise_fetch_producer_if_required >/dev/null \
+          || ! taskdag_materialise_fetch_producer_if_required "$1"; then
+            echo "✗ $TASKDAG_MATERIALISATION_REF cannot acquire producer authority"
+            return 0
+        fi
+    fi
+    taskdag_materialisation_tree_violations "$@"
+}
+
 # Private seam: tests source this module and call the core.  No CLI path tests
 # an environment variable, so exported state cannot bypass migration drain.
 taskdag_materialise_reserve_core() {
@@ -559,26 +682,25 @@ taskdag_materialise_reserve_core() {
     actor=$(jq -r .actor <<<"$prepared"); timestamp=$(jq -r .authoritativeTimestamp <<<"$prepared")
     for _ in 1 2 3 4 5; do
       remote=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF") || return 2; old=${remote%%[[:space:]]*}; [ "$remote" != "$old" ] || old=""
-      [ -z "$old" ] || { git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2; old=$(git rev-parse FETCH_HEAD); [ -z "$(taskdag_materialisation_tree_violations "$old" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3; }
+      [ -z "$old" ] || { git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2; old=$(git rev-parse FETCH_HEAD); [ -z "$(taskdag_materialisation_online_tree_violations "$old" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3; }
       while IFS= read -r slot; do
         dd=$(jq -r --arg s "$slot" '.declarations[]|select(.slotId==$s)|.declarationDigest' <<<"$prepared")
-        if [ -n "$old" ] && git ls-tree -r --name-only "$old" "slots/$slot/states" "slots/$slot/authorizations" | grep -q .; then return 3; fi
-        if [ -n "$old" ] && git cat-file -e "$old:slots/$slot/state.json" 2>/dev/null; then
-          [ "$(git show "$old:slots/$slot/state.json" | jq -r .declarationDigest)" = "$dd" ] || return 3
+        if [ -n "$old" ] && git cat-file -e "$old:slots/$slot/states/0000000000000000.json" 2>/dev/null; then
+          [ "$(git show "$old:slots/$slot/states/0000000000000000.json" | jq -r .declarationDigest)" = "$dd" ] || return 3
         fi
       done < <(jq -r '.declarations[].slotId' <<<"$prepared")
       tmp=$(mktemp -d); index="$tmp/index"; GIT_INDEX_FILE="$index" git read-tree "${old:-$(git mktree </dev/null)}"
       while IFS= read -r declaration; do
         slot=$(jq -r .slotId <<<"$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); op=$(jq -r .operationId <<<"$declaration"); body_sha=$(jq -r .bodySha256 <<<"$declaration")
-        [ -n "$old" ] && git cat-file -e "$old:slots/$slot/state.json" 2>/dev/null && continue
-        mkdir -p "$tmp/bodies" "$tmp/declarations" "$tmp/slots/$slot"
+        [ -n "$old" ] && git cat-file -e "$old:slots/$slot/states/0000000000000000.json" 2>/dev/null && continue
+        mkdir -p "$tmp/bodies" "$tmp/declarations" "$tmp/slots/$slot/states"
         jq -rj .body <<<"$declaration" >"$tmp/bodies/$body_sha.body"
         jq -cS 'del(.body,.memberProvenance)' <<<"$declaration" >"$tmp/declarations/$dd.json"
         state=$(jq -ncS --arg slotId "$slot" --arg declarationDigest "$dd" --arg operationId "$op" --arg batchId "$batch_id" --arg actor "$actor" --arg authoritativeTimestamp "$timestamp" --arg tip "$old" --arg authorityTip "$(jq -r .authorityTip <<<"$activation")" --argjson activation "$activation_provenance" '{schema:1,state:"batch-reserved-before-create",slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,batchId:$batchId,generation:0,fence:1,activation:$activation,actor:$actor,authoritativeTimestamp:$authoritativeTimestamp,predecessorStateDigest:null,originReadback:{activationAuthorityTip:$authorityTip,materialisationTip:(if $tip=="" then null else $tip end)}}')
-        printf '%s\n' "$state" >"$tmp/slots/$slot/state.json"
+        printf '%s\n' "$state" >"$tmp/slots/$slot/states/0000000000000000.json"
         GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/bodies/$body_sha.body"),bodies/$body_sha.body"
         GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/declarations/$dd.json"),declarations/$dd.json"
-        GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/slots/$slot/state.json"),slots/$slot/state.json"
+        GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/slots/$slot/states/0000000000000000.json"),slots/$slot/states/0000000000000000.json"
       done < <(jq -c '.declarations[]' <<<"$prepared")
       mkdir -p "$tmp/batches"; printf '%s\n' "$batch_json" >"$tmp/batches/$batch_id.json"
       GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/batches/$batch_id.json"),batches/$batch_id.json"
@@ -588,7 +710,7 @@ taskdag_materialise_reserve_core() {
       tree=$(GIT_INDEX_FILE="$index" git write-tree); rm -rf "$tmp"
       if [ -n "$old" ] && [ "$tree" = "$(git rev-parse "$old^{tree}")" ]; then printf '%s\n' "$batch_json"; return 0; fi
       if [ -n "$old" ]; then commit=$(printf 'Reserve materialisation batch %s\n' "${batch_id:0:12}" | git commit-tree "$tree" -p "$old"); else commit=$(printf 'Reserve materialisation batch %s\n' "${batch_id:0:12}" | git commit-tree "$tree"); fi
-      [ -z "$(taskdag_materialisation_tree_violations "$commit" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3
+      [ -z "$(taskdag_materialisation_online_tree_violations "$commit" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3
       if [ "${TASKDAG_MATERIALISE_TEST_CRASH_BEFORE_CAS:-0}" = 1 ]; then return 86; fi
       if taskdag_activation_fenced_push "$activation" materialisation reserve-batch "$actor" "$timestamp" "$TASKDAG_MATERIALISATION_REF" "$old" "$commit"; then
         # Deterministic fixture seam for a transport that reports failure after
@@ -596,11 +718,11 @@ taskdag_materialise_reserve_core() {
         # complete durable request from origin rather than write or POST again.
         if [ "${TASKDAG_MATERIALISE_TEST_AMBIGUOUS_SUCCESS:-0}" = 1 ]; then continue; fi
         now=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk '{print $1}'); git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2; now=$(git rev-parse FETCH_HEAD)
-        [ -z "$(taskdag_materialisation_tree_violations "$now" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3
+        [ -z "$(taskdag_materialisation_online_tree_violations "$now" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3
         [ "$(git show "$now:batches/$batch_id.json" 2>/dev/null)" = "$batch_json" ] || return 3
         while IFS= read -r declaration; do
           slot=$(jq -r .slotId <<<"$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); body_sha=$(jq -r .bodySha256 <<<"$declaration")
-          [ "$(git show "$now:slots/$slot/state.json" | jq -r .declarationDigest)" = "$dd" ] || return 3
+          [ "$(git show "$now:slots/$slot/states/0000000000000000.json" | jq -r .declarationDigest)" = "$dd" ] || return 3
           git show "$now:declarations/$dd.json" | cmp - <(jq -cS 'del(.body,.memberProvenance)' <<<"$declaration") || return 3
           [ "$(git show "$now:bodies/$body_sha.body" | sha256sum | awk '{print $1}')" = "$body_sha" ] || return 3
         done < <(jq -c '.declarations[]' <<<"$prepared")
@@ -936,7 +1058,7 @@ cmd_materialise_import() {
     old=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk '{print $1}')
     if [ -n "$old" ]; then
       git fetch -q --no-tags origin "$old" || { rm -rf "$tmp"; return 3; }
-      [ -z "$(taskdag_materialisation_tree_violations "$old" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || { rm -rf "$tmp"; return 3; }
+      [ -z "$(taskdag_materialisation_online_tree_violations "$old" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || { rm -rf "$tmp"; return 3; }
       if git cat-file -e "$old:censuses/$(cat "$digest").json" 2>/dev/null; then
         updates=$(jq -ncS --arg ref "$TASKDAG_MATERIALISATION_REF" --arg new "$old" '[{ref:$ref,new:$new}]')
         while IFS= read -r evidence; do
@@ -973,13 +1095,13 @@ cmd_materialise_import() {
       updates=$(jq -cS --arg ref "$close_ref" --arg new "$close_commit" '.+[{ref:$ref,old:"",new:$new}]|sort_by(.ref)' <<<"$updates") || { rm -rf "$tmp"; return 2; }
     done < <(jq -c --arg repo "$current_repo" '.liveDelegations[]|select(.repository==$repo and .disposition=="verified-child-close")' "$artifact")
     jq -e '(map(.ref)|length==(unique|length))' <<<"$updates" >/dev/null || { rm -rf "$tmp"; return 3; }
-    [ -z "$(taskdag_materialisation_tree_violations "$commit" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || { rm -rf "$tmp"; return 3; }
+    [ -z "$(taskdag_materialisation_online_tree_violations "$commit" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || { rm -rf "$tmp"; return 3; }
     actor=census-import; timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     taskdag_activation_fenced_multi_push "$token" materialisation census-import "$actor" "$timestamp" "$updates"; rc=$?
     if [ "$rc" -eq 0 ]; then
       readback=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk '{print $1}')
       [ "$readback" = "$commit" ] && git fetch -q --no-tags origin "$readback" &&
-        [ -z "$(taskdag_materialisation_tree_violations "$readback" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || rc=3
+        [ -z "$(taskdag_materialisation_online_tree_violations "$readback" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || rc=3
     fi
     rm -rf "$tmp"; return "$rc"
 }
@@ -988,22 +1110,28 @@ _taskdag_materialise_transition() { # strict authorization spec, mode
     local spec=$1 mode=$2 old token slot generation prior prior_digest prior_state record path tmp index tree commit updates authorization authorization_digest census_digest census_path readback current_repo rc
     _taskdag_materialise_no_duplicate_keys "$spec" || return 2
     jq -e --arg mode "$mode" '
-      def common: .schema==1 and .mode==$mode and (.slotId|test("^[0-9a-f]{64}$")) and (.censusDigest|test("^[0-9a-f]{64}$")) and (.priorStateDigest|test("^[0-9a-f]{64}$")) and
+      def common: .schema==1 and .mode==$mode and (.slotId|test("^[0-9a-f]{64}$")) and (.priorStateDigest|test("^[0-9a-f]{64}$")) and
         (.generation|type=="number" and floor==. and .>=1) and (.evidence|type=="array" and length>0 and .==sort and length==(unique|length)) and
         (.actor|type=="string" and length>0) and (.timestamp|fromdateiso8601|todateiso8601)==.timestamp;
       type=="object" and common and
       (if $mode=="adopt" then keys==["actor","adoptedIssue","approval","censusDigest","evidence","generation","mode","priorStateDigest","schema","slotId","timestamp"] and
-         (.approval|type=="string" and length>0) and (.adoptedIssue|keys==["issueNodeId","number","repositoryId"] and (.issueNodeId|type=="string" and length>0) and (.repositoryId|type=="string" and length>0) and (.number|type=="number" and floor==. and .>0))
-       elif $mode=="rearm" then keys==["actor","approval","censusDigest","evidence","generation","mode","priorStateDigest","schema","slotId","timestamp"] and (.approval|type=="string" and length>0)
-       else keys==["actor","authorizationDigest","censusDigest","evidence","generation","mode","priorStateDigest","schema","slotId","timestamp"] and (.authorizationDigest|test("^[0-9a-f]{64}$")) end)' "$spec" >/dev/null || return 2
+         (.censusDigest|test("^[0-9a-f]{64}$")) and (.approval|type=="string" and length>0) and (.adoptedIssue|keys==["issueNodeId","number","repositoryId"] and (.issueNodeId|type=="string" and length>0) and (.repositoryId|type=="string" and length>0) and (.number|type=="number" and floor==. and .>0))
+       elif $mode=="rearm" then
+         ((keys==["actor","approval","censusDigest","evidence","generation","mode","priorStateDigest","schema","slotId","timestamp"] and (.censusDigest|test("^[0-9a-f]{64}$"))) or
+          (keys==["actor","approval","declarationDigest","evidence","generation","mode","operationId","priorStateDigest","schema","slotId","timestamp"] and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")))) and
+         (.approval|type=="string" and length>0)
+       else keys==["actor","authorizationDigest","censusDigest","evidence","generation","mode","priorStateDigest","schema","slotId","timestamp"] and (.censusDigest|test("^[0-9a-f]{64}$")) and (.authorizationDigest|test("^[0-9a-f]{64}$")) end)' "$spec" >/dev/null || return 2
     old=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk '{print $1}'); [ -n "$old" ] || return 3; git fetch -q origin "$TASKDAG_MATERIALISATION_REF" || return 2; old=$(git rev-parse FETCH_HEAD)
     token=$(taskdag_activation_snapshot_token) || return 3
     current_repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 3
-    [ -z "$(taskdag_materialisation_tree_violations "$old" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || return 3
-    slot=$(jq -r .slotId "$spec"); generation=$(jq -r .generation "$spec"); census_digest=$(jq -r .censusDigest "$spec"); census_path="censuses/$census_digest.json"
-    git cat-file -e "$old:$census_path" 2>/dev/null || return 3
-    [ "$(git show "$old:$census_path" | jq -r .activationRecordDigest)" = "$(jq -r .digest <<<"$token")" ] || return 3
-    git show "$old:$census_path" | jq -e --arg slot "$slot" 'any(.slots[];.slotId==$slot)' >/dev/null || return 3
+    [ -z "$(taskdag_materialisation_online_tree_violations "$old" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || return 3
+    slot=$(jq -r .slotId "$spec"); generation=$(jq -r .generation "$spec"); census_digest=$(jq -r '.censusDigest // ""' "$spec")
+    if [ -n "$census_digest" ]; then
+      census_path="censuses/$census_digest.json"
+      git cat-file -e "$old:$census_path" 2>/dev/null || return 3
+      [ "$(git show "$old:$census_path" | jq -r .activationRecordDigest)" = "$(jq -r .digest <<<"$token")" ] || return 3
+      git show "$old:$census_path" | jq -e --arg slot "$slot" 'any(.slots[];.slotId==$slot)' >/dev/null || return 3
+    fi
     if [ "$mode" = adopt ]; then
       git show "$old:$census_path" | jq -e --argjson issue "$(jq -c .adoptedIssue "$spec")" \
         --arg slot "$slot" '
@@ -1018,7 +1146,13 @@ _taskdag_materialise_transition() { # strict authorization spec, mode
     prior="slots/$slot/states/$(printf '%016d' "$((generation-1))").json"
     prior_digest=$(git show "$old:$prior" | sha256sum | awk '{print $1}') || return 3; [ "$prior_digest" = "$(jq -r .priorStateDigest "$spec")" ] || return 3
     prior_state=$(git show "$old:$prior" | jq -r .state) || return 3
-    [ "$(git show "$old:$prior" | jq -r .censusDigest)" = "$census_digest" ] || return 3
+    if [ -n "$census_digest" ]; then
+      [ "$(git show "$old:$prior" | jq -r .censusDigest)" = "$census_digest" ] || return 3
+    else
+      [ "$mode" = rearm ] || return 3
+      [ "$(git show "$old:$prior" | jq -r .declarationDigest)" = "$(jq -r .declarationDigest "$spec")" ] || return 3
+      [ "$(git show "$old:$prior" | jq -r .operationId)" = "$(jq -r .operationId "$spec")" ] || return 3
+    fi
     case "$mode" in
       adopt) [ "$prior_state" = blocked-repair ] || [ "$prior_state" = create-in-flight-or-uncertain ] || return 3; record=$(jq -cS '.+{state:"issue-adopted",predecessorStateDigest:.priorStateDigest}|del(.priorStateDigest)' "$spec");;
       rearm) [ "$prior_state" = create-in-flight-or-uncertain ] || return 3; authorization=$(jq -cS '.+{state:"rearm-authorized",predecessorStateDigest:.priorStateDigest}|del(.priorStateDigest)' "$spec"); authorization_digest=$(_taskdag_materialise_sha256_text "$authorization"); record=$(jq -cS --arg authorizationDigest "$authorization_digest" '.+{authorizationDigest:$authorizationDigest}' <<<"$authorization");;
@@ -1034,13 +1168,13 @@ _taskdag_materialise_transition() { # strict authorization spec, mode
       adopt) git cat-file -e "$old:slots/$slot/authorizations/$(printf '%016d' "$generation").json" 2>/dev/null && return 3;;
     esac
     tmp=$(mktemp -d); index="$tmp/index"; GIT_INDEX_FILE="$index" git read-tree "$old"; GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(printf '%s\n' "$record"|git hash-object -w --stdin),$path"; tree=$(GIT_INDEX_FILE="$index" git write-tree); commit=$(printf 'Append materialisation %s transition\n' "$mode"|git commit-tree "$tree" -p "$old")
-    [ -z "$(taskdag_materialisation_tree_violations "$commit" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || { rm -rf "$tmp"; return 3; }
+    [ -z "$(taskdag_materialisation_online_tree_violations "$commit" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || { rm -rf "$tmp"; return 3; }
     updates=$(jq -ncS --arg ref "$TASKDAG_MATERIALISATION_REF" --arg old "$old" --arg new "$commit" '[{ref:$ref,old:$old,new:$new}]')
     taskdag_activation_fenced_multi_push "$token" materialisation "$mode" "$(jq -r .actor "$spec")" "$(jq -r .timestamp "$spec")" "$updates"; rc=$?
     if [ "$rc" -eq 0 ]; then
       readback=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF" | awk '{print $1}')
       [ "$readback" = "$commit" ] && git fetch -q --no-tags origin "$readback" &&
-        [ -z "$(taskdag_materialisation_tree_violations "$readback" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || rc=3
+        [ -z "$(taskdag_materialisation_online_tree_violations "$readback" "$(jq -r .authorityTip <<<"$token")" "$current_repo")" ] || rc=3
     fi
     rm -rf "$tmp"; return "$rc"
 }

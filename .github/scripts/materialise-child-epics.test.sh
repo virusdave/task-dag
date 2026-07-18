@@ -190,10 +190,10 @@ if [ "$mode" = draining-legacy-writers ]; then
     drain_out="$(bash "$HERE/materialise-child-epics.sh" 2>&1)"
     rc=$?
     set -e
-    if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$drain_out"; then
-        echo "ok  - integration path is deterministically drained before effects"
+    if [ "$rc" -eq 78 ] && grep -q '^MIGRATION REQUIRED:' <<<"$drain_out"; then
+        echo "ok  - retired integration path rejects before effects"
     else
-        echo "NOT OK - integration path did not return migration status 75"
+        echo "NOT OK - retired integration path did not return status 78"
         fail=1
     fi
     if [ "$fail" -ne 0 ]; then

@@ -135,24 +135,3 @@ jobs:
     secrets:
       app_id: ${{ secrets.TASK_DAG_APP_ID }}
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
-
-  # Materialise cross-repo child epics from `Materialise-Child-Epic:` commit
-  # trailers pushed to this repo's master (see docs/MIGRATION.md and
-  # .github/scripts/materialise-child-epics.sh for the trailer contract). Like
-  # `completion-aggregate`, this is a cross-repo-writing job: it mints a
-  # task-dag GitHub App installation token from the SAME two App secrets to
-  # create the peer-repo issue, so it is only safe to wire on repos that have
-  # them provisioned. On trailer-free pushes the script is a no-op. This
-  # mirrors the per-peer template in docs/MIGRATION.md.
-  materialise:
-    if: ${{ github.event_name == 'push' }}
-    uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@master
-    permissions:
-      contents: write
-      issues: write
-    with:
-      base_sha: ${{ github.event.before }}
-      head_sha: ${{ github.sha }}
-    secrets:
-      app_id: ${{ secrets.TASK_DAG_APP_ID }}
-      app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}

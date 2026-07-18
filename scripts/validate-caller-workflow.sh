@@ -214,11 +214,16 @@ check_secret(errors, jobs, 'completion-aggregate', 'app_id', '${{ secrets.TASK_D
 check_secret(errors, jobs, 'completion-aggregate', 'app_private_key', '${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}')
 
 if jobs.key?('materialise')
-  check_uses(errors, jobs, 'materialise', 'materialise-child-epic.yml', expected_ref)
-  expect_contains(errors, 'jobs.materialise.if', job(errors, jobs, 'materialise')['if'], "github.event_name == 'push'")
+  materialise_job = job(errors, jobs, 'materialise')
+  materialise_uses = materialise_job['uses'].to_s
+  materialise_match = materialise_uses.match(%r{\Avirusdave/task-dag/\.github/workflows/materialise-child-epic\.yml@([0-9a-f]{40})\z})
+  errors << 'jobs.materialise.uses: must pin the privileged reusable workflow to an exact 40-hex commit' unless materialise_match
+  %w[push schedule workflow_dispatch].each { |event| expect_contains(errors, 'jobs.materialise.if', job(errors, jobs, 'materialise')['if'], "github.event_name == '#{event}'") }
   check_permissions(errors, jobs, 'materialise', { 'contents' => 'write', 'issues' => 'write' })
-  check_with(errors, jobs, 'materialise', 'base_sha', '${{ github.event.before }}')
-  check_with(errors, jobs, 'materialise', 'head_sha', '${{ github.sha }}')
+  check_with(errors, jobs, 'materialise', 'base_sha', "${{ github.event_name == 'push' && github.event.before || '' }}")
+  check_with(errors, jobs, 'materialise', 'head_sha', "${{ github.event_name == 'push' && github.sha || '' }}")
+  materialise_ref = fetch_map(materialise_job, 'with')['ref'].to_s
+  errors << 'jobs.materialise.with.ref: must equal the exact reusable-workflow commit' unless materialise_match && materialise_ref == materialise_match[1]
   check_secret(errors, jobs, 'materialise', 'app_id', '${{ secrets.TASK_DAG_APP_ID }}')
   check_secret(errors, jobs, 'materialise', 'app_private_key', '${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}')
 end

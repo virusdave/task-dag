@@ -111,19 +111,19 @@ jobs:
       app_id: ${{ secrets.TASK_DAG_APP_ID }}
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
   materialise:
-    # Optional: only add this job (and the App secrets) in a peer that must be
-    # able to spawn cross-repo child epics via the Materialise-Child-Epic:
-    # trailer. Keep it a single push-triggered caller so a trailer is processed
-    # exactly once per push (no double execution). Reuses the same two
-    # TASK_DAG_APP_* App secrets as completion-aggregate.
-    if: ${{ github.event_name == 'push' }}
-    uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@master
+    # Optional: add this job (and the App secrets) only on a peer that owns
+    # immutable child-epic intents. It reconciles already-reserved authority;
+    # it does not scan commit trailers or independently authorize new work.
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # Replace this example SHA with the exact producer-enabled runtime.
+    uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@0123456789abcdef0123456789abcdef01234567
     permissions:
       contents: write
       issues: write
     with:
-      base_sha: ${{ github.event.before }}
-      head_sha: ${{ github.sha }}
+      base_sha: ${{ github.event_name == 'push' && github.event.before || '' }}
+      head_sha: ${{ github.event_name == 'push' && github.sha || '' }}
+      ref: 0123456789abcdef0123456789abcdef01234567
     secrets:
       app_id: ${{ secrets.TASK_DAG_APP_ID }}
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
@@ -190,12 +190,13 @@ auto-close cross-repo epics — by the optional `comment-sync` App path) —
 identical values on every peer; exact runbook in
 [`docs/SECRETS.md`](SECRETS.md).
 
-The `materialise` job is **optional**: add it only to peers that must be able
-to spawn cross-repo child epics (via the `Materialise-Child-Epic:` commit
-trailer). It reuses the same two App secrets and is fleet-wide — any wired peer
-with the job + secrets can originate a child epic, not only
-`virusdave/top-level`. The task-dag GitHub App must be installed (Issues: read
-& write) on every peer a child epic may be materialised **in**.
+The `materialise` job is **optional**: add it only to peers that own immutable
+child-epic intents. It reuses the same two App secrets and is fleet-wide. Edit
+both literal SHA fields (`uses: ...@<sha>` and `with.ref`) to the same exact
+runtime commit from the stable producer-enable record; moving refs and
+mismatched pins are rejected before effects. The task-dag GitHub App must be
+installed (Issues: read & write) on every peer a child epic may be
+materialised **in**.
 
 ## Sequenced rollout (CI-safe; canary first)
 
@@ -249,7 +250,7 @@ with the job + secrets can originate a child epic, not only
    (staged via `.github2/REMOVE.txt`, promoted by the operator) rather than
    re-pointed. Peer `AGENTS.md` files already drop stale `scripts/task-dag`
    references and run the CLI via `ephemeral-checkout task-dag`.
-6. **Materialise reusable. [done, #6]** Cross-repo child-epic
+6. **Materialise reusable. [superseded by incident #21, 2026-07-18]** Cross-repo child-epic
    materialisation was the last non-reusable step: the slug-aware
    `materialise-child-epics.sh` was canonicalised here (generalised
    `TOP_LEVEL_TOKEN`→`SOURCE_TOKEN` so any source repo works), wrapped in the
@@ -260,7 +261,15 @@ with the job + secrets can originate a child epic, not only
    at the reusable workflow (single push-triggered caller, no double
    execution). Any peer can now originate cross-repo child epics by adding the
    optional `materialise` caller job + the two App secrets — it is no longer
-   `top-level`-only.
+   `top-level`-only. The trailer actuator is now an effect-free rejection
+   stub. Canonical commands reserve immutable batches; the stable producer
+   record binds the activation record, complete census/import blobs, registry
+   set, expected App creator, and exact runtime. The pinned workflow invokes
+   only `materialise-reconcile`: one CAS winner persists its create attempt
+   before the sole POST, and all later recovery exhaustively adopts by exact
+   sentinel identity without retrying POST. Final state follows canonical
+   marker, delegation, and graph-edge readback; stale or ambiguous authority
+   fails closed.
 
 ## Ordering hazards
 

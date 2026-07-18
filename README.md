@@ -37,11 +37,11 @@ scripts/
     sync-comment-to-task.yml
     sync-task-to-comment.yml
     aggregate-cross-repo-completions.yml
-    materialise-child-epic.yml        cross-repo child-epic materialisation (any wired peer)
+    materialise-child-epic.yml        pinned immutable-intent reconciler (any wired peer)
   scripts/                          coordinator / per-repo action helpers (source of truth)
     create-task-commit.sh           issue → task ref
     close-completed-issues.sh       auto-close issues whose tasks are all complete
-    materialise-child-epics.sh      cross-repo child-epic materialisation
+    materialise-child-epics.sh      effect-free retired legacy entry point
     page-on-manual-issue-close.sh
     post-issue-comments.sh
 
@@ -62,14 +62,12 @@ Comment ingestion checks out its helper, CLI, modules, and config together at
 the same explicit `ref` that pins the reusable workflow. This prevents mixed
 moving-ref observations while retaining one logic-free caller.
 
-Cross-repo child-epic materialisation (the `Materialise-Child-Epic:` commit
-trailer that mints an issue in a peer repo and registers the delegation) is
-one of these reusable workflows (`materialise-child-epic.yml`). It works for
-**any** wired peer that adds the `materialise` job and provisions the task-dag
-GitHub App secrets — not only `virusdave/top-level`-originated epics. The
-reusable workflow passes the caller repo's own token as `SOURCE_TOKEN`, so the
-source epic can live in any wired repo. See `docs/MIGRATION.md` for the caller
-template.
+Cross-repo child-epic materialisation is reconciled from immutable reserved
+intents by `materialise-child-epic.yml`. The pinned reconciler is the sole
+issue-creation actuator and finalizes the operation-bound marker, delegation,
+and dependency edge. Any wired peer with reserved intents, the exact enabled
+runtime ref, and the task-dag GitHub App secrets can run it. See
+`docs/MIGRATION.md` for the caller template and rollout fence.
 
 ## Status
 

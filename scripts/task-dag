@@ -66,6 +66,10 @@ TASKDAG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
 # shellcheck source=task-dag.d/materialise.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
+# shellcheck source=task-dag.d/materialise-producer.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-producer.sh"
+# shellcheck source=task-dag.d/materialise-reconcile.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-reconcile.sh"
 # shellcheck source=task-dag.d/activation.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
 
@@ -356,7 +360,7 @@ list_task_refs() {
 # ref surgery by hand" mistake this whole subsystem exists to prevent.
 # ─────────────────────────────────────────────────────────────────────
 TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated delegated-close completions ci-chains repair-superseded"
-TASKDAG_KNOWN_GH_NS="issues comments child-epics child-epic-slots"
+TASKDAG_KNOWN_GH_NS="issues comments child-epics child-epic-slots materialisation-markers"
 
 # ─────────────────────────────────────────────────────────────────────
 # The dependency-graph index branch (issue #13 north-star, Phase 2).
@@ -377,6 +381,7 @@ TASKDAG_GRAPH_REF="refs/heads/tasks/v1/graph"
 # Never broaden this exception to tasks/v1/*.
 TASKDAG_MATERIALISATION_REF="refs/heads/tasks/v1/materialisation"
 TASKDAG_ACTIVATION_REF="refs/heads/tasks/v1/activation"
+TASKDAG_MATERIALISE_PRODUCER_REF="refs/heads/tasks/v1/materialisation-producer"
 
 taskdag_is_activation_ref() {
     case "$1" in
@@ -388,6 +393,13 @@ taskdag_is_activation_ref() {
 taskdag_is_materialisation_ref() {
     case "$1" in
         refs/heads/tasks/v1/materialisation|tasks/v1/materialisation) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+taskdag_is_materialisation_producer_ref() {
+    case "$1" in
+        refs/heads/tasks/v1/materialisation-producer|tasks/v1/materialisation-producer) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -527,7 +539,7 @@ taskdag_ref_violations() {
     local sha="$1" ref="$2" activation_authority=${3:-} expected_repository=${4:-}
     local objtype tree rest ns
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || {
-        { taskdag_is_materialisation_ref "$ref" || taskdag_is_activation_ref "$ref"; } \
+        { taskdag_is_materialisation_ref "$ref" || taskdag_is_materialisation_producer_ref "$ref" || taskdag_is_activation_ref "$ref"; } \
             && echo "✗ ${ref} → ${sha} is missing or unreadable"
         return 0
     }
@@ -555,6 +567,11 @@ taskdag_ref_violations() {
     fi
     if taskdag_is_materialisation_ref "$ref"; then
         taskdag_materialisation_tree_violations "$sha" "$activation_authority" "$expected_repository"
+        return 0
+    fi
+    if taskdag_is_materialisation_producer_ref "$ref"; then
+        _taskdag_materialise_producer_validate_tip "$sha" \
+            || echo "✗ ${ref} has malformed materialisation producer authority"
         return 0
     fi
     if taskdag_is_activation_ref "$ref"; then
@@ -630,6 +647,7 @@ fetch_task_refs_strict() {
         '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
         '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
         '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
+        '+refs/heads/tasks/v1/*:refs/heads/tasks/v1/*' \
         '+refs/heads/gh/issues/*:refs/heads/gh/issues/*'
 }
 
@@ -6162,6 +6180,7 @@ EOF
         taskdag_is_graph_ref "$ref" && continue
         taskdag_is_mailbox_ref "$ref" && continue
         taskdag_is_materialisation_ref "$ref" && continue
+        taskdag_is_materialisation_producer_ref "$ref" && continue
         taskdag_is_activation_ref "$ref" && continue
         local tree
         tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
@@ -8004,6 +8023,8 @@ main() {
         materialise-import) cmd_materialise_import "$@" ;;
         materialise-adopt) cmd_materialise_adopt "$@" ;;
         materialise-rearm) cmd_materialise_rearm "$@" ;;
+        materialise-producer-enable) cmd_materialise_producer_enable "$@" ;;
+        materialise-reconcile) cmd_materialise_reconcile "$@" ;;
         activation) cmd_activation "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
@@ -8232,7 +8253,7 @@ sanctioned_tip_requirements_satisfied() {
 }
 
 cmd_publish() {
-    local tip old first updates rc=0
+    local tip old first updates rc=0 close_issue close_root
     case "${1:-}" in
         -h|--help) echo "Usage: task-dag publish [<completion-or-close-tip>]"; return 0 ;;
         "") tip=HEAD ;;
@@ -8259,6 +8280,16 @@ cmd_publish() {
         echo "Error: tip is not an exact canonical completion/close, or its canonical requirements changed." >&2
         return 2
     }
+    close_issue=$(git log -1 --format=%B "$tip" | sed -nE 's/^Closes-Epic:[[:space:]]*#([1-9][0-9]*)[[:space:]]*$/\1/p')
+    if [ -n "$close_issue" ]; then
+        close_root=$(git rev-parse "$tip^2") || return 2
+        TASKDAG_MATERIALISATION_VALIDATED_TIP=""
+        taskdag_materialisation_authority_durable "$close_issue" "$close_root" || {
+            echo "Error: materialisation authority changed or is incomplete; refusing close publication." >&2
+            return 3
+        }
+        [ -n "$TASKDAG_MATERIALISATION_VALIDATED_TIP" ] || return 3
+    fi
     old=$TASKDAG_CONSUMER_MASTER_TIP
     if git merge-base --is-ancestor "$tip" "$old" 2>/dev/null; then
         echo "Canonical task-dag completion is already present on origin/master: $tip"
@@ -8272,6 +8303,9 @@ cmd_publish() {
         git push origin "$tip:refs/heads/master"
         return $?
     fi
+    # Reservations and closes both advance the shared activation guard. A
+    # reservation after this readback and this close therefore cannot both win
+    # the same semantic generation; the loser must revalidate current state.
     updates=$(jq -ncS --arg ref refs/heads/master --arg old "$old" --arg new "$tip" '[{ref:$ref,old:$old,new:$new}]') || return 2
     export TASKDAG_FENCED_PUBLISH=1
     taskdag_consumer_fenced_scheduling_push publish-completion "${TASK_DAG_CLAIMER:-publisher}" "$updates" || rc=$?
