@@ -328,6 +328,106 @@ async function lowInventoryPhysicalCountsSchemaApplied(db: Queryable): Promise<b
   return result.rows[0]?.applied === true
 }
 
+async function vendorBrandAssociationsSchemaApplied(db: Queryable): Promise<boolean> {
+  // One bounded catalog round-trip verifies the exact schema contract. Seed
+  // rows are deliberately excluded because operators may edit them later.
+  const result = await db.query<{ applied: boolean }>(`
+    with expected_columns(table_name, name, type, not_null, identity_kind, default_expr) as (values
+      ('vendors', 'id', 'bigint', true, 'a', null),
+      ('vendors', 'name', 'text', true, '', null),
+      ('vendors', 'is_mso', 'boolean', true, '', 'false'),
+      ('vendors', 'is_micro', 'boolean', true, '', 'false'),
+      ('vendors', 'cod_only', 'boolean', true, '', 'false'),
+      ('vendors', 'created_at', 'timestamp with time zone', true, '', 'now()'),
+      ('vendors', 'updated_at', 'timestamp with time zone', true, '', 'now()'),
+      ('vendor_brand_associations', 'id', 'bigint', true, 'a', null),
+      ('vendor_brand_associations', 'vendor_id', 'bigint', true, '', null),
+      ('vendor_brand_associations', 'brand_name', 'text', true, '', null),
+      ('vendor_brand_associations', 'is_primary', 'boolean', true, '', 'true'),
+      ('vendor_brand_associations', 'target_days_on_hand', 'integer', false, '', null),
+      ('vendor_brand_associations', 'asset_url', 'text', false, '', null),
+      ('vendor_brand_associations', 'cod_required', 'boolean', false, '', null),
+      ('vendor_brand_associations', 'cod_discount_source', 'text', false, '', null),
+      ('vendor_brand_associations', 'minimum_order_dollars', 'numeric(12,2)', false, '', null),
+      ('vendor_brand_associations', 'comments', 'text', false, '', null),
+      ('vendor_brand_associations', 'created_at', 'timestamp with time zone', true, '', 'now()'),
+      ('vendor_brand_associations', 'updated_at', 'timestamp with time zone', true, '', 'now()')
+    ), actual_columns as (
+      select t.relname as table_name, a.attname as name,
+             format_type(a.atttypid, a.atttypmod) as type,
+             a.attnotnull as not_null, a.attidentity::text as identity_kind,
+             pg_get_expr(d.adbin, d.adrelid) as default_expr
+      from pg_attribute a
+      join pg_class t on t.oid = a.attrelid
+      join pg_namespace n on n.oid = t.relnamespace
+      left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+      where n.nspname = 'public'
+        and t.relname in ('vendors', 'vendor_brand_associations')
+        and t.relkind in ('r', 'p')
+        and a.attnum > 0 and not a.attisdropped
+    ), expected_constraints(table_name, name, type, definition) as (values
+      ('vendors', 'vendors_pkey', 'p', 'PRIMARY KEY (id)'),
+      ('vendors', 'vendors_name_trimmed_nonempty_check', 'c', 'CHECK (((name = btrim(name)) AND (name <> ''''::text)))'),
+      ('vendor_brand_associations', 'vendor_brand_associations_pkey', 'p', 'PRIMARY KEY (id)'),
+      ('vendor_brand_associations', 'vendor_brand_associations_vendor_id_fkey', 'f', 'FOREIGN KEY (vendor_id) REFERENCES vendors(id) ON DELETE CASCADE'),
+      ('vendor_brand_associations', 'vendor_brand_associations_brand_trimmed_nonempty_check', 'c', 'CHECK (((brand_name = btrim(brand_name)) AND (brand_name <> ''''::text)))'),
+      ('vendor_brand_associations', 'vendor_brand_associations_target_days_check', 'c', 'CHECK (((target_days_on_hand IS NULL) OR (target_days_on_hand > 0)))'),
+      ('vendor_brand_associations', 'vendor_brand_associations_asset_url_check', 'c', 'CHECK (((asset_url IS NULL) OR ((asset_url = btrim(asset_url)) AND (asset_url <> ''''::text))))'),
+      ('vendor_brand_associations', 'vendor_brand_associations_cod_discount_source_check', 'c', 'CHECK (((cod_discount_source IS NULL) OR ((cod_discount_source = btrim(cod_discount_source)) AND (cod_discount_source <> ''''::text))))'),
+      ('vendor_brand_associations', 'vendor_brand_associations_minimum_order_check', 'c', 'CHECK (((minimum_order_dollars IS NULL) OR (minimum_order_dollars >= (0)::numeric)))'),
+      ('vendor_brand_associations', 'vendor_brand_associations_comments_check', 'c', 'CHECK (((comments IS NULL) OR ((comments = btrim(comments)) AND (comments <> ''''::text))))')
+    ), actual_constraints as (
+      select t.relname as table_name, c.conname as name, c.contype::text as type,
+             pg_get_constraintdef(c.oid) as definition, c.convalidated
+      from pg_constraint c
+      join pg_class t on t.oid = c.conrelid
+      join pg_namespace n on n.oid = t.relnamespace
+      where n.nspname = 'public'
+        and t.relname in ('vendors', 'vendor_brand_associations')
+    ), expected_indexes(name, definition, predicate) as (values
+      ('vendors_name_lower_uidx', 'CREATE UNIQUE INDEX vendors_name_lower_uidx ON public.vendors USING btree (lower(name))', null),
+      ('vendor_brand_associations_vendor_brand_lower_uidx', 'CREATE UNIQUE INDEX vendor_brand_associations_vendor_brand_lower_uidx ON public.vendor_brand_associations USING btree (vendor_id, lower(brand_name))', null),
+      ('vendor_brand_associations_one_primary_brand_uidx', 'CREATE UNIQUE INDEX vendor_brand_associations_one_primary_brand_uidx ON public.vendor_brand_associations USING btree (lower(brand_name)) WHERE is_primary', 'is_primary')
+    ), actual_indexes as (
+      select i.relname as name, pg_get_indexdef(i.oid) as definition,
+             pg_get_expr(x.indpred, x.indrelid) as predicate,
+             x.indisunique, x.indisvalid, x.indisready
+      from pg_class i
+      join pg_namespace n on n.oid = i.relnamespace
+      join pg_index x on x.indexrelid = i.oid
+      where n.nspname = 'public'
+        and i.relname in (
+          'vendors_name_lower_uidx',
+          'vendor_brand_associations_vendor_brand_lower_uidx',
+          'vendor_brand_associations_one_primary_brand_uidx'
+        )
+    )
+    select
+      not exists (
+        select 1 from expected_columns e
+        left join actual_columns a using
+          (table_name, name, type, not_null, identity_kind)
+        where a.name is null or a.default_expr is distinct from e.default_expr
+      )
+      and (select count(*) from actual_columns) = (select count(*) from expected_columns)
+      and not exists (
+        select 1 from expected_constraints e
+        left join actual_constraints a using (table_name, name, type, definition)
+        where a.name is null or not a.convalidated
+      )
+      and (select count(*) from actual_constraints) = (select count(*) from expected_constraints)
+      and not exists (
+        select 1 from expected_indexes e
+        left join actual_indexes a
+          on a.name = e.name
+         and a.definition = e.definition
+         and a.predicate is not distinct from e.predicate
+        where a.name is null or not a.indisunique or not a.indisvalid or not a.indisready
+      ) as applied
+  `)
+  return result.rows[0]?.applied === true
+}
+
 const SENTINELS: MigrationSentinel[] = [
   {
     migrationId: '007_pending_purchases',
@@ -1651,6 +1751,14 @@ const SENTINELS: MigrationSentinel[] = [
       'per-package floor counts (automation#73). Until applied, Helios keeps ' +
       'the low-inventory review page read-only and refuses count capture.',
     check: lowInventoryPhysicalCountsSchemaApplied,
+  },
+  {
+    migrationId: '104_vendor_brand_associations',
+    label:
+      'vendors + vendor_brand_associations normalized purchasing directory ' +
+      '(automation#79), including case-insensitive vendor/brand uniqueness ' +
+      'and the at-most-one-primary-vendor rule.',
+    check: vendorBrandAssociationsSchemaApplied,
   },
   // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and
   // 101_migration_flow_smoketest_drop were a throwaway create+drop PAIR used to
