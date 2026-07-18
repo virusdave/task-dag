@@ -13,13 +13,14 @@ usage() {
 Usage: run-all.sh [TASK_DAG_CLI]
 
 Run shellcheck (when available), bash -n, and the task-dag fixture suite.
-Fixture output is buffered and printed in declaration order.
+Fixture logs are buffered and printed in declaration order; starts,
+completions, wall times, and active-fixture heartbeats stream live.
 
 Options:
   -h, --help  Show this help and exit.
 
 Environment:
-  TASK_DAG_TEST_JOBS  Maximum parallel fixtures (1-8; default: 8).
+  TASK_DAG_TEST_JOBS  Maximum parallel fixtures (1-8; default: 4).
 EOF
 }
 
@@ -31,7 +32,7 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 
-jobs=${TASK_DAG_TEST_JOBS-8}
+jobs=${TASK_DAG_TEST_JOBS-4}
 case "$jobs" in
     [1-8]) ;;
     *)
@@ -135,75 +136,75 @@ bash -n "$TD" \
 
 parallel_tests=(
     reconcile.sh
+    complete-safety.sh
+    materialise-census.sh
+    root-claim.sh
+    materialise.sh
+    consumer-cutover.sh
     ci-repair-evidence.sh
+    activation.sh
+    complete-ops.sh
+    complete-historical.sh
+    mailbox.sh
+    transitive-block.sh
     ci-tree-fix-outcome.sh
     ci-repair-retire.sh
     ci-race-stale.sh
-    mailbox.sh
+    blocked-meta.sh
+    guard-pre-push.sh
+    complete-subject-style.sh
+    facts.sh
+    edges-prune.sh
     ci-repair-ticket.sh
-    root-claim.sh
-    ci-repair-decisions.sh
     ci-classifier.sh
-    complete-safety.sh
+    operator-blocked-dashboard.sh
+    comment-receipts.sh
+    blocked-json.sh
+    operator-blocked-dispatch.sh
+    breakdown-self-continue.sh
+    ci-repair-decisions.sh
+    wrappers.sh
+    frontier-json.sh
+    claim-pid.sh
     ci-reconcile-lease.sh
     ci-repair-audit.sh
-    wrappers.sh
-    edges-prune.sh
-    comment-receipts.sh
-    operator-blocked-dashboard.sh
-    complete-ops.sh
-    complete-historical.sh
-    ci-chain-cas.sh
-    breakdown-self-continue.sh
-    blocked-json.sh
-    ci-verify-target.sh
-    ci-repair-projections.sh
-    blocked-meta.sh
-    validate-strict.sh
-    transitive-block.sh
-    legacy-edges.sh
-    edges-write.sh
-    operator-blocked-dispatch.sh
-    operator-blocked-dashboard-publish.sh
-    guard-pre-push.sh
-    guard-commit-message.sh
-    facts.sh
-    validate-closed-issue-audit.sh
-    complete-subject-style.sh
-    comment-cmd.sh
-    claim-pid.sh
-    ingest-selfheal.sh
-    caller-workflow-preflight.sh
     breakdown-self-claim.sh
-    reap.sh
-    ingest-loop.sh
-    frontier-json.sh
-    edges.sh
-    migration-drain.sh
-    materialise.sh
-    materialise-census.sh
-    activation.sh
-    consumer-cutover.sh
-    blocked-overlay.sh
-    tree-fix-trailers.sh
-    no-handbuilt-json.sh
+    edges-write.sh
+    operator-blocked-dashboard-publish.sh
+    validate-strict.sh
     context-cmd.sh
-    claim-idempotent.sh
-    reconcile-comments.sh
+    validate-closed-issue-audit.sh
     local-epic-close-partial-view.sh
-    emitter-json.sh
-    delegated-block-json.sh
-    ../create-task-commit.sh
+    guard-commit-message.sh
+    blocked-overlay.sh
+    reap.sh
+    ingest-selfheal.sh
+    comment-cmd.sh
+    ci-chain-cas.sh
+    legacy-edges.sh
+    ci-repair-projections.sh
+    migration-drain.sh
+    claim-idempotent.sh
+    ci-verify-target.sh
+    ingest-loop.sh
+    caller-workflow-preflight.sh
     claim-force-steal.sh
-    reconcile-closed-issue.sh
+    edges.sh
+    ../create-task-commit.sh
+    no-handbuilt-json.sh
+    tree-fix-trailers.sh
+    emitter-json.sh
+    reconcile-comments.sh
+    ../../.github/scripts/materialise-child-epics.test.sh
     projection-backstop.sh
     ../post-reopen-notice.sh
     local-epic-close.sh
-    graph-converge.sh
-    ../../.github/scripts/materialise-child-epics.test.sh
+    delegated-block-json.sh
     cross-repo-completion-attribution.sh
     completed-ref-reconcile.sh
     close-ops-epic.sh
+    reconcile-closed-issue.sh
+    graph-converge.sh
     close-issue-ref-cleanup.sh
     close-completed-epic.sh
 )
@@ -221,6 +222,7 @@ run_tmp=$(mktemp -d) || {
 }
 active_pids=()
 observed_statuses=()
+completed_count=0
 
 remove_active_pid() {
     local reaped_pid=$1 active_index
@@ -298,49 +300,79 @@ trap 'interrupted 143' TERM
 
 all_tests=("${parallel_tests[@]}" "${serial_tests[@]}")
 parallel_count=${#parallel_tests[@]}
-echo "== fixtures: ${#all_tests[@]} total, up to $jobs parallel; output buffered =="
+echo "== fixtures: ${#all_tests[@]} total, up to $jobs parallel; fixture logs buffered, progress live =="
 
-for ((batch_start = 0; batch_start < parallel_count; batch_start += jobs)); do
-    batch_pids=()
-    batch_indexes=()
-    for ((offset = 0; offset < jobs && batch_start + offset < parallel_count; offset++)); do
-        index=$((batch_start + offset))
-        t=${parallel_tests[$index]}
-        ready_file="$run_tmp/$index.ready"
-        duration_file="$run_tmp/$index.duration"
-        env -u TASK_DAG_TEST_JOBS setsid bash -c \
-            'ready=$1; duration=$2; shift 2; start=$SECONDS; : >"$ready" || exit 125; bash "$@"; status=$?; printf "%s\n" "$((SECONDS - start))" >"$duration" || exit 125; exit "$status"' \
-            run-all-worker "$ready_file" "$duration_file" "$here/$t" "$TD" \
-            >"$run_tmp/$index.log" 2>&1 &
-        pid=$!
-        active_pids+=("$pid")
-        if wait_for_worker_start "$pid" "$ready_file"; then
-            batch_pids+=("$pid")
-            batch_indexes+=("$index")
-        else
-            kill -TERM -- "-$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-            remove_active_pid "$pid"
-            observed_statuses[$index]=125
-            printf 'run-all.sh: fixture worker did not confirm startup\n' \
-                >>"$run_tmp/$index.log" || true
-            printf '125\n' >"$run_tmp/$index.status" || true
-        fi
-    done
+declare -A worker_indexes=()
+declare -A worker_started=()
 
-    for ((offset = 0; offset < ${#batch_pids[@]}; offset++)); do
-        pid=${batch_pids[$offset]}
-        index=${batch_indexes[$offset]}
-        if wait "$pid"; then
-            status=0
-        else
-            status=$?
-        fi
+launch_parallel_worker() {
+    local index=$1 t=${parallel_tests[$1]} ready_file="$run_tmp/$1.ready"
+    local duration_file="$run_tmp/$1.duration" pid
+    env -u TASK_DAG_TEST_JOBS setsid bash -c \
+        'ready=$1; duration=$2; shift 2; start=$SECONDS; : >"$ready" || exit 125; bash "$@"; status=$?; printf "%s\n" "$((SECONDS - start))" >"$duration" || exit 125; exit "$status"' \
+        run-all-worker "$ready_file" "$duration_file" "$here/$t" "$TD" \
+        >"$run_tmp/$index.log" 2>&1 &
+    pid=$!
+    active_pids+=("$pid")
+    worker_indexes[$pid]=$index
+    worker_started[$pid]=$SECONDS
+    printf 'START %d/%d %-47s active=%d/%d\n' "$((index + 1))" "$parallel_count" "$t" "${#active_pids[@]}" "$jobs"
+    if ! wait_for_worker_start "$pid" "$ready_file"; then
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
         remove_active_pid "$pid"
-        observed_statuses[$index]=$status
-        printf '%s\n' "$status" >"$run_tmp/$index.status" || true
+        unset 'worker_indexes[$pid]'
+        unset 'worker_started[$pid]'
+        observed_statuses[$index]=125
+        printf 'run-all.sh: fixture worker did not confirm startup\n' >>"$run_tmp/$index.log" || true
+        printf '125\n' >"$run_tmp/$index.status" || true
+        completed_count=$((completed_count + 1))
+        printf 'DONE %d/%d %-48s %4s  FAIL (startup)\n' "$completed_count" "$parallel_count" "$t" '-'
+    fi
+}
+
+wait_for_parallel_worker() {
+    local pid status index duration result active elapsed last_report=$SECONDS
+    while :; do
+        jobs -pr >"$run_tmp/running"
+        for active in "${active_pids[@]}"; do
+            if ! grep -Fxq "$active" "$run_tmp/running"; then
+                pid=$active
+                break 2
+            fi
+        done
+        sleep 1
+        if [ $((SECONDS - last_report)) -ge 15 ]; then
+            printf 'ACTIVE %d fixture(s):' "${#active_pids[@]}"
+            for active in "${active_pids[@]}"; do
+                elapsed=$((SECONDS - worker_started[$active]))
+                printf ' %s=%ss' "${parallel_tests[${worker_indexes[$active]}]}" "$elapsed"
+            done
+            printf '\n'
+            last_report=$SECONDS
+        fi
     done
+    if wait "$pid"; then status=0; else status=$?; fi
+    index=${worker_indexes[$pid]}
+    remove_active_pid "$pid"
+    unset 'worker_indexes[$pid]'
+    unset 'worker_started[$pid]'
+    observed_statuses[$index]=$status
+    printf '%s\n' "$status" >"$run_tmp/$index.status" || true
+    duration=$(cat "$run_tmp/$index.duration" 2>/dev/null || printf '?')
+    if [ "$status" -eq 0 ]; then result=PASS; else result="FAIL ($status)"; fi
+    completed_count=$((completed_count + 1))
+    printf 'DONE %d/%d %-48s %4ss  %s\n' "$completed_count" "$parallel_count" "${parallel_tests[$index]}" "$duration" "$result"
+}
+
+# A work-conserving queue starts the next longest estimated fixture whenever
+# any slot becomes free. Unlike fixed batches, one long fixture cannot leave
+# seven CPUs idle while it finishes.
+for ((index = 0; index < parallel_count; index++)); do
+    while [ "${#active_pids[@]}" -ge "$jobs" ]; do wait_for_parallel_worker; done
+    launch_parallel_worker "$index"
 done
+while [ "${#active_pids[@]}" -gt 0 ]; do wait_for_parallel_worker; done
 
 for ((serial_index = 0; serial_index < ${#serial_tests[@]}; serial_index++)); do
     index=$((parallel_count + serial_index))
