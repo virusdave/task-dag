@@ -1737,10 +1737,21 @@ EOF
         done
     }
 
+    local repo_numeric_id=""
+    if [ "$fatal" = false ]; then
+        if _rc_api "repos/$repo" && repo_numeric_id=$(jq -r '.id // empty' "$tmp/body") \
+            && [[ "$repo_numeric_id" =~ ^[1-9][0-9]*$ ]]; then
+            :
+        else
+            _rc_fail list "" "" "cannot resolve repository pagination identity"
+            fatal=true
+        fi
+    fi
+
     local scan_from="$start"
     [ "$mode" = recent ] && scan_from="$since"
     scan_from=$(date -u -d "$scan_from - 900 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || fatal=true
-    local endpoint="repos/$repo/issues/comments?sort=updated&direction=asc&per_page=100&since=$scan_from" next item issue cid iu ca ua author url bodyf
+    local endpoint="repos/$repo/issues/comments?sort=updated&direction=asc&per_page=100&since=$scan_from" next next_lc item issue cid iu ca ua author url bodyf
     : >"$tmp/all"
     : >"$tmp/allow-receipts"
     while [ "$fatal" = false ] && [ -n "$endpoint" ]; do
@@ -1750,7 +1761,15 @@ EOF
         local n; n=$(jq length "$tmp/body"); returned=$((returned+n)); [ "$returned" -le "$max_comments" ] || { _rc_fail ceiling "" "" "comment ceiling reached"; fatal=true; break; }
         jq -c '.[]' "$tmp/body" >>"$tmp/all"
         next=$(awk 'tolower($1)=="link:" {$1=""; print substr($0,2)}' "$tmp/headers" | grep -o '<[^>]*>; rel="next"' | head -1 | sed 's/^<//;s/>; rel="next"$//' || true)
-        if [ -n "$next" ]; then [[ "${next,,}" == "https://api.github.com/repos/${repo}/issues/comments"* ]] || { _rc_fail list "" "" "unsafe pagination link"; fatal=true; break; }; endpoint="${next#https://api.github.com/}"; else endpoint=""; fi
+        if [ -n "$next" ]; then
+            next_lc=${next,,}
+            if [[ "$next_lc" == "https://api.github.com/repos/${repo}/issues/comments?"* \
+                || "$next_lc" == "https://api.github.com/repositories/${repo_numeric_id}/issues/comments?"* ]]; then
+                endpoint=${next#https://api.github.com/}
+            else
+                _rc_fail list "" "" "unsafe pagination link"; fatal=true; break
+            fi
+        else endpoint=""; fi
         [ "$pages" -lt "$max_pages" ] || { [ -z "$endpoint" ] || { _rc_fail ceiling "" "" "page ceiling reached with next page"; fatal=true; }; break; }
     done
     # Explicit historical objects are fetched even when outside the scan.

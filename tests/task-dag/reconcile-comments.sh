@@ -33,6 +33,9 @@ comment() {
     '{id:$id,issue_url:("https://api.github.com/repos/Acme/Widgets/issues/"+$issue),created_at:$created,updated_at:$updated,body:$body,user:{login:"alice"},html_url:("https://github.com/Acme/Widgets/issues/"+$issue+"#issuecomment-"+($id|tostring))}'
 }
 case "$endpoint" in
+  repos/acme/widgets)
+    header; printf '\r\n{"id":123}\n'
+    ;;
   *issues/comments/99)
     header; printf '\r\n'; comment 99 10 2020-01-01T00:00:00Z 2020-01-01T00:00:00Z historical
     ;;
@@ -44,7 +47,8 @@ case "$endpoint" in
     ;;
   *issues/comments?*)
     header
-    printf 'link: <https://api.github.com/repos/Acme/Widgets/issues/comments?sort=updated&direction=asc&per_page=100&page=2>; rel="next"\r\n\r\n['
+    link_id=123; [[ "${GH_BAD_NUMERIC_LINK:-0}" == 0 ]] || link_id=124
+    printf 'link: <https://api.github.com/repositories/%s/issues/comments?sort=updated&direction=asc&per_page=100&since=2025-01-01T00%%3A00%%3A00Z&page=2>; rel="next"\r\n\r\n[' "$link_id"
     comment 1 10 2024-12-01T00:00:00Z 2025-01-03T00:00:00Z old
     printf ','; comment 2 10 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z work
     printf ','; comment 3 11 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z pull-request
@@ -63,14 +67,26 @@ out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     --ingestion-start-at 2025-01-01T00:00:00Z --allow-comment 10:99 --dry-run)
 [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]
 jq -e '.schema_version == 1 and .status == "success" and .dry_run == true and
-       .pages == 2 and .requests == 5 and .returned == 6 and .unique == 5 and
+       .pages == 2 and .requests == 6 and .returned == 6 and .unique == 5 and
        .pre_boundary == 1 and .pull_requests == 1 and .eligible == 3 and
        .missing == 3 and .dispositions == {human:2,completion:0,machine_skip:1} and
        .attempted == 0 and .deferred == 3 and .failures == 0 and
        .recent_success_at == null and .complete_success_at == null' <<<"$out" >/dev/null
 grep -q 'since=2024-12-31T23:45:00Z' "$GH_LOG"
+grep -Fxq 'repositories/123/issues/comments?sort=updated&direction=asc&per_page=100&since=2025-01-01T00%3A00%3A00Z&page=2' "$GH_LOG"
 refs_after=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname) %(refname)' | sort)
 [ "$refs_after" = "$refs_before" ]
+
+set +e
+mismatch_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets GH_BAD_NUMERIC_LINK=1 \
+    "$TD" reconcile-comments --mode complete \
+    --ingestion-start-at 2025-01-01T00:00:00Z --dry-run)
+mismatch_rc=$?
+set -e
+[ "$mismatch_rc" -ne 0 ]
+jq -e '.status == "failed" and .failures == 1 and
+       .failure_items == [{stage:"list",issue:null,comment_id:null,message:"unsafe pagination link"}]' \
+  <<<"$mismatch_out" >/dev/null
 
 unsupported=$(printf '%s\n' 'kind: message' 'role: human' 'intent: unsupported' '' \
   'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 97' \
