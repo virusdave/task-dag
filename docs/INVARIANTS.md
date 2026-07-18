@@ -778,5 +778,9 @@ and one terminal disposition. `machine-skip` has no parent or effect fields.
 record `Effect-Ref-At-Creation`. The receipt and any newly-created effect ref
 are published in one create-only atomic push. Local refs are caches, never
 proof of ingestion. Recognised historical human and completion provenance is
-immutable and remains accepted; malformed or unsupported origin objects are
-fatal and are never replaced.
+immutable and remains accepted, including the historical human
+`intent: clarification` form. Four pre-v1 top-level completion records use
+the narrowly grandfathered
+`gh/comments/10/manual-cleanup-<repo>-<issue>` shape; they are validated as
+completion provenance but never treated as numeric GitHub comment receipts.
+Malformed or unsupported origin objects are fatal and are never replaced.

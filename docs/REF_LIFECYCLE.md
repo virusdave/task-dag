@@ -741,3 +741,9 @@ receipts and absent completion facts, are created by a mandatory atomic push
 with create-only leases; skip receipts create no effect. Only origin readback
 permits local mirroring. Receipts are immutable and are never retired; an edit
 does not rewrite a receipt or mint another task.
+
+Historical `intent: comment` and `intent: clarification` human provenance
+remains terminal. The four pre-v1 top-level
+`gh/comments/10/manual-cleanup-<repo>-<issue>` records are narrowly accepted
+and validated as historical completion provenance; they are not numeric
+GitHub comment receipts and no current writer can create that shape.

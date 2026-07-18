@@ -5,6 +5,20 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 git init -q --bare "$tmp/origin.git"
 git init -q "$tmp/work"
 git -C "$tmp/work" remote add origin "$tmp/origin.git"
+git -C "$tmp/work" config user.name test
+git -C "$tmp/work" config user.email test@example.com
+empty=$(git -C "$tmp/work" hash-object -t tree /dev/null)
+clarification=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarification' '' \
+  'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 98' \
+  | git -C "$tmp/work" commit-tree "$empty")
+manual_cleanup=$(printf '%s\n' 'kind: completion' 'role: system' 'intent: cross-repo-satisfied' '' \
+  'issue:' '  repo: acme/widgets' '  number: 10' '' 'delegated:' '  repo: acme/peer' \
+  '  number: 1' '' 'source:' '  repo: acme/peer' '  commit: abcdef123456' \
+  '  comment_id: manual-cleanup-peer-1' \
+  | git -C "$tmp/work" commit-tree "$empty")
+git -C "$tmp/work" push -q origin \
+  "$clarification:refs/heads/gh/comments/10/98" \
+  "$manual_cleanup:refs/heads/gh/comments/10/manual-cleanup-peer-1"
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -16,7 +30,7 @@ header() {
 }
 comment() {
   jq -nc --argjson id "$1" --arg issue "$2" --arg created "$3" --arg updated "$4" --arg body "$5" \
-    '{id:$id,issue_url:("https://api.github.com/repos/acme/widgets/issues/"+$issue),created_at:$created,updated_at:$updated,body:$body,user:{login:"alice"},html_url:("https://github.com/acme/widgets/issues/"+$issue+"#issuecomment-"+($id|tostring))}'
+    '{id:$id,issue_url:("https://api.github.com/repos/Acme/Widgets/issues/"+$issue),created_at:$created,updated_at:$updated,body:$body,user:{login:"alice"},html_url:("https://github.com/Acme/Widgets/issues/"+$issue+"#issuecomment-"+($id|tostring))}'
 }
 case "$endpoint" in
   *issues/comments/99)
@@ -30,7 +44,7 @@ case "$endpoint" in
     ;;
   *issues/comments?*)
     header
-    printf 'link: <https://api.github.com/repos/acme/widgets/issues/comments?sort=updated&direction=asc&per_page=100&page=2>; rel="next"\r\n\r\n['
+    printf 'link: <https://api.github.com/repos/Acme/Widgets/issues/comments?sort=updated&direction=asc&per_page=100&page=2>; rel="next"\r\n\r\n['
     comment 1 10 2024-12-01T00:00:00Z 2025-01-03T00:00:00Z old
     printf ','; comment 2 10 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z work
     printf ','; comment 3 11 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z pull-request
@@ -43,6 +57,7 @@ esac
 EOF
 chmod +x "$tmp/bin/gh"
 export GH_LOG="$tmp/gh.log"
+refs_before=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname) %(refname)' | sort)
 out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     "$TD" reconcile-comments --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --allow-comment 10:99 --dry-run)
@@ -54,5 +69,21 @@ jq -e '.schema_version == 1 and .status == "success" and .dry_run == true and
        .attempted == 0 and .deferred == 3 and .failures == 0 and
        .recent_success_at == null and .complete_success_at == null' <<<"$out" >/dev/null
 grep -q 'since=2024-12-31T23:45:00Z' "$GH_LOG"
-[ -z "$(git --git-dir="$tmp/origin.git" for-each-ref)" ]
+refs_after=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname) %(refname)' | sort)
+[ "$refs_after" = "$refs_before" ]
+
+unsupported=$(printf '%s\n' 'kind: message' 'role: human' 'intent: unsupported' '' \
+  'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 97' \
+  | git -C "$tmp/work" commit-tree "$empty")
+git -C "$tmp/work" push -q origin "$unsupported:refs/heads/gh/comments/10/97"
+set +e
+bad_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    "$TD" reconcile-comments --mode complete \
+    --ingestion-start-at 2025-01-01T00:00:00Z --dry-run)
+bad_rc=$?
+set -e
+[ "$bad_rc" -ne 0 ]
+jq -e '.status == "failed" and .failures == 1 and
+       .failure_items == [{stage:"snapshot",issue:10,comment_id:97,message:"malformed comment receipt"}]' \
+  <<<"$bad_out" >/dev/null
 echo "reconcile-comments fixture: ok"

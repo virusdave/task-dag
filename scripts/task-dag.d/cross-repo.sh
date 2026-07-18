@@ -1322,6 +1322,13 @@ _xrepo_valid_timestamp() {
     [ "$rendered" = "$1" ]
 }
 
+_xrepo_write_sorted_listing() {
+    local listing="$1" output="$2"
+    if [ -n "$listing" ]; then
+        printf '%s\n' "$listing"
+    fi | LC_ALL=C sort >"$output"
+}
+
 # Validate either the durable v1 receipt or a narrowly recognised historical
 # provenance commit.  For v1, echo its disposition, updated-at and body hash.
 _xrepo_validate_receipt() {
@@ -1335,7 +1342,7 @@ _xrepo_validate_receipt() {
         li="$(awk '/^issue:/{f=1;next} f && /^  number: /{print $2;exit}' <<<"$msg")"
         lc="$(awk '/^github:/{f=1;next} f && /^  comment_id: /{print $2;exit} /^source:/{f=1;next} f && /^  comment_id: /{print $2;exit}' <<<"$msg")"
         [ "$li" = "$issue" ] || return 2
-        if [ "$(grep -cx 'kind: message' <<<"$msg")" = 1 ] && [ "$(grep -cx 'role: human' <<<"$msg")" = 1 ] && [ "$(grep -cx 'intent: comment' <<<"$msg")" = 1 ]; then
+        if [ "$(grep -cx 'kind: message' <<<"$msg")" = 1 ] && [ "$(grep -cx 'role: human' <<<"$msg")" = 1 ] && [ "$(grep -Ec '^intent: (comment|clarification)$' <<<"$msg")" = 1 ]; then
             [ "$lc" = "$cid" ] || return 2
             echo legacy-human
             return 0
@@ -1661,8 +1668,8 @@ EOF
     # One authoritative namespace advertisement. It is also the proof used by
     # the private no-initial-probe ingestion mode.
     listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 2>"$tmp/git.err") || { _rc_fail snapshot "" "" "$(cat "$tmp/git.err")"; fatal=true; listing=""; }
-    printf '%s' "$listing" | LC_ALL=C sort >"$tmp/manifest"
-    if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
+    _xrepo_write_sorted_listing "$listing" "$tmp/manifest"
+    if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
     printf '%s\n' "$listing" | awk '$2 ~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ {print $2}' >"$tmp/receipts"
     git init -q --bare "$tmp/snapshot.git" && git --git-dir="$tmp/snapshot.git" remote add origin "$(git remote get-url origin)" || { _rc_fail snapshot "" "" "cannot initialize isolated snapshot"; fatal=true; }
     if [ "$fatal" = false ] && [ -s "$tmp/manifest" ]; then
@@ -1682,6 +1689,14 @@ EOF
                 _rc_fail snapshot "$receipt_issue" "$receipt_id" "malformed comment receipt"; fatal=true
             elif [[ "$receipt_info" = completion* || "$receipt_info" = legacy-completion* ]]; then
                 printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"
+            fi
+        elif [[ "$ref" =~ ^refs/heads/gh/comments/([1-9][0-9]*)/(manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$ ]]; then
+            local legacy_issue="${BASH_REMATCH[1]}" legacy_id="${BASH_REMATCH[2]}" legacy_info
+            if ! legacy_info=$(GIT_DIR="$tmp/snapshot.git" _xrepo_validate_receipt "$sha" "$repo" "$legacy_issue" "$legacy_id") \
+                || [ "$legacy_info" != legacy-completion ]; then
+                _rc_fail snapshot "$legacy_issue" "" "malformed historical completion provenance"; fatal=true
+            else
+                printf '%s\n' "$legacy_issue" >>"$tmp/converge-issues"
             fi
         elif [[ "$ref" =~ ^refs/heads/tasks/delegated/([1-9][0-9]*)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/([1-9][0-9]*)$ ]]; then
             local delegated_issue="${BASH_REMATCH[1]}" delegated_owner="${BASH_REMATCH[2]}" delegated_repo="${BASH_REMATCH[3]}" delegated_peer="${BASH_REMATCH[4]}"
@@ -1735,7 +1750,7 @@ EOF
         local n; n=$(jq length "$tmp/body"); returned=$((returned+n)); [ "$returned" -le "$max_comments" ] || { _rc_fail ceiling "" "" "comment ceiling reached"; fatal=true; break; }
         jq -c '.[]' "$tmp/body" >>"$tmp/all"
         next=$(awk 'tolower($1)=="link:" {$1=""; print substr($0,2)}' "$tmp/headers" | grep -o '<[^>]*>; rel="next"' | head -1 | sed 's/^<//;s/>; rel="next"$//' || true)
-        if [ -n "$next" ]; then [[ "$next" == https://api.github.com/repos/"$repo"/issues/comments* ]] || { _rc_fail list "" "" "unsafe pagination link"; fatal=true; break; }; endpoint="${next#https://api.github.com/}"; else endpoint=""; fi
+        if [ -n "$next" ]; then [[ "${next,,}" == "https://api.github.com/repos/${repo}/issues/comments"* ]] || { _rc_fail list "" "" "unsafe pagination link"; fatal=true; break; }; endpoint="${next#https://api.github.com/}"; else endpoint=""; fi
         [ "$pages" -lt "$max_pages" ] || { [ -z "$endpoint" ] || { _rc_fail ceiling "" "" "page ceiling reached with next page"; fatal=true; }; break; }
     done
     # Explicit historical objects are fetched even when outside the scan.
@@ -1762,7 +1777,7 @@ EOF
     while IFS= read -r item; do
         _rc_time || { _rc_fail ceiling "" "" "time ceiling reached"; fatal=true; break; }
         cid=$(jq -r '.id|tostring' <<<"$item"); iu=$(jq -r .issue_url <<<"$item"); issue=${iu##*/}
-        [[ "$iu" == https://api.github.com/repos/"$repo"/issues/"$issue" && "$issue" =~ ^[1-9][0-9]*$ ]] || { _rc_fail validate "$issue" "$cid" "invalid issue_url"; continue; }
+        [[ "${iu,,}" == "https://api.github.com/repos/${repo}/issues/${issue}" && "$issue" =~ ^[1-9][0-9]*$ ]] || { _rc_fail validate "$issue" "$cid" "invalid issue_url"; continue; }
         ca=$(jq -r .created_at <<<"$item"); ua=$(jq -r .updated_at <<<"$item")
         if ! _xrepo_valid_timestamp "$ca" || ! _xrepo_valid_timestamp "$ua" || [[ "$ua" < "$ca" ]]; then _rc_fail validate "$issue" "$cid" "invalid comment timestamps"; continue; fi
         expected=$(jq -r '.__allow_issue // empty' <<<"$item"); [ -z "$expected" ] || [ "$expected" = "$issue" ] || { _rc_fail allowlist "$issue" "$cid" "allowlist issue mismatch"; continue; }
@@ -1823,7 +1838,7 @@ EOF
         rm -rf "$dir"
         advertised=$(git ls-remote --refs origin \
             "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*") || return 2
-        printf '%s' "$advertised" | LC_ALL=C sort >"$manifest"
+        _xrepo_write_sorted_listing "$advertised" "$manifest"
         git init -q --bare "$dir" && git --git-dir="$dir" remote add origin "$(git remote get-url origin)" || return 2
         if [ -s "$manifest" ]; then
             git --git-dir="$dir" fetch -q --no-tags origin \
