@@ -14,7 +14,7 @@ git -C "$(dirname "$TD")/.." push -q "$ROOT/task-dag.git" "$runtime:refs/heads/m
 git init -q "$ROOT/top-source"; mkdir -p "$ROOT/top-source/scripts/ephemeral_checkout.d"
 cat >"$ROOT/top-source/scripts/ephemeral_checkout.d/repos.conf" <<EOF
 task-dag git@github-task-dag:virusdave/task-dag.git
-top-level git@github-top-level:virusdave/top-level.git
+top-level git@github-top-level:virusdave/old-top-level.git
 EOF
 git -C "$ROOT/top-source" add .; git -C "$ROOT/top-source" commit -qm registry
 git -C "$ROOT/top-source" remote add origin "$ROOT/top-level.git"; git -C "$ROOT/top-source" push -q origin HEAD:master
@@ -22,13 +22,15 @@ git clone -q "$ROOT/top-level.git" "$ROOT/registry"
 
 export GIT_CONFIG_COUNT=2
 export GIT_CONFIG_KEY_0=url.file://$ROOT/task-dag.git.insteadOf GIT_CONFIG_VALUE_0=git@github-task-dag:virusdave/task-dag.git
-export GIT_CONFIG_KEY_1=url.file://$ROOT/top-level.git.insteadOf GIT_CONFIG_VALUE_1=git@github-top-level:virusdave/top-level.git
+export GIT_CONFIG_KEY_1=url.file://$ROOT/top-level.git.insteadOf GIT_CONFIG_VALUE_1=git@github-top-level:virusdave/old-top-level.git
 mkdir "$ROOT/bin"
 cat >"$ROOT/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+if [ "${GH_FAIL_OLD:-0}" = 1 ] && [[ " $* " == *" repos/virusdave/old-top-level "* ]]; then exit 1; fi
 case " $* " in
   *" --include "*) printf 'HTTP/2 200\r\ndate: Sat, 18 Jul 2026 12:00:00 GMT\r\n\r\n{}\n' ;;
   *" repos/virusdave/task-dag "*) printf '{"full_name":"virusdave/task-dag","node_id":"R_taskdag"}\n' ;;
+  *" repos/virusdave/old-top-level "*) printf '{"full_name":"virusdave/top-level","node_id":"R_toplevel"}\n' ;;
   *" repos/virusdave/top-level "*) printf '{"full_name":"virusdave/top-level","node_id":"R_toplevel"}\n' ;;
   *) exit 1 ;;
 esac
@@ -36,11 +38,11 @@ EOF
 chmod +x "$ROOT/bin/gh"; export PATH="$ROOT/bin:$PATH"
 mkdir "$ROOT/fleet"
 git clone -q "$ROOT/task-dag.git" "$ROOT/fleet/task-dag"; git -C "$ROOT/fleet/task-dag" remote set-url origin git@github-task-dag:virusdave/task-dag.git
-git clone -q "$ROOT/top-level.git" "$ROOT/fleet/top-level"; git -C "$ROOT/fleet/top-level" remote set-url origin git@github-top-level:virusdave/top-level.git
+git clone -q "$ROOT/top-level.git" "$ROOT/fleet/top-level"; git -C "$ROOT/fleet/top-level" remote set-url origin git@github-top-level:virusdave/old-top-level.git
 
 if "$TD" activation fleet-plan --registry-checkout "$ROOT/registry" --work-root "$ROOT/fleet" --output "$ROOT/plan" --actor fixture >/dev/null \
   && jq -e '.schema==1 and .target.state=="enabled" and .target.authoritativeTimestamp=="2026-07-18T12:00:00Z" and (.target.registrySnapshot.repositories|length)==2 and (.target.sourceTips|length)==2 and all(.expected[];.state=="absent")' "$ROOT/plan" >/dev/null; then
-  ok "fleet plan freezes registry, identities, tips, runtime, and server time"
+  ok "fleet plan freezes canonical identities across a repository rename"
 else bad "fleet plan"; fi
 
 status=$($TD activation fleet-status --spec-file "$ROOT/plan" --work-root "$ROOT/fleet")
@@ -86,6 +88,10 @@ else ok "same-path substitute endpoint fails closed without mutation"; fi
 git -C "$ROOT/fleet/task-dag" remote set-url origin git@github-task-dag:virusdave/task-dag.git
 ln -s "$ROOT/reenable" "$ROOT/plan-link"
 if "$TD" activation fleet-apply --spec-file "$ROOT/plan-link" --work-root "$ROOT/fleet" >/dev/null 2>&1; then bad "symlink plan accepted"; else ok "fleet apply snapshots one regular plan file"; fi
+git -C "$ROOT/fleet/top-level" config taskdag.current-repo virusdave/top-level
+if GH_FAIL_OLD=1 "$TD" activation fleet-plan --registry-checkout "$ROOT/registry" --work-root "$ROOT/fleet" --output "$ROOT/failed-plan" --actor fixture >/dev/null 2>&1; then bad "API failure accepted"
+elif [ "$(git -C "$ROOT/fleet/top-level" config taskdag.current-repo)" != virusdave/top-level ]; then bad "API failure replaced canonical checkout identity"
+else ok "API failure preserves canonical checkout identity"; fi
 
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

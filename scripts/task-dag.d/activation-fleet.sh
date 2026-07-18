@@ -49,15 +49,14 @@ _taskdag_activation_fleet_remote_head() { # checkout; ref<TAB>commit
     printf '%s\t%s\n' "$ref" "$commit"
 }
 
-_taskdag_activation_fleet_prepare_checkout() { # work-root name url repo
-    local root=$1 name=$2 url=$3 repo=$4 path="$1/$2"
+_taskdag_activation_fleet_prepare_checkout() { # work-root name url
+    local root=$1 name=$2 url=$3 path="$1/$2"
     mkdir -p "$root" || return 1
     if [ ! -d "$path/.git" ]; then
         [ ! -e "$path" ] || return 1
         git clone -q "$url" "$path" || return 1
     fi
     [ "$(git -C "$path" config --get remote.origin.url)" = "$url" ] || return 1
-    git -C "$path" config taskdag.current-repo "$repo" || return 1
     printf '%s\n' "$path"
 }
 
@@ -144,12 +143,14 @@ cmd_activation_fleet_plan() {
     tmp=$(mktemp -d) || { rm -f "$rows"; return 2; }
     : >"$tmp/repositories"; : >"$tmp/tips"; : >"$tmp/expected"; : >"$tmp/endpoints"
     while IFS=$'\t' read -r name url repo; do
-        path=$(_taskdag_activation_fleet_prepare_checkout "$work_root" "$name" "$url" "$repo") || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
+        path=$(_taskdag_activation_fleet_prepare_checkout "$work_root" "$name" "$url") || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
         IFS=$'\t' read -r head_ref head_commit < <(_taskdag_activation_fleet_remote_head "$path") || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
         repo_info=$(gh api "repos/$repo" 2>/dev/null) || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
         jq -e '.node_id|type=="string" and length>0' <<<"$repo_info" >/dev/null 2>&1 || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
         repository_id=$(jq -r .node_id <<<"$repo_info")
-        [ "$(jq -r '.full_name|ascii_downcase' <<<"$repo_info")" = "$repo" ] || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
+        repo=$(jq -r '.full_name|ascii_downcase' <<<"$repo_info")
+        [[ "$repo" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
+        git -C "$path" config taskdag.current-repo "$repo" || { rm -rf "$tmp"; rm -f "$rows"; return 3; }
         jq -ncS --arg repository "$repo" --arg repositoryId "$repository_id" --arg url "$url" '{repository:$repository,repositoryId:$repositoryId,url:$url}' >>"$tmp/endpoints"
         jq -ncS --arg name "$name" --arg repository "$repo" --arg repositoryId "$repository_id" '{name:$name,repairBranch:null,repairMode:"off",repository:$repository,repositoryId:$repositoryId}' >>"$tmp/repositories"
         jq -ncS --arg commit "$head_commit" --arg ref "$head_ref" --arg repository "$repo" --arg repositoryId "$repository_id" '{commit:$commit,ref:$ref,repository:$repository,repositoryId:$repositoryId}' >>"$tmp/tips"
