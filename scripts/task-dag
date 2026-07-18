@@ -499,7 +499,7 @@ taskdag_mailbox_tree_violations() {
 # mid-walk (concurrent claim/complete/drop) yields no lines, so the audit never
 # flaps. The immutable materialisation authority instead fails closed.
 taskdag_ref_violations() {
-    local sha="$1" ref="$2" activation_authority=${3:-}
+    local sha="$1" ref="$2" activation_authority=${3:-} expected_repository=${4:-}
     local objtype tree rest ns
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || {
         { taskdag_is_materialisation_ref "$ref" || taskdag_is_activation_ref "$ref"; } \
@@ -529,7 +529,7 @@ taskdag_ref_violations() {
         return 0
     fi
     if taskdag_is_materialisation_ref "$ref"; then
-        taskdag_materialisation_tree_violations "$sha" "$activation_authority"
+        taskdag_materialisation_tree_violations "$sha" "$activation_authority" "$expected_repository"
         return 0
     fi
     if taskdag_is_activation_ref "$ref"; then
@@ -1672,6 +1672,12 @@ COMMANDS:
     materialise-child --spec-file FILE
                            One-declaration adapter to materialise-batch. Also
                            disabled by migration policy (exit 75).
+    materialise-census --spec-file FILE --artifact FILE --digest-file FILE
+                           Freeze and classify the activation registry universe.
+    materialise-import --spec-file FILE --artifact FILE --digest-file FILE
+                           Re-census exact reviewed bytes, then atomically import.
+    materialise-adopt|materialise-rearm --spec-file FILE
+                           Audited append-only recovery authorization.
     activation apply|status|check-compatible
                            Manage and inspect the exact canonical semantic
                            activation authority (offline git plus origin).
@@ -6033,13 +6039,20 @@ EOF
         # sub-namespaces) so a hand-crafted ref at an UNKNOWN path is
         # actually seen and flagged — restricting the snapshot to known
         # namespaces would make the unknown-namespace check dead code.
-        local snapshot line vsha vref out activation_authority
+        local snapshot line vsha vref out activation_authority expected_repository=""
         snapshot=$(git for-each-ref --format='%(objectname) %(refname)' \
             refs/heads/tasks/ refs/heads/gh/)
         activation_authority=$(awk -v ref="$TASKDAG_ACTIVATION_REF" '$2==ref {print $1}' <<<"$snapshot")
+        if grep -q " $TASKDAG_MATERIALISATION_REF$" <<<"$snapshot"; then
+            expected_repository=$(printf '%s' "$(_xrepo_current_repo_offline 2>/dev/null)" | tr '[:upper:]' '[:lower:]')
+            if [ -z "$expected_repository" ]; then
+                errors=$((errors + 1))
+                [ "$json" = false ] && printf "${RED}✗ cannot resolve current repository for strict materialisation validation${RESET}\n"
+            fi
+        fi
         while read -r vsha vref; do
             [ -n "$vsha" ] || continue
-            out=$(taskdag_ref_violations "$vsha" "$vref" "$activation_authority")
+            out=$(taskdag_ref_violations "$vsha" "$vref" "$activation_authority" "$expected_repository")
             [ -n "$out" ] || continue
             while IFS= read -r line; do
                 errors=$((errors + 1))
@@ -7794,6 +7807,10 @@ main() {
         supersede) cmd_supersede "$@" ;;
         materialise-batch) cmd_materialise_batch "$@" ;;
         materialise-child) cmd_materialise_child "$@" ;;
+        materialise-census) cmd_materialise_census "$@" ;;
+        materialise-import) cmd_materialise_import "$@" ;;
+        materialise-adopt) cmd_materialise_adopt "$@" ;;
+        materialise-rearm) cmd_materialise_rearm "$@" ;;
         activation) cmd_activation "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;

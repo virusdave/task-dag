@@ -179,6 +179,7 @@ parallel_tests=(
     edges.sh
     migration-drain.sh
     materialise.sh
+    materialise-census.sh
     activation.sh
     blocked-overlay.sh
     tree-fix-trailers.sh

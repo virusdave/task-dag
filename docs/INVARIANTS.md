@@ -35,22 +35,68 @@ disabled, malformed, stale, shallow or uncertain authority fails closed.
 
 ## Immutable materialisation reservations (disabled-state schema 1)
 
+### Reviewed legacy census import
+
+Legacy import is partitioned by current repository identity. The global,
+fully-paginated census is reviewed input, but a writer may add only declarations,
+generation-zero states, and delegated-close outputs owned by that parent origin.
+Evidence identity is the exact `(repository, ref, object ID)` tuple. Every source
+and peer is in the pinned activation registry, whose repository IDs equal issue
+page, declaration, and delegation IDs.
+
+The census reconstructs every legacy declaration from every commit reachable
+from each frozen source tip with the shared trailer parser and reads body bytes
+from the declaring commit. That reconstructed multiset must exactly equal the
+classified issue-page declarations. Optional trailer presence is identity:
+absent and present-empty are distinct, present-empty slug is invalid, and a
+present-empty delegation note remains present.
+
+The chain stores reviewed bytes at `censuses/<sha256>.json`, partition membership
+at `import-batches/<sha256>.json`, declarations at
+`declarations/<declaration-digest>.json`, bodies at
+`bodies/<body-sha256>.body`, states at
+`slots/<slot-id>/states/<16-digit-generation>.json`, and rearm authority at
+`slots/<slot-id>/authorizations/<16-digit-generation>.json`. Import rejects every
+pre-existing form of a proposed slot. `issue-adopted` carries the exact peer tuple
+`{repositoryId,issueNodeId,number}`; its issue node occurs in only one imported or
+transitioned terminal slot globally.
+
+The chain is a generation-zero imported terminal state, followed only by adopt,
+or by `rearm-authorized(g+1)` and its exact one-use consume into
+`create-in-flight-or-uncertain(g+1)`. Records name the reviewed census and exact
+predecessor digest. Strict validation checks exact schemas, filenames,
+memberships, generation cardinality, authorization relationships, and per-commit
+deltas. Current history, the local candidate, and authoritative readback all
+validate.
+
+At command start, descriptor/realpath checks precede private snapshots of the
+specification, activation record, every issue page, reviewed artifact/digest,
+repository HEAD, and relevant ref manifest. Census and import use only snapshots.
+Malformed evidence, missing pages, unknown peers, identity mismatches,
+conflicting strict closes, or uncertain readback fail closed with no partial
+import. Partial-implementation evidence remains audit-only.
+
 `refs/heads/tasks/v1/materialisation` is one exact data-in-tree exception;
 no other `tasks/v1/materialisation/*` or broad `tasks/v1/*` ref is valid. Its
 history is linear (the initial commit has no parent, every successor exactly
 one) and append-only. Regular `100644` blobs are restricted to
 `bodies/<body-sha256>.body`, `declarations/<declaration-digest>.json`,
-`batches/<batch-id>.json`, and `slots/<slot-id>/state.json`.
+`batches/<batch-id>.json`, `censuses/<census-digest>.json`,
+`import-batches/<census-digest>.json`, `slots/<slot-id>/state.json`,
+`slots/<slot-id>/states/<generation>.json`, and
+`slots/<slot-id>/authorizations/<generation>.json`.
 
-Schema 1 permits only `batch-reserved-before-create` slot states at generation
-0/fence 1. Each state names its deterministic slot, declaration, operation and
+Ordinary reservations use only `batch-reserved-before-create` at
+`slots/<slot-id>/state.json`, generation 0/fence 1. Each reservation names its deterministic slot, declaration, operation and
 batch IDs, durable activation `{epoch,digest,guardVersion}` provenance, and the
 activation and materialisation authority tips observed before the whole-batch
 leased compare-and-swap (the materialisation tip is null only initially). A reservation commit adds
 complete bodies, declarations, batch membership and slot states atomically;
 existing paths can never be deleted or replaced. `task-dag validate --strict`
-revalidates this state offline. Public materialisation commands remain denied
-by the semantic migration policy and perform no issue creation or publication.
+revalidates this state offline. Imported slots exclusively use the census,
+import-batch, generation-state, and authorization paths documented above; the
+two forms may never coexist for one slot. Public issue-creating materialisation
+commands remain denied by the semantic migration policy.
 
 Declarations contain semantic input only. Request provenance lives in the
 batch receipt's sorted member records, each of which binds slot, declaration,
@@ -201,10 +247,10 @@ gate.
 
 ---
 
-## The data-in-tree task refs (`tasks/v1/graph`, `tasks/v1/mailbox/*`) — the empty-tree exceptions
+## The bounded mutable data-in-tree indexes (`tasks/v1/graph`, `tasks/v1/mailbox/*`)
 
-There are exactly two ref KINDS whose tree **is** their data (and so is
-legitimately non-empty): the dependency-graph index `tasks/v1/graph`
+There are exactly two bounded mutable-index ref KINDS whose tree **is** their
+current data: the dependency-graph index `tasks/v1/graph`
 (below) and the 16 cross-repo mailbox shards `tasks/v1/mailbox/00..0f`
 (further below, "The cross-repo mailbox shards"). Both are deliberate,
 operator-approved (issue #13 Phase 0) exceptions to invariant-floor rule #1,
@@ -212,13 +258,15 @@ because storing data in-tree under a **fixed, bounded** ref set is exactly
 what keeps the live mirrored **ref count bounded** (`O(open work)` /
 `O(in-flight signals)`, never `O(total history)`). Each is an exact-ref
 exemption with its own shape invariant, not a blanket loosening of the floor
-under `tasks/v1/*`.
+under `tasks/v1/*`. The append-only activation and materialisation authorities
+documented above are separate exact data-in-tree exceptions, not mutable
+indexes.
 
 ### The dependency-graph index (`tasks/v1/graph`)
 
 The north-star dependency graph (issue #13) stores its **active edge set**
 as an ordinary per-repo git branch, `refs/heads/tasks/v1/graph`, whose
-**latest tree IS the edge set**. This is one of the two deliberate,
+**latest tree IS the edge set**. This is one of the two bounded mutable-index,
 operator-approved (issue #13 Phase 0) exceptions to invariant-floor rule #1
 (empty tree): the graph index is data-in-tree by design, because that is
 exactly what keeps the live mirrored **ref count bounded** — one ref per

@@ -23,8 +23,10 @@ taskdag_activation_validate_provenance() {
   [[ "$1" = 2222222222222222222222222222222222222222 || "$1" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] \
     && jq -e '.guardVersion==1 and ((.epoch==1 and .digest=="3333333333333333333333333333333333333333333333333333333333333333") or (.epoch==2 and .digest=="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))' <<<"$2" >/dev/null
 }
+_xrepo_current_repo() { printf '%s\n' o/source; }
 export -f taskdag_activation_snapshot_token taskdag_activation_fenced_push \
-  taskdag_activation_validate_history taskdag_activation_validate_provenance
+  taskdag_activation_validate_history taskdag_activation_validate_provenance \
+  _xrepo_current_repo
 
 printf 'body with trailing lines\n\n' >"$ROOT/body"
 printf 'second body\n' >"$ROOT/body-2"

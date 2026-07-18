@@ -55,7 +55,7 @@ taskdag_materialise_parent_number() {
 # last-wins behavior. Values are encoded by jq, never by shell interpolation.
 taskdag_materialise_groups_json_from_message() {
     local trailers line key val key_lc open=false
-    local peer="" title="" body_file="" parent="" slug="" note=""
+    local peer="" title="" body_file="" parent="" slug="" note="" slug_present=false note_present=false
     local -a groups=()
     trailers=$(taskdag_extract_materialise_trailers_from_message) || return 1
 
@@ -64,7 +64,8 @@ taskdag_materialise_groups_json_from_message() {
         groups+=("$(jq -nc \
             --arg peer "$peer" --arg title "$title" --arg bodyFile "$body_file" \
             --arg parent "$parent" --arg slug "$slug" --arg note "$note" \
-            '{peer:$peer,title:$title,bodyFile:$bodyFile,parent:$parent,slug:$slug,note:$note}')")
+            --argjson slugPresent "$slug_present" --argjson notePresent "$note_present" \
+            '{peer:$peer,title:$title,bodyFile:$bodyFile,parent:$parent,slug:$slug,note:$note,slugPresent:$slugPresent,notePresent:$notePresent}')")
     }
 
     while IFS= read -r line; do
@@ -76,13 +77,13 @@ taskdag_materialise_groups_json_from_message() {
         case "$key_lc" in
             materialise-child-epic|materialize-child-epic)
                 _taskdag_mi_flush_group || return 1
-                open=true peer="$val" title="" body_file="" parent="" slug="" note=""
+                open=true peer="$val" title="" body_file="" parent="" slug="" note="" slug_present=false note_present=false
                 ;;
             child-epic-title) title="$val" ;;
             child-epic-body-file) body_file="$val" ;;
             parent-issue) parent="$val" ;;
-            child-epic-slug) slug="$val" ;;
-            delegation-note) note="$val" ;;
+            child-epic-slug) slug="$val"; slug_present=true ;;
+            delegation-note) note="$val"; note_present=true ;;
         esac
     done <<< "$trailers"
     _taskdag_mi_flush_group || return 1

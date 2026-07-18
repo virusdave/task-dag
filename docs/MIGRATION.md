@@ -385,6 +385,57 @@ authority, run `activation check-compatible` offline for the proposed runtime,
 and only then repin. Never repin before the disable, confirmation, and offline
 compatibility check have all succeeded.
 
+### Offline census/import/adoption schemas
+
+`materialise-census` accepts one strict schema-1 JSON object with exactly
+`activationRecord`, `issuePages`, `repositories`, and `schema`. Repositories
+are sorted `{path,repository,tip}` objects and must equal both the activation
+registry and `sourceTips`; every path is a full local checkout at that exact
+tip. Issue pages are sorted `{file,hasNextPage,page,repository}` objects. Each
+issue snapshot includes exact title and body bytes, repository and issue node
+identities, creator and creation time, reconstructed declarations, markers,
+old completion evidence, and live delegations. Evidence refs must exactly
+equal the relevant refs enumerated from the frozen checkout; omission is an
+error. Declarations are independently reconstructed by applying the shared
+legacy parser to every commit reachable from each frozen source tip and reading
+body bytes from the declaring commit. The reconstructed and issue-classified
+multisets must match exactly. Trailer-field presence participates in identity:
+present-empty slug is invalid, while present-empty delegation note is distinct
+from an absent note. Pages start at 1, are contiguous, end in
+`hasNextPage:false`, and cover every registry repository. Issue node IDs,
+`(repository,number)` pairs, slot IDs, and adopted issue node IDs are globally
+unique.
+
+The census writes canonical artifact bytes and a separate lowercase SHA-256
+digest. `materialise-import` requires those exact files and the same input,
+repeats census, byte-compares it, then performs one activation-fenced atomic
+multi-ref compare-and-swap. The artifact has separately keyed `slots`,
+`legacyCompletionRefs`, and `liveDelegations` arrays; every member carries
+exactly one disposition. Any inaccessible repository, tip drift, evidence
+omission, incomplete pagination, collision, or corruption fails before a
+write. Import persists the reviewed census, exact bodies and declarations,
+and a generation-zero append-only state for every slot. Imported slots can
+never be create-capable reservations.
+
+Run import once from each parent repository. The current repository identity
+selects exactly one parent-origin partition; the global census remains the
+reviewed input, but no command may write another repository's slots or strict
+delegated-close outputs. Review the canonical census bytes and its digest
+together, retain both unchanged, and supply both to import. On any malformed
+evidence, unknown peer, identity mismatch, slot collision, candidate-validation
+failure, push conflict, or readback mismatch, retain the reviewed files, repair
+the source evidence, regenerate and review a new digest, then retry. Never edit
+an imported generation or reuse an old digest for changed bytes.
+
+Adopt and rearm use different strict schemas. Adoption binds one exact repository/issue node identity and appends
+`issue-adopted(g+1)`. Rearm appends `rearm-authorized(g+1)` with the reviewed
+evidence and approval. Only the sole reconciler may consume that authorization
+immediately before its one POST; there is no public non-POST consume command.
+The private consume transition must name the authorization digest and appends
+`create-in-flight-or-uncertain(g+1)`. Generation paths and
+predecessor-state digests make each authorization and transition structurally
+one-use; old evidence is never edited.
+
 ## Repair-chain reconciliation format activation
 
 The reconciliation lease and evidence fields extend the existing

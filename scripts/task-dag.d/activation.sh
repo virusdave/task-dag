@@ -271,8 +271,8 @@ _taskdag_activation_authority_token() {
     jq -ncS --argjson record "$record" --arg activationCommit "$active" --arg authorityTip "$authority" --arg digest "$digest" '{activationCommit:$activationCommit,authorityTip:$authorityTip,digest:$digest,record:$record}'
 }
 
-taskdag_activation_fenced_push() { # <token-json> <writer> <operation> <actor> <timestamp> <target-ref> <old> <new>
-    local token=$1 writer=$2 operation=$3 actor=$4 timestamp=$5 target=$6 old=$7 new=$8 current active tree guard updates message info authority path digest record origin
+taskdag_activation_fenced_multi_push() { # <token-json> <writer> <operation> <actor> <timestamp> <updates-json>
+    local token=$1 writer=$2 operation=$3 actor=$4 timestamp=$5 updates=$6 current active tree guard message info authority path digest record origin ref old new args=() requested_refs=() readback winning_updates
     jq -e 'def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
       type=="object" and keys==["activationCommit","authorityTip","digest","epoch","guardVersion","minimumCompatibleTaskDagCommit","origin","runtimeCommit","state"] and
       (.activationCommit|oid) and (.authorityTip|oid) and (.runtimeCommit|oid) and
@@ -289,20 +289,46 @@ taskdag_activation_fenced_push() { # <token-json> <writer> <operation> <actor> <
       .activationCommit==$active and .authorityTip==$authority and .digest==$digest and .origin==$origin and
       .epoch==$record.epoch and .guardVersion==$record.guardVersion and .state==$record.state and
       .minimumCompatibleTaskDagCommit==$record.minimumCompatibleTaskDagCommit' <<<"$token" >/dev/null || return 3
+    jq -e 'type=="array" and length>0 and .==sort_by(.ref) and (map(.ref)|length==(unique|length)) and all(.[];
+      keys==["new","old","ref"] and (.ref|test("^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$")) and
+      (.ref!="refs/heads/tasks/v1/activation") and (.old=="" or (.old|test("^([0-9a-f]{40}|[0-9a-f]{64})$"))) and
+      (.new|test("^([0-9a-f]{40}|[0-9a-f]{64})$")))' <<<"$updates" >/dev/null 2>&1 || return 2
     tree=$(git rev-parse "$active^{tree}") || return 3
-    updates=$(jq -ncS --arg ref "$target" --arg old "$old" --arg new "$new" '[{ref:$ref,old:$old,new:$new}]')
     message=$(_taskdag_activation_guard_message "$current" "$active" "$(jq -r .epoch <<<"$token")" "$(jq -r .digest <<<"$token")" "$(jq -r .guardVersion <<<"$token")" "$writer" "$operation" "$actor" "$timestamp" "$updates") || return 2
     guard=$(printf '%s' "$message" | git commit-tree "$tree" -p "$active") || return 2
     _taskdag_activation_parse_guard "$guard" "$active" "$(jq -r .epoch <<<"$token")" "$(jq -r .digest <<<"$token")" || return 3
-    if git push -q --atomic origin --force-with-lease="$TASKDAG_ACTIVATION_REF:$current" --force-with-lease="$target:$old" "$guard:$TASKDAG_ACTIVATION_REF" "$new:$target" 2>/dev/null; then
-        [ "$(_taskdag_activation_fetch_authority)" = "$guard" ] || return 3
-        [ "$(git ls-remote --refs origin "$target" | awk '{print $1}')" = "$new" ] || return 3
-        return 0
-    fi
-    # Failure is classified by authoritative state; never retry blindly.
-    [ "$(_taskdag_activation_fetch_authority 2>/dev/null || true)" = "$guard" ] \
-      && [ "$(git ls-remote --refs origin "$target" 2>/dev/null | awk '{print $1}')" = "$new" ] && return 0
-    return 3
+    while IFS= read -r update; do
+        ref=$(jq -r .ref <<<"$update"); old=$(jq -r .old <<<"$update"); new=$(jq -r .new <<<"$update")
+        args+=("--force-with-lease=$ref:$old" "$new:$ref")
+    done < <(jq -c '.[]' <<<"$updates")
+    git push -q --atomic origin --force-with-lease="$TASKDAG_ACTIVATION_REF:$current" "${args[@]}" "$guard:$TASKDAG_ACTIVATION_REF" 2>/dev/null || :
+    # One advertisement is the authoritative outcome snapshot.  In
+    # particular, never accept a mixture assembled by several ls-remote
+    # calls while another writer is advancing refs.  An exact same-payload
+    # concurrent winner is success even when its guard commit differs.
+    mapfile -t requested_refs < <(jq -r '.[].ref' <<<"$updates")
+    readback=$(git ls-remote --refs origin "$TASKDAG_ACTIVATION_REF" "${requested_refs[@]}" 2>/dev/null) || return 3
+    while IFS= read -r update; do
+        ref=$(jq -r .ref <<<"$update"); new=$(jq -r .new <<<"$update")
+        [ "$(awk -v r="$ref" '$2==r {print $1}' <<<"$readback")" = "$new" ] || return 3
+    done < <(jq -c '.[]' <<<"$updates")
+    authority=$(awk -v r="$TASKDAG_ACTIVATION_REF" '$2==r {print $1}' <<<"$readback")
+    [ "$authority" = "$guard" ] && return 0
+    [[ "$authority" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 3
+    # Fetch the object named by the same advertisement used for every target
+    # readback.  A later ref advance must not substitute a different guard.
+    git fetch -q --no-tags origin "$authority" || return 3
+    [ "$(git rev-parse FETCH_HEAD)" = "$authority" ] || return 3
+    _taskdag_activation_parse_guard "$authority" "$active" "$(jq -r .epoch <<<"$token")" "$(jq -r .digest <<<"$token")" || return 3
+    winning_updates=$(git log -1 --format=%B "$authority" | sed -n 's/^Target-Updates: //p')
+    [ "$winning_updates" = "$(jq -cS . <<<"$updates")" ] || return 3
+    return 0
+}
+
+taskdag_activation_fenced_push() { # compatibility wrapper
+    local token=$1 writer=$2 operation=$3 actor=$4 timestamp=$5 target=$6 old=$7 new=$8 updates
+    updates=$(jq -ncS --arg ref "$target" --arg old "$old" --arg new "$new" '[{ref:$ref,old:$old,new:$new}]') || return 2
+    taskdag_activation_fenced_multi_push "$token" "$writer" "$operation" "$actor" "$timestamp" "$updates"
 }
 
 cmd_activation_apply() {
