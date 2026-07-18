@@ -88,6 +88,32 @@ if "$TD" claim-root 77 >/dev/null && git --git-dir="$ROOT/origin" show-ref --ver
   ok "root claim uses the activated fenced scheduling path"
 else bad "activated root claim did not converge"; fi
 
+cat >"$ROOT/breakdown.json" <<'EOF'
+[{"title":"Born-claimed activated child","type":"leaf","status":"pending","claim":true}]
+EOF
+authority_before_breakdown=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+breakdown=$($TD breakdown "$root" --spec-file="$ROOT/breakdown.json" --json)
+child=$(jq -r '.tasks[0].sha // empty' <<<"$breakdown")
+child_short=$(jq -r '.tasks[0].shortSha // empty' <<<"$breakdown")
+active_claim=$(git ls-remote origin "refs/heads/tasks/active/$child_short" | awk '{print $1}')
+git fetch -q origin "$active_claim"
+if [[ "$child" =~ ^[0-9a-f]{40}$ ]] \
+   && [ "$(git show -s --format='%(trailers:key=Task-Commit,valueonly)' FETCH_HEAD)" = "$child" ] \
+   && [ -z "$(git ls-remote origin refs/heads/tasks/root-active/77)" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_breakdown" ]; then
+  ok "activated breakdown atomically publishes a born-claimed child"
+else
+  bad "activated breakdown did not publish its fenced update set"
+fi
+
+"$TD" block "$dep" --reason="fixture" >/dev/null
+authority_before_unblock=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+if "$TD" unblock "$dep" >/dev/null \
+   && [ -z "$(git ls-remote origin "refs/heads/tasks/blocked/$dep" "refs/heads/tasks/blocked-meta/$dep")" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_unblock" ]; then
+  ok "activated unblock publishes its fenced deletion set"
+else bad "activated unblock did not publish its fenced deletion set"; fi
+
 printf 'new incident detail' >"$ROOT/human-comment"
 authority_before_comment=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
 if "$TD" ingest-comment --issue 77 --comment-id 7701 --author human \

@@ -4439,7 +4439,7 @@ EOF
             for lease in "${lease_args[@]}"; do
                 case "$lease" in "--force-with-lease=$ref:"*) old=${lease#"--force-with-lease=$ref:"} ;; esac
             done
-            breakdown_updates=$(jq -cS --argjson u "$breakdown_updates" --arg ref "$ref" --arg old "$old" --arg new "$new" \
+            breakdown_updates=$(jq -ncS --argjson u "$breakdown_updates" --arg ref "$ref" --arg old "$old" --arg new "$new" \
                 '$u+[{ref:$ref,old:$old,new:$new}] | sort_by(.ref)') || return 3
         done
         taskdag_consumer_fenced_scheduling_push breakdown "$claimer" "$breakdown_updates" || push_rc=$?
@@ -7170,8 +7170,8 @@ cmd_unblock() {
     taskdag_consumer_prepare unblock-pre-cas || return 3
     if [ "${#refspecs[@]}" -gt 0 ]; then
         if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
-            [ -n "$remote_blocked" ] && unblock_updates=$(jq -cS --argjson u "$unblock_updates" --arg ref "$blocked_ref" --arg old "$remote_blocked" '$u+[{ref:$ref,old:$old,new:""}]')
-            [ -n "$remote_meta" ] && unblock_updates=$(jq -cS --argjson u "$unblock_updates" --arg ref "$meta_ref" --arg old "$remote_meta" '$u+[{ref:$ref,old:$old,new:""}]')
+            [ -n "$remote_blocked" ] && unblock_updates=$(jq -ncS --argjson u "$unblock_updates" --arg ref "$blocked_ref" --arg old "$remote_blocked" '$u+[{ref:$ref,old:$old,new:""}]')
+            [ -n "$remote_meta" ] && unblock_updates=$(jq -ncS --argjson u "$unblock_updates" --arg ref "$meta_ref" --arg old "$remote_meta" '$u+[{ref:$ref,old:$old,new:""}]')
             taskdag_consumer_fenced_scheduling_push unblock "${TASK_DAG_CLAIMER:-unblock}" "$unblock_updates" || unblock_push_rc=$?
         else
             git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" 2>/dev/null || unblock_push_rc=$?
