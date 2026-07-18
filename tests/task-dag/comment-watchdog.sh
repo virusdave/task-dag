@@ -16,6 +16,16 @@ reviewed=$(printf '%s' '[{"ingestionStartAt":"2026-06-01T00:00:00Z","repository"
 runtime1=1111111111111111111111111111111111111111
 runtime2=2222222222222222222222222222222222222222
 cycle=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+cat >"$ROOT/reviewed.json" <<'EOF'
+{"schema":1,"repositories":[{"ingestionStartAt":"2026-06-01T00:00:00Z","name":"top-level","repository":"virusdave/top-level"}]}
+EOF
+activation_record='{"registrySnapshot":{"repositories":[{"repository":"virusdave/task-dag"},{"repository":"virusdave/top-level"}]}}'
+if _taskdag_comment_watchdog_registry_allowed "$activation_record" "$ROOT/reviewed.json" virusdave/top-level; then
+    ok "reviewed watchdog registry may be a strict activation subset"
+else bad "valid strict activation subset rejected"; fi
+if _taskdag_comment_watchdog_registry_allowed "$activation_record" "$ROOT/reviewed.json" virusdave/missing; then
+    bad "coordination repository outside reviewed registry accepted"
+else ok "coordination repository must be reviewed"; fi
 append_record() {
     local record=$1 seq path tree commit type last_attempt=${LAST_ATTEMPT:-none} recent_success=${RECENT_SUCCESS:-none} complete_success=${COMPLETE_SUCCESS:-none}
     seq=$(jq -r .sequence <<<"$record"); path=$(printf 'records/%016d.json' "$seq")

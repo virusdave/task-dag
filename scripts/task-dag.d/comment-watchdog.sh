@@ -5,6 +5,16 @@ TASKDAG_COMMENT_WATCHDOG_REF="refs/heads/tasks/v1/comment-watchdog"
 
 _taskdag_comment_watchdog_registry() { jq -cS '[.repositories[]|{repository,ingestionStartAt}]|sort_by(.repository)' "$1"; }
 _taskdag_comment_watchdog_registry_digest() { printf '%s' "$(_taskdag_comment_watchdog_registry "$1")" | sha256sum | awk '{print $1}'; }
+_taskdag_comment_watchdog_registry_allowed() { # activation-record registry-file coordination-repository
+    local activation_record=$1 registry_file=$2 coordination=$3 reviewed
+    reviewed=$(_taskdag_comment_watchdog_registry "$registry_file") || return 1
+    jq -e --argjson reviewed "$reviewed" --arg coordination "$coordination" '
+      . as $activation |
+      ($reviewed|map(.repository)) as $names |
+      ($names|index($coordination))!=null and
+      all($names[]; . as $name | any($activation.registrySnapshot.repositories[]; .repository==$name))
+    ' <<<"$activation_record" >/dev/null
+}
 
 _taskdag_comment_watchdog_response_parts() { # endpoint; prints epoch<TAB>body-file
     local endpoint=$1 response headers body observed
@@ -203,11 +213,7 @@ cmd_comment_watchdog() {
         activation=$(taskdag_activation_snapshot_token) || return 3; activation_record=$(taskdag_activation_record_for_snapshot "$activation") || return 3
         runtime=$(_taskdag_activation_runtime_commit) || return 3; registry=$(jq -r .registrySnapshot.id <<<"$activation_record")
         repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 3
-        jq -e --argjson reviewed "$(_taskdag_comment_watchdog_registry "$registry_file")" --arg coordination "$repo" '
-          ($reviewed|map(.repository)) as $names |
-          ($names|index($coordination))!=null and
-          all($names[] as $name; any(.registrySnapshot.repositories[]; .repository==$name))
-        ' <<<"$activation_record" >/dev/null || return 3
+        _taskdag_comment_watchdog_registry_allowed "$activation_record" "$registry_file" "$repo" || return 3
         old=$(git ls-remote --refs origin "$TASKDAG_COMMENT_WATCHDOG_REF" | awk 'NF==2{print $1}') || return 2
         if [ -z "$old" ]; then
             [ "$action" = acquire ] || return 3
