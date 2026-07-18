@@ -8,6 +8,19 @@ git -C "$tmp/work" remote add origin "$tmp/origin.git"
 git -C "$tmp/work" config user.name test
 git -C "$tmp/work" config user.email test@example.com
 empty=$(git -C "$tmp/work" hash-object -t tree /dev/null)
+classify() {
+  local issue=$1 body=$2 result
+  printf '%s' "$body" >"$tmp/classify-body"
+  result=$(source "$(dirname "$TD")/task-dag.d/cross-repo.sh"; _xrepo_classify_comment_body acme/widgets "$issue" "$tmp/classify-body")
+  printf '%s\n' "${result%%$'\x1f'*}"
+}
+metadata_sha=0123456789abcdef0123456789abcdef01234567
+[ "$(classify 10 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = machine-skip ]
+[ "$(classify 11 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = human ]
+[ "$(classify 10 'Task metadata commit: 0123456 | Branch: tasks/pending/10')" = human ]
+[ "$(classify 10 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10 extra")" = human ]
+[ "$(classify 10 $'Task metadata commit: '$metadata_sha$' | Branch: tasks/pending/10\n')" = human ]
+[ "$(classify 10 $'Task metadata commit:\t'$metadata_sha$' | Branch: tasks/pending/10')" = human ]
 clarification=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarification' '' \
   'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 98' \
   | git -C "$tmp/work" commit-tree "$empty")

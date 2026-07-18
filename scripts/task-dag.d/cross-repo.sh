@@ -1442,13 +1442,18 @@ _xrepo_make_receipt() {
 # empty for non-completions). A non-whitespace delimiter preserves an empty
 # phase followed by a present peer issue.
 _xrepo_classify_comment_body() {
-    local repo="$1" issue="$2" body_file="$3" first_line first_nonblank
+    local repo="$1" issue="$2" body_file="$3" first_line first_nonblank body
+    local metadata_re='^Task metadata commit: ([0-9a-f]{40}) \| Branch: tasks/pending/([1-9][0-9]*)$'
     first_line="$(head -n1 "$body_file")"
     first_nonblank="$(grep -m1 -v '^[[:space:]]*$' "$body_file" 2>/dev/null || true)"
+    body="$(cat "$body_file"; printf '\x1e')"; body="${body%$'\x1e'}"
     if [[ "$first_line" =~ ^[[:space:]]*\<\!--[[:space:]]*task-dag:completion[[:space:]]*--\>[[:space:]]+Satisfies[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)[[:space:]]+via[[:space:]]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([A-Fa-f0-9]+)([[:space:]]+phase[[:space:]]+([A-Za-z0-9]+))?([[:space:]]+peer-issue[[:space:]]+([0-9]+))?[[:space:]]*$ ]]; then
         local target_repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" target_issue="${BASH_REMATCH[3]}"
         [ "$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')" = "$repo" ] && [ "$target_issue" = "$issue" ] || return 2
         printf 'completion\x1f%s/%s@%s\x1f%s\x1f%s\n' "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}" "${BASH_REMATCH[8]}" "${BASH_REMATCH[10]}"
+    elif [[ "$body" =~ $metadata_re ]] \
+        && [ "${BASH_REMATCH[2]}" = "$issue" ]; then
+        printf 'machine-skip\x1f\x1f\x1f\n'
     elif [[ "$first_nonblank" =~ ^[[:space:]]*\<\!-- ]] || grep -q '<!-- task-dag:' "$body_file"; then
         printf 'machine-skip\x1f\x1f\x1f\n'
     else
