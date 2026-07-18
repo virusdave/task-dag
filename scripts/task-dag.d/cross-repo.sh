@@ -1852,7 +1852,8 @@ EOF
     # Delegations live outside master, so the initial run snapshot is not
     # sufficient authority for a close several minutes later.
     _rc_fresh_issue_status() {
-        local ci="$1" dir="$tmp/converge-${ci}.git" manifest="$tmp/converge-${ci}.manifest" fetched="$tmp/converge-${ci}.fetched"
+        local ci="$1"
+        local dir="$tmp/converge-${ci}.git" manifest="$tmp/converge-${ci}.manifest" fetched="$tmp/converge-${ci}.fetched"
         local advertised
         rm -rf "$dir"
         advertised=$(git ls-remote --refs origin \
