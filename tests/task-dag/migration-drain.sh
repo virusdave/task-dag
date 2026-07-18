@@ -14,7 +14,7 @@ if jq -e '.schema == 1 and .mode == "draining-legacy-writers" and .recognizedRea
 printf '<!-- task-dag:completion --> Satisfies virusdave/task-dag#1 via peer/repo@abcdef1' >"$ROOT/completion-body"
 printf 'child body\n\n' >"$ROOT/materialise-body"
 jq -n --arg body "materialise-body" '{schema:1,actor:"fixture",authoritativeTimestamp:"2026-07-17T00:00:00Z",provenance:["fixture"],declarations:[{sourceRepo:{id:"1",name:"o/source"},parentIssue:{id:"2",number:21},peerRepo:{id:"3",name:"o/peer"},title:"Child",bodyFile:$body,provenance:"fixture"}]}' >"$ROOT/materialise-spec"
-for spec in "close-epic --issue 1" "close-ops-epic --issue 1 --yes" "close-completed-epic --issue 1 --reason evidence --yes" "delegate --issue 1 --to peer/repo#2" "reconcile-closed-issue 1 --yes" "ingest-comment --issue 1 --comment-id 1 --author bot --comment-url https://example.test/1 --created-at 2026-07-17T00:00:00Z --updated-at 2026-07-17T00:00:00Z --body-file $ROOT/completion-body" "propagate-completion --node issue:virusdave/task-dag#1 --witness aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "reconcile-backstop --no-fetch" "graph-converge --no-fetch"; do
+for spec in "close-epic --issue 1" "close-ops-epic --issue 1 --yes" "close-completed-epic --issue 1 --reason evidence --yes" "delegate --issue 1 --to peer/repo#2" "reconcile-closed-issue 1 --yes" "propagate-completion --node issue:virusdave/task-dag#1 --witness aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "reconcile-backstop --no-fetch" "graph-converge --no-fetch"; do
     read -r -a args <<<"$spec"
     out="$($TD "${args[@]}" 2>&1)"; rc=$?
     if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out" && grep -q '^mode: draining-legacy-writers$' <<<"$out"; then ok "${args[0]} drains before effects"; else bad "${args[0]} rc=$rc: $out"; fi
@@ -22,10 +22,10 @@ done
 
 for command in materialise-batch materialise-child; do
     out="$($TD "$command" --spec-file "$ROOT/materialise-spec" 2>&1)"; rc=$?
-    if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out"; then
-        ok "$command validates then drains"
+    if [ "$rc" -eq 3 ]; then
+        ok "$command validates then requires canonical producer authority"
     else
-        bad "$command valid spec rc=$rc: $out"
+        bad "$command producer authority rc=$rc: $out"
     fi
     "$TD" "$command" --spec-file "$ROOT/completion-body" >/dev/null 2>&1; rc=$?
     [ "$rc" -eq 2 ] && ok "$command malformed spec fails before drain" \
@@ -124,9 +124,10 @@ TASKDAG_MATERIALISE_RECONCILER_INTERNAL=1 "$TD" delegate --issue 1 --to peer/rep
 [ "$rc" -eq 75 ] && ok "exported reconciler-like environment cannot bypass public delegate drain" \
   || bad "public delegate bypassed drain with exported environment (rc=$rc)"
 
-mkdir "$ROOT/offline-comment-repo" "$ROOT/offline-bin"
-git -C "$ROOT/offline-comment-repo" init -q
-git -C "$ROOT/offline-comment-repo" remote add origin https://github.com/virusdave/task-dag.git
+git init -q --bare "$ROOT/offline-comment-origin"
+git clone -q "$ROOT/offline-comment-origin" "$ROOT/offline-comment-repo"
+mkdir "$ROOT/offline-bin"
+git -C "$ROOT/offline-comment-repo" config taskdag.current-repo virusdave/task-dag
 cat >"$ROOT/offline-bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo called >"$GH_CALL_LOG"
@@ -141,9 +142,11 @@ chmod +x "$ROOT/offline-bin/gh"
       --created-at 2026-07-17T00:00:00Z --updated-at 2026-07-17T00:00:00Z \
       --body-file "$ROOT/completion-body" >/dev/null 2>&1
 ); rc=$?
-[ "$rc" -eq 75 ] && [ ! -e "$ROOT/gh-called" ] \
-  && ok "completion preclassification resolves origin without GitHub calls" \
-  || bad "completion preclassification returned rc=$rc or called GitHub"
+[ "$rc" -eq 0 ] && [ ! -e "$ROOT/gh-called" ] \
+  && git --git-dir="$ROOT/offline-comment-origin" show-ref --verify --quiet refs/heads/gh/comments/1/1 \
+  && [ -z "$(git --git-dir="$ROOT/offline-comment-origin" for-each-ref --format='%(refname)' refs/heads/tasks/completions)" ] \
+  && ok "completion hint writes only an isolated receipt without GitHub calls" \
+  || bad "completion hint did not remain receipt-only (rc=$rc)"
 
 for spec in \
   "ingest-comment --issue nope --comment-id 1 --author bot --comment-url https://example.test/1 --created-at 2026-07-17T00:00:00Z --updated-at 2026-07-17T00:00:00Z --body-file $ROOT/completion-body" \
@@ -155,8 +158,8 @@ for spec in \
       || bad "ingest-comment malformed observation returned rc=$rc"
 done
 
-mkdir "$ROOT/comment-repo"
-git -C "$ROOT/comment-repo" init -q
+git init -q --bare "$ROOT/comment-origin"
+git clone -q "$ROOT/comment-origin" "$ROOT/comment-repo"
 git -C "$ROOT/comment-repo" config taskdag.current-repo virusdave/task-dag
 out="$(
   cd "$ROOT/comment-repo" || exit 1
@@ -167,12 +170,12 @@ out="$(
     COMMENT_UPDATED_AT=2026-07-17T00:00:00Z \
     "$REPO_ROOT/scripts/sync-comment-to-tasks.sh" 2>&1
 )"; rc=$?
-if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out" \
-  && [ -z "$(git -C "$ROOT/comment-repo" for-each-ref --format='%(refname)')" ] \
-  && ! git -C "$ROOT/comment-repo" config --local --get user.name >/dev/null; then
-    ok "sync-comment-to-tasks.sh drains completion before receipt/config effects"
+if [ "$rc" -eq 0 ] \
+  && git --git-dir="$ROOT/comment-origin" show-ref --verify --quiet refs/heads/gh/comments/1/1 \
+  && [ -z "$(git --git-dir="$ROOT/comment-origin" for-each-ref --format='%(refname)' refs/heads/tasks/completions)" ]; then
+    ok "sync-comment-to-tasks.sh writes receipt-only completion hints"
 else
-    bad "sync-comment-to-tasks.sh completion drain rc=$rc: $out"
+    bad "sync-comment-to-tasks.sh receipt-only completion rc=$rc: $out"
 fi
 
 for arg in -h --help; do

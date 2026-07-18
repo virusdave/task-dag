@@ -382,6 +382,7 @@ TASKDAG_GRAPH_REF="refs/heads/tasks/v1/graph"
 TASKDAG_MATERIALISATION_REF="refs/heads/tasks/v1/materialisation"
 TASKDAG_ACTIVATION_REF="refs/heads/tasks/v1/activation"
 TASKDAG_MATERIALISE_PRODUCER_REF="refs/heads/tasks/v1/materialisation-producer"
+TASKDAG_COMMENT_WATCHDOG_REF="refs/heads/tasks/v1/comment-watchdog"
 
 taskdag_is_activation_ref() {
     case "$1" in
@@ -400,6 +401,13 @@ taskdag_is_materialisation_ref() {
 taskdag_is_materialisation_producer_ref() {
     case "$1" in
         refs/heads/tasks/v1/materialisation-producer|tasks/v1/materialisation-producer) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+taskdag_is_comment_watchdog_ref() {
+    case "$1" in
+        refs/heads/tasks/v1/comment-watchdog|tasks/v1/comment-watchdog) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -539,7 +547,7 @@ taskdag_ref_violations() {
     local sha="$1" ref="$2" activation_authority=${3:-} expected_repository=${4:-}
     local objtype tree rest ns
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || {
-        { taskdag_is_materialisation_ref "$ref" || taskdag_is_materialisation_producer_ref "$ref" || taskdag_is_activation_ref "$ref"; } \
+        { taskdag_is_materialisation_ref "$ref" || taskdag_is_materialisation_producer_ref "$ref" || taskdag_is_comment_watchdog_ref "$ref" || taskdag_is_activation_ref "$ref"; } \
             && echo "✗ ${ref} → ${sha} is missing or unreadable"
         return 0
     }
@@ -572,6 +580,11 @@ taskdag_ref_violations() {
     if taskdag_is_materialisation_producer_ref "$ref"; then
         _taskdag_materialise_producer_validate_tip "$sha" \
             || echo "✗ ${ref} has malformed materialisation producer authority"
+        return 0
+    fi
+    if taskdag_is_comment_watchdog_ref "$ref"; then
+        taskdag_comment_watchdog_validate_tip "$sha" \
+            || echo "✗ ${ref} has malformed comment-watchdog authority"
         return 0
     fi
     if taskdag_is_activation_ref "$ref"; then
@@ -6181,6 +6194,7 @@ EOF
         taskdag_is_mailbox_ref "$ref" && continue
         taskdag_is_materialisation_ref "$ref" && continue
         taskdag_is_materialisation_producer_ref "$ref" && continue
+        taskdag_is_comment_watchdog_ref "$ref" && continue
         taskdag_is_activation_ref "$ref" && continue
         local tree
         tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
@@ -8026,6 +8040,7 @@ main() {
         materialise-producer-enable) cmd_materialise_producer_enable "$@" ;;
         materialise-reconcile) cmd_materialise_reconcile "$@" ;;
         activation) cmd_activation "$@" ;;
+        comment-watchdog) cmd_comment_watchdog "$@" ;;
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;
@@ -8300,6 +8315,7 @@ cmd_publish() {
         return 2
     }
     if [ "$TASKDAG_CONSUMER_MODE" = legacy ]; then
+        if declare -F _xrepo_watchdog_fence >/dev/null 2>&1; then _xrepo_watchdog_fence || return 3; fi
         git push origin "$tip:refs/heads/master"
         return $?
     fi
@@ -8307,6 +8323,7 @@ cmd_publish() {
     # reservation after this readback and this close therefore cannot both win
     # the same semantic generation; the loser must revalidate current state.
     updates=$(jq -ncS --arg ref refs/heads/master --arg old "$old" --arg new "$tip" '[{ref:$ref,old:$old,new:$new}]') || return 2
+    if declare -F _xrepo_watchdog_fence >/dev/null 2>&1; then _xrepo_watchdog_fence || return 3; fi
     export TASKDAG_FENCED_PUBLISH=1
     taskdag_consumer_fenced_scheduling_push publish-completion "${TASK_DAG_CLAIMER:-publisher}" "$updates" || rc=$?
     unset TASKDAG_FENCED_PUBLISH

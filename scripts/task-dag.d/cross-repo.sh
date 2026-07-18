@@ -29,6 +29,10 @@ _xrepo_die() {
     return 2
 }
 
+_xrepo_watchdog_fence() {
+    [ -z "${_XREPO_WATCHDOG_TOKEN_FILE:-}" ] || taskdag_comment_watchdog_check_file "$_XREPO_WATCHDOG_TOKEN_FILE" 30
+}
+
 # Helper: trim leading/trailing whitespace.
 _xrepo_trim() {
     local s="$1"
@@ -236,11 +240,13 @@ _xrepo_ensure_issue_epic() {
         local updates
         updates=$(jq -ncS --arg pending "$pending_ref" --arg issue_ref "$gh_issues_ref" --arg epic "$epic_sha" \
             '[{ref:$pending,old:"",new:$epic},{ref:$issue_ref,old:"",new:$epic}] | sort_by(.ref)') || return 2
+        _xrepo_watchdog_fence || return 2
         taskdag_consumer_fenced_scheduling_push ensure-issue-epic \
             "${TASK_DAG_CLAIMER:-comment-ingest}" "$updates" || publish_rc=$?
     else
         git update-ref "$pending_ref" "$epic_sha"
         git update-ref "$gh_issues_ref" "$epic_sha"
+        _xrepo_watchdog_fence || return 2
         git push --atomic origin "$pending_ref" "$gh_issues_ref" 1>&2 || publish_rc=$?
     fi
     if [ "$publish_rc" -ne 0 ]; then
@@ -310,12 +316,19 @@ cmd_delegate() {
 }
 
 _taskdag_materialise_delegate_projection() {
-    local top_issue="" target="" note=""
+    local top_issue="" target="" note="" parent_repo_node_id="" parent_issue_node_id=""
+    local peer_repo_node_id="" peer_issue_node_id="" materialisation_operation_id="" declaration_digest=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --issue) top_issue="$2"; shift 2 ;;
             --to)    target="$2";    shift 2 ;;
             --note)  note="$2";      shift 2 ;;
+            --parent-repo-node-id) parent_repo_node_id="$2"; shift 2 ;;
+            --parent-issue-node-id) parent_issue_node_id="$2"; shift 2 ;;
+            --peer-repo-node-id) peer_repo_node_id="$2"; shift 2 ;;
+            --peer-issue-node-id) peer_issue_node_id="$2"; shift 2 ;;
+            --materialisation-operation-id) materialisation_operation_id="$2"; shift 2 ;;
+            --declaration-digest) declaration_digest="$2"; shift 2 ;;
             *) _xrepo_die "delegate: unknown arg: $1"; return 2 ;;
         esac
     done
@@ -405,6 +418,13 @@ _taskdag_materialise_delegate_projection() {
             if [ -n "$note" ]; then
                 printf '  note: %s\n' "$note"
             fi
+            printf '\n'
+            printf 'Parent-Repo-Node-Id: %s\n' "$parent_repo_node_id"
+            printf 'Parent-Issue-Node-Id: %s\n' "$parent_issue_node_id"
+            printf 'Peer-Repo-Node-Id: %s\n' "$peer_repo_node_id"
+            printf 'Peer-Issue-Node-Id: %s\n' "$peer_issue_node_id"
+            printf 'Materialisation-Operation-Id: %s\n' "$materialisation_operation_id"
+            printf 'Declaration-Digest: %s\n' "$declaration_digest"
         } > "$msg_file"
 
         local delegation_sha
@@ -778,6 +798,71 @@ _xrepo_validate_delegated_close_v1() {
     close_issue=$(env -u GIT_DIR git -C "$wt" show -s \
         --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$peer_close")
     [ "$close_issue" = "#${peer_issue}" ] || return 2
+}
+
+# Sole live delegated-close writer. Completion comments are hints only; this
+# operation derives the oldest valid close from the peer's authoritative tip
+# and create-only publishes parent-authoritative evidence.
+_xrepo_reconcile_delegated_close() { # parent-issue peer-repo peer-issue delegation-sha
+    local top_issue=$1 peer_repo=$2 peer_issue=$3 delegation=$4 top_repo wt tip root close="" candidate ref existing rc=0 updates evidence
+    top_repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 2
+    wt=$(taskdag_peer_worktree_for "$peer_repo" 2>/dev/null) || return 0
+    env -u GIT_DIR git -C "$wt" fetch -q --no-tags origin \
+        '+refs/heads/master:refs/remotes/origin/master' \
+        "+refs/heads/gh/issues/${peer_issue}:refs/heads/gh/issues/${peer_issue}" \
+        "+refs/heads/tasks/pending/${peer_issue}:refs/heads/tasks/pending/${peer_issue}" || return 2
+    tip=$(env -u GIT_DIR git -C "$wt" rev-parse refs/remotes/origin/master^{commit}) || return 2
+    root=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/gh/issues/${peer_issue}^{commit}" 2>/dev/null \
+        || env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/tasks/pending/${peer_issue}^{commit}" 2>/dev/null) || return 2
+    while IFS= read -r candidate; do
+        local parents first second extra tree first_tree trailer
+        parents=$(env -u GIT_DIR git -C "$wt" show -s --format='%P' "$candidate") || return 2
+        read -r first second extra <<<"$parents"
+        [ -n "$first" ] && [ "$second" = "$root" ] && [ -z "${extra:-}" ] || continue
+        tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$candidate^{tree}") || return 2
+        first_tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$first^{tree}") || return 2
+        [ "$tree" = "$first_tree" ] || continue
+        trailer=$(env -u GIT_DIR git -C "$wt" show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$candidate") || return 2
+        [ "$trailer" = "#${peer_issue}" ] || continue
+        close=$candidate; break
+    done < <(env -u GIT_DIR git -C "$wt" rev-list --first-parent --reverse "$tip")
+    [ -n "$close" ] || return 0
+    evidence=$(jq -ncS --arg parentRepo "$top_repo" --argjson parentIssue "$top_issue" --arg peerRepo "$peer_repo" --argjson peerIssue "$peer_issue" \
+        --arg parentRepoNodeId "$(_xrepo_exact_trailer "$delegation" Parent-Repo-Node-Id)" \
+        --arg parentIssueNodeId "$(_xrepo_exact_trailer "$delegation" Parent-Issue-Node-Id)" \
+        --arg peerRepoNodeId "$(_xrepo_exact_trailer "$delegation" Peer-Repo-Node-Id)" \
+        --arg peerIssueNodeId "$(_xrepo_exact_trailer "$delegation" Peer-Issue-Node-Id)" \
+        --arg materialisationOperationId "$(_xrepo_exact_trailer "$delegation" Materialisation-Operation-Id)" \
+        --arg declarationDigest "$(_xrepo_exact_trailer "$delegation" Declaration-Digest)" \
+        --arg peerTip "$tip" --arg peerClose "$close" --arg peerEpic "$root" \
+        '{parentRepo:$parentRepo,parentIssue:$parentIssue,peerRepo:$peerRepo,peerIssue:$peerIssue,parentRepoNodeId:$parentRepoNodeId,parentIssueNodeId:$parentIssueNodeId,peerRepoNodeId:$peerRepoNodeId,peerIssueNodeId:$peerIssueNodeId,materialisationOperationId:$materialisationOperationId,declarationDigest:$declarationDigest,peerTip:$peerTip,peerClose:$peerClose,peerEpic:$peerEpic}') || return 2
+    candidate=$(_taskdag_delegated_close_message "$evidence" | git commit-tree "$(_xrepo_empty_tree)" -p "$delegation") || return 2
+    _xrepo_validate_delegated_close_v1 "$candidate" "$delegation" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue" || return 2
+    ref="refs/heads/tasks/delegated-close/v1/${top_issue}/${peer_repo}/${peer_issue}"
+    existing=$(_xrepo_remote_sha "$ref") || rc=$?; [ "$rc" -ne 3 ] || return 2
+    if [ -n "$existing" ]; then
+        git fetch -q --no-tags origin "$ref" || return 2
+        _xrepo_validate_delegated_close_v1 "$existing" "$delegation" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue"
+        return
+    fi
+    _xrepo_watchdog_fence || return 2
+    updates=$(jq -ncS --arg ref "$ref" --arg new "$candidate" '[{ref:$ref,old:"",new:$new}]') || return 2
+    taskdag_consumer_fenced_scheduling_push reconcile-delegated-close "${TASK_DAG_CLAIMER:-comment-reconciler}" "$updates" || :
+    existing=$(_xrepo_remote_sha "$ref") || return 2; [ -n "$existing" ] || return 2
+    git fetch -q --no-tags origin "$ref" || return 2
+    _xrepo_validate_delegated_close_v1 "$existing" "$delegation" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue"
+}
+
+_xrepo_reconcile_issue_delegated_closes() { # issue
+    local issue=$1 listing sha ref tail owner repo peer
+    listing=$(git ls-remote --refs origin "refs/heads/tasks/delegated/${issue}/*") || return 2
+    while IFS=$'\t' read -r sha ref; do
+        [ -n "$ref" ] || continue
+        tail=${ref#refs/heads/tasks/delegated/${issue}/}; owner=${tail%%/*}; tail=${tail#*/}; repo=${tail%%/*}; peer=${tail#*/}
+        git fetch -q --no-tags origin "$ref" || return 2
+        _xrepo_validate_delegation "$sha" "$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')" "$issue" "${owner}/${repo}" "$peer" || return 2
+        _xrepo_reconcile_delegated_close "$issue" "${owner}/${repo}" "$peer" "$sha" || return 2
+    done < <(printf '%s\n' "$listing" | awk 'NF==2{print $1 "\t" $2}')
 }
 
 _xrepo_exact_trailer() {
@@ -1163,9 +1248,8 @@ cmd_ingest_comment() {
             && { [ "$created_at" \< "$updated_at" ] || [ "$created_at" = "$updated_at" ]; } \
             || { _xrepo_die "ingest-comment: invalid observation timestamps"; return 2; }
     fi
-    # Classification is pure. Drain completion observations before the API
-    # timestamp fallback, remote receipt probe, or any local/durable write.
-    # Human work-request comments continue under the legacy reader semantics.
+    # Classification is pure. Completion observations are receipt-only hints;
+    # the canonical delegated-close reconciler derives authority independently.
     local pre_classification pre_disposition _pre_from _pre_phase _pre_issue pre_repo body_value="" body_tmp=""
     if [ "$body_stdin" = true ]; then
         IFS= read -r -d '' body_value || true
@@ -1179,9 +1263,7 @@ cmd_ingest_comment() {
         pre_classification="$(_xrepo_classify_comment_body "$pre_repo" "$issue" "$body_file")" || return 2
     fi
     IFS=$'\x1f' read -r pre_disposition _pre_from _pre_phase _pre_issue <<<"$pre_classification"
-    if [ "$pre_disposition" = completion ]; then
-        taskdag_migration_guard completion-ingest || return $?
-    fi
+    : "$pre_disposition"
     # Offline/event fixtures may explicitly provide their coherent snapshot.
     # Without timestamps obtain body and metadata from one direct API response.
     if [ -z "$created_at" ]; then
@@ -1287,7 +1369,7 @@ _xrepo_validate_receipt() {
     [[ "$bh" =~ ^[0-9a-f]{64}$ ]] || return 2
     parents="$(git rev-list --parents -n1 "$sha" | awk '{print NF-1}')"
     effect="$(_xrepo_receipt_field "$sha" Effect-Commit)"
-    if [ "$disposition" = machine-skip ]; then
+    if [ "$disposition" = machine-skip ] || { [ "$disposition" = completion ] && [ -z "$effect" ]; }; then
         [ "$parents" = 0 ] \
             && [ "$(grep -c '^Effect-Commit:' <<<"$msg")" = 0 ] \
             && [ "$(grep -c '^Effect-Ref-At-Creation:' <<<"$msg")" = 0 ] || return 2
@@ -1323,7 +1405,7 @@ _xrepo_validate_origin_receipt() {
     local sha="$1" repo="$2" issue="$3" cid="$4" info disposition effect effect_ref tail owner peer_repo peer_issue delegation_ref delegation_sha rc=0
     info="$(_xrepo_validate_receipt "$sha" "$repo" "$issue" "$cid")" || return 2
     disposition="${info%% *}"
-    if [ "$disposition" = completion ]; then
+    if [ "$disposition" = completion ] && [ -n "$(_xrepo_receipt_field "$sha" Effect-Commit)" ]; then
         effect="$(_xrepo_receipt_field "$sha" Effect-Commit)"
         effect_ref="$(_xrepo_receipt_field "$sha" Effect-Ref-At-Creation)"
         tail="${effect_ref#refs/heads/tasks/completions/${issue}/}"
@@ -1388,24 +1470,13 @@ _xrepo_ingest_observed_comment() {
     classification="$(_xrepo_classify_comment_body "$repo" "$issue" "$body_file")" || return 2
     IFS=$'\x1f' read -r disposition peer_from peer_phase peer_issue <<<"$classification"
     if [ "$disposition" = completion ]; then
-        taskdag_migration_guard completion-ingest || return $?
-        local _XREPO_PREPARE_COMPLETION=true
-        local completion_args=(--issue "$issue" --comment-id "$comment_id" --comment-url "$comment_url" --from "$peer_from")
-        [ -z "$peer_phase" ] || completion_args+=(--phase "$peer_phase")
-        [ -z "$peer_issue" ] || completion_args+=(--peer-issue "$peer_issue")
-        unset XREPO_PREPARED_COMPLETION_SHA XREPO_PREPARED_COMPLETION_REF \
-            XREPO_PREPARED_COMPLETION_EXISTS XREPO_PREPARED_DELEGATION_SHA
-        cmd_ingest_completion "${completion_args[@]}" || {
-            local completion_rc=$?
-            unset XREPO_PREPARED_COMPLETION_SHA XREPO_PREPARED_COMPLETION_REF \
-                XREPO_PREPARED_COMPLETION_EXISTS XREPO_PREPARED_DELEGATION_SHA
-            return "$completion_rc"
-        }
-        effect_sha="$XREPO_PREPARED_COMPLETION_SHA"; effect_ref="$XREPO_PREPARED_COMPLETION_REF"
-        local effect_exists="$XREPO_PREPARED_COMPLETION_EXISTS"
-        local expected_delegation="$XREPO_PREPARED_DELEGATION_SHA"
+        # Completion comments are latency hints, never completion authority.
+        # Persist the receipt only; the canonical delegated-close reconciler
+        # independently verifies the peer's exact close merge.
+        : "$peer_from" "$peer_phase" "$peer_issue" "$comment_url"
     elif [ "$disposition" = human ]; then
         local epic msgf short nonce
+        _xrepo_watchdog_fence || return 2
         epic="$(_xrepo_ensure_issue_epic "$issue")" || return $?; msgf="$(mktemp)"
         nonce="$(printf '%s:%s:%s:%s\n' "$BASHPID" "$RANDOM" "$(date +%s%N)" "$comment_id" | git hash-object --stdin)" || return 2
         { printf 'kind: message\nrole: human\nintent: comment\n\nissue:\n  number: %s\n\ngithub:\n  comment_id: %s\n  actor: %s\n  url: %s\n\nmessage_id: msg_%s\n\nbody: |\n' "$issue" "$comment_id" "$author" "$comment_url" "$nonce"; sed 's/^/  /' "$body_file"; } >"$msgf"
@@ -1424,6 +1495,7 @@ _xrepo_ingest_observed_comment() {
     fi
     args+=("$receipt_sha:$comment_ref")
     local publish_rc=0
+    _xrepo_watchdog_fence || return 2
     if [ "$disposition" = human ]; then
         taskdag_consumer_prepare ingest-human-comment-pre-push || return 2
         if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
@@ -1433,16 +1505,19 @@ _xrepo_ingest_observed_comment() {
                 '[{ref:$rr,old:"",new:$receipt}]
                  + (if ($er!="" and ($exists|not)) then [{ref:$er,old:"",new:$effect}] else [] end)
                  | sort_by(.ref)') || return 2
+            _xrepo_watchdog_fence || return 2
             taskdag_consumer_fenced_scheduling_push ingest-human-comment "${TASK_DAG_CLAIMER:-comment-ingest}" "$updates" || publish_rc=$?
         else
+            _xrepo_watchdog_fence || return 2
             git push origin "${args[@]}" || publish_rc=$?
         fi
     else
+        _xrepo_watchdog_fence || return 2
         git push origin "${args[@]}" || publish_rc=$?
     fi
     if [ "$publish_rc" -ne 0 ]; then
         remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2
-        if [ -z "$remote_sha" ] && [ "$disposition" = completion ] && [ "$effect_exists" != true ]; then
+        if [ -z "$remote_sha" ] && [ "$disposition" = completion ] && [ -n "$effect_ref" ] && [ "$effect_exists" != true ]; then
             # A concurrent completion for another comment can win only the
             # shared fact ref. Adopt that valid fact, then retry this
             # comment's create-only receipt once.
@@ -1462,6 +1537,7 @@ _xrepo_ingest_observed_comment() {
             receipt_sha="$(_xrepo_make_receipt "$repo" "$issue" "$comment_id" "$disposition" \
                 "$created_at" "$updated_at" "$hash" "$effect_sha" "$effect_ref")" || return 2
             _xrepo_validate_receipt "$receipt_sha" "$repo" "$issue" "$comment_id" >/dev/null || return 2
+            _xrepo_watchdog_fence || return 2
             git push origin --atomic "--force-with-lease=$comment_ref:" "$receipt_sha:$comment_ref" >/dev/null 2>&1 || true
             remote_sha="$(_xrepo_remote_sha "$comment_ref")" || return 2
         fi
@@ -1502,10 +1578,13 @@ _xrepo_ingest_observed_comment() {
         fi
     fi
     if [ "$winner_disposition" = completion ] && [ "${_XREPO_DEFER_CONVERGENCE:-false}" != true ]; then
-        local status_line
+        local status_line root
+        _xrepo_reconcile_issue_delegated_closes "$issue" || return 2
         status_line="$(_xrepo_epic_status "$issue" | tail -n1)"
         if [[ "$status_line" =~ ^epic[[:space:]]ready-to-close: ]]; then
-            cmd_close_epic --issue "$issue" || return $?
+            root=$(_xrepo_ensure_issue_epic "$issue") || return 2
+            _xrepo_watchdog_fence || return 2
+            taskdag_emit_origin_epic_close "$issue" "$root" || return $?
         fi
     fi
 }
@@ -1518,24 +1597,24 @@ _xrepo_reconcile_argument_failure() {
         {schema_version:1,mode:(if $mode=="" then null else $mode end),status:"failed",dry_run:false,
          requests:0,pages:0,returned:0,unique:0,eligible:0,pull_requests:0,pre_boundary:0,
          already_receipted:0,missing:0,dispositions:{human:0,completion:0,machine_skip:0},
-         attempted:0,applied:0,deferred:0,failures:1,
+         attempted:0,applied:0,deferred:0,failures:1,exhausted:false,
          failure_items:[{stage:"arguments",issue:null,comment_id:null,message:$message}],
          duration_seconds:0,rate_limit:{remaining:null,reset:null},
          recent_success_at:null,complete_success_at:null}'
 }
 
 _xrepo_reconcile_comments_impl() {
-    local mode="" start="" since="" dry=false max_apply=100 max_pages=100 max_comments=10000 max_seconds=300
+    local mode="" start="" since="" dry=false max_apply=100 max_pages=100 max_comments=10000 max_seconds=300 watchdog_token=""
     local -a allows=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --mode|--ingestion-start-at|--since|--allow-comment|--max-apply|--max-pages|--max-comments|--max-seconds)
+            --mode|--ingestion-start-at|--since|--allow-comment|--max-apply|--max-pages|--max-comments|--max-seconds|--watchdog-token-file)
                 [ $# -ge 2 ] || { _xrepo_reconcile_argument_failure "$mode" "$1 requires a value"; return 2; }
                 case "$1" in
                     --mode) mode="$2";; --ingestion-start-at) start="$2";; --since) since="$2";;
                     --allow-comment) allows+=("$2");; --max-apply) max_apply="$2";;
                     --max-pages) max_pages="$2";; --max-comments) max_comments="$2";;
-                    --max-seconds) max_seconds="$2";;
+                    --max-seconds) max_seconds="$2";; --watchdog-token-file) watchdog_token="$2";;
                 esac
                 shift 2 ;;
             --dry-run) dry=true; shift;;
@@ -1554,6 +1633,11 @@ EOF
     [ "$mode" = recent ] || [ "$mode" = complete ] || { _xrepo_reconcile_argument_failure "$mode" "--mode must be recent or complete"; return 2; }
     _xrepo_valid_timestamp "$start" || { _xrepo_reconcile_argument_failure "$mode" "invalid --ingestion-start-at"; return 2; }
     if [ "$mode" = recent ]; then _xrepo_valid_timestamp "$since" || { _xrepo_reconcile_argument_failure "$mode" "recent requires valid --since"; return 2; }; else [ -z "$since" ] || { _xrepo_reconcile_argument_failure "$mode" "complete rejects --since"; return 2; }; fi
+    local _XREPO_WATCHDOG_TOKEN_FILE="$watchdog_token"
+    if [ -n "$watchdog_token" ]; then
+        [ -f "$watchdog_token" ] && [ "$max_seconds" -le 240 ] && taskdag_comment_watchdog_check_file "$watchdog_token" $((max_seconds+30)) \
+            || { _xrepo_reconcile_argument_failure "$mode" "invalid, stale, or insufficient watchdog lease"; return 2; }
+    fi
 
     local began now deadline repo tmp listing rc=0 fatal=false real_git
     began=$(date +%s); deadline=$((began + max_seconds)); repo=$(printf '%s' "$(_xrepo_current_repo_offline)" | tr '[:upper:]' '[:lower:]')
@@ -1755,25 +1839,35 @@ EOF
         while IFS= read -r issue; do
             [ -n "$issue" ] || continue
             _rc_time || { _rc_fail convergence "$issue" "" "time ceiling reached"; fatal=true; break; }
+            if ! _xrepo_reconcile_issue_delegated_closes "$issue"; then
+                _rc_fail convergence "$issue" "" "delegated-close reconciliation failed"
+                continue
+            fi
             local strict_status
             if ! strict_status=$(_rc_fresh_issue_status "$issue"); then
                 _rc_fail convergence "$issue" "" "cannot obtain a valid fresh delegation/completion snapshot"
                 continue
             fi
             [ "$strict_status" = ready ] || continue
+            local root
+            root=$(_xrepo_ensure_issue_epic "$issue") || { _rc_fail convergence "$issue" "" "cannot resolve epic root"; continue; }
+            if ! _xrepo_watchdog_fence; then _rc_fail convergence "$issue" "" "watchdog lease lost"; fatal=true; break; fi
             if ! _XREPO_STRICT_SNAPSHOT_GIT_DIR="$tmp/converge-${issue}.git" \
-                cmd_close_epic --issue "$issue" >"$tmp/close-${issue}.out"; then
+                taskdag_emit_origin_epic_close "$issue" "$root" >"$tmp/close-${issue}.out"; then
                 _rc_fail convergence "$issue" "" "strict epic close failed"
             fi
         done < <(LC_ALL=C sort -nu "$tmp/converge-issues")
     fi
-    now=$(date +%s); local status=success; { [ "$fatal" = true ] || [ "$failures" -gt 0 ]; } && status=failed
+    now=$(date +%s); local status=success exhausted=true
+    if [ "$fatal" = true ] || [ "$failures" -gt 0 ]; then status=failed; exhausted=false
+    elif [ "$dry" = false ] && [ "$deferred" -gt 0 ]; then status=partial; exhausted=false
+    fi
     local failure_json='[]'; [ -s "$failure_file" ] && failure_json=$(jq -s . "$failure_file")
     local recent_at=null complete_at=null stamp
-    if [ "$status" = success ] && [ "$dry" = false ]; then stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); [ "$mode" = recent ] && recent_at="\"$stamp\"" || complete_at="\"$stamp\""; fi
-    jq -nc --arg mode "$mode" --arg status "$status" --argjson dry_run "$dry" --argjson requests "$requests" --argjson pages "$pages" --argjson returned "$returned" --argjson unique "$unique" --argjson eligible "$eligible" --argjson prs "$prs" --argjson pre "$pre" --argjson receipts "$receipted" --argjson missing "$missing" --argjson human "$human" --argjson completion "$completion" --argjson machine "$machine" --argjson attempted "$attempted" --argjson applied "$applied" --argjson deferred "$deferred" --argjson failures "$failures" --argjson items "$failure_json" --argjson duration "$((now-began))" --argjson remaining "$remaining" --argjson reset "$reset" --argjson recent "$recent_at" --argjson complete "$complete_at" '{schema_version:1,mode:$mode,status:$status,dry_run:$dry_run,requests:$requests,pages:$pages,returned:$returned,unique:$unique,eligible:$eligible,pull_requests:$prs,pre_boundary:$pre,already_receipted:$receipts,missing:$missing,dispositions:{human:$human,completion:$completion,machine_skip:$machine},attempted:$attempted,applied:$applied,deferred:$deferred,failures:$failures,failure_items:$items,duration_seconds:$duration,rate_limit:{remaining:$remaining,reset:$reset},recent_success_at:$recent,complete_success_at:$complete}'
+    if [ "$status" = success ] && [ "$dry" = false ] && [ "$exhausted" = true ]; then stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); [ "$mode" = recent ] && recent_at="\"$stamp\"" || complete_at="\"$stamp\""; fi
+    jq -nc --arg mode "$mode" --arg status "$status" --argjson dry_run "$dry" --argjson exhausted "$exhausted" --argjson requests "$requests" --argjson pages "$pages" --argjson returned "$returned" --argjson unique "$unique" --argjson eligible "$eligible" --argjson prs "$prs" --argjson pre "$pre" --argjson receipts "$receipted" --argjson missing "$missing" --argjson human "$human" --argjson completion "$completion" --argjson machine "$machine" --argjson attempted "$attempted" --argjson applied "$applied" --argjson deferred "$deferred" --argjson failures "$failures" --argjson items "$failure_json" --argjson duration "$((now-began))" --argjson remaining "$remaining" --argjson reset "$reset" --argjson recent "$recent_at" --argjson complete "$complete_at" '{schema_version:1,mode:$mode,status:$status,dry_run:$dry_run,exhausted:$exhausted,requests:$requests,pages:$pages,returned:$returned,unique:$unique,eligible:$eligible,pull_requests:$prs,pre_boundary:$pre,already_receipted:$receipts,missing:$missing,dispositions:{human:$human,completion:$completion,machine_skip:$machine},attempted:$attempted,applied:$applied,deferred:$deferred,failures:$failures,failure_items:$items,duration_seconds:$duration,rate_limit:{remaining:$remaining,reset:$reset},recent_success_at:$recent,complete_success_at:$complete}'
     rm -rf "$tmp"
-    [ "$status" != failed ]
+    [ "$status" = success ]
 }
 
 cmd_reconcile_comments() {
@@ -1782,7 +1876,7 @@ cmd_reconcile_comments() {
         return
     fi
     if ! command -v jq >/dev/null 2>&1; then
-        printf '%s\n' '{"schema_version":1,"mode":null,"status":"failed","dry_run":false,"requests":0,"pages":0,"returned":0,"unique":0,"eligible":0,"pull_requests":0,"pre_boundary":0,"already_receipted":0,"missing":0,"dispositions":{"human":0,"completion":0,"machine_skip":0},"attempted":0,"applied":0,"deferred":0,"failures":1,"failure_items":[{"stage":"dependencies","issue":null,"comment_id":null,"message":"required command not found: jq"}],"duration_seconds":0,"rate_limit":{"remaining":null,"reset":null},"recent_success_at":null,"complete_success_at":null}'
+        printf '%s\n' '{"schema_version":1,"mode":null,"status":"failed","dry_run":false,"exhausted":false,"requests":0,"pages":0,"returned":0,"unique":0,"eligible":0,"pull_requests":0,"pre_boundary":0,"already_receipted":0,"missing":0,"dispositions":{"human":0,"completion":0,"machine_skip":0},"attempted":0,"applied":0,"deferred":0,"failures":1,"failure_items":[{"stage":"dependencies","issue":null,"comment_id":null,"message":"required command not found: jq"}],"duration_seconds":0,"rate_limit":{"remaining":null,"reset":null},"recent_success_at":null,"complete_success_at":null}'
         return 2
     fi
     local output rc=0

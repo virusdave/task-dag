@@ -120,6 +120,7 @@ All task-dag obligations for this epic are satisfied.
 
 Closes-Epic: #${issue}"
     close_sha=$(printf '%s' "$msg" | git commit-tree "$tree" -p "$base" -p "$root_sha") || return 1
+    if declare -F _xrepo_watchdog_fence >/dev/null 2>&1; then _xrepo_watchdog_fence || return 1; fi
     cmd_publish "$close_sha" >/dev/null \
         || { echo "Error: failed to publish auto-close commit for epic #${issue}" >&2; return 1; }
     readback=$(git ls-remote origin refs/heads/master 2>/dev/null | awk '{print $1}')

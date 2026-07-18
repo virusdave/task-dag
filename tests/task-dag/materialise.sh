@@ -38,7 +38,7 @@ printf 'second body\n' >"$ROOT/body-2"
 jq -n '{schema:1,actor:"fixture",authoritativeTimestamp:"2026-07-17T00:00:00Z",provenance:["test"],declarations:[{sourceRepo:{id:"src-1",name:"o/source"},parentIssue:{id:"issue-21",number:21},peerRepo:{id:"peer-2",name:"o/peer"},title:"Immutable child",bodyFile:"body",provenance:"fixture"}]}' >"$ROOT/spec"
 
 "$TD" materialise-batch --spec-file "$ROOT/spec" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 75 ] && ok "valid public batch is migration-drained" || bad "public batch rc=$rc"
+[ "$rc" -eq 3 ] && ok "public batch fails closed without producer authority" || bad "public batch rc=$rc"
 printf '{"schema":1,"schema":1}\n' >"$ROOT/bad"
 "$TD" materialise-batch --spec-file "$ROOT/bad" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] && ok "duplicate keys fail before drain" || bad "duplicate keys rc=$rc"

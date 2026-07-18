@@ -672,8 +672,8 @@ taskdag_materialisation_online_tree_violations() { # tip activation-authority ex
 # Private seam: tests source this module and call the core.  No CLI path tests
 # an environment variable, so exported state cannot bypass migration drain.
 taskdag_materialise_reserve_core() {
-    local spec=$1 prepared batch_json batch_id actor timestamp old="" tmp index tree commit remote now slot dd op body_sha declaration state activation activation_provenance expected_repository
-    activation=$(taskdag_activation_snapshot_token) || return 3
+    local spec=$1 activation=${2:-} prepared batch_json batch_id actor timestamp old="" tmp index tree commit remote now slot dd op body_sha declaration state activation_provenance expected_repository
+    [ -n "$activation" ] || activation=$(taskdag_activation_snapshot_token) || return 3
     expected_repository=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 3
     [ -n "$expected_repository" ] || return 3
     prepared=$(taskdag_materialise_prepare "$spec") || return $?
@@ -733,20 +733,24 @@ taskdag_materialise_reserve_core() {
 }
 
 cmd_materialise_batch() {
-    local spec=""
+    local spec="" activation
     case "${1:-}" in -h|--help) echo "Usage: task-dag materialise-batch --spec-file FILE"; return 0;; esac
     [ "$#" -eq 2 ] && [ "$1" = --spec-file ] && spec=$2 || { echo "Usage: task-dag materialise-batch --spec-file FILE" >&2; return 2; }
     taskdag_materialise_prepare "$spec" >/dev/null || return $?
-    taskdag_migration_guard materialise
+    activation=$(taskdag_activation_snapshot_token) || return 3
+    taskdag_materialise_producer_check "$activation" >/dev/null || return 3
+    taskdag_materialise_reserve_core "$spec" "$activation"
 }
 
 cmd_materialise_child() {
-    local spec="" prepared
+    local spec="" prepared activation
     case "${1:-}" in -h|--help) echo "Usage: task-dag materialise-child --spec-file FILE"; return 0;; esac
     [ "$#" -eq 2 ] && [ "$1" = --spec-file ] && spec=$2 || { echo "Usage: task-dag materialise-child --spec-file FILE" >&2; return 2; }
     prepared=$(taskdag_materialise_prepare "$spec") || return $?
     [ "$(jq -r .inputDeclarationCount <<<"$prepared")" -eq 1 ] || { _taskdag_materialise_error "materialise-child requires exactly one declaration"; return 2; }
-    taskdag_migration_guard materialise
+    activation=$(taskdag_activation_snapshot_token) || return 3
+    taskdag_materialise_producer_check "$activation" >/dev/null || return 3
+    taskdag_materialise_reserve_core "$spec" "$activation"
 }
 
 # Offline migration input deliberately names every frozen repository and issue

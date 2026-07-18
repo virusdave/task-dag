@@ -153,7 +153,14 @@ _taskdag_materialise_finalize() { # tip token slot adopted declaration
         adopted=$(_taskdag_materialise_latest_state "$tip" "$slot") || return 3
     fi
     parent=$(jq -r .parentIssue.number <<<"$declaration"); peer=$(jq -r .peerRepo.name <<<"$declaration"); issue=$(jq -r .adoptedIssue.number <<<"$adopted"); note=$(jq -r '.delegationNote // ""' <<<"$declaration")
-    args=(--issue "$parent" --to "$peer#$issue"); [ -z "$note" ] || args+=(--note "$note")
+    args=(--issue "$parent" --to "$peer#$issue"
+      --parent-repo-node-id "$(jq -r .sourceRepo.id <<<"$declaration")"
+      --parent-issue-node-id "$(jq -r .parentIssue.id <<<"$declaration")"
+      --peer-repo-node-id "$(jq -r .peerRepo.id <<<"$declaration")"
+      --peer-issue-node-id "$(jq -r .adoptedIssue.issueNodeId <<<"$adopted")"
+      --materialisation-operation-id "$(jq -r .operationId <<<"$adopted")"
+      --declaration-digest "$(jq -r .declarationDigest <<<"$adopted")")
+    [ -z "$note" ] || args+=(--note "$note")
     _taskdag_materialise_delegate_projection "${args[@]}" || return 3
     root=$(git rev-parse "refs/heads/tasks/pending/$parent") || return 3
     delegation="refs/heads/tasks/delegated/$parent/$peer/$issue"

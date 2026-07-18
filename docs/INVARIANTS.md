@@ -96,7 +96,8 @@ existing paths can never be deleted or replaced. `task-dag validate --strict`
 revalidates this state offline. Imported slots exclusively use the census,
 import-batch, generation-state, and authorization paths documented above; the
 two forms may never coexist for one slot. Public issue-creating materialisation
-commands remain denied by the semantic migration policy.
+commands reserve only after validating the current activation and its exact
+producer-enable authority; absent, stale, or mismatched authority fails closed.
 
 Declarations contain semantic input only. Request provenance lives in the
 batch receipt's sorted member records, each of which binds slot, declaration,
@@ -186,6 +187,7 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    | `tasks/ci-chains/<owner>/<repo>/<branch>` | CI broken-master repair-chain state (NOT a task-workflow ref) | `chain-write`, `reconcile-lease`, `repair-retire` |
    | `tasks/repair-superseded/<64-hex>` | immutable, non-scheduling repair-retirement audit | `repair-retire` |
    | `tasks/v1/graph` | dependency-edge index branch — a data-in-tree ref exempt from the empty-tree floor (see below) | the edge writer (issue #13) |
+   | `tasks/v1/comment-watchdog` | append-only fleet lease and reconciliation-result authority | `comment-watchdog acquire|renew|result` |
    | `tasks/v1/mailbox/00`..`0f` | cross-repo notification mailbox — 16 fixed data-in-tree shard branches, exempt from the empty-tree floor (see below) | the mailbox writer (issue #13) |
    | `gh/issues/<N>` | GitHub-side epic mapping | `create-task-commit.sh` |
    | `gh/comments/<N>/<id>` | comment provenance (kept so a comment is never re-ingested) | `ingest-comment` |
@@ -197,6 +199,29 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
    in the *same* change, or `validate --strict` (and the CLI-tests CI gate)
    will correctly reject it. This ordering is deliberate: it forces the
    contract and its test to land before any ref uses the new path.
+
+### Comment-watchdog authority (`tasks/v1/comment-watchdog`)
+
+This exact data-in-tree ref is a linear append-only sequence of canonical JSON
+records. Lease records bind the holder, monotonic fence, authoritative GitHub
+server observation and expiry, immutable task-dag runtime, activation epoch,
+and activation registry snapshot. A current holder may renew without changing
+its fence; only an acquire observed at or after expiry may change holder and
+increment the fence. Result records retain that exact lease identity and never
+extend it. Attempt records bind the canonical reviewed repository/timestamp
+configuration digest; one result per exact member follows, and only a fleet
+record whose effectful, exhausted results all have zero failures and deferrals
+is a success watermark. The mutation hot path checks the exact current remote
+tip, exact lease record, canonical new record and append shape, and remaining
+server-time lifetime. Tokens carry the previously validated immutable tip, so
+normal operation is incremental rather than replaying an ever-growing history
+before every append. Every commit carries validated latest-attempt and
+recent/complete-success checkpoint trailers, making status reads constant-time.
+Strict validation and periodic audits replay the complete local history and
+recompute those checkpoints.
+CAS ambiguity or any API/readback uncertainty fails closed. Strict validation
+recognises only this exact ref and rejects malformed, rewritten, skipped, stale,
+or cross-fence histories.
 
    CI repair-chain messages are a typed line protocol. `Current-Head` is
    derived only from `chain-write --for-sha`; the legacy classifier writer can
@@ -615,6 +640,9 @@ are the contract you must preserve when editing a minter.
   first parent == task commit, **deterministic** identity (fixed
   author/committer + `Blocked-At` date) so re-blocking is idempotent.
 - **Delegation** (`tasks/delegated/…`): `kind: delegated`, parent = epic.
+  Canonical materialisation also binds the immutable parent/peer repository
+  and issue node IDs, materialisation operation ID, and declaration digest;
+  delegated-close evidence must repeat those exact bindings.
 - **Completion record** (`tasks/completions/…`): `kind: completion`.
 - **Completion merge** (on `master`, from `complete`): a merge whose
   non-first parent is the task commit, carrying `Task-Commit:` +
