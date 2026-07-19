@@ -70,8 +70,17 @@ _xrepo_empty_tree() {
     printf '%s' "$_XREPO_EMPTY_TREE"
 }
 
-# Helper: ensure git committer identity is set (no-op if already set).
+# Helper: ensure Git author and committer identity are available. A complete
+# environment identity is intentionally caller-local-config read-only.
 _xrepo_ensure_git_identity() {
+    if [ -n "$(git config user.name 2>/dev/null)" ] \
+        && [ -n "$(git config user.email 2>/dev/null)" ]; then
+        return 0
+    fi
+    if [ -n "${GIT_AUTHOR_NAME:-}" ] && [ -n "${GIT_AUTHOR_EMAIL:-}" ] \
+        && [ -n "${GIT_COMMITTER_NAME:-}" ] && [ -n "${GIT_COMMITTER_EMAIL:-}" ]; then
+        return 0
+    fi
     if [ -z "$(git config user.name 2>/dev/null)" ]; then
         git config user.name "github-actions[bot]"
     fi

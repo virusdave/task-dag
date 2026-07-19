@@ -6,6 +6,8 @@ ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 pass=0 fail=0
 ok() { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
+export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.test
+export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
 git init -q "$ROOT/repo"; git -C "$ROOT/repo" config user.name fixture; git -C "$ROOT/repo" config user.email fixture@example.test
 git -C "$ROOT/repo" config taskdag.current-repo virusdave/task-dag
 printf x >"$ROOT/repo/x"; git -C "$ROOT/repo" add x; git -C "$ROOT/repo" commit -qm fixture

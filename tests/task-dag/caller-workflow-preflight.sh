@@ -127,6 +127,39 @@ else
     bad "7: reusable workflow runtime checkout contract failed"
 fi
 
+mkdir -p "$TMP/identity-home" "$TMP/identity-env" "$TMP/identity-partial"
+git -C "$TMP/identity-env" init -q
+if (
+    cd "$TMP/identity-env" || exit 1
+    export HOME="$TMP/identity-home" XDG_CONFIG_HOME="$TMP/identity-home/.config" GIT_CONFIG_NOSYSTEM=1
+    export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.test
+    export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
+    source "$ROOT/scripts/task-dag.d/cross-repo.sh"
+    _xrepo_ensure_git_identity
+    ! git config --local --get user.name >/dev/null \
+      && ! git config --local --get user.email >/dev/null
+); then
+    ok "8a: complete environment identity does not mutate caller config"
+else
+    bad "8a: complete environment identity mutated caller config"
+fi
+
+git -C "$TMP/identity-partial" init -q
+if (
+    cd "$TMP/identity-partial" || exit 1
+    export HOME="$TMP/identity-home" XDG_CONFIG_HOME="$TMP/identity-home/.config" GIT_CONFIG_NOSYSTEM=1
+    export GIT_AUTHOR_NAME=partial
+    unset GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    source "$ROOT/scripts/task-dag.d/cross-repo.sh"
+    _xrepo_ensure_git_identity
+    [ "$(git config --local --get user.name)" = "github-actions[bot]" ] \
+      && [ "$(git config --local --get user.email)" = "github-actions[bot]@users.noreply.github.com" ]
+); then
+    ok "8b: partial environment identity retains canonical fallback"
+else
+    bad "8b: partial environment identity bypassed canonical fallback"
+fi
+
 # Exercise the helper against a coherent runtime in a separate caller repo.
 # Completion comments are receipt-only hints: they write the durable receipt
 # without GitHub API access, task effects, or caller-local identity mutation.
@@ -167,9 +200,9 @@ if [ "$rc" -eq 0 ] \
   && git --git-dir="$TMP/caller-origin" show-ref --verify --quiet refs/heads/gh/comments/42/99 \
   && [ "$(git --git-dir="$TMP/caller-origin" for-each-ref --format='%(refname)')" = refs/heads/gh/comments/42/99 ] \
   && ! git -C "$TMP/caller" config --local --get user.name >/dev/null; then
-    ok "8: shim writes a receipt-only completion hint without GitHub or task effects"
+    ok "9: shim writes a receipt-only completion hint without GitHub or task effects"
 else
-    bad "8: shim receipt-only completion rc=$rc used GitHub, task effects, or local identity"
+    bad "9: shim receipt-only completion rc=$rc used GitHub, task effects, or local identity"
     sed 's/^/    drain: /' "$TMP/drain.out"
 fi
 unset COMMENT_BODY
