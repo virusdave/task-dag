@@ -849,12 +849,12 @@ _xrepo_peer_historical_root_matches() { # peer-worktree root issue
     [ "$tree" = "$(_xrepo_empty_tree)" ] || return 1
     type=$(env -u GIT_DIR git -C "$wt" show -s --format=%B "$root" 2>/dev/null \
         | awk -v key=Type '
-            /^$/ { section++; if (section == 2) exit; next }
+            /^$/ { section++; next }
             section == 1 && index($0,key ": ") == 1 { count++; value=substr($0,length(key)+3) }
             END { if (count == 1) print value; else exit 1 }') || return 1
     issue_value=$(env -u GIT_DIR git -C "$wt" show -s --format=%B "$root" 2>/dev/null \
         | awk -v key=Issue '
-            /^$/ { section++; if (section == 2) exit; next }
+            /^$/ { section++; next }
             section == 1 && index($0,key ": ") == 1 { count++; value=substr($0,length(key)+3) }
             END { if (count == 1) print value; else exit 1 }') || return 1
     [ "$type" = epic ] && [ "$issue_value" = "#${issue}" ] || return 1

@@ -56,7 +56,13 @@ git --git-dir="$tmp/peer-origin.git" update-ref -d refs/heads/tasks/pending/1
 # A peer with no close is still waiting, not erroneous. A strict historical
 # close can recover its unique root after both legacy identity refs are gone.
 [ -z "$(_xrepo_resolve_peer_close "$tmp/peer" "$(git -C "$tmp/peer" rev-parse HEAD)" 2)" ]
-legacy_root=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -m $'Task: Legacy peer epic\n\nIssue: #2\nStatus: pending\nType: epic')
+{
+  printf '%s\n' 'Task: Legacy peer epic' '' 'Issue: #2' 'Status: pending' 'Type: epic' ''
+  # Keep enough trailing body data to force a producer-side SIGPIPE if the
+  # header parser exits early under pipefail instead of consuming the stream.
+  yes 'Large historical task body that must not affect header validation.' | head -n 4096 || true
+} >"$tmp/legacy-root-message"
+legacy_root=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -F "$tmp/legacy-root-message")
 legacy_base=$(git -C "$tmp/peer" rev-parse HEAD)
 legacy_close=$(git -C "$tmp/peer" commit-tree "$(git -C "$tmp/peer" rev-parse "${legacy_base}^{tree}")" \
   -p "$legacy_base" -p "$legacy_root" -m $'Close legacy peer epic\n\nCloses-Epic: #2')
