@@ -32,11 +32,11 @@ import {
   ADVISORY_CATALOG_DOC_URL,
   ADVISORY_CATALOG_URL,
   buildPromoteRequest,
-  clusterOtherMembers,
   compareObservations,
   defaultPromoteFormState,
   deriveViewState,
   describeClusterError,
+  evictClusterMember,
   fetchAgentWasteBacklog,
   fetchAgentWasteClusters,
   observationKey,
@@ -97,6 +97,13 @@ export function AgentWasteReviewPage() {
   const [clusterError, setClusterError] = useState<{ code: string; message: string } | null>(null)
   const [clustering, setClustering] = useState(false)
   const [viewMode, setViewMode] = useState<'flat' | 'clustered'>('flat')
+  const [clusterUndo, setClusterUndo] = useState<{
+    before: AgentWasteClustersResponse
+    observationId: string
+    removalButtonId: string
+  } | null>(null)
+  const clusterUndoButtonRef = useRef<HTMLButtonElement>(null)
+  const restoreClusterFocusRef = useRef<string | null>(null)
 
   const runClustering = useCallback(async () => {
     setClustering(true)
@@ -108,6 +115,7 @@ export function AgentWasteReviewPage() {
     setClustering(false)
     if (result.ok) {
       setClusters(result.response)
+      setClusterUndo(null)
       setViewMode('clustered')
     } else {
       setClusterError({ code: result.code, message: result.message })
@@ -169,6 +177,52 @@ export function AgentWasteReviewPage() {
 
   const restoreDismissed = useCallback(() => setDismissed(new Set()), [])
   const dismissedCount = sorted.length - visible.length
+
+  const removeFromCluster = useCallback(
+    (clusterIndex: number, memberIndex: number) => {
+      if (!clusters || clustering) {
+        return
+      }
+      const observation = clusters.clusters[clusterIndex]?.members[memberIndex]
+      const next = evictClusterMember(clusters, clusterIndex, memberIndex)
+      if (!observation || next === clusters) {
+        return
+      }
+      setClusterUndo({
+        before: clusters,
+        observationId: observation.id,
+        removalButtonId: `cluster-remove-${clusterIndex}-${memberIndex}`,
+      })
+      setClusters(next)
+    },
+    [clusters, clustering],
+  )
+
+  const undoClusterRemoval = useCallback(() => {
+    if (!clusterUndo || clustering) {
+      return
+    }
+    restoreClusterFocusRef.current = clusterUndo.removalButtonId
+    setClusters(clusterUndo.before)
+    setClusterUndo(null)
+  }, [clusterUndo, clustering])
+
+  useEffect(() => {
+    if (clusterUndo && viewMode === 'clustered') {
+      clusterUndoButtonRef.current?.focus()
+      return
+    }
+    const focusId = restoreClusterFocusRef.current
+    if (focusId) {
+      restoreClusterFocusRef.current = null
+      const target = document.getElementById(focusId)
+      const disclosure = target?.closest('details')
+      if (disclosure) {
+        disclosure.open = true
+      }
+      target?.focus()
+    }
+  }, [clusterUndo, viewMode])
 
   // Route-level admin guard (defense-in-depth; the server route is
   // authoritative). Placed after all hooks so hook order stays stable across
@@ -278,9 +332,30 @@ export function AgentWasteReviewPage() {
         </article>
       ) : null}
 
+      {clusterUndo && viewMode === 'clustered' ? (
+        <div className="agent-waste-cluster-undo" role="status">
+          <span>
+            Moved <code>{clusterUndo.observationId}</code> to ungrouped.
+          </span>
+          <button
+            ref={clusterUndoButtonRef}
+            type="button"
+            className="ghost-button"
+            disabled={clustering}
+            onClick={undoClusterRemoval}
+          >
+            Undo
+          </button>
+        </div>
+      ) : null}
+
       {view.kind === 'ready' ? (
         viewMode === 'clustered' && clusters ? (
-          <ClusteredView clusters={clusters} />
+          <ClusteredView
+            clusters={clusters}
+            removalDisabled={clustering}
+            onRemoveFromCluster={removeFromCluster}
+          />
         ) : (
           <>
             {visible.length === 0 ? (
@@ -352,17 +427,23 @@ export function AgentWasteReviewPage() {
 function ObservationCard({
   obs,
   onDismiss,
+  onRemoveFromCluster,
+  removeFromClusterId,
+  removalDisabled,
 }: {
   obs: AgentWasteObservation
-  /** Omitted in the clustered view, where dismissal against a snapshot would be confusing. */
+  /** Omitted when the card is not part of the dismissible flat list. */
   onDismiss?: () => void
+  onRemoveFromCluster?: () => void
+  removeFromClusterId?: string
+  removalDisabled?: boolean
 }) {
   const tokens = formatTokens(obs.estimated_wasted_tokens)
   const seconds = formatSeconds(obs.estimated_wasted_seconds)
   const [promoting, setPromoting] = useState(false)
   const promoteFormId = useId()
   return (
-    <article className="history-card">
+    <article className="history-card agent-waste-observation-card">
       <div className="history-card-topline">
         <div>
           <strong>{obs.kind}</strong>
@@ -371,7 +452,7 @@ function ObservationCard({
             {obs.repo ? <> · {obs.repo}</> : null}
           </p>
         </div>
-        <div className="inline-row wrap-row">
+        <div className="inline-row wrap-row agent-waste-observation-actions">
           <Pill tone={severityTone(obs.severity)}>{obs.severity ?? 'unrated'}</Pill>
           <button
             type="button"
@@ -385,6 +466,18 @@ function ObservationCard({
           {onDismiss ? (
             <button type="button" className="ghost-button" onClick={onDismiss}>
               Dismiss
+            </button>
+          ) : null}
+          {onRemoveFromCluster ? (
+            <button
+              id={removeFromClusterId}
+              type="button"
+              className="ghost-button"
+              disabled={removalDisabled}
+              onClick={onRemoveFromCluster}
+              aria-label={`Remove ${obs.id} report recorded ${formatTime(obs.time)} from cluster`}
+            >
+              Remove from cluster
             </button>
           ) : null}
         </div>
@@ -636,29 +729,35 @@ function PromoteForm({
 // its representative report with a member-count pill; the remaining members
 // are collapsed behind a <details>/<summary> per helios/AGENTS.md so the
 // operator sees the answer (the ranked themes) without scrolling past detail.
-function ClusteredView({ clusters }: { clusters: AgentWasteClustersResponse }) {
-  if (clusters.clusters.length === 0) {
-    return (
-      <article className="mini-card">
-        <p className="subtle-copy">
-          The model did not group the backlog into any clusters. Switch to the flat list to review
-          the reports individually.
-        </p>
-      </article>
-    )
-  }
+function ClusteredView({
+  clusters,
+  removalDisabled,
+  onRemoveFromCluster,
+}: {
+  clusters: AgentWasteClustersResponse
+  removalDisabled: boolean
+  onRemoveFromCluster: (clusterIndex: number, memberIndex: number) => void
+}) {
   return (
     <>
       <p className="subtle-copy" style={{ marginBottom: '0.5rem' }}>
-        {clusters.clusters.length} cluster{clusters.clusters.length === 1 ? '' : 's'}, most
-        aggregate waste first · grouped by <code>{clusters.model}</code> (display-only)
+        {clusters.clusters.length > 0
+          ? <>{clusters.clusters.length} cluster{clusters.clusters.length === 1 ? '' : 's'}, most
+              aggregate waste first · grouped by <code>{clusters.model}</code> (display-only)</>
+          : <>No reports are currently grouped. Model: <code>{clusters.model}</code> (display-only)</>}
         {clusters.unclustered.length > 0
           ? ` · ${clusters.unclustered.length} left ungrouped`
           : null}
       </p>
       <div className="stacked-list">
         {clusters.clusters.map((cluster, i) => (
-          <ClusterCard key={`${observationKey(cluster.primary)}-${i}`} cluster={cluster} />
+          <ClusterCard
+            key={`${observationKey(cluster.primary)}-${i}`}
+            cluster={cluster}
+            clusterIndex={i}
+            removalDisabled={removalDisabled}
+            onRemove={(memberIndex) => onRemoveFromCluster(i, memberIndex)}
+          />
         ))}
       </div>
       {clusters.unclustered.length > 0 ? (
@@ -678,8 +777,23 @@ function ClusteredView({ clusters }: { clusters: AgentWasteClustersResponse }) {
   )
 }
 
-function ClusterCard({ cluster }: { cluster: AgentWasteCluster }) {
-  const others = clusterOtherMembers(cluster)
+function ClusterCard({
+  cluster,
+  clusterIndex,
+  removalDisabled,
+  onRemove,
+}: {
+  cluster: AgentWasteCluster
+  clusterIndex: number
+  removalDisabled: boolean
+  onRemove: (memberIndex: number) => void
+}) {
+  const primaryIndex = cluster.members.findIndex(
+    (member) => observationKey(member) === observationKey(cluster.primary),
+  )
+  const others = cluster.members
+    .map((observation, memberIndex) => ({ observation, memberIndex }))
+    .filter(({ memberIndex }) => memberIndex !== primaryIndex)
   const tokens = formatTokens(cluster.aggregateWastedTokens)
   const seconds =
     cluster.aggregateWastedSeconds > 0 ? formatSeconds(cluster.aggregateWastedSeconds) : null
@@ -698,7 +812,12 @@ function ClusterCard({ cluster }: { cluster: AgentWasteCluster }) {
         </Pill>
       </div>
       <div style={{ marginTop: '0.5rem' }}>
-        <ObservationCard obs={cluster.primary} />
+        <ObservationCard
+          obs={cluster.primary}
+          removeFromClusterId={`cluster-remove-${clusterIndex}-${primaryIndex}`}
+          removalDisabled={removalDisabled}
+          onRemoveFromCluster={() => onRemove(primaryIndex)}
+        />
       </div>
       {others.length > 0 ? (
         <details style={{ marginTop: '0.5rem' }}>
@@ -706,8 +825,14 @@ function ClusterCard({ cluster }: { cluster: AgentWasteCluster }) {
             Show {others.length} other member{others.length === 1 ? '' : 's'}
           </summary>
           <div className="stacked-list" style={{ marginTop: '0.5rem' }}>
-            {others.map((obs, i) => (
-              <ObservationCard key={`${observationKey(obs)}-${i}`} obs={obs} />
+            {others.map(({ observation, memberIndex }) => (
+              <ObservationCard
+                key={`${observationKey(observation)}-${memberIndex}`}
+                obs={observation}
+                removeFromClusterId={`cluster-remove-${clusterIndex}-${memberIndex}`}
+                removalDisabled={removalDisabled}
+                onRemoveFromCluster={() => onRemove(memberIndex)}
+              />
             ))}
           </div>
         </details>

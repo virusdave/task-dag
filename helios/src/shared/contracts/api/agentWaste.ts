@@ -56,6 +56,23 @@ export const AgentWasteObservationSchema = z.object({
 })
 export type AgentWasteObservation = z.infer<typeof AgentWasteObservationSchema>
 
+/** Sum real waste estimates, treating missing, non-finite, or negative values as zero. */
+export function aggregateWaste(members: readonly AgentWasteObservation[]): {
+  aggregateWastedTokens: number
+  aggregateWastedSeconds: number
+} {
+  const normalize = (value: number | undefined): number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+
+  let aggregateWastedTokens = 0
+  let aggregateWastedSeconds = 0
+  for (const member of members) {
+    aggregateWastedTokens += normalize(member.estimated_wasted_tokens)
+    aggregateWastedSeconds += normalize(member.estimated_wasted_seconds)
+  }
+  return { aggregateWastedTokens, aggregateWastedSeconds }
+}
+
 /**
  * Status of the underlying backlog data source. Lets the UI distinguish a
  * genuinely-empty backlog (`available: true`, empty array) from a not-yet

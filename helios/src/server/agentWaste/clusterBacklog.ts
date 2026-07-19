@@ -23,7 +23,8 @@ import type {
   AgentWasteCluster,
   AgentWasteObservation,
 } from '../../shared/contracts/api/agentWaste.js'
-import { MAX_CLUSTER_LABEL_CHARS } from '../../shared/contracts/api/agentWaste.js'
+import { aggregateWaste, MAX_CLUSTER_LABEL_CHARS } from '../../shared/contracts/api/agentWaste.js'
+export { aggregateWaste } from '../../shared/contracts/api/agentWaste.js'
 export { MAX_CLUSTER_LABEL_CHARS } from '../../shared/contracts/api/agentWaste.js'
 
 /**
@@ -83,34 +84,12 @@ export const RawClusterModelOutputSchema = z
   .strip()
 export type RawClusterModelOutput = z.infer<typeof RawClusterModelOutputSchema>
 
-/** Clamp a possibly-missing/NaN/negative estimate to a finite, >=0 number. */
-function normalizeWaste(value: number | undefined): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    return 0
-  }
-  return value
-}
-
 /** Trim + collapse whitespace + cap length of the model's display label. */
 function sanitizeLabel(label: string): string {
   const collapsed = label.replace(/\s+/g, ' ').trim()
   return collapsed.length > MAX_CLUSTER_LABEL_CHARS
     ? collapsed.slice(0, MAX_CLUSTER_LABEL_CHARS).trimEnd()
     : collapsed
-}
-
-/** Sum the members' real waste estimates (missing/invalid count as 0). */
-export function aggregateWaste(members: readonly AgentWasteObservation[]): {
-  aggregateWastedTokens: number
-  aggregateWastedSeconds: number
-} {
-  let aggregateWastedTokens = 0
-  let aggregateWastedSeconds = 0
-  for (const m of members) {
-    aggregateWastedTokens += normalizeWaste(m.estimated_wasted_tokens)
-    aggregateWastedSeconds += normalizeWaste(m.estimated_wasted_seconds)
-  }
-  return { aggregateWastedTokens, aggregateWastedSeconds }
 }
 
 /**

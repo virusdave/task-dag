@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type {
   AgentWasteBacklogResponse,
+  AgentWasteClustersResponse,
   AgentWasteObservation,
 } from '../../../shared/contracts/index.js'
 import type { AgentWasteCluster } from '../../../shared/contracts/index.js'
@@ -13,6 +14,7 @@ import {
   defaultPromoteFormState,
   deriveViewState,
   describeClusterError,
+  evictClusterMember,
   fetchAgentWasteClusters,
   observationKey,
   parseTriggerIds,
@@ -95,6 +97,12 @@ describe('observationKey', () => {
   it('does not collide across field boundaries (uses a separator)', () => {
     const a = obs({ kind: 'ab', id: 'c' })
     const b = obs({ kind: 'a', id: 'bc' })
+    expect(observationKey(a)).not.toBe(observationKey(b))
+  })
+
+  it('distinguishes observations with different waste estimates', () => {
+    const a = obs({ estimated_wasted_tokens: 10, estimated_wasted_seconds: 2 })
+    const b = obs({ estimated_wasted_tokens: 11, estimated_wasted_seconds: 2 })
     expect(observationKey(a)).not.toBe(observationKey(b))
   })
 })
@@ -254,6 +262,94 @@ describe('clusterOtherMembers', () => {
 
   it('returns empty for a single-member cluster', () => {
     expect(clusterOtherMembers(cluster({}))).toEqual([])
+  })
+})
+
+function clusterResponse(clusters: AgentWasteCluster[]): AgentWasteClustersResponse {
+  return {
+    source: AVAILABLE,
+    model: 'deepseek.v3.2',
+    clusters,
+    unclustered: [],
+  }
+}
+
+describe('evictClusterMember', () => {
+  it('moves one exact non-primary occurrence and updates membership, count, and aggregates', () => {
+    const primary = obs({ id: 'primary', estimated_wasted_tokens: 100, estimated_wasted_seconds: 10 })
+    const firstDuplicate = obs({ id: 'duplicate', estimated_wasted_tokens: 5 })
+    const secondDuplicate = obs({ id: 'duplicate', estimated_wasted_tokens: 5 })
+    const response = clusterResponse([
+      cluster({
+        primary,
+        members: [primary, firstDuplicate, secondDuplicate],
+        count: 3,
+        aggregateWastedTokens: 110,
+        aggregateWastedSeconds: 10,
+      }),
+    ])
+
+    const next = evictClusterMember(response, 0, 2)
+
+    expect(next.clusters[0].members).toEqual([primary, firstDuplicate])
+    expect(next.clusters[0]).toMatchObject({
+      primary,
+      count: 2,
+      aggregateWastedTokens: 105,
+      aggregateWastedSeconds: 10,
+    })
+    expect(next.unclustered[0]).toBe(secondDuplicate)
+  })
+
+  it('replaces an evicted primary, normalizes aggregates, and re-ranks clusters', () => {
+    const removed = obs({ id: 'removed', estimated_wasted_tokens: 1000 })
+    const replacement = obs({ id: 'replacement', estimated_wasted_tokens: -5, estimated_wasted_seconds: Number.NaN })
+    const stable = obs({ id: 'stable', estimated_wasted_tokens: 10 })
+    const response = clusterResponse([
+      cluster({
+        label: 'formerly first',
+        primary: removed,
+        members: [removed, replacement],
+        count: 2,
+        aggregateWastedTokens: 1000,
+      }),
+      cluster({
+        label: 'now first',
+        primary: stable,
+        members: [stable],
+        count: 1,
+        aggregateWastedTokens: 10,
+      }),
+    ])
+
+    const next = evictClusterMember(response, 0, 0)
+
+    expect(next.clusters.map((entry) => entry.label)).toEqual(['now first', 'formerly first'])
+    expect(next.clusters[1]).toMatchObject({
+      primary: replacement,
+      members: [replacement],
+      count: 1,
+      aggregateWastedTokens: 0,
+      aggregateWastedSeconds: 0,
+    })
+  })
+
+  it('deletes a singleton cluster while retaining the report as ungrouped', () => {
+    const only = obs({ id: 'only' })
+    const next = evictClusterMember(
+      clusterResponse([cluster({ primary: only, members: [only], count: 1 })]),
+      0,
+      0,
+    )
+
+    expect(next.clusters).toEqual([])
+    expect(next.unclustered).toEqual([only])
+  })
+
+  it('returns the same snapshot for an invalid cluster or member index', () => {
+    const response = clusterResponse([cluster({})])
+    expect(evictClusterMember(response, 9, 0)).toBe(response)
+    expect(evictClusterMember(response, 0, 9)).toBe(response)
   })
 })
 

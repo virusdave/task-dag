@@ -12,6 +12,7 @@ import {
   PromoteAdvisoryErrorResponseSchema,
   PromoteAdvisoryRequestSchema,
   PromoteAdvisoryResponseSchema,
+  aggregateWaste,
   estimateAdvisoryTokens,
   type AgentWasteBacklogResponse,
   type AgentWasteCluster,
@@ -148,6 +149,8 @@ export function observationKey(obs: AgentWasteObservation): string {
     obs.task_sha ?? '',
     obs.host ?? '',
     obs.note ?? '',
+    obs.estimated_wasted_tokens?.toString() ?? '',
+    obs.estimated_wasted_seconds?.toString() ?? '',
   ].join('\u0001')
 }
 
@@ -400,6 +403,45 @@ export function clusterOtherMembers(cluster: AgentWasteCluster): AgentWasteObser
     }
     return true
   })
+}
+
+/**
+ * Move one exact member occurrence from a displayed cluster to the response's
+ * ungrouped list. This changes only the local cluster snapshot; the flat
+ * backlog remains the canonical review list.
+ */
+export function evictClusterMember(
+  response: AgentWasteClustersResponse,
+  clusterIndex: number,
+  memberIndex: number,
+): AgentWasteClustersResponse {
+  const cluster = response.clusters[clusterIndex]
+  const evicted = cluster?.members[memberIndex]
+  if (!cluster || !evicted) {
+    return response
+  }
+
+  const members = cluster.members.filter((_, index) => index !== memberIndex)
+  const clusters = response.clusters.filter((_, index) => index !== clusterIndex)
+  if (members.length > 0) {
+    const primaryIndex = cluster.members.findIndex(
+      (member) => observationKey(member) === observationKey(cluster.primary),
+    )
+    const primary = memberIndex === primaryIndex ? members[0] : cluster.primary
+    clusters.push({
+      ...cluster,
+      primary,
+      members,
+      count: members.length,
+      ...aggregateWaste(members),
+    })
+  }
+
+  return {
+    ...response,
+    clusters: sortClustersByWaste(clusters),
+    unclustered: [...response.unclustered, evicted],
+  }
 }
 
 /** Human-friendly one-liner for a cluster failure `code`. */

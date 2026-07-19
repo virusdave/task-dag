@@ -579,6 +579,53 @@ pre {
   font-size: 0.92rem;
 }
 
+.agent-waste-cluster-undo {
+  position: sticky;
+  top: 0.75rem;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--control-border);
+  border-radius: 0.6rem;
+  background: var(--panel);
+  box-shadow: 0 4px 14px rgba(23, 19, 15, 0.12);
+}
+
+.agent-waste-cluster-undo .ghost-button,
+.agent-waste-observation-actions .ghost-button {
+  min-height: 44px;
+}
+
+.agent-waste-cluster-undo .ghost-button:disabled,
+.agent-waste-observation-actions .ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.agent-waste-observation-card .history-card-topline {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.agent-waste-observation-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .agent-waste-observation-card .history-card-topline {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .agent-waste-observation-actions {
+    justify-content: flex-start;
+  }
+}
+
 /* Lazy pricing-ladder mount (review queue): the placeholder reserves
  * roughly the rendered ladder's height so deferring the mount doesn't
  * cause the page to jump as rows scroll into view. */
