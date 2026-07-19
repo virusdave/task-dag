@@ -316,8 +316,9 @@ else
 fi
 
 # D4: the fold's effect commit carries the witness + message-id trailers.
-if git log --format='%(trailers:key=Mailbox-Witness,valueonly)' | grep -q "^${WIT}$" \
-   && git log --format='%(trailers:key=Mailbox-Message-Id,valueonly)' | grep -qE '^[0-9a-f]{64}$'; then
+trailers=$(git log --format='%(trailers)')
+if grep -q "^Mailbox-Witness: ${WIT}$" <<<"$trailers" \
+   && grep -qE '^Mailbox-Message-Id: [0-9a-f]{64}$' <<<"$trailers"; then
     ok "D4: the fold's effect commit carries the witness-provenance trailers"
 else
     bad "D4: witness trailer not stamped on the effect commit"
