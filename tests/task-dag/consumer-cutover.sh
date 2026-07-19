@@ -239,16 +239,76 @@ taskdag_activation_test_pre_fenced_push_hook() {
 export -f taskdag_activation_test_pre_fenced_push_hook
 zero_output=$(TASKDAG_CAS_MAX_ATTEMPTS=0 "$TD" publish 2>&1); zero_rc=$?
 if [ "$zero_rc" -eq 3 ] \
-   && grep -q 'exhausted 0 retries under proven activation-authority contention' <<<"$zero_output" \
+   && grep -q 'attempt=1 classification=authority-contention' <<<"$zero_output" \
+   && grep -q 'exhausted 0 retries after 1 fenced attempts' <<<"$zero_output" \
    && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$remote_master" ]; then
   ok "zero retry budget still performs one fenced attempt and fails loud on contention"
 else
   bad "zero retry budget skipped or retried its initial push (rc=$zero_rc out=$zero_output)"
 fi
+
+# Persistent contention consumes the complete nonzero retry budget: one
+# initial attempt plus exactly MAX retries, with master unchanged throughout.
+: >"$ROOT/publish-contention-count"
+fixture_nested_contender=false
+export fixture_nested_contender EMPTY_TREE
+taskdag_activation_test_pre_fenced_push_hook() {
+  [ "$fixture_nested_contender" = false ] || return 0
+  fixture_nested_contender=true
+  local n side
+  n=$(( $(wc -c <"$ROOT/publish-contention-count") + 1 ))
+  printf x >>"$ROOT/publish-contention-count"
+  side=$(printf 'persistent contention %s\n' "$n" | git commit-tree "$EMPTY_TREE") || return
+  taskdag_activation_fenced_push "$token" fixture persistent-contender fixture 2026-07-18T00:00:10Z \
+    "refs/heads/fixture-publish-persistent-$n" "" "$side" >/dev/null
+  fixture_nested_contender=false
+}
+export -f taskdag_activation_test_pre_fenced_push_hook
+exhausted_output=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 TASKDAG_CAS_MAX_ATTEMPTS=2 "$TD" publish 2>&1); exhausted_rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+if [ "$exhausted_rc" -eq 3 ] \
+   && [ "$(wc -c <"$ROOT/publish-contention-count")" -eq 3 ] \
+   && grep -q "candidate=$completion_tip attempt=3 classification=authority-contention" <<<"$exhausted_output" \
+   && grep -Eq 'push-exit=[1-9][0-9]* readback=coherent' <<<"$exhausted_output" \
+   && grep -q "master-before=$remote_master master-candidate=$completion_tip master-observed=$remote_master" <<<"$exhausted_output" \
+   && grep -Eq 'authority-before=[0-9a-f]{40} authority-observed=[0-9a-f]{40} authority-guard=[0-9a-f]{40}' <<<"$exhausted_output" \
+   && grep -q "exhausted 2 retries after 3 fenced attempts" <<<"$exhausted_output" \
+   && grep -q "Recovery command: task-dag publish $completion_tip" <<<"$exhausted_output" \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$remote_master" ]; then
+  ok "persistent contention exhausts exactly MAX retries with complete evidence"
+else
+  bad "persistent contention exhaustion lost attempts, evidence, or master safety (rc=$exhausted_rc out=$exhausted_output)"
+fi
+
+# A local/setup failure before structured push evidence still reports the same
+# complete field set, with every unprovable value explicit as unknown.
+taskdag_activation_test_pre_fenced_push_hook() { return 91; }
+export -f taskdag_activation_test_pre_fenced_push_hook
+unavailable_output=$($TD publish 2>&1); unavailable_rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+if [ "$unavailable_rc" -eq 91 ] \
+   && grep -q "candidate=$completion_tip attempt=1 classification=unavailable push-exit=unknown readback=unknown" <<<"$unavailable_output" \
+   && grep -q "master-before=unknown master-candidate=$completion_tip master-observed=unknown" <<<"$unavailable_output" \
+   && grep -q 'authority-before=unknown authority-observed=unknown authority-guard=unknown' <<<"$unavailable_output" \
+   && grep -q "Recovery command: task-dag publish $completion_tip" <<<"$unavailable_output" \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$remote_master" ]; then
+  ok "pre-result failure emits a complete explicit-unknown evidence record"
+else
+  bad "pre-result failure omitted evidence or changed master (rc=$unavailable_rc out=$unavailable_output)"
+fi
+
 contention_marker="$ROOT/publish-contention-retry"
 contention_ref=refs/heads/fixture-publish-contention-retry
 contention_value=$contention_side_retry
 export contention_marker contention_ref contention_value
+taskdag_activation_test_pre_fenced_push_hook() {
+  [ ! -e "$contention_marker" ] || return 0
+  : >"$contention_marker"
+  unset -f taskdag_activation_test_pre_fenced_push_hook
+  taskdag_activation_fenced_push "$token" fixture publish-contender fixture 2026-07-18T00:00:10Z \
+    "$contention_ref" "" "$contention_value" >/dev/null
+}
+export -f taskdag_activation_test_pre_fenced_push_hook
 publish_output=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 TASKDAG_CAS_MAX_ATTEMPTS=1 "$TD" publish 2>&1); publish_rc=$?
 unset -f taskdag_activation_test_pre_fenced_push_hook
 if [ "$publish_rc" -eq 0 ] \
@@ -361,6 +421,10 @@ ambiguous_retry_output=$($TD publish "$prepared_tip" 2>&1); ambiguous_retry_rc=$
 authority_after_ambiguous_retry=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
 if [ "$ambiguous_rc" -eq 3 ] \
    && grep -q 'outcome is indeterminate' <<<"$ambiguous_output" \
+   && grep -q "candidate=$prepared_tip attempt=1 classification=indeterminate push-exit=0 readback=unavailable" <<<"$ambiguous_output" \
+   && grep -q "master-before=$prepared_base master-candidate=$prepared_tip master-observed=unknown" <<<"$ambiguous_output" \
+   && grep -Eq 'authority-before=[0-9a-f]{40} authority-observed=unknown authority-guard=[0-9a-f]{40}' <<<"$ambiguous_output" \
+   && grep -q "Recovery command: task-dag publish $prepared_tip" <<<"$ambiguous_output" \
    && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$prepared_tip" ] \
    && [ "$ambiguous_retry_rc" -eq 0 ] \
    && [ "$authority_before_ambiguous_retry" = "$authority_after_ambiguous_retry" ]; then

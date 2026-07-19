@@ -51,7 +51,8 @@ if [ ! -x "$TASK_DAG_CLI" ]; then
 fi
 
 # Supply commit identity without mutating caller-local git config. The CLI
-# classifies and drains completion comments before any receipt/ref write.
+# records completion comments only as non-authoritative receipts; authoritative
+# delegated-close reconciliation remains separately migration-drained.
 export GIT_AUTHOR_NAME="github-actions[bot]"
 export GIT_AUTHOR_EMAIL="github-actions[bot]@users.noreply.github.com"
 export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"

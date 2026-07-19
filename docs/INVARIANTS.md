@@ -597,6 +597,19 @@ two-parent shape and pre-tip status before atomically moving master and the
 semantic generation. The managed task-dag pre-push hook rejects raw master
 publication after activation; canonical tooling must use `task-dag publish`.
 
+Publication uses a structured, fail-closed outcome from that atomic push.
+Proven activation-authority contention is the only automatically retried
+outcome; each bounded retry takes a fresh coherent consumer snapshot and
+revalidates the same immutable candidate's master ancestry, canonical
+requirements, close materialisation authority, and activation compatibility.
+A changed target, confirmed no-effect rejection, or indeterminate readback is
+never retried automatically. Operators should preserve the exact local
+candidate: inspect the reported master/authority evidence, then run
+`task-dag publish <candidate>` again. That command converges if the candidate
+already landed and says explicitly when changed ancestry or requirements
+actually require rebasing and recreating it. A publication failure alone is
+not evidence that the completion should be recreated.
+
 Human comment ingestion for an issue whose epic refs are absent deliberately
 uses two fenced generations. The first atomically creates matching
 `tasks/pending/<N>` and `gh/issues/<N>` refs; the second creates the comment

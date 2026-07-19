@@ -127,9 +127,9 @@ else
     bad "7: reusable workflow runtime checkout contract failed"
 fi
 
-# Exercise the helper against a coherent drained runtime in a separate caller
-# repo. This proves the guard runs before CLI invocation, git config, network,
-# or receipt creation.
+# Exercise the helper against a coherent runtime in a separate caller repo.
+# Completion comments are receipt-only hints: they write the durable receipt
+# without GitHub API access, task effects, or caller-local identity mutation.
 mkdir -p "$TMP/runtime" "$TMP/caller" "$TMP/output" "$TMP/bin"
 cp -R "$ROOT/scripts" "$TMP/runtime/scripts"
 cat > "$TMP/bin/curl" <<'EOF'
@@ -137,8 +137,15 @@ cat > "$TMP/bin/curl" <<'EOF'
 echo called > "$OUTPUT_DIR/curl-called"
 exit 99
 EOF
-chmod +x "$TMP/bin/curl"
+cat > "$TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo called > "$OUTPUT_DIR/gh-called"
+exit 99
+EOF
+chmod +x "$TMP/bin/curl" "$TMP/bin/gh"
+git init -q --bare "$TMP/caller-origin"
 git -C "$TMP/caller" init -q
+git -C "$TMP/caller" remote add origin "$TMP/caller-origin"
 git -C "$TMP/caller" config taskdag.current-repo acme/widgets
 printf '<!-- task-dag:completion --> Satisfies acme/widgets#42 via peer/repo@abcdef1' > "$TMP/expected-body"
 COMMENT_BODY="$(cat "$TMP/expected-body"; printf x)"
@@ -154,14 +161,16 @@ export COMMENT_BODY
       "$TMP/runtime/scripts/sync-comment-to-tasks.sh"
 ) >"$TMP/drain.out" 2>&1
 rc=$?
-if [ "$rc" -eq 75 ] \
-  && grep -q '^MIGRATION REQUIRED$' "$TMP/drain.out" \
+if [ "$rc" -eq 0 ] \
   && [ ! -e "$TMP/output/curl-called" ] \
-  && [ -z "$(git -C "$TMP/caller" for-each-ref --format='%(refname)')" ] \
+  && [ ! -e "$TMP/output/gh-called" ] \
+  && git --git-dir="$TMP/caller-origin" show-ref --verify --quiet refs/heads/gh/comments/42/99 \
+  && [ "$(git --git-dir="$TMP/caller-origin" for-each-ref --format='%(refname)')" = refs/heads/gh/comments/42/99 ] \
   && ! git -C "$TMP/caller" config --local --get user.name >/dev/null; then
-    ok "8: shim drains before CLI, git config, receipt, or network effects"
+    ok "8: shim writes a receipt-only completion hint without GitHub or task effects"
 else
-    bad "8: shim drain rc=$rc allowed an effect or omitted the migration notice"
+    bad "8: shim receipt-only completion rc=$rc used GitHub, task effects, or local identity"
+    sed 's/^/    drain: /' "$TMP/drain.out"
 fi
 unset COMMENT_BODY
 

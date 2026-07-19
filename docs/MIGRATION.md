@@ -355,11 +355,13 @@ epic-close, materialisation, completion-ingest, and projection writers are disab
 guarded entry point. A missing, malformed, or unsupported policy fails closed
 for those writers and for migration status, without disabling unrelated reads
 or local completion recording. Human work-request comments remain available;
-completion comments are classified and rejected before API fallback, receipt,
-or ref effects. Reusable workflows obtain each mutator, guard, and policy from
-one checkout/archive revision and translate only exact status 75 into an
-explicit deferred-success result. Every other policy or runtime failure stays
-red.
+completion comments are classified as non-authoritative hints and may create
+only an immutable `gh/comments/<issue>/<comment>` receipt without GitHub API
+fallback or task/completion effects. The independently authoritative delegated
+close reconciler remains migration-drained. Reusable workflows obtain each
+mutator, guard, and policy from one checkout/archive revision and translate
+only exact status 75 into an explicit deferred-success result. Every other
+policy or runtime failure stays red.
 
 Once an activation authority exists, local epic closure no longer consults
 that legacy drain. It consumes the canonical root-completeness snapshot and

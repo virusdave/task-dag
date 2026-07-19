@@ -8266,8 +8266,21 @@ sanctioned_tip_requirements_satisfied() {
     fi
 }
 
-_taskdag_publish_attempt() { # immutable completion candidate
-    local tip=$1 old first updates rc=0 close_issue close_root outcome diagnostic
+_taskdag_publish_evidence() { # candidate attempt structured-result
+    local tip=$1 attempt=$2 result=$3
+    jq -r --arg candidate "$tip" --arg attempt "$attempt" '
+      (.updates | map(select(.ref=="refs/heads/master")) | first) as $master |
+      (if .readback==null then "unavailable" else "coherent" end) as $readbackState |
+      (if .readback==null then "unknown" else ((.readback.targets | map(select(.ref=="refs/heads/master")) | first | .oid) // "absent") end) as $observedMaster |
+      "Publication evidence: candidate=\($candidate) attempt=\($attempt) classification=\(.outcome) push-exit=\(.push.exit) readback=\($readbackState)",
+      "Publication evidence: master-before=\($master.old // "unknown") master-candidate=\($master.new // $candidate) master-observed=\($observedMaster)",
+      "Publication evidence: authority-before=\((.authority.expected | select(length>0)) // "unknown") authority-observed=\((.authority.observed | select(length>0)) // "unknown") authority-guard=\((.authority.guard | select(length>0)) // "unknown")",
+      "Recovery command: task-dag publish \($candidate)"
+    ' <<<"$result" >&2
+}
+
+_taskdag_publish_attempt() { # immutable completion candidate, 1-based attempt
+    local tip=$1 attempt=$2 old first updates rc=0 close_issue close_root outcome diagnostic
     first=$(get_first_parent "$tip") || return 2
     # Observe current master before validating the candidate. A retry after an
     # accepted-but-ambiguous publish is success even if close cleanup already
@@ -8324,11 +8337,16 @@ _taskdag_publish_attempt() { # immutable completion candidate
     [ "$rc" -eq 0 ] || {
         if ! jq -e 'type=="object" and .schema==1 and (.outcome=="authority-contention" or .outcome=="target-changed" or .outcome=="rejected-no-effect" or .outcome=="indeterminate")' \
           <<<"$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT" >/dev/null 2>&1; then
-            echo "Error: completion publication failed before a trustworthy remote outcome was available. Nothing is proven about remote effect; do not recreate or retry automatically. Re-run publish only after inspecting origin/master and activation authority." >&2
+            echo "Publication evidence: candidate=$tip attempt=$attempt classification=unavailable push-exit=unknown readback=unknown" >&2
+            echo "Publication evidence: master-before=unknown master-candidate=$tip master-observed=unknown" >&2
+            echo "Publication evidence: authority-before=unknown authority-observed=unknown authority-guard=unknown" >&2
+            echo "Recovery command: task-dag publish $tip" >&2
+            echo "Error: completion publication failed before a trustworthy remote outcome was available. Nothing is proven about remote effect; do not recreate or retry automatically. Inspect origin/master and activation authority before using the recovery command." >&2
             return "$rc"
         fi
         outcome=$(jq -r .outcome <<<"$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT") || return 2
         diagnostic=$(jq -r .push.diagnostic <<<"$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT") || return 2
+        _taskdag_publish_evidence "$tip" "$attempt" "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT" || return 2
         [ -z "$diagnostic" ] || printf 'Git push diagnostic (sanitized): %s\n' "$diagnostic" >&2
         case "$outcome" in
             authority-contention)
@@ -8354,21 +8372,39 @@ _taskdag_publish_attempt() { # immutable completion candidate
 cmd_publish() {
     local tip retry=0 rc
     case "${1:-}" in
-        -h|--help) echo "Usage: task-dag publish [<completion-or-close-tip>]"; return 0 ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: task-dag publish [<completion-or-close-tip>]
+
+Validate and publish one exact local completion/close candidate. In an
+activated repository, master and activation authority move atomically.
+
+Ordinary activation-authority contention is retried with the shared bounded
+CAS budget and fresh validation before every attempt. Other outcomes stop:
+  target changed       Inspect current master; prior application is unknown.
+  rejected/no effect   Fix the rejection, then retry the exact candidate.
+  indeterminate        Inspect master and activation authority before retrying.
+
+Never recreate a completion merely because publication failed. A fresh
+publish of the exact candidate converges if it is already present and reports
+when changed ancestry or requirements really require a rebase/recreation.
+EOF
+            return 0
+            ;;
         "") tip=HEAD ;;
         *) tip=$1; [ "$#" -eq 1 ] || { echo "Usage: task-dag publish [<completion-or-close-tip>]" >&2; return 2; } ;;
     esac
     tip=$(git rev-parse --verify "${tip}^{commit}") || return 2
     [[ "$TASKDAG_CAS_MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "Error: TASKDAG_CAS_MAX_ATTEMPTS must be a non-negative integer" >&2; return 2; }
     while :; do
-        if _taskdag_publish_attempt "$tip"; then
+        if _taskdag_publish_attempt "$tip" "$((retry+1))"; then
             return 0
         else
             rc=$?
         fi
         [ "$rc" -eq 75 ] || return "$rc"
         if [ "$retry" -ge "$TASKDAG_CAS_MAX_ATTEMPTS" ]; then
-            echo "Error: completion publication exhausted ${TASKDAG_CAS_MAX_ATTEMPTS} retries under proven activation-authority contention. Every failed attempt left origin/master unchanged. The exact candidate may be retried; recreate it only if fresh validation reports changed requirements or master ancestry." >&2
+            echo "Error: completion publication candidate=$tip exhausted ${TASKDAG_CAS_MAX_ATTEMPTS} retries after $((retry+1)) fenced attempts under proven activation-authority contention. Every failed attempt left origin/master unchanged. Recovery command: task-dag publish $tip. Recreate only if fresh validation reports changed requirements or master ancestry." >&2
             return 3
         fi
         retry=$((retry+1))
