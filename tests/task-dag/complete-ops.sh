@@ -20,8 +20,12 @@ export TASK_DAG_GIT_NAME=t TASK_DAG_GIT_EMAIL=t@t
 export TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=myhost TASK_DAG_CLAIMER_PID=$$
 
 git init -q --bare "$ROOT/origin.git"
+git -C "$ROOT/origin.git" config gc.auto 0
+git -C "$ROOT/origin.git" config maintenance.auto false
 bash "$ORDER_HOOK" "$ROOT/origin.git"
 git clone -q "$ROOT/origin.git" "$ROOT/wc"; cd "$ROOT/wc"
+git config gc.auto 0
+git config maintenance.auto false
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
 
 EMPTY_TREE=$(git mktree </dev/null)
@@ -126,7 +130,10 @@ if [ -n "$LEAF" ]; then
   fi
   git clone -q --no-local "$ROOT/origin.git" "$ROOT/keepalive"
   (
+    set -e
     cd "$ROOT/keepalive" || exit 1
+    git config gc.auto 0
+    git config maintenance.auto false
     git fetch -q origin master
     git checkout -q -B master origin/master
     for i in $(seq 1 50); do
@@ -135,16 +142,21 @@ if [ -n "$LEAF" ]; then
       git commit -qm "Keep alive after ops completion $i"
     done
     git push -q origin HEAD:master
-  ) || bad "1h setup: could not create long post-completion history"
-  git fetch -q origin master
-  git reset --hard -q origin/master
-  AFTER_LONG=$(git ls-remote origin refs/heads/master | awk '{print $1}')
-  out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
-  AFTER_LONG2=$(git ls-remote origin refs/heads/master | awk '{print $1}')
-  if [ "$rc" -eq 0 ] && [ "$AFTER_LONG" = "$AFTER_LONG2" ] && echo "$out" | grep -qi 'already'; then
-    ok "1j: long-history idempotent rerun scans without SIGPIPE failure"
+  )
+  setup_rc=$?
+  if [ "$setup_rc" -eq 0 ]; then
+    git fetch -q origin master
+    git reset --hard -q origin/master
+    AFTER_LONG=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+    out=$("$TD" complete-ops "$LEAF" "${ops_args[@]}" 2>&1); rc=$?
+    AFTER_LONG2=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+    if [ "$rc" -eq 0 ] && [ "$AFTER_LONG" = "$AFTER_LONG2" ] && echo "$out" | grep -qi 'already'; then
+      ok "1j: long-history idempotent rerun scans without SIGPIPE failure"
+    else
+      bad "1j: long-history idempotent rerun failed or moved master (rc=$rc out=$out)"
+    fi
   else
-    bad "1j: long-history idempotent rerun failed or moved master (rc=$rc out=$out)"
+    bad "1j setup: could not create long post-completion history"
   fi
 fi
 
