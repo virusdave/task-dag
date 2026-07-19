@@ -48,7 +48,7 @@ import { getWorkerEnv } from '../config/env.js'
 
 // Bump when the prompt's SEMANTICS change (recorded on the result for
 // audit/replay). Date-stamped like DEFAULT_DESCRIPTION_PROMPT_VERSION.
-export const PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION = '2026-07-09-operator-guidance-v1'
+export const PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION = '2026-07-19-operator-guidance-vendor-evidence-v2'
 
 // Event-level: one deliberate, rare call gets generous room but stays bounded.
 const CLASSIFIER_TIMEOUT_CEILING_MS = 120_000
@@ -123,6 +123,16 @@ export interface ClassifierSweedSuggestion {
   readonly score: number | null
 }
 
+export interface ClassifierVendorEvidence {
+  readonly status: 'matched' | 'unknown' | 'conflicting' | 'explicit-override'
+  readonly vendorId: number | null
+  readonly vendorName: string | null
+  readonly confidence: 'high' | 'medium' | 'none'
+  readonly allowedBrandNames: readonly string[]
+  readonly allowedCatalogProductIds: readonly number[]
+  readonly evidence: readonly string[]
+}
+
 /** One distributor line-item group to classify. */
 export interface ClassifierRowInput {
   // Stable, unique within the event. The draft's rowKey must echo this; the
@@ -137,6 +147,10 @@ export interface ClassifierRowInput {
   // (the strongest reuse evidence: 'current-distributor-link').
   readonly currentDistributorLinkProductId: number | null
   readonly sweedSuggestions: readonly ClassifierSweedSuggestion[]
+  // Canonical vendor-directory evidence inferred deterministically from this
+  // purchase/manifest. A non-empty allowedBrandNames list is a hard row-scoped
+  // brand boundary, not merely a model hint.
+  readonly vendorEvidence: ClassifierVendorEvidence
 }
 
 /** One inert C3 fact, flattened with the cited-id the model must use. */
@@ -403,6 +417,7 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'IMPORTANT: operatorGuidance still cannot manufacture a candidate. If the operator says a row is an existing brand/product but NO offered catalogCandidate (or the row\'s currentDistributorLinkProductId / sweedSuggestions) clearly matches it, choose proposedAction "needs-review" (never "catalog-create", and never invent or reuse a non-offered product id) and note the unmet operator guidance in warningFlags.',
   'Each glossaryEntries item maps an abbreviation/term ("term") to its literal expansion ("expansion") — e.g. "PR" -> "Preroll", "FL" -> "Flower", "METRC" -> its acronym expansion. You MAY use these expansions to decode heavily abbreviated distributor/METRC "rows" names into the correct target taxonomy, and you MUST cite the glossary entry\'s "citedId" in citedHintIds whenever an expansion informed your decode.',
   'A glossary entry is INTERPRETATION evidence ONLY: it explains what an abbreviation MEANS, never that a reusable product exists and never a product id. Never propose a reuseProductIdCandidate on the strength of a glossary entry alone, and never use reuseEvidence.source "sibling-po" citing only glossary entries — a sibling-po claim must rest on an actual product fact from a prior order. When a glossary expansion helped you find a live product, use source "live-catalog-search" (or "model-inference") and cite the glossary id.',
+  'Each row includes deterministic vendorEvidence from the canonical vendor-brand directory and known brands in that purchase/manifest. When allowedBrandNames is non-empty, targetBrand MUST be one of those names and a catalog candidate proposed for that row MUST be listed in allowedCatalogProductIds. status "explicit-override" is an authoritative operator pin. status "conflicting" or "unknown" supplies no brand constraint; do not invent one. Confidence and evidence are review context, not permission to escape the allowed lists.',
   'Produce EXACTLY ONE draft per input row, echoing its "rowKey", "distributorProductId", and "distributorProductName" verbatim.',
   'For each row set the structured target taxonomy (targetBrand, targetCategory, targetSubcategory, targetGroupName, targetVariantName, targetVariantTab, targetStrainName, targetSize, targetPackCount); use null for any field you cannot determine. targetCategory and targetSubcategory, when set, MUST be values present in the allowed taxonomy.',
   'Choose proposedAction: "mapping-only" when the row clearly IS an existing live product (then set reuseProductIdCandidate to that product\'s id and provide reuseEvidence); "catalog-create" when it is a genuinely new product (then reuseProductIdCandidate MUST be null); "needs-review" when you are not confident either way.',
@@ -444,6 +459,7 @@ interface UserPayload {
     unitCost: number | null
     currentDistributorLinkProductId: number | null
     sweedSuggestions: readonly ClassifierSweedSuggestion[]
+    vendorEvidence: ClassifierVendorEvidence
   }>
 }
 
@@ -481,6 +497,7 @@ function buildUserPayload(input: ClassifyPendingPurchasePacketInput): UserPayloa
       unitCost: row.unitCost,
       currentDistributorLinkProductId: row.currentDistributorLinkProductId,
       sweedSuggestions: row.sweedSuggestions,
+      vendorEvidence: row.vendorEvidence,
     })),
   }
 }
@@ -612,7 +629,10 @@ function parseAndValidateDrafts(
   const drafts = parsed.data.drafts
 
   // Boundary invariants the static schema can't express.
-  const catalogCandidateIds = new Set(input.catalogCandidates.map((candidate) => candidate.productId))
+  const catalogCandidatesById = new Map(
+    input.catalogCandidates.map((candidate) => [candidate.productId, candidate]),
+  )
+  const catalogCandidateIds = new Set(catalogCandidatesById.keys())
   // A citation may point at a product fact OR a glossary entry; both are
   // legitimately-provided evidence the model may cite.
   const productFactCitedIds = new Set(input.hintFacts.map((fact) => fact.citedId))
@@ -653,7 +673,10 @@ function parseAndValidateDrafts(
         catalogCandidateIds,
         productFactCitedIds,
       })
+      assertVendorCandidateAllowed(draft.rowKey, expected, draft.reuseProductIdCandidate, catalogCandidatesById)
     }
+
+    assertVendorTargetBrandAllowed(draft.rowKey, expected, draft.targetBrand)
 
     for (const citedId of allCitedIds(draft)) {
       if (!providedCitedIds.has(citedId)) {
@@ -694,6 +717,52 @@ function parseAndValidateDrafts(
   }
 
   return validated
+}
+
+function assertVendorTargetBrandAllowed(
+  rowKey: string,
+  row: ClassifierRowInput,
+  targetBrand: string | null,
+): void {
+  const allowed = row.vendorEvidence.allowedBrandNames
+  if (allowed.length === 0) return
+  if (targetBrand === null) {
+    if (row.vendorEvidence.status === 'explicit-override') {
+      throw new PendingPurchaseClassifierError(
+        `draft "${rowKey}" omitted the authoritative explicit brand override "${allowed[0]}".`,
+      )
+    }
+    return
+  }
+  const allowedKeys = new Set(allowed.map(normalizeTaxon))
+  if (!allowedKeys.has(normalizeTaxon(targetBrand))) {
+    throw new PendingPurchaseClassifierError(
+      `draft "${rowKey}" targetBrand "${targetBrand}" is outside the vendor-evidence brand set (${allowed.join(', ')}).`,
+    )
+  }
+}
+
+function assertVendorCandidateAllowed(
+  rowKey: string,
+  row: ClassifierRowInput,
+  productId: number,
+  candidatesById: ReadonlyMap<number, ClassifierCatalogCandidate>,
+): void {
+  const allowed = row.vendorEvidence.allowedBrandNames
+  const candidate = candidatesById.get(productId)
+  // Current distributor links and row-scoped Sweed suggestions are stronger,
+  // explicit row facts. C5 must see them even when vendor evidence conflicts.
+  if (
+    allowed.length === 0
+    || candidate === undefined
+    || row.currentDistributorLinkProductId === productId
+    || row.sweedSuggestions.some((suggestion) => suggestion.productId === productId)
+  ) return
+  if (!row.vendorEvidence.allowedCatalogProductIds.includes(productId)) {
+    throw new PendingPurchaseClassifierError(
+      `draft "${rowKey}" proposed catalog product ${productId} outside the vendor-evidence brand set (${allowed.join(', ')}).`,
+    )
+  }
 }
 
 /**

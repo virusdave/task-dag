@@ -328,7 +328,7 @@ async function lowInventoryPhysicalCountsSchemaApplied(db: Queryable): Promise<b
   return result.rows[0]?.applied === true
 }
 
-async function vendorBrandAssociationsSchemaApplied(db: Queryable): Promise<boolean> {
+export async function vendorBrandAssociationsSchemaApplied(db: Queryable): Promise<boolean> {
   // One bounded catalog round-trip verifies the exact schema contract. Seed
   // rows are deliberately excluded because operators may edit them later.
   const result = await db.query<{ applied: boolean }>(`

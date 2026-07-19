@@ -52,10 +52,15 @@ import {
   type ClassifierOperatorGuidance,
   type ClassifierRowInput,
   type ClassifierSweedSuggestion,
+  type ClassifierVendorEvidence,
 } from '../pendingPurchases/classifyPendingPurchasePacket.js'
+import {
+  loadPendingPurchaseVendorEvidence,
+} from '../pendingPurchases/pendingPurchaseVendorEvidence.js'
 import {
   reconcilePendingPurchaseDrafts,
   type ReconciledPendingPurchaseClassification,
+  type ReconciledSuggestionCandidate,
   type ReconcilerCatalogCandidate,
 } from '../pendingPurchases/reconcilePendingPurchaseDrafts.js'
 import { getWorkerEnv } from '../config/env.js'
@@ -805,6 +810,7 @@ interface PendingPurchaseGroupContext {
   rowInputSignature: string
   parseComparison: PendingPurchaseParseComparison
   classifierRow: ClassifierRowInput
+  vendorEvidence: ClassifierVendorEvidence
   pinnedDistributorBrand: string | null
   enrichmentCandidateIds: number[]
   relevantCandidateIds: number[]
@@ -936,9 +942,34 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
   }
 
   // ── Phase A: per-group context (parallel) ───────────────────────────────
-  const contexts = await mapWithConcurrency(groupsArray, GROUP_CONTEXT_CONCURRENCY, (group) =>
+  let contexts = await mapWithConcurrency(groupsArray, GROUP_CONTEXT_CONCURRENCY, (group) =>
     buildPendingPurchaseGroupContext(cache, group),
   )
+
+  const vendorEvidenceByRow = await loadPendingPurchaseVendorEvidence(
+    db,
+    contexts.map((ctx) => ({
+      rowKey: ctx.classifierRow.rowKey,
+      purchaseRefs: [...ctx.group.orderIds].map((orderId) => ({
+        dealerId: ctx.group.siteDealerId,
+        poId: String(orderId),
+      })),
+      parsedBrand: normalizeNonEmptyString(ctx.parseComparison.winner?.brand),
+      parsedCategory: normalizeNonEmptyString(ctx.parseComparison.winner?.category),
+      explicitBrandOverride: ctx.pinnedDistributorBrand,
+    })),
+  )
+  contexts = contexts.map((ctx) => {
+    const vendorEvidence = vendorEvidenceByRow.get(ctx.classifierRow.rowKey)
+    if (vendorEvidence === undefined) {
+      throw new Error(`Vendor evidence returned no result for row "${ctx.classifierRow.rowKey}".`)
+    }
+    return {
+      ...ctx,
+      vendorEvidence,
+      classifierRow: { ...ctx.classifierRow, vendorEvidence },
+    }
+  })
 
   // ── Phase B: hint facts + allowed taxonomy ──────────────────────────────
   const { hintFacts, glossaryEntries, operatorGuidance, operatorNoteDocuments } = await buildClassifierHintFacts(
@@ -949,6 +980,16 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
 
   // ── Phase C: catalog candidate pool ─────────────────────────────────────
   const candidatePool = await buildPendingPurchaseCandidatePool(cache, contexts)
+  contexts = contexts.map((ctx) => {
+    const allowedCatalogProductIds = ctx.vendorEvidence.allowedBrandNames.length === 0
+      ? []
+      : ctx.relevantCandidateIds.filter((productId) => {
+          const candidate = candidatePool.get(productId)?.classifier
+          return candidate !== undefined && candidateMatchesVendorEvidence(candidate, ctx.vendorEvidence)
+        })
+    const vendorEvidence = { ...ctx.vendorEvidence, allowedCatalogProductIds }
+    return { ...ctx, vendorEvidence, classifierRow: { ...ctx.classifierRow, vendorEvidence } }
+  })
 
   // ── Phase D: chunked classify → single reconcile ────────────────────────
   const chunks = chunkGroupContextsForClassifier(contexts)
@@ -967,11 +1008,22 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       total: chunks.length,
     })
 
+    const catalogCandidates = selectClassifierCandidatesForChunk(chunk, candidatePool)
+    const offeredCandidateIds = new Set(catalogCandidates.map((candidate) => candidate.productId))
+    const chunkRows = chunk.map((ctx) => ({
+      ...ctx.classifierRow,
+      vendorEvidence: {
+        ...ctx.classifierRow.vendorEvidence,
+        allowedCatalogProductIds: ctx.classifierRow.vendorEvidence.allowedCatalogProductIds.filter(
+          (productId) => offeredCandidateIds.has(productId),
+        ),
+      },
+    }))
     const chunkResult = await classifyPendingPurchasePacketWithLlm({
       db,
       eventDescription: describeClassifierEvent(chunk),
-      rows: chunk.map((ctx) => ctx.classifierRow),
-      catalogCandidates: selectClassifierCandidatesForChunk(chunk, candidatePool),
+      rows: chunkRows,
+      catalogCandidates,
       hintFacts,
       glossaryEntries,
       operatorGuidance,
@@ -1125,6 +1177,15 @@ async function buildPendingPurchaseGroupContext(
     unitCost: resolvedCost.value,
     currentDistributorLinkProductId: stateDistributorProductRow?.productId ?? null,
     sweedSuggestions,
+    vendorEvidence: {
+      status: 'unknown',
+      vendorId: null,
+      vendorName: null,
+      confidence: 'none',
+      allowedBrandNames: [],
+      allowedCatalogProductIds: [],
+      evidence: [],
+    },
   }
 
   const enrichmentCandidateIds: number[] = []
@@ -1154,6 +1215,7 @@ async function buildPendingPurchaseGroupContext(
     rowInputSignature,
     parseComparison,
     classifierRow,
+    vendorEvidence: classifierRow.vendorEvidence,
     pinnedDistributorBrand,
     enrichmentCandidateIds: dedupePositiveInts(enrichmentCandidateIds),
     relevantCandidateIds,
@@ -1320,15 +1382,70 @@ function selectClassifierCandidatesForChunk(
       if (entry === undefined) {
         continue
       }
-      seen.add(id)
       if (ctx.enrichmentCandidateIds.includes(id) || entry.enrichment) {
+        seen.add(id)
         enrichment.push(entry.classifier)
-      } else {
+      } else if (candidateMatchesVendorEvidence(entry.classifier, ctx.vendorEvidence)) {
+        seen.add(id)
         search.push(entry.classifier)
       }
     }
   }
   return [...enrichment, ...search].slice(0, MAX_CLASSIFIER_CANDIDATES_PER_CALL)
+}
+
+function candidateMatchesVendorEvidence(
+  candidate: ClassifierCatalogCandidate,
+  evidence: ClassifierVendorEvidence,
+): boolean {
+  if (evidence.allowedBrandNames.length === 0) return true
+  if (candidate.brand === null) return false
+  const brandKey = candidate.brand.trim().toLocaleLowerCase('en-US')
+  return evidence.allowedBrandNames.some(
+    (brand) => brand.trim().toLocaleLowerCase('en-US') === brandKey,
+  )
+}
+
+function formatVendorEvidenceNote(evidence: ClassifierVendorEvidence): string {
+  const subject = evidence.vendorName === null
+    ? evidence.status === 'explicit-override' ? 'Explicit brand override' : 'Vendor evidence'
+    : `Vendor evidence for ${evidence.vendorName}`
+  const allowed = evidence.allowedBrandNames.length > 0
+    ? ` Allowed brands: ${evidence.allowedBrandNames.join(', ')}.`
+    : ''
+  const confidence = evidence.confidence === 'none' ? 'no confidence' : `${evidence.confidence} confidence`
+  return `${subject} (${confidence}): ${evidence.evidence.join(' ')}${allowed}`
+}
+
+export function downgradeExplicitBrandConflict(input: {
+  classification: ReconciledPendingPurchaseClassification
+  explicitBrand: string
+  catalogAction: string
+  additionalCandidates: readonly ReconciledSuggestionCandidate[]
+}): ReconciledPendingPurchaseClassification {
+  const suggestions = new Map(
+    input.classification.suggestionCandidates.map((candidate) => [candidate.productId, candidate]),
+  )
+  if (input.classification.reuseProductId !== null) {
+    suggestions.set(input.classification.reuseProductId, {
+      productId: input.classification.reuseProductId,
+      productName: input.classification.reuseProductName,
+      score: null,
+    })
+  }
+  for (const candidate of input.additionalCandidates) suggestions.set(candidate.productId, candidate)
+  return {
+    ...input.classification,
+    actionType: 'needs-review',
+    catalogAction: input.catalogAction,
+    mappingStatus: 'needs_review',
+    reuseProductId: null,
+    reuseProductName: null,
+    reuseGroupId: null,
+    validatedReuseSnapshot: null,
+    targetBrand: input.explicitBrand,
+    suggestionCandidates: [...suggestions.values()],
+  }
 }
 
 function selectReconcilerCandidates(
@@ -1550,6 +1667,27 @@ async function composePendingPurchaseRowFromReconciled(input: {
   const extraReviewFlags: string[] = []
   const extraNotes: string[] = []
 
+  // Current links and Sweed suggestions remain visible to C5 even when vendor
+  // evidence disagrees, but an explicit operator brand pin must never be
+  // silently replaced by their catalog brand. Preserve both facts for review.
+  if (
+    ctx.vendorEvidence.status === 'explicit-override'
+    && classification.validatedReuseSnapshot !== null
+    && !candidateMatchesVendorEvidence(
+      { ...classification.validatedReuseSnapshot, groupName: classification.validatedReuseSnapshot.groupName },
+      ctx.vendorEvidence,
+    )
+  ) {
+    classification = downgradeExplicitBrandConflict({
+      classification,
+      catalogAction: 'Review the explicit brand override against the existing catalog reuse link.',
+      explicitBrand: ctx.vendorEvidence.allowedBrandNames[0]!,
+      additionalCandidates: [],
+    })
+    extraReviewFlags.push('Explicit brand override conflicts with existing catalog link')
+    extraNotes.push('The explicit brand override was preserved; the conflicting existing link requires operator review.')
+  }
+
   // Operator-pinned exact-name reuse (EXACT_REUSE_PRODUCT_IDS). Trusted like a
   // DB distributor link: if the reconciler did not already confirm a reuse, pin
   // it deterministically here (the model/reconciler cannot "discover" a hand-
@@ -1566,13 +1704,32 @@ async function composePendingPurchaseRowFromReconciled(input: {
   const exactReuseId = EXACT_REUSE_PRODUCT_IDS.get(group.distributorProductName)
   const currentLinkId = ctx.classifierRow.currentDistributorLinkProductId
   const pinDoesNotConflictWithCurrentLink = currentLinkId === null || currentLinkId === exactReuseId
-  if (
-    exactReuseId !== undefined
-    && classification.reuseProductId === null
-    && pinDoesNotConflictWithCurrentLink
-  ) {
+  if (exactReuseId !== undefined) {
     const pinned = await tryGetProductSummary(cache, exactReuseId)
-    if (pinned !== null) {
+    const pinnedCandidate = pinned === null ? null : toCandidatePoolEntry(pinned)?.classifier ?? null
+    const conflictsWithExplicitOverride =
+      pinnedCandidate !== null
+      && ctx.vendorEvidence.status === 'explicit-override'
+      && !candidateMatchesVendorEvidence(pinnedCandidate, ctx.vendorEvidence)
+    if (pinned !== null && pinnedCandidate !== null && conflictsWithExplicitOverride) {
+      classification = downgradeExplicitBrandConflict({
+        classification,
+        catalogAction: 'Review the explicit brand override against the exact-name reuse pin.',
+        explicitBrand: ctx.vendorEvidence.allowedBrandNames[0]!,
+        additionalCandidates: [{
+          productId: pinned.productId,
+          productName: pinned.productName,
+          score: null,
+        }],
+      })
+      extraReviewFlags.push('Explicit brand override conflicts with exact-name reuse pin')
+      extraNotes.push('The explicit brand override was preserved; the conflicting exact-name reuse pin requires operator review.')
+    } else if (
+      pinned !== null
+      && pinnedCandidate !== null
+      && classification.reuseProductId === null
+      && pinDoesNotConflictWithCurrentLink
+    ) {
       classification = {
         ...classification,
         actionType: 'mapping-only',
@@ -1664,6 +1821,7 @@ async function composePendingPurchaseRowFromReconciled(input: {
 
   const notes = joinNotes([
     classification.notes,
+    formatVendorEvidenceNote(ctx.vendorEvidence),
     reuseReason,
     resolvedCost.reason,
     !reuse && anchors.length > 0

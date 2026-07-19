@@ -64,6 +64,15 @@ function rowInput(overrides: Partial<ClassifierRowInput> = {}): ClassifierRowInp
     unitCost: 12.5,
     currentDistributorLinkProductId: null,
     sweedSuggestions: [],
+    vendorEvidence: {
+      status: 'unknown',
+      vendorId: null,
+      vendorName: null,
+      confidence: 'none',
+      allowedBrandNames: [],
+      allowedCatalogProductIds: [],
+      evidence: [],
+    },
     ...overrides,
   }
 }
@@ -354,6 +363,71 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
     stubFetch(modelResponse({ drafts: [modelDraft({ targetCategory: 'Concentrates' })] }))
     await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
       /not in the allowed taxonomy/,
+    )
+  })
+
+  it('rejects a target brand outside the row-scoped vendor evidence', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft({ targetBrand: 'Runtz' })] }))
+    const input = buildInput({
+      rows: [rowInput({
+        vendorEvidence: {
+          status: 'matched',
+          vendorId: 1,
+          vendorName: 'Curaleaf',
+          confidence: 'high',
+          allowedBrandNames: ['Select', 'Grass Roots'],
+          allowedCatalogProductIds: [],
+          evidence: ['Purchase manifest brand “Select” maps to Curaleaf.'],
+        },
+      })],
+    })
+    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(
+      /outside the vendor-evidence brand set/,
+    )
+  })
+
+  it('rejects a catalog reuse candidate outside the row-scoped vendor evidence', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft({ targetBrand: 'Select' })] }))
+    const input = buildInput({
+      rows: [rowInput({
+        vendorEvidence: {
+          status: 'matched',
+          vendorId: 1,
+          vendorName: 'Curaleaf',
+          confidence: 'high',
+          allowedBrandNames: ['Select'],
+          allowedCatalogProductIds: [],
+          evidence: ['Purchase manifest brand “Select” maps to Curaleaf.'],
+        },
+      })],
+    })
+    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(
+      /catalog product 7001 outside the vendor-evidence brand set/,
+    )
+  })
+
+  it('requires the model to retain an explicit brand override', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft({
+      targetBrand: null,
+      proposedAction: 'needs-review',
+      reuseProductIdCandidate: null,
+      reuseEvidence: null,
+    })] }))
+    const input = buildInput({
+      rows: [rowInput({
+        vendorEvidence: {
+          status: 'explicit-override',
+          vendorId: null,
+          vendorName: null,
+          confidence: 'high',
+          allowedBrandNames: ['Pinned Brand'],
+          allowedCatalogProductIds: [],
+          evidence: ['Explicit distributor-brand override pins this line to “Pinned Brand”.'],
+        },
+      })],
+    })
+    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(
+      /omitted the authoritative explicit brand override/,
     )
   })
 
