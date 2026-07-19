@@ -32,13 +32,13 @@ clarification=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarificati
   'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 98' \
   | git -C "$tmp/work" commit-tree "$empty")
 manual_cleanup=$(printf '%s\n' 'kind: completion' 'role: system' 'intent: cross-repo-satisfied' '' \
-  'issue:' '  repo: acme/widgets' '  number: 10' '' 'delegated:' '  repo: acme/peer' \
+  'issue:' '  repo: acme/widgets' '  number: 12' '' 'delegated:' '  repo: acme/peer' \
   '  number: 1' '' 'source:' '  repo: acme/peer' '  commit: abcdef123456' \
   '  comment_id: manual-cleanup-peer-1' \
   | git -C "$tmp/work" commit-tree "$empty")
 git -C "$tmp/work" push -q origin \
   "$clarification:refs/heads/gh/comments/10/98" \
-  "$manual_cleanup:refs/heads/gh/comments/10/manual-cleanup-peer-1"
+  "$manual_cleanup:refs/heads/gh/comments/12/manual-cleanup-peer-1"
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -59,10 +59,18 @@ case "$endpoint" in
   *issues/comments/99)
     header; printf '\r\n'; comment 99 10 2020-01-01T00:00:00Z 2020-01-01T00:00:00Z historical
     ;;
+  *issues/comments?*) if [[ "${GH_CLOSED_ONLY:-0}" == 1 ]]; then
+    header; printf '\r\n['
+    comment 5 12 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z late-closed-comment
+    printf ']\n'
+    exit 0
+    fi
+    ;;&
   *issues/comments*page=2*)
     header; printf '\r\n['
     comment 2 10 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z work
     printf ','; comment 4 10 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z '<!-- task-dag:status -->'
+    printf ','; comment 5 12 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z late-closed-comment
     printf ']\n'
     ;;
   *issues/comments?*)
@@ -74,8 +82,9 @@ case "$endpoint" in
     printf ','; comment 3 11 2025-01-02T00:00:00Z 2025-01-03T00:00:00Z pull-request
     printf ']\n'
     ;;
-  *issues/10) header; printf '\r\n{"number":10,"title":"Issue ten","body":"","html_url":"https://github.com/acme/widgets/issues/10","user":{"login":"alice"}}\n' ;;
-  *issues/11) header; printf '\r\n{"number":11,"title":"Pull request","body":"","html_url":"https://github.com/acme/widgets/pull/11","user":{"login":"alice"},"pull_request":{}}\n' ;;
+  *issues/10) header; printf '\r\n{"number":10,"state":"open","title":"Issue ten","body":"","html_url":"https://github.com/acme/widgets/issues/10","user":{"login":"alice"}}\n' ;;
+  *issues/11) header; printf '\r\n{"number":11,"state":"open","title":"Pull request","body":"","html_url":"https://github.com/acme/widgets/pull/11","user":{"login":"alice"},"pull_request":{}}\n' ;;
+  *issues/12) header; printf '\r\n{"number":12,"state":"closed","title":"Closed issue","body":"","html_url":"https://github.com/acme/widgets/issues/12","user":{"login":"alice"}}\n' ;;
   *) exit 1 ;;
 esac
 EOF
@@ -87,15 +96,33 @@ out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     --ingestion-start-at 2025-01-01T00:00:00Z --allow-comment 10:99 --dry-run)
 [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]
 jq -e '.schema_version == 1 and .status == "success" and .dry_run == true and
-       .pages == 2 and .requests == 6 and .returned == 6 and .unique == 5 and
-       .pre_boundary == 1 and .pull_requests == 1 and .eligible == 3 and
-       .missing == 3 and .dispositions == {human:2,completion:0,machine_skip:1} and
-       .attempted == 0 and .deferred == 3 and .failures == 0 and
+       .pages == 2 and .requests == 7 and .returned == 7 and .unique == 6 and
+       .pre_boundary == 1 and .pull_requests == 1 and .eligible == 4 and
+       .missing == 4 and .dispositions == {human:2,completion:0,machine_skip:2} and
+       .attempted == 0 and .deferred == 4 and .failures == 0 and
        .recent_success_at == null and .complete_success_at == null' <<<"$out" >/dev/null
 grep -q 'since=2024-12-31T23:45:00Z' "$GH_LOG"
 grep -Fxq 'repositories/123/issues/comments?sort=updated&direction=asc&per_page=100&since=2025-01-01T00%3A00%3A00Z&page=2' "$GH_LOG"
 refs_after=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname) %(refname)' | sort)
 [ "$refs_after" = "$refs_before" ]
+
+# Apply mode: a late human comment on a closed issue is receipted without
+# recreating work, while an immutable historical completion receipt for that
+# same closed issue does not attempt close convergence against a retired root.
+apply_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    GH_CLOSED_ONLY=1 CROSS="$(dirname "$TD")/task-dag.d/cross-repo.sh" \
+    bash -c 'source "$CROSS"; taskdag_comment_watchdog_check_file() { :; }; \
+      _xrepo_reconcile_comments_impl --mode complete \
+        --ingestion-start-at 2025-01-01T00:00:00Z \
+        --watchdog-token-file "'$tmp'/watchdog-token"')
+jq -e '.status == "success" and .dry_run == false and .applied == 1 and
+       .failures == 0 and .dispositions.machine_skip == 1 and
+       .complete_success_at != null' <<<"$apply_out" >/dev/null
+receipt=$(git --git-dir="$tmp/origin.git" rev-parse refs/heads/gh/comments/12/5)
+[ "$(git --git-dir="$tmp/origin.git" rev-list --parents -n1 "$receipt" | wc -w)" -eq 1 ]
+git --git-dir="$tmp/origin.git" show -s --format=%B "$receipt" | grep -Fxq 'Disposition: machine-skip'
+! git --git-dir="$tmp/origin.git" show-ref --verify --quiet refs/heads/tasks/pending/12
+! git --git-dir="$tmp/origin.git" for-each-ref --format='%(refname)' refs/heads/tasks/frontier/ | grep -q .
 
 set +e
 mismatch_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets GH_BAD_NUMERIC_LINK=1 \

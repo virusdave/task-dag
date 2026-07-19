@@ -1467,6 +1467,7 @@ _xrepo_classify_comment_body() {
 
 _xrepo_ingest_observed_comment() {
     local issue="$1" comment_id="$2" created_at="$3" updated_at="$4" author="$5" comment_url="$6" body_file="$7"
+    local classification_override="${8:-}"
     local repo comment_ref remote_sha existing hash disposition effect_sha="" effect_ref="" classification peer_from peer_phase peer_issue
     repo="$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')"; comment_ref="refs/heads/gh/comments/${issue}/${comment_id}"
     [[ "$repo" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] || { _xrepo_die "cannot determine canonical owner/repository"; return 2; }
@@ -1483,7 +1484,11 @@ _xrepo_ingest_observed_comment() {
         && { [ "$created_at" \< "$updated_at" ] || [ "$created_at" = "$updated_at" ]; } \
         || { _xrepo_die "invalid comment observation timestamps"; return 2; }
     hash="$(sha256sum "$body_file" | awk '{print $1}')"
-    classification="$(_xrepo_classify_comment_body "$repo" "$issue" "$body_file")" || return 2
+    if [ -n "$classification_override" ]; then
+        classification="$classification_override"
+    else
+        classification="$(_xrepo_classify_comment_body "$repo" "$issue" "$body_file")" || return 2
+    fi
     IFS=$'\x1f' read -r disposition peer_from peer_phase peer_issue <<<"$classification"
     if [ "$disposition" = completion ]; then
         # Completion comments are latency hints, never completion authority.
@@ -1815,7 +1820,7 @@ EOF
             if ! _rc_api "repos/$repo/issues/$issue"; then
                 issue_pr[$issue]=-1
                 _rc_fail issue "$issue" "$cid" "issue request failed"
-            elif ! jq -e --argjson issue "$issue" 'type=="object" and .number==$issue and (.title|type)=="string" and (.html_url|type)=="string" and (.user.login|type)=="string" and ((.body|type)=="string" or .body==null) and ((has("pull_request")|not) or (.pull_request|type)=="object")' "$tmp/body" >/dev/null; then
+            elif ! jq -e --argjson issue "$issue" 'type=="object" and .number==$issue and (.state=="open" or .state=="closed") and (.title|type)=="string" and (.html_url|type)=="string" and (.user.login|type)=="string" and ((.body|type)=="string" or .body==null) and ((has("pull_request")|not) or (.pull_request|type)=="object")' "$tmp/body" >/dev/null; then
                 issue_pr[$issue]=-1
                 _rc_fail issue "$issue" "$cid" "malformed issue metadata"
             elif jq -e 'has("pull_request")' "$tmp/body" >/dev/null; then
@@ -1830,7 +1835,14 @@ EOF
         eligible=$((eligible+1)); missing=$((missing+1))
         bodyf="$tmp/body-$cid"; jq -rj .body <<<"$item" >"$bodyf"
         local classified
-        if ! classified="$(_xrepo_classify_comment_body "$repo" "$issue" "$bodyf")"; then _rc_fail classify "$issue" "$cid" "invalid completion target"; continue; fi
+        # Closed issues have no live scheduling root: canonical close cleanup
+        # retires tasks/pending/<N>. Receipt their late comments so scans
+        # converge, but never recreate work or attempt another epic close.
+        if jq -e '.state == "closed"' "$tmp/issue-${issue}.json" >/dev/null; then
+            classified=$'machine-skip\x1f\x1f\x1f'
+        elif ! classified="$(_xrepo_classify_comment_body "$repo" "$issue" "$bodyf")"; then
+            _rc_fail classify "$issue" "$cid" "invalid completion target"; continue
+        fi
         case "${classified%%$'\x1f'*}" in
             completion) completion=$((completion+1)); printf '%s\n' "$issue" >>"$tmp/converge-issues" ;;
             machine-skip) machine=$((machine+1)) ;;
@@ -1844,7 +1856,7 @@ EOF
             ISSUE_URL="$(jq -r .html_url "$tmp/issue-${issue}.json")" \
             ISSUE_BODY="$(jq -r '.body // ""' "$tmp/issue-${issue}.json")" \
             _XREPO_SNAPSHOT_ABSENT=true _XREPO_DEFER_CONVERGENCE=true \
-            _xrepo_ingest_observed_comment "$issue" "$cid" "$ca" "$ua" "$author" "$url" "$bodyf"; then
+            _xrepo_ingest_observed_comment "$issue" "$cid" "$ca" "$ua" "$author" "$url" "$bodyf" "$classified"; then
             applied=$((applied+1))
         else
             _rc_fail ingest "$issue" "$cid" "atomic ingestion failed"
@@ -1883,6 +1895,20 @@ EOF
         while IFS= read -r issue; do
             [ -n "$issue" ] || continue
             _rc_time || { _rc_fail convergence "$issue" "" "time ceiling reached"; fatal=true; break; }
+            # Refresh state immediately before mutation. The earlier scan
+            # observation may have failed or the issue may have closed since.
+            if ! _rc_api "repos/$repo/issues/$issue"; then
+                _rc_fail convergence "$issue" "" "issue request failed"; continue
+            elif ! jq -e --argjson issue "$issue" 'type=="object" and .number==$issue and (.state=="open" or .state=="closed")' "$tmp/body" >/dev/null; then
+                _rc_fail convergence "$issue" "" "malformed issue metadata"; continue
+            fi
+            cp "$tmp/body" "$tmp/issue-${issue}.json"
+            # Completion receipts are immutable history and remain in every
+            # future snapshot. A closed issue is already converged; its live
+            # scheduling root was intentionally retired by close cleanup.
+            if jq -e '.state == "closed"' "$tmp/issue-${issue}.json" >/dev/null; then
+                continue
+            fi
             if ! _xrepo_reconcile_issue_delegated_closes "$issue"; then
                 _rc_fail convergence "$issue" "" "delegated-close reconciliation failed"
                 continue
