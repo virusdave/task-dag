@@ -28,7 +28,8 @@ else
   count=0; [ ! -n "${CAPTURE_COUNTER:-}" ] || { count=$(cat "$CAPTURE_COUNTER" 2>/dev/null || echo 0); count=$((count+1)); printf '%s\n' "$count" >"$CAPTURE_COUNTER"; }
   [ "${CAPTURE_MODE:-}" != mutate-ref ] || [ "$count" -ne 1 ] || git -C "$CAPTURE_REPO" update-ref refs/heads/tasks/mutated "$CAPTURE_TIP"
   case "${CAPTURE_MODE:-}" in
-    pages) printf '%s\n' '[[{"body":"fixture body\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture","user":{"login":"fixture"}}],[{"body":"pr\n","created_at":"2026-07-17T00:00:01Z","node_id":"PR_fixture","number":2,"pull_request":{},"state":"open","title":"PR","user":{"login":"fixture"}},{"body":"second\n","created_at":"2026-07-17T00:00:02Z","node_id":"I_second","number":3,"state":"closed","title":"Second","user":{"login":"fixture"}}]]' ;;
+    pages) printf '%s\n' '[[{"body":"fixture body\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture","user":{"login":"fixture"}}],[{"body":"pr\n","created_at":"2026-07-17T00:00:01Z","node_id":"PR_fixture","number":3,"pull_request":{},"state":"open","title":"PR","user":{"login":"fixture"}},{"body":"second\n","created_at":"2026-07-17T00:00:02Z","node_id":"I_second","number":2,"state":"closed","title":"Second","user":{"login":"fixture"}}]]' ;;
+    duplicate) printf '%s\n' '[[{"body":"first\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"First","user":{"login":"fixture"}}],[{"body":"duplicate\n","created_at":"2026-07-17T00:00:01Z","node_id":"I_duplicate","number":1,"state":"open","title":"Duplicate","user":{"login":"fixture"}}]]' ;;
     unstable) printf '[[{"body":"fixture body\\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture %s","user":{"login":"fixture"}}]]\n' "$count" ;;
     pr-unstable) printf '[[{"body":"fixture body\\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture","user":{"login":"fixture"}},{"body":"pr\\n","created_at":"2026-07-17T00:00:01Z","node_id":"PR_fixture","number":2,"pull_request":{},"state":"open","title":"PR %s","user":{"login":"fixture"}}]]\n' "$count" ;;
     *) printf '%s\n' '[[{"body":"fixture body\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture","user":{"login":"fixture"}}]]' ;;
@@ -51,8 +52,10 @@ PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$RO
 if PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured" >/dev/null 2>&1; then bad "capture overwrote existing output"; else ok "capture output is no-clobber"; fi
 CAPTURE_MODE=pages CAPTURE_COUNTER="$ROOT/pages-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured-pages" >/dev/null \
   && [ "$(jq '.issuePages|length' "$ROOT/captured-pages/spec.json")" -eq 2 ] \
-  && jq -se '[.[].issues[]|.number]==[1,2,3]' "$ROOT/captured-pages/pages/"*.json >/dev/null \
-  && ok "capture preserves complete issues-endpoint pagination" || bad "paginated census capture"
+  && jq -se '[.[].issues[]|.number]==[1,3,2]' "$ROOT/captured-pages/pages/"*.json >/dev/null \
+  && ok "capture preserves complete out-of-order issues-endpoint pagination" || bad "paginated census capture"
+if CAPTURE_MODE=duplicate PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/duplicate" >/dev/null 2>&1 \
+  || [ -e "$ROOT/duplicate" ]; then bad "capture accepted duplicate issue numbers"; else ok "capture rejects duplicate issue numbers without output"; fi
 if CAPTURE_MODE=unstable CAPTURE_COUNTER="$ROOT/unstable-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/unstable" >/dev/null 2>&1 \
   || [ -e "$ROOT/unstable" ]; then bad "capture accepted changing API snapshots"; else ok "capture rejects changing API snapshots without output"; fi
 if CAPTURE_MODE=pr-unstable CAPTURE_COUNTER="$ROOT/pr-unstable-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/pr-unstable" >/dev/null 2>&1 \

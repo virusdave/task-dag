@@ -23,8 +23,8 @@ _taskdag_census_capture_api() { # repo repository-id output
       | map(map({body:(.body//""),completionEvidence:[],createdAt:.created_at,creator:.user.login,
           declarations:[],id:.node_id,liveDelegations:[],markers:[],number:.number,
           repositoryId:$id,state:(.state|ascii_upcase),title:.title}))
-      | if ([.[][]|.number] as $n | ($n|length)==($n|unique|length) and $n==($n|sort)) then .
-        else error("duplicate or non-monotonic issue numbers") end
+      | if ([.[][]|.number] as $n | ($n|length)==($n|unique|length)) then .
+        else error("duplicate issue numbers") end
     ' <<<"$pages" >"$out"
 }
 
