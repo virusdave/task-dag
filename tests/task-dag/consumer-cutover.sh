@@ -8,6 +8,12 @@ bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=4242
 
+fixture_fail_publish_readback=false
+git() {
+  if [ "$fixture_fail_publish_readback" = true ] && [ "${1:-}" = ls-remote ]; then return 1; fi
+  command git "$@"
+}
+
 git init -q --bare "$ROOT/origin"
 git clone -q "$ROOT/origin" "$ROOT/wc"
 cd "$ROOT/wc"
@@ -407,10 +413,6 @@ fi
 # indeterminate; an explicit retry then converges from remote ancestry.
 prepare_publish_candidate ambiguous
 fixture_fail_publish_readback=false
-git() {
-  if [ "$fixture_fail_publish_readback" = true ] && [ "${1:-}" = ls-remote ]; then return 1; fi
-  command git "$@"
-}
 taskdag_activation_test_after_fenced_push_hook() { fixture_fail_publish_readback=true; }
 export fixture_fail_publish_readback
 export -f git taskdag_activation_test_after_fenced_push_hook
