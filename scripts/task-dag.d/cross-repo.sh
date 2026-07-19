@@ -33,6 +33,10 @@ _xrepo_watchdog_fence() {
     [ -z "${_XREPO_WATCHDOG_TOKEN_FILE:-}" ] || taskdag_comment_watchdog_check_file "$_XREPO_WATCHDOG_TOKEN_FILE" 30
 }
 
+_xrepo_watchdog_token_valid_for() { # token-file max-seconds
+    [ -f "$1" ] && taskdag_comment_watchdog_check_file "$1" $(($2 + 30))
+}
+
 # Helper: trim leading/trailing whitespace.
 _xrepo_trim() {
     local s="$1"
@@ -1647,7 +1651,7 @@ EOF
     if [ "$mode" = recent ]; then _xrepo_valid_timestamp "$since" || { _xrepo_reconcile_argument_failure "$mode" "recent requires valid --since"; return 2; }; else [ -z "$since" ] || { _xrepo_reconcile_argument_failure "$mode" "complete rejects --since"; return 2; }; fi
     local _XREPO_WATCHDOG_TOKEN_FILE="$watchdog_token"
     if [ -n "$watchdog_token" ]; then
-        [ -f "$watchdog_token" ] && [ "$max_seconds" -le 240 ] && taskdag_comment_watchdog_check_file "$watchdog_token" $((max_seconds+30)) \
+        _xrepo_watchdog_token_valid_for "$watchdog_token" "$max_seconds" \
             || { _xrepo_reconcile_argument_failure "$mode" "invalid, stale, or insufficient watchdog lease"; return 2; }
     fi
 

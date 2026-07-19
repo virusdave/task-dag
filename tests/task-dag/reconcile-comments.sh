@@ -14,6 +14,13 @@ classify() {
   result=$(source "$(dirname "$TD")/task-dag.d/cross-repo.sh"; _xrepo_classify_comment_body acme/widgets "$issue" "$tmp/classify-body")
   printf '%s\n' "${result%%$'\x1f'*}"
 }
+source "$(dirname "$TD")/task-dag.d/cross-repo.sh"
+touch "$tmp/watchdog-token"
+taskdag_comment_watchdog_check_file() { [ "$1" = "$tmp/watchdog-token" ] && [ "$2" -eq 510 ]; }
+_xrepo_watchdog_token_valid_for "$tmp/watchdog-token" 480
+! _xrepo_watchdog_token_valid_for "$tmp/missing-token" 480
+taskdag_comment_watchdog_check_file() { [ "$2" -le 300 ]; }
+! _xrepo_watchdog_token_valid_for "$tmp/watchdog-token" 480
 metadata_sha=0123456789abcdef0123456789abcdef01234567
 [ "$(classify 10 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = machine-skip ]
 [ "$(classify 11 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = human ]
