@@ -82,6 +82,19 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
       ],
     },
     {
+      kind: 'branch',
+      navKey: 'config.purchasing',
+      label: 'Purchasing',
+      children: [
+        {
+          kind: 'leaf',
+          navKey: 'config.purchasing.vendors',
+          label: 'Vendors',
+          to: buildHeliosModulePath('config', 'vendors'),
+        },
+      ],
+    },
+    {
       // Marketing — segment automation (geofenced scan-location-based
       // assignment rules; route /config/marketing/geo-segment-rules).
       kind: 'branch',

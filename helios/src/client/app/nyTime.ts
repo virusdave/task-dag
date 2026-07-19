@@ -138,6 +138,34 @@ export function nyIsoDate(ms: number): string {
   return `${p.y}-${pad2(p.m)}-${pad2(p.day)}`
 }
 
+/**
+ * Format an ISO calendar date without interpreting it as a UTC instant.
+ * Anchoring at noon keeps the supplied day stable in New York in both EST
+ * and EDT. This is for date-only API fields, not timestamps.
+ */
+export function nyCalendarDate(isoDate: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate)
+  if (!match) throw new Error(`Invalid ISO calendar date: ${isoDate}`)
+  const [, yearText, monthText, dayText] = match
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const anchor = new Date(Date.UTC(year, month - 1, day, 12))
+  if (
+    anchor.getUTCFullYear() !== year ||
+    anchor.getUTCMonth() !== month - 1 ||
+    anchor.getUTCDate() !== day
+  ) {
+    throw new Error(`Invalid ISO calendar date: ${isoDate}`)
+  }
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: NY_TZ,
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(anchor)
+}
+
 /** "MM/DD" in NY time. Short month/day for compact labels. */
 export function nyMonthDaySlash(ms: number): string {
   const p = nyParts(ms)

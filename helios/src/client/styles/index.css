@@ -12057,3 +12057,236 @@ span.metric-chart-legend-item {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Vendor management stays card-based at every width so association metadata
+ * never forces horizontal scrolling on a phone. */
+.vendors-page,
+.vendor-directory,
+.vendor-association-list,
+.vendor-distributor-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.vendor-toolbar,
+.vendor-card-actions,
+.vendor-editor-heading,
+.vendor-conflict,
+.vendor-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.vendor-toolbar {
+  justify-content: space-between;
+}
+
+.vendor-toolbar label,
+.vendor-toolbar input {
+  width: min(100%, 34rem);
+}
+
+.vendor-card h3,
+.vendor-create-card h3,
+.vendor-editor h4,
+.vendor-editor h5,
+.vendor-details-grid h4 {
+  margin: 0;
+}
+
+.vendor-card,
+.vendor-card .history-card-topline > div,
+.vendor-card h3,
+.vendor-card .subtle-copy,
+.vendor-association-summary strong,
+.vendor-distributor-list strong,
+.vendor-site-pills .pill {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vendor-card:focus {
+  outline: 3px solid var(--accent-muted);
+  outline-offset: 3px;
+}
+
+.vendor-card-actions {
+  margin-top: 0.75rem;
+}
+
+.vendor-editor-status,
+.vendor-save-notice {
+  margin: 0;
+  color: #2f5b3c;
+  font-weight: 700;
+}
+
+.vendor-details-grid {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--panel-border);
+}
+
+.vendor-association-summary,
+.vendor-distributor-list article,
+.vendor-association-editor {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 250, 241, 0.55);
+}
+
+.vendor-definition-grid,
+.vendor-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.vendor-definition-grid {
+  margin: 0.75rem 0 0;
+}
+
+.vendor-definition-grid div,
+.vendor-form-grid label:not(.vendor-check) {
+  min-width: 0;
+}
+
+.vendor-definition-grid dt,
+.vendor-form-grid label > span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.vendor-definition-grid dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.vendor-editor {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--panel-border);
+}
+
+.vendor-form-grid label:not(.vendor-check) {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.vendor-form-grid input:not([type='checkbox']),
+.vendor-form-grid select,
+.vendor-form-grid textarea {
+  width: 100%;
+}
+
+.vendor-form-grid textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+.vendor-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+}
+
+.vendor-association-editor {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.vendor-association-editor legend {
+  max-width: 100%;
+  padding: 0 0.35rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.vendor-more-details summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.vendor-more-details .vendor-form-grid {
+  margin-top: 0.5rem;
+}
+
+.vendor-remove-association {
+  justify-self: start;
+}
+
+.vendor-field-error {
+  color: #8b2e20;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.vendor-conflict {
+  justify-content: space-between;
+  padding: 0.75rem;
+  border: 1px solid rgba(192, 99, 84, 0.45);
+  border-radius: 10px;
+  background: rgba(192, 99, 84, 0.12);
+}
+
+.vendor-editor-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding: 0.75rem 0 calc(0.75rem + env(safe-area-inset-bottom));
+  background: var(--panel);
+}
+
+.vendor-editor-actions button,
+.vendor-card-actions button,
+.vendor-toolbar button {
+  min-height: 44px;
+}
+
+.vendors-page button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.vendor-site-pills {
+  justify-content: flex-start;
+  margin-top: 0.5rem;
+}
+
+@media (min-width: 760px) {
+  .vendor-details-grid,
+  .vendor-form-grid,
+  .vendor-definition-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vendor-wide-value {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 759px) {
+  .vendors-page .page-header,
+  .vendor-card .history-card-topline {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .vendor-editor-actions button,
+  .vendor-card-actions button,
+  .vendor-toolbar button {
+    flex: 1 1 auto;
+  }
+}

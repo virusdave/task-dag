@@ -70,6 +70,7 @@ import {
 import { SweedAuthLogPage, sweedAuthLogLoader } from '../routes/config/SweedAuthLogPage.js'
 import { SweedSessionsPage, sweedSessionsLoader } from '../routes/config/SweedSessionsPage.js'
 import { UsersPage, usersLoader } from '../routes/config/UsersPage.js'
+import { VendorsPage, vendorsLoader } from '../routes/config/VendorsPage.js'
 import { GeoSegmentRulesPage, geoSegmentRulesLoader } from '../routes/config/GeoSegmentRulesPage.js'
 import {
   MarketingSegmentDetailsPage,
@@ -662,6 +663,11 @@ export const router = createBrowserRouter([
         element: <UsersPage />,
         loader: usersLoader,
         path: 'config/users',
+      },
+      {
+        element: <VendorsPage />,
+        loader: vendorsLoader,
+        path: 'config/vendors',
       },
       {
         element: <GeoSegmentRulesPage />,

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   nyAddDays,
   nyAddMonthsFromFirst,
+  nyCalendarDate,
   nyDateTimeLocalInput,
   nyDateTimeLocalInputToInstant,
   nyFloorToDay,
@@ -105,6 +106,21 @@ describe('nyHourTick / nyMonthDayTick / nyMonthYearTick / nyIsoDate / nyMonthDay
 
   it('month-day slash is MM/DD in NY local', () => {
     expect(nyMonthDaySlash(Date.UTC(2026, 4, 18, 4))).toBe('05/18')
+  })
+})
+
+describe('nyCalendarDate', () => {
+  it.each([
+    ['2026-01-15', 'Jan 15, 2026'],
+    ['2026-07-19', 'Jul 19, 2026'],
+    ['2026-03-08', 'Mar 8, 2026'],
+    ['2026-11-01', 'Nov 1, 2026'],
+  ])('preserves the API calendar date across New York offset changes', (input, expected) => {
+    expect(nyCalendarDate(input)).toBe(expected)
+  })
+
+  it.each(['2026-02-29', '2026-13-01', 'not-a-date'])('rejects invalid date-only input %s', (input) => {
+    expect(() => nyCalendarDate(input)).toThrow('Invalid ISO calendar date')
   })
 })
 
