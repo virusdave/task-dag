@@ -52,7 +52,7 @@
 # in sibling modules and call this predicate layer instead of re-implementing
 # its semantics.
 #
-# Relies on: facts.sh (taskdag_node_done, taskdag_edges_with_facts,
+# Relies on: edges-write.sh (the canonical CAS retry budget/backoff), facts.sh (taskdag_node_done, taskdag_edges_with_facts,
 # taskdag_current_repo, taskdag_sync_master), edges.sh (taskdag_normalize_node),
 # and the containment-tree / block helpers from the main script
 # (is_task_commit, get_first_parent, is_task_blocked,
@@ -85,6 +85,7 @@ TASKDAG_CONSUMER_TIP=""
 TASKDAG_CONSUMER_ACTIVATION='null'
 TASKDAG_CONSUMER_GRAPH_TIP=""
 TASKDAG_CONSUMER_MASTER_TIP=""
+TASKDAG_CONSUMER_PREPARE_RESULT='{"schema":1,"status":"error","reason":null,"attempts":0,"before":{"activation":null},"local":{"activation":null,"graph":null,"master":null,"taskRefsDigest":null},"observed":{"activation":null,"graph":null,"master":null,"taskRefsDigest":null}}'
 
 _taskdag_consumer_local_activation_authority() {
     local observed=""
@@ -115,18 +116,59 @@ _taskdag_consumer_remote_advertisement() {
 
 _taskdag_consumer_advertised_oid() { awk -v r="$2" '$2==r {print $1}' <<<"$1"; }
 
-_taskdag_consumer_task_refs_match() {
-    local advertisement=$1 remote local_refs
-    remote=$(awk '$2 ~ /^refs\/heads\/(tasks\/(frontier|active|blocked|blocked-meta|root-active|pending)\/|gh\/issues\/)/ {print $1" "$2}' <<<"$advertisement" | sort)
-    local_refs=$(git for-each-ref --format='%(objectname) %(refname)' \
+_taskdag_consumer_local_task_refs() {
+    git for-each-ref --format='%(objectname) %(refname)' \
       refs/heads/tasks/frontier/ refs/heads/tasks/active/ refs/heads/tasks/blocked/ \
       refs/heads/tasks/blocked-meta/ refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
-      refs/heads/gh/issues/ | sort)
-    [ "$remote" = "$local_refs" ]
+      refs/heads/gh/issues/ | LC_ALL=C sort
+}
+
+_taskdag_consumer_advertised_task_refs() {
+    awk '$2 ~ /^refs\/heads\/(tasks\/(frontier|active|blocked|blocked-meta|root-active|pending)\/|gh\/issues\/)/ {print $1" "$2}' <<<"$1" \
+      | LC_ALL=C sort
+}
+
+_taskdag_consumer_refs_digest() { printf '%s' "$1" | taskdag_sha256_hex; }
+
+_taskdag_consumer_retry_budget() {
+    local raw=$1 normalized
+    [[ "$raw" =~ ^[0-9]+$ ]] || return 1
+    normalized=$(sed 's/^0*//' <<<"$raw")
+    [ -n "$normalized" ] || normalized=0
+    # A larger retry budget is operationally nonsensical (the canonical
+    # quadratic backoff would already take many minutes) and risks shell
+    # integer overflow. Keep the accepted decimal range explicit and small.
+    [ "${#normalized}" -lt 3 ] || { [ "${#normalized}" -eq 3 ] && [ "$normalized" -le 100 ]; } || return 1
+    printf '%s\n' "$normalized"
+}
+
+_taskdag_consumer_result() { # status reason attempts before local-activation local-graph local-master local-refs observed-activation observed-graph observed-master observed-refs
+    local status=$1 reason=$2 attempts=$3 before=$4 local_activation=$5 local_graph=$6 local_master=$7 local_refs=$8
+    local observed_activation=$9 observed_graph=${10} observed_master=${11} observed_refs=${12}
+    jq -ncS --arg status "$status" --arg reason "$reason" --argjson attempts "$attempts" \
+      --arg before "$before" --arg localActivation "$local_activation" --arg localGraph "$local_graph" \
+      --arg localMaster "$local_master" --arg localRefs "$local_refs" --arg observedActivation "$observed_activation" \
+      --arg observedGraph "$observed_graph" --arg observedMaster "$observed_master" --arg observedRefs "$observed_refs" '
+      def value_or_null: if length == 0 then null else . end;
+      {schema:1,status:$status,reason:($reason|value_or_null),attempts:$attempts,
+       before:{activation:($before|value_or_null)},
+       local:{activation:($localActivation|value_or_null),graph:($localGraph|value_or_null),master:($localMaster|value_or_null),taskRefsDigest:($localRefs|value_or_null)},
+       observed:{activation:($observedActivation|value_or_null),graph:($observedGraph|value_or_null),master:($observedMaster|value_or_null),taskRefsDigest:($observedRefs|value_or_null)}}'
+}
+
+_taskdag_consumer_mismatch_reason() { # before local-activation observed-activation local-graph observed-graph local-master observed-master local-refs observed-refs requested-tip
+    [ "$1" = "$2" ] || { printf 'activation-token\n'; return; }
+    [ "$1" = "$3" ] || { printf 'activation-authority\n'; return; }
+    [ "$4" = "$5" ] || { printf 'graph-tip\n'; return; }
+    { [ -n "${10}" ] || [ "$6" = "$7" ]; } || { printf 'master-tip\n'; return; }
+    [ "$8" = "$9" ] || { printf 'task-refs\n'; return; }
+    printf '\n'
 }
 
 taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
     local consumer=${1:-} requested_tip="" nofetch=false before after token runtime attempt arg advertisement graph_tip master_tip
+    local candidate_mode local_activation local_graph local_master local_task_refs local_task_refs_digest
+    local observed_task_refs observed_task_refs_digest reason max_attempts retry_budget
     local prior_ready=${TASKDAG_CONSUMER_READY:-false} prior_mode=${TASKDAG_CONSUMER_MODE:-}
     [ -n "$consumer" ] || return 2
     shift
@@ -140,7 +182,22 @@ taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
         esac
     done
     TASKDAG_CONSUMER_READY=false
-    for attempt in 1 2 3; do
+    TASKDAG_CONSUMER_MODE=""
+    TASKDAG_CONSUMER_ID=""
+    TASKDAG_CONSUMER_TIP=""
+    TASKDAG_CONSUMER_ACTIVATION='null'
+    TASKDAG_CONSUMER_GRAPH_TIP=""
+    TASKDAG_CONSUMER_MASTER_TIP=""
+    TASKDAG_RECON_READY=false
+    TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result error "" 0 "" "" "" "" "" "" "" "" "") || return 2
+    retry_budget=$(_taskdag_consumer_retry_budget "$TASKDAG_CAS_MAX_ATTEMPTS") \
+      || { echo "Error: TASKDAG_CAS_MAX_ATTEMPTS must be a decimal integer from 0 through 100" >&2; return 2; }
+    declare -F taskdag_cas_sleep >/dev/null \
+      || { echo "Error: canonical taskdag_cas_sleep backoff helper is unavailable" >&2; return 2; }
+    max_attempts=$(( retry_budget + 1 ))
+    for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+        TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result error "" "$attempt" "" "" "" "" "" "" "" "" "") || return 2
+        candidate_mode=""
         if [ "$nofetch" = true ] && [ "$prior_ready" = true ] && [ "$prior_mode" = legacy ] \
           && ! git show-ref --verify --quiet refs/task-dag/activation-observed \
           && ! git show-ref --verify --quiet "$TASKDAG_ACTIVATION_REF"; then
@@ -156,11 +213,10 @@ taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
             if [ "$nofetch" = true ]; then token=$(_taskdag_consumer_activation_token_at "$before") || return 2
             else token=$(_taskdag_activation_authority_token) || return 2
             fi
-            [ "$(jq -r .authorityTip <<<"$token")" = "$before" ] || continue
             runtime=$(_taskdag_activation_runtime_commit) || return 2
             git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor \
                 "$(jq -r .record.minimumCompatibleTaskDagCommit <<<"$token")" "$runtime" || return 2
-            TASKDAG_CONSUMER_MODE=canonical
+            candidate_mode=canonical
         else
             # Cutover is permanent for a checkout once it has observed any
             # valid authority.  A deleted/hidden remote ref after that point
@@ -170,8 +226,14 @@ taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
                 echo "Error: semantic activation disappeared after canonical cutover; refusing legacy fallback" >&2
                 return 2
             fi
-            TASKDAG_CONSUMER_MODE=legacy
+            candidate_mode=legacy
         fi
+        local_activation=$(jq -r '.authorityTip // empty' <<<"$token") || return 2
+        if [ "$local_activation" != "$before" ]; then
+            reason=activation-token
+            after=""; graph_tip=""; master_tip=""; local_graph=""; local_master=""
+            local_task_refs_digest=""; observed_task_refs_digest=""
+        else
         if [ -n "$requested_tip" ]; then
             if [ "$nofetch" = true ]; then taskdag_recon_prepare --no-fetch --tip "$requested_tip" || return 2
             else taskdag_recon_prepare --tip "$requested_tip" || return 2
@@ -181,35 +243,72 @@ taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
             else taskdag_recon_prepare || return 2
             fi
         fi
+        # The prepared reconciliation cache is only a candidate until the
+        # final advertisement attests every captured dimension. Clear it
+        # before any subsequent capture or digest operation can fail.
+        TASKDAG_RECON_READY=false
+        local_graph=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
+        local_master=$TASKDAG_RECON_FACTS_TIP
+        local_task_refs=$(_taskdag_consumer_local_task_refs) || return 2
+        local_task_refs_digest=$(_taskdag_consumer_refs_digest "$local_task_refs") || return 2
+        if declare -F taskdag_consumer_test_after_prepare_hook >/dev/null; then
+            taskdag_consumer_test_after_prepare_hook "$attempt" || return $?
+        fi
         if [ "$nofetch" = true ]; then
             if [ -z "$before" ]; then after=""
             else after=$(_taskdag_consumer_local_activation_authority) || return 2
             fi
             graph_tip=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
             master_tip=$(taskdag_resolve_facts_tip) || return 2
+            observed_task_refs=$local_task_refs
         else
             advertisement=$(_taskdag_consumer_remote_advertisement) || return 2
             after=$(_taskdag_consumer_advertised_oid "$advertisement" "$TASKDAG_ACTIVATION_REF")
             graph_tip=$(_taskdag_consumer_advertised_oid "$advertisement" "$TASKDAG_GRAPH_REF")
             master_tip=$(_taskdag_consumer_advertised_oid "$advertisement" refs/heads/master)
-            [ "$graph_tip" = "$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)" ] || continue
-            _taskdag_consumer_task_refs_match "$advertisement" || continue
-            [ -n "$requested_tip" ] || [ "$master_tip" = "$TASKDAG_RECON_FACTS_TIP" ] || continue
+            observed_task_refs=$(_taskdag_consumer_advertised_task_refs "$advertisement") || return 2
         fi
-        [ "$before" = "$after" ] || continue
+        observed_task_refs_digest=$(_taskdag_consumer_refs_digest "$observed_task_refs") || return 2
+        reason=$(_taskdag_consumer_mismatch_reason "$before" "$local_activation" "$after" \
+          "$local_graph" "$graph_tip" "$local_master" "$master_tip" \
+          "$local_task_refs_digest" "$observed_task_refs_digest" "$requested_tip") || return 2
+        fi
+        if [ -n "$reason" ]; then
+            TASKDAG_RECON_READY=false
+            if [ "$attempt" -ge "$max_attempts" ]; then
+                TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result exhausted "$reason" "$attempt" "$before" "$local_activation" \
+                  "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
+                echo "Error: semantic consumer snapshot did not stabilize after $attempt attempts" >&2
+                printf '%s\n' "$TASKDAG_CONSUMER_PREPARE_RESULT" >&2
+                echo "Rerun the same task-dag command; it will re-read and re-attest current state. Do not edit task refs manually. Preparation made no remote semantic mutation." >&2
+                return 2
+            fi
+            TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result retrying "$reason" "$attempt" "$before" "$local_activation" \
+              "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
+            if ! taskdag_cas_sleep "$attempt"; then
+                TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result error "" "$attempt" "$before" "$local_activation" \
+                  "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
+                return 2
+            fi
+            continue
+        fi
         if [ -n "$requested_tip" ]; then
             requested_tip=$(git rev-parse --verify -q "${requested_tip}^{commit}") || return 2
             [ "$TASKDAG_FACTS_TIP_OID" = "$requested_tip" ] || return 2
         fi
+        TASKDAG_CONSUMER_MODE=$candidate_mode
         TASKDAG_CONSUMER_ID=$consumer
         TASKDAG_CONSUMER_TIP=$TASKDAG_FACTS_TIP_OID
         TASKDAG_CONSUMER_ACTIVATION=$token
         TASKDAG_CONSUMER_GRAPH_TIP=$graph_tip
         TASKDAG_CONSUMER_MASTER_TIP=$master_tip
+        TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result ready "" "$attempt" "$before" "$local_activation" \
+          "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
+        TASKDAG_RECON_READY=true
         TASKDAG_CONSUMER_READY=true
         return 0
     done
-    echo "Error: semantic activation changed repeatedly during consumer preparation" >&2
+    echo "Error: semantic consumer preparation ended without a ready or exhausted result" >&2
     return 2
 }
 

@@ -94,6 +94,117 @@ if "$TD" claim-root 77 >/dev/null && git --git-dir="$ROOT/origin" show-ref --ver
   ok "root claim uses the activated fenced scheduling path"
 else bad "activated root claim did not converge"; fi
 
+# Consumer preparation may overlap ordinary task writers. It must rebuild a
+# complete snapshot under the canonical bounded retry budget rather than fail
+# after three hot-loop attempts or misreport every changed ref as activation.
+make_contention_root() {
+  local issue=$1 root
+  root=$(git commit-tree "$EMPTY_TREE" -p HEAD -m "Task: contention root $issue
+Issue: #$issue
+Type: epic")
+  git update-ref "refs/heads/tasks/pending/$issue" "$root"
+  git push -q origin "refs/heads/tasks/pending/$issue"
+  printf '%s\n' "$root"
+}
+export ROOT EMPTY_TREE
+settling_root=$(make_contention_root 81)
+: >"$ROOT/consumer-settling-count"
+taskdag_consumer_test_after_prepare_hook() {
+  local attempt side
+  attempt=$(( $(wc -c <"$ROOT/consumer-settling-count") + 1 ))
+  [ "$attempt" -le 3 ] || return 0
+  printf x >>"$ROOT/consumer-settling-count"
+  side=$(printf 'consumer settling %s\n' "$attempt" | git --git-dir="$ROOT/origin" commit-tree "$EMPTY_TREE") || return
+  git --git-dir="$ROOT/origin" update-ref refs/heads/tasks/frontier/consumer-settling "$side"
+}
+export -f taskdag_consumer_test_after_prepare_hook
+settling_out=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 \
+  TASKDAG_CAS_MAX_ATTEMPTS=3 "$TD" claim-root 81 2>&1); settling_rc=$?
+unset -f taskdag_consumer_test_after_prepare_hook
+if [ "$settling_rc" -eq 0 ] && [ "$(wc -c <"$ROOT/consumer-settling-count")" -eq 3 ] \
+   && git --git-dir="$ROOT/origin" show-ref --verify --quiet refs/heads/tasks/root-active/81; then
+  ok "consumer snapshot settles on the fourth initial-plus-retry attempt"
+else
+  bad "consumer snapshot did not recover after bounded task-ref contention (rc=$settling_rc out=$settling_out)"
+fi
+
+persistent_root=$(make_contention_root 82)
+: >"$ROOT/consumer-persistent-count"
+taskdag_consumer_test_after_prepare_hook() {
+  local attempt=$1 side
+  printf x >>"$ROOT/consumer-persistent-count"
+  side=$(printf 'consumer persistent %s\n' "$attempt" | git --git-dir="$ROOT/origin" commit-tree "$EMPTY_TREE") || return
+  git --git-dir="$ROOT/origin" update-ref refs/heads/tasks/frontier/consumer-persistent "$side"
+}
+export -f taskdag_consumer_test_after_prepare_hook
+persistent_master=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+persistent_graph=$(git ls-remote origin refs/heads/tasks/v1/graph | awk '{print $1}')
+persistent_activation=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+persistent_out=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 \
+  TASKDAG_CAS_MAX_ATTEMPTS=2 "$TD" claim-root 82 2>&1); persistent_rc=$?
+unset -f taskdag_consumer_test_after_prepare_hook
+persistent_json=$(grep -E '^\{"attempts":' <<<"$persistent_out" | tail -1)
+if [ "$persistent_rc" -eq 3 ] && [ "$(wc -c <"$ROOT/consumer-persistent-count")" -eq 3 ] \
+   && jq -e '.status=="exhausted" and .reason=="task-refs" and .attempts==3
+      and (.local.taskRefsDigest|test("^[0-9a-f]{64}$"))
+      and (.observed.taskRefsDigest|test("^[0-9a-f]{64}$"))
+      and .local.taskRefsDigest != .observed.taskRefsDigest' <<<"$persistent_json" >/dev/null \
+   && [ "$(git ls-remote origin refs/heads/tasks/pending/82 | awk '{print $1}')" = "$persistent_root" ] \
+   && [ -z "$(git ls-remote origin refs/heads/tasks/root-active/82)" ] \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$persistent_master" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/graph | awk '{print $1}')" = "$persistent_graph" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" = "$persistent_activation" ]; then
+  ok "persistent consumer contention exhausts with bounded task-ref evidence and no semantic effect"
+else
+  bad "persistent consumer contention lost its budget, evidence, or safety (rc=$persistent_rc out=$persistent_out)"
+fi
+
+zero_root=$(make_contention_root 84)
+: >"$ROOT/consumer-zero-count"
+taskdag_consumer_test_after_prepare_hook() {
+  local attempt=$1 side
+  printf x >>"$ROOT/consumer-zero-count"
+  side=$(printf 'consumer zero %s\n' "$attempt" | git --git-dir="$ROOT/origin" commit-tree "$EMPTY_TREE") || return
+  git --git-dir="$ROOT/origin" update-ref refs/heads/tasks/frontier/consumer-zero "$side"
+}
+export -f taskdag_consumer_test_after_prepare_hook
+zero_consumer_out=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 \
+  TASKDAG_CAS_MAX_ATTEMPTS=0 "$TD" claim-root 84 2>&1); zero_consumer_rc=$?
+unset -f taskdag_consumer_test_after_prepare_hook
+if [ "$zero_consumer_rc" -eq 3 ] && [ "$(wc -c <"$ROOT/consumer-zero-count")" -eq 1 ] \
+   && grep -q '"attempts":1' <<<"$zero_consumer_out" \
+   && [ -z "$(git ls-remote origin refs/heads/tasks/root-active/84)" ]; then
+  ok "zero consumer retry budget performs exactly one fail-closed attempt"
+else
+  bad "zero consumer retry budget skipped or retried its initial attempt (rc=$zero_consumer_rc out=$zero_consumer_out)"
+fi
+
+touch "$ROOT/invalid-budget-hook-not-called"
+rm "$ROOT/invalid-budget-hook-not-called"
+taskdag_consumer_test_after_prepare_hook() { : >"$ROOT/invalid-budget-hook-not-called"; }
+export -f taskdag_consumer_test_after_prepare_hook
+invalid_budget_out=$(TASKDAG_CAS_MAX_ATTEMPTS=9223372036854775807 "$TD" roots --json 2>&1); invalid_budget_rc=$?
+unset -f taskdag_consumer_test_after_prepare_hook
+if [ "$invalid_budget_rc" -eq 2 ] \
+   && grep -q 'TASKDAG_CAS_MAX_ATTEMPTS must be a decimal integer from 0 through 100' <<<"$invalid_budget_out" \
+   && [ ! -e "$ROOT/invalid-budget-hook-not-called" ]; then
+  ok "overflowing consumer retry budget fails before preparation"
+else
+  bad "overflowing consumer retry budget entered preparation (rc=$invalid_budget_rc out=$invalid_budget_out)"
+fi
+if ! TASKDAG_CAS_MAX_ATTEMPTS=003 "$TD" roots --json >/dev/null 2>&1; then
+  bad "leading-zero consumer retry budget was not normalized as decimal"
+elif TASKDAG_CAS_MAX_ATTEMPTS=invalid "$TD" roots --json >/dev/null 2>&1; then
+  bad "invalid consumer retry budget was accepted"
+else
+  ok "consumer retry budgets normalize decimal zeros and reject non-digits"
+fi
+if "$TD" claim-root 82 >/dev/null && git --git-dir="$ROOT/origin" show-ref --verify --quiet refs/heads/tasks/root-active/82; then
+  ok "clean retry succeeds after exhausted consumer contention"
+else
+  bad "clean retry did not replace exhausted consumer state with a ready snapshot"
+fi
+
 cat >"$ROOT/breakdown.json" <<'EOF'
 [{"title":"Born-claimed activated child","type":"leaf","status":"pending","claim":true}]
 EOF
@@ -481,6 +592,85 @@ if "$TD" frontier --json >/dev/null 2>&1; then
   bad "online activation disappearance revived legacy semantics"
 else
   ok "online disappearance after observed activation fails closed"
+fi
+
+# The reason classifier is deliberately pure so precedence cannot drift as
+# new consumer call sites are added. Activation generation outranks all
+# dependent dimensions; explicit --tip reads ignore ambient master movement.
+source "$(dirname "$TD")/task-dag.d/reconcile.sh"
+reason_token=$(_taskdag_consumer_mismatch_reason a b c g h m n r s "")
+reason_authority=$(_taskdag_consumer_mismatch_reason a a b g h m n r s "")
+reason_graph=$(_taskdag_consumer_mismatch_reason a a a g h m n r s "")
+reason_master=$(_taskdag_consumer_mismatch_reason a a a g g m n r s "")
+reason_refs=$(_taskdag_consumer_mismatch_reason a a a g g m m r s "")
+reason_tip=$(_taskdag_consumer_mismatch_reason a a a g g m n r r explicit-tip)
+TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result exhausted task-refs 3 a a g m r a g m s)
+TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result ready "" 1 a a g m r a g m r)
+if [ "$reason_token" = activation-token ] \
+   && [ "$reason_authority" = activation-authority ] \
+   && [ "$reason_graph" = graph-tip ] \
+   && [ "$reason_master" = master-tip ] \
+   && [ "$reason_refs" = task-refs ] \
+   && [ -z "$reason_tip" ] \
+   && jq -e '.status=="ready" and .reason==null and .attempts==1' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null; then
+  ok "consumer mismatch reasons and replacement result have deterministic semantics"
+else
+  bad "consumer mismatch reason precedence drifted (token=$reason_token authority=$reason_authority graph=$reason_graph master=$reason_master refs=$reason_refs tip=$reason_tip)"
+fi
+
+# Exercise actual prepare calls in one shell with deterministic stubs. The
+# first call exhausts an authority mismatch, the second replaces that result
+# with READY, and a separate mismatch-then-hook-error call clears both ready
+# flags and replaces RETRYING evidence with ERROR.
+if (
+  TASKDAG_ACTIVATION_REF=refs/heads/tasks/v1/activation
+  TASKDAG_GRAPH_REF=refs/heads/tasks/v1/graph
+  TASKDAG_CAS_MAX_ATTEMPTS=0
+  fixture_authority_mismatch=true
+  fixture_authority_calls="$ROOT/unit-authority-calls"
+  : >"$fixture_authority_calls"
+  _taskdag_consumer_local_activation_authority() {
+    local n
+    n=$(( $(wc -c <"$fixture_authority_calls") + 1 )); printf x >>"$fixture_authority_calls"
+    if [ "$fixture_authority_mismatch" = true ] && [ $(( n % 2 )) -eq 0 ]; then printf 'b\n'; else printf 'a\n'; fi
+  }
+  _taskdag_consumer_activation_token_at() { printf '%s\n' '{"authorityTip":"a","record":{"minimumCompatibleTaskDagCommit":"runtime"}}'; }
+  _taskdag_activation_runtime_commit() { printf 'runtime\n'; }
+  taskdag_recon_prepare() { TASKDAG_RECON_FACTS_TIP=m; TASKDAG_FACTS_TIP_OID=m; TASKDAG_RECON_READY=true; }
+  taskdag_resolve_facts_tip() { printf 'm\n'; }
+  taskdag_cas_sleep() { return 0; }
+  taskdag_sha256_hex() { sha256sum | awk '{print $1}'; }
+  git() {
+    case "$*" in
+      *'merge-base --is-ancestor'*) return 0 ;;
+      *'rev-parse --verify -q refs/heads/tasks/v1/graph'*) printf 'g\n' ;;
+      *'for-each-ref'*) printf 'r refs/heads/tasks/pending/1\n' ;;
+      *) command git "$@" ;;
+    esac
+  }
+  taskdag_consumer_prepare unit-exhaust --no-fetch >/dev/null 2>&1 && exit 1
+  jq -e '.status=="exhausted" and .reason=="activation-authority"' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
+  [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ] || exit 1
+  fixture_authority_mismatch=false; : >"$fixture_authority_calls"
+  taskdag_consumer_prepare unit-ready --no-fetch >/dev/null 2>&1 || exit 1
+  jq -e '.status=="ready" and .reason==null' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
+  [ "$TASKDAG_CONSUMER_READY" = true ] && [ "$TASKDAG_RECON_READY" = true ] || exit 1
+  taskdag_sha256_hex() { return 91; }
+  taskdag_consumer_prepare unit-digest-error --no-fetch >/dev/null 2>&1; digest_rc=$?
+  [ "$digest_rc" -eq 2 ] || exit 1
+  jq -e '.status=="error" and .reason==null and .attempts==1' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
+  [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ] || exit 1
+  taskdag_sha256_hex() { sha256sum | awk '{print $1}'; }
+  fixture_authority_mismatch=true; : >"$fixture_authority_calls"; TASKDAG_CAS_MAX_ATTEMPTS=1
+  taskdag_consumer_test_after_prepare_hook() { [ "$1" -eq 1 ] || return 91; }
+  taskdag_consumer_prepare unit-hard-error --no-fetch >/dev/null 2>&1; hard_rc=$?
+  [ "$hard_rc" -eq 91 ] || exit 1
+  jq -e '.status=="error" and .reason==null and .attempts==2' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
+  [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ]
+); then
+  ok "actual consumer calls replace exhausted state and clear candidates on hard error"
+else
+  bad "actual consumer calls leaked exhausted, retrying, or reconciliation state"
 fi
 
 SOURCE=$(cd "$(dirname "$TD")/.." && pwd)/scripts/task-dag

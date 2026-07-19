@@ -579,7 +579,15 @@ consumers. It binds an operation to a validated activation authority, a
 runtime-compatibility check, one facts tip, one graph view, and one complete
 task-ref snapshot. It compares those local inputs with one origin
 advertisement after preparation and retries rather than exposing a mixed
-epoch/ref view. Once an activation history exists, both enabled
+epoch/ref view. Preparation uses the canonical initial-plus-bounded-retries
+CAS budget and backoff. Each retry rebuilds the entire read-only snapshot;
+transport, malformed authority, compatibility, and explicit-tip errors still
+fail immediately. Exhaustion fails closed with one bounded structured record
+that distinguishes activation-token, activation-authority, graph-tip,
+master-tip, and task-ref contention, plus the safe instruction to rerun the
+same command rather than edit refs. Consumer state becomes ready atomically
+only after every captured input matches the final advertisement. Once an
+activation history exists, both enabled
 and disabled epochs select canonical graph semantics; disabling an epoch
 fences producers but never revives legacy interpretation.
 
