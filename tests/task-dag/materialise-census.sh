@@ -8,6 +8,15 @@ ok() { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.test
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
+TASKDAG_SCRIPT_DIR=$(dirname "$TD"); source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
+bare=$(printf '%s\n' 'Materialise-Child-Epic:) are allowed.' | taskdag_materialise_groups_json_from_message)
+partial=$(printf '%s\n' 'Materialise-Child-Epic: peer/repo' 'Child-Epic-Title: incomplete' | taskdag_materialise_groups_json_from_message)
+present_empty=$(printf '%s\n' 'Materialise-Child-Epic: peer/repo' 'Parent-Issue:' | taskdag_materialise_groups_json_from_message)
+complete=$(printf '%s\n' 'Materialise-Child-Epic: peer/repo' 'Child-Epic-Title: title' 'Child-Epic-Body-File: body' 'Parent-Issue: 1' | taskdag_materialise_groups_json_from_message)
+jq -e 'length==0' <<<"$bare" >/dev/null && jq -e 'length==1 and .[0].title=="incomplete" and .[0].parent==""' <<<"$partial" >/dev/null \
+  && jq -e 'length==1 and .[0].parent==""' <<<"$present_empty" >/dev/null \
+  && jq -e 'length==1 and .[0].parent=="1" and .[0].bodyFile=="body"' <<<"$complete" >/dev/null \
+  && ok "shared parser ignores only bare marker prose" || bad "bare marker parser semantics"
 git init -q "$ROOT/repo"; git -C "$ROOT/repo" config user.name fixture; git -C "$ROOT/repo" config user.email fixture@example.test
 git -C "$ROOT/repo" config taskdag.current-repo virusdave/task-dag
 printf x >"$ROOT/repo/x"; git -C "$ROOT/repo" add x; git -C "$ROOT/repo" commit -qm fixture

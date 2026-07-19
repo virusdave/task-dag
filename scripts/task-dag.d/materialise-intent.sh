@@ -55,12 +55,18 @@ taskdag_materialise_parent_number() {
 # last-wins behavior. Values are encoded by jq, never by shell interpolation.
 taskdag_materialise_groups_json_from_message() {
     local trailers line key val key_lc open=false
-    local peer="" title="" body_file="" parent="" slug="" note="" slug_present=false note_present=false
+    local peer="" title="" body_file="" parent="" slug="" note="" slug_present=false note_present=false companion_seen=false
     local -a groups=()
     trailers=$(taskdag_extract_materialise_trailers_from_message) || return 1
 
     _taskdag_mi_flush_group() {
         [ "$open" = true ] || return 0
+        # A lone marker-like line in prose never described an actionable
+        # legacy request. Preserve any companion field so partially-authored
+        # declarations still reach strict validation and fail closed.
+        if [ "$companion_seen" = false ]; then
+            return 0
+        fi
         groups+=("$(jq -nc \
             --arg peer "$peer" --arg title "$title" --arg bodyFile "$body_file" \
             --arg parent "$parent" --arg slug "$slug" --arg note "$note" \
@@ -77,13 +83,13 @@ taskdag_materialise_groups_json_from_message() {
         case "$key_lc" in
             materialise-child-epic|materialize-child-epic)
                 _taskdag_mi_flush_group || return 1
-                open=true peer="$val" title="" body_file="" parent="" slug="" note="" slug_present=false note_present=false
+                open=true peer="$val" title="" body_file="" parent="" slug="" note="" slug_present=false note_present=false companion_seen=false
                 ;;
-            child-epic-title) title="$val" ;;
-            child-epic-body-file) body_file="$val" ;;
-            parent-issue) parent="$val" ;;
-            child-epic-slug) slug="$val"; slug_present=true ;;
-            delegation-note) note="$val"; note_present=true ;;
+            child-epic-title) title="$val"; companion_seen=true ;;
+            child-epic-body-file) body_file="$val"; companion_seen=true ;;
+            parent-issue) parent="$val"; companion_seen=true ;;
+            child-epic-slug) slug="$val"; slug_present=true; companion_seen=true ;;
+            delegation-note) note="$val"; note_present=true; companion_seen=true ;;
         esac
     done <<< "$trailers"
     _taskdag_mi_flush_group || return 1
