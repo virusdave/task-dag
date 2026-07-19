@@ -869,38 +869,67 @@ root_active_sha_on_remote() {
 # exact duplicate-decompose race this lock exists to prevent (#2). Display
 # paths (`roots`) may ignore the rc.
 fetch_root_refs() {
-    local issue="${1:-}"
-    # --prune so a local checkout that still carries a frontier/active/etc
-    # ref origin has since removed does not give task_has_children a stale
-    # false-positive child. (Truly local-only experimental branches are
-    # still visible to `git rev-list --all`; origin is the source of truth.)
-    git fetch --quiet --prune origin \
+    # Fetch the complete authoritative decomposition snapshot atomically.
+    # In particular, master is mandatory: completed children are reachable
+    # only through their completion merge after their scheduling ref retires.
+    # Never substitute HEAD/local master or retain a ready map after failure.
+    TASKDAG_CHILD_MAP_READY=false
+    TASKDAG_RECON_READY=false
+    git fetch --quiet --atomic --prune --no-tags origin \
+        '+refs/heads/master:refs/remotes/origin/master' \
         '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
         '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
         '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
         '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
         '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
+        '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
+        '+refs/heads/gh/issues/*:refs/heads/gh/issues/*' \
         2>/dev/null || return 1
-    # Also refresh the default branch (master): a COMPLETED child's frontier/
-    # active ref is deleted on completion, but the child task commit lives on
-    # as the SECOND parent of its completion commit on master. `task_has_children`
-    # walks `git rev-list --all`, so if origin/master is stale a long-lived
-    # worktree would not see already-completed children and could re-decompose
-    # the root (false-negative #2 race). Keep this best-effort: if the default
-    # branch ref cannot be resolved, the task-namespace fetch above already
-    # succeeded, so do NOT fail the whole sync over it.
-    local default_branch
-    default_branch=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
-    default_branch="${default_branch:-master}"
-    git fetch --quiet origin \
-        "+refs/heads/${default_branch}:refs/remotes/origin/${default_branch}" \
-        2>/dev/null || true
-    if [ -n "$issue" ]; then
-        git fetch --quiet --prune origin \
-            "+refs/heads/tasks/delegated/${issue}/*:refs/heads/tasks/delegated/${issue}/*" \
-            2>/dev/null || return 1
+    taskdag_prepare_child_map || return 1
+}
+
+# Prepare the sole task-child view used by decomposition readers. The roots
+# are the captured origin/master commit plus the task refs attested by the
+# semantic consumer. Arbitrary local branches, HEAD, delegated side metadata,
+# and unreferenced objects minted during breakdown cannot enter this map.
+taskdag_prepare_child_map() {
+    TASKDAG_CHILD_MAP_READY=false
+    TASKDAG_CHILD_MAP_MASTER=""
+    TASKDAG_CHILD_MAP_REFS=""
+    TASKDAG_CHILDREN_ANY=()
+    TASKDAG_RECON_FP_CHILDREN=()
+
+    local master us=$'\x1f' commit tree subject parents first parent map_file
+    master=$(git rev-parse --verify -q 'refs/remotes/origin/master^{commit}') || return 2
+    TASKDAG_CHILD_MAP_MASTER=$master
+    TASKDAG_CHILD_MAP_REFS=$(git for-each-ref --format='%(objectname) %(refname)' \
+        refs/heads/tasks/frontier/ refs/heads/tasks/active/ \
+        refs/heads/tasks/blocked/ refs/heads/tasks/blocked-meta/ \
+        refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
+        refs/heads/gh/issues/ | LC_ALL=C sort) || return 2
+    map_file=$(mktemp) || return 2
+    if ! {
+        printf '%s\n' "$master"
+        awk '{print $1}' <<<"$TASKDAG_CHILD_MAP_REFS"
+    } | git log --stdin --format="%H${us}%T${us}%s${us}%P" >"$map_file" 2>/dev/null; then
+        rm -f "$map_file"
+        return 2
     fi
-    return 0
+    while IFS="$us" read -r commit tree subject parents; do
+        [ -n "$commit" ] || continue
+        [ "$tree" = "$EMPTY_TREE" ] || continue
+        case "$subject" in
+            Claim:*|Blocked-Meta:*|kind:\ delegated*|kind:\ completion*) continue ;;
+        esac
+        first="${parents%% *}"
+        [ -n "$first" ] || continue
+        TASKDAG_RECON_FP_CHILDREN["$first"]+="$commit"$'\n'
+        for parent in $parents; do
+            TASKDAG_CHILDREN_ANY["$parent"]+="$commit"$'\n'
+        done
+    done <"$map_file"
+    rm -f "$map_file"
+    TASKDAG_CHILD_MAP_READY=true
 }
 
 # Helper: build the root-orchestration claim commit. Mirrors the leaf
@@ -1013,29 +1042,10 @@ claim_is_dead() {
 # child refs are present locally.
 task_has_children() {
     local parent_sha="$1"
-    local commit parents subject
-    while read -r commit parents; do
-        case " $parents " in
-            *" $parent_sha "*) ;;
-            *) continue ;;
-        esac
-        # Skip side commits that are parented to a task/root but are NOT
-        # DAG children: claim commits (leaf `tasks/active/*` + root
-        # `tasks/root-active/*`) are locks, and `Blocked-Meta:` commits are
-        # blocked-task side metadata (tree == task tree, first parent ==
-        # task), neither of which is a decomposition child.
-        subject=$(git log -1 --format='%s' "$commit" 2>/dev/null || true)
-        case "$subject" in
-            Claim:*|Blocked-Meta:*) continue ;;
-        esac
-        # Only count empty-tree task commits as DAG children; real
-        # implementation/master commits that happen to list the root are
-        # not breakdown children.
-        is_task_commit "$commit" || continue
-        printf '%s\n' "$commit"
-        return 0
-    done < <(git rev-list --all --parents 2>/dev/null)
-    return 1
+    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
+    local children="${TASKDAG_CHILDREN_ANY[$parent_sha]:-}"
+    [ -n "$children" ] || return 1
+    printf '%s\n' "${children%%$'\n'*}"
 }
 
 # Helper: true iff <parent_sha> has a direct STRUCTURAL child. Breakdown
@@ -1046,19 +1056,10 @@ task_has_children() {
 # make a root non-childless.
 task_has_structural_children() {
     local parent_sha="$1"
-    local commit parents first subject
-    while read -r commit parents; do
-        first="${parents%% *}"
-        [ "$first" = "$parent_sha" ] || continue
-        subject=$(git log -1 --format='%s' "$commit" 2>/dev/null || true)
-        case "$subject" in
-            Claim:*|Blocked-Meta:*) continue ;;
-        esac
-        is_task_commit "$commit" || continue
-        printf '%s\n' "$commit"
-        return 0
-    done < <(git rev-list --all --parents 2>/dev/null)
-    return 1
+    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
+    local children="${TASKDAG_RECON_FP_CHILDREN[$parent_sha]:-}"
+    [ -n "$children" ] || return 1
+    printf '%s\n' "${children%%$'\n'*}"
 }
 
 # Helper: list ALL direct DAG children (breakdown child task commits) of a
@@ -1068,19 +1069,9 @@ task_has_structural_children() {
 # every child rather than short-circuiting at the first. Callers that care
 # about origin state must fetch the relevant task namespaces first.
 list_dag_children() {
-    local parent_sha="$1" commit parents subject
-    while read -r commit parents; do
-        case " $parents " in
-            *" $parent_sha "*) ;;
-            *) continue ;;
-        esac
-        subject=$(git log -1 --format='%s' "$commit" 2>/dev/null || true)
-        case "$subject" in
-            Claim:*|Blocked-Meta:*) continue ;;
-        esac
-        is_task_commit "$commit" || continue
-        printf '%s\n' "$commit"
-    done < <(git rev-list --all --parents 2>/dev/null)
+    local parent_sha="$1"
+    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
+    printf '%s' "${TASKDAG_CHILDREN_ANY[$parent_sha]:-}"
 }
 
 # Helper: recursively decide whether the entire subtree rooted at <node>
@@ -4304,9 +4295,12 @@ EOF
             echo "       ${parent_sha:0:12} — refusing to decompose. Retry when online." >&2
             return 4
         fi
-        local existing_child
-        existing_child=$(task_has_children "$parent_sha" || true)
-        if [ -n "$existing_child" ]; then
+        local existing_child child_rc=0
+        existing_child=$(task_has_children "$parent_sha") || child_rc=$?
+        if [ "$child_rc" -gt 1 ]; then
+            echo "Error: authoritative child map became indeterminate; refusing breakdown." >&2
+            return 4
+        elif [ "$child_rc" -eq 0 ]; then
             echo "Error: parent ${parent_sha:0:12} ('${parent_title}') already has at" >&2
             echo "       least one live child task (${existing_child:0:12})." >&2
             echo "       Refusing to create a duplicate breakdown. Re-run with --force" >&2
@@ -4436,6 +4430,23 @@ EOF
     # activation authority in the same push.
     local push_output push_rc=0 breakdown_updates='[]' spec ref new old lease
     taskdag_consumer_prepare breakdown-pre-push || return 3
+    # A child may have published after the initial guard but before semantic
+    # preparation. Preparation legitimately accepts that newer generation,
+    # so activation CAS alone cannot reject it; inspect the newly prepared
+    # authoritative map once more. A publication after this check advances
+    # activation and is rejected by the fenced scheduling push below.
+    if [ "$force" = false ]; then
+        local prepared_child prepared_child_rc=0
+        prepared_child=$(task_has_children "$parent_sha") || prepared_child_rc=$?
+        if [ "$prepared_child_rc" -gt 1 ]; then
+            echo "Error: prepared child map became indeterminate; refusing breakdown." >&2
+            return 3
+        elif [ "$prepared_child_rc" -eq 0 ]; then
+            echo "Error: parent ${parent_sha:0:12} gained child ${prepared_child:0:12}" >&2
+            echo "       during breakdown preparation; refusing duplicate decomposition." >&2
+            return 1
+        fi
+    fi
     if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
         for spec in "${refspecs[@]}"; do
             new=${spec%%:*}; ref=${spec#*:}; old=""
@@ -4980,6 +4991,14 @@ EOF
             echo "       and let the epic close (close-epic), do not complete the root." >&2
             return 2
         fi
+    fi
+
+    # Internal dependency reconciliation runs offline at the implementation
+    # tip, but containment must still come from a freshly captured
+    # authoritative master/task-ref snapshot rather than ambient local refs.
+    if [ "$TASKDAG_CHILD_MAP_READY" != true ] && ! fetch_root_refs; then
+        echo "Error: cannot prepare authoritative task state for completion dependency checks." >&2
+        return 2
     fi
 
     # Check dependencies

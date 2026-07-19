@@ -232,12 +232,14 @@ taskdag_synth_supersede_completion() {
     rest="${from#task:}"; task="${rest##*@}"
     git rev-parse -q --verify "$task^{commit}" >/dev/null 2>&1 || return 2
     is_task_commit "$task" || { echo "Error: supersede target is not an empty-tree task commit: $task" >&2; return 2; }
-    taskdag_recon_build_child_map
+    # Prepare and attest the authoritative master/task-ref snapshot before
+    # reading containment. Never rebuild this safety decision from ambient
+    # refs in a graph-convergence subprocess.
+    taskdag_consumer_prepare supersede-convergence || return 2
     children="${TASKDAG_RECON_FP_CHILDREN[$task]:-}"
     [ -z "$children" ] || { echo "Error: refusing to synth-complete decomposed task/epic ${task:0:12}; supersede completion for epics is not safe in this phase" >&2; return 2; }
 
     taskdag_node_done "$from" >/dev/null 2>&1 && return 0
-    taskdag_consumer_prepare supersede-convergence || return 2
     # Canonical complete() already treats the satisfied `satisfies` edge as
     # authoritative. A second master witness would duplicate that semantic
     # decision and race an ordinary completion publication.

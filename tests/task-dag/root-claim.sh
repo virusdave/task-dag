@@ -92,10 +92,22 @@ else
   fi
 fi
 
+# A failed/local experiment may leave a task-shaped child reachable from an
+# arbitrary local ref. It is not authoritative scheduling state and must not
+# make the pending root look decomposed to claim, breakdown, or reconciliation.
+LOCAL_CHILD=$(git commit-tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
+  -p "$EPIC2" -m "Task: local-only phantom")
+git update-ref refs/heads/local-only-phantom "$LOCAL_CHILD"
+if "$TD" claim-root 1000 >/dev/null 2>&1; then
+  ok "2b: arbitrary local child ref does not mark a pending root decomposed"
+else
+  bad "2b: local-only child ref prevented authoritative root claim"
+fi
+
 # ---------------------------------------------------------------------------
 # TEST 3: claim-root + breakdown publishes leaves, consumes lock, keeps pending.
 # ---------------------------------------------------------------------------
-"$TD" claim-root 1000 >/dev/null 2>&1
+# Root was claimed by the local-only-ref regression immediately above.
 printf '[{"title":"leaf A","type":"leaf"},{"title":"leaf B","type":"leaf"}]' > "$ROOT/spec.json"
 if "$TD" breakdown "$EPIC2" --spec-file="$ROOT/spec.json" >/dev/null 2>&1; then
   leaf_ct=$(git ls-remote origin 'refs/heads/tasks/frontier/*' | wc -l | tr -d ' ')

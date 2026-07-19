@@ -71,7 +71,11 @@
 TASKDAG_RECON_EDGES_JSON=""
 TASKDAG_RECON_FACTS_TIP=""
 declare -gA TASKDAG_RECON_FP_CHILDREN=()
+declare -gA TASKDAG_CHILDREN_ANY=()
 declare -gA TASKDAG_RECON_NODE_STATE=()
+TASKDAG_CHILD_MAP_READY=false
+TASKDAG_CHILD_MAP_MASTER=""
+TASKDAG_CHILD_MAP_REFS=""
 TASKDAG_RECON_CUR=""
 TASKDAG_RECON_READY=false   # set by prepare; guards use-before-prepare
 
@@ -117,10 +121,8 @@ _taskdag_consumer_remote_advertisement() {
 _taskdag_consumer_advertised_oid() { awk -v r="$2" '$2==r {print $1}' <<<"$1"; }
 
 _taskdag_consumer_local_task_refs() {
-    git for-each-ref --format='%(objectname) %(refname)' \
-      refs/heads/tasks/frontier/ refs/heads/tasks/active/ refs/heads/tasks/blocked/ \
-      refs/heads/tasks/blocked-meta/ refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
-      refs/heads/gh/issues/ | LC_ALL=C sort
+    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
+    printf '%s\n' "$TASKDAG_CHILD_MAP_REFS"
 }
 
 _taskdag_consumer_advertised_task_refs() {
@@ -160,12 +162,12 @@ _taskdag_consumer_mismatch_reason() { # before local-activation observed-activat
     [ "$1" = "$2" ] || { printf 'activation-token\n'; return; }
     [ "$1" = "$3" ] || { printf 'activation-authority\n'; return; }
     [ "$4" = "$5" ] || { printf 'graph-tip\n'; return; }
-    { [ -n "${10}" ] || [ "$6" = "$7" ]; } || { printf 'master-tip\n'; return; }
+    [ "$6" = "$7" ] || { printf 'master-tip\n'; return; }
     [ "$8" = "$9" ] || { printf 'task-refs\n'; return; }
     printf '\n'
 }
 
-taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
+_taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
     local consumer=${1:-} requested_tip="" nofetch=false before after token runtime attempt arg advertisement graph_tip master_tip
     local candidate_mode local_activation local_graph local_master local_task_refs local_task_refs_digest
     local observed_task_refs observed_task_refs_digest reason max_attempts retry_budget
@@ -248,7 +250,10 @@ taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
         # before any subsequent capture or digest operation can fail.
         TASKDAG_RECON_READY=false
         local_graph=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
-        local_master=$TASKDAG_RECON_FACTS_TIP
+        # Facts may be explicitly pinned to another commit, but containment
+        # always derives from the captured origin/master generation. Attest
+        # that map root independently and unconditionally.
+        local_master=$TASKDAG_CHILD_MAP_MASTER
         local_task_refs=$(_taskdag_consumer_local_task_refs) || return 2
         local_task_refs_digest=$(_taskdag_consumer_refs_digest "$local_task_refs") || return 2
         if declare -F taskdag_consumer_test_after_prepare_hook >/dev/null; then
@@ -310,6 +315,21 @@ taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
     done
     echo "Error: semantic consumer preparation ended without a ready or exhausted result" >&2
     return 2
+}
+
+# A failed or exhausted preparation must not leave its child snapshot usable
+# by a caller that accidentally ignores the return status.
+taskdag_consumer_prepare() {
+    local rc=0
+    _taskdag_consumer_prepare "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        TASKDAG_CHILD_MAP_READY=false
+        TASKDAG_CHILD_MAP_MASTER=""
+        TASKDAG_CHILD_MAP_REFS=""
+        TASKDAG_CHILDREN_ANY=()
+        TASKDAG_RECON_FP_CHILDREN=()
+    fi
+    return "$rc"
 }
 
 taskdag_consumer_require_prepared() {
@@ -438,18 +458,7 @@ taskdag_root_status_json() { # <root-node> <issue>
 # parent — never a dependency parent). The result is a strict forest, so the
 # complete() recursion over it is inherently acyclic and terminating.
 taskdag_recon_build_child_map() {
-    TASKDAG_RECON_FP_CHILDREN=()
-    local us=$'\x1f' commit tree subject parents first
-    while IFS="$us" read -r commit tree subject parents; do
-        [ -n "$commit" ] || continue
-        [ "$tree" = "$EMPTY_TREE" ] || continue           # task commits only
-        case "$subject" in
-            Claim:*|Blocked-Meta:*|kind:\ delegated*|kind:\ completion*) continue ;;
-        esac
-        first="${parents%% *}"                            # first parent only
-        [ -n "$first" ] || continue                       # a rootless commit
-        TASKDAG_RECON_FP_CHILDREN["$first"]+="$commit"$'\n'
-    done < <(git log --all --format="%H${us}%T${us}%s${us}%P" 2>/dev/null)
+    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
 }
 
 # taskdag_recon_prepare [--no-fetch]: load the per-invocation state. Online
@@ -479,31 +488,36 @@ taskdag_recon_prepare() {
     TASKDAG_RECON_EDGES_JSON=""
     TASKDAG_RECON_FACTS_TIP=""
     TASKDAG_RECON_CUR=""
-    TASKDAG_RECON_FP_CHILDREN=()
+    if [ "$nofetch" = true ]; then
+        [ "$TASKDAG_CHILD_MAP_READY" = true ] || {
+            echo "Error: offline reconciliation requires an already-prepared authoritative child snapshot" >&2
+            return 2
+        }
+    else
+        TASKDAG_CHILD_MAP_READY=false
+        TASKDAG_CHILD_MAP_MASTER=""
+        TASKDAG_CHILD_MAP_REFS=""
+        TASKDAG_CHILDREN_ANY=()
+        TASKDAG_RECON_FP_CHILDREN=()
+    fi
     TASKDAG_RECON_NODE_STATE=()
 
     if [ "$nofetch" = false ]; then
-        taskdag_sync_master || { echo "Error: could not sync origin/master (indeterminate); refusing to reconcile against a possibly-stale view (use --no-fetch for local refs)" >&2; return 2; }
-        # Sync the task-ref namespace so containment (the child map) AND the
-        # claim/block gates reflect ORIGIN, not a partial local checkout. FAIL
-        # CLOSED: a decomposed epic judged against a partial local DAG (only
-        # the completed child visible) would FALSE-COMPLETE — the exact hazard
-        # the legacy auto-close path guards against. (An unset helper resolves
-        # to 127 here, also caught by `|| { … }`, so this is fail-closed even
-        # when the module is sourced standalone.)
-        fetch_task_refs_strict >/dev/null 2>&1 || { echo "Error: could not sync task refs from origin (indeterminate); refusing to reconcile against a partial local DAG (use --no-fetch for the local view)" >&2; return 2; }
+        fetch_root_refs >/dev/null 2>&1 || { echo "Error: could not sync the authoritative master/task-ref snapshot (indeterminate); refusing reconciliation" >&2; return 2; }
     fi
 
     local args=() facts_args=()
     [ "$nofetch" = true ] && args+=(--no-fetch)
     facts_args=("${args[@]}")
-    [ -n "$tip" ] && facts_args+=(--tip "$tip")
+    [ -n "$tip" ] || tip=$TASKDAG_CHILD_MAP_MASTER
+    tip=$(git rev-parse --verify -q "${tip}^{commit}") || return 2
+    facts_args+=(--tip "$tip")
     TASKDAG_RECON_EDGES_JSON=$(taskdag_edges_with_facts "${facts_args[@]}") || return 2
-    TASKDAG_RECON_FACTS_TIP=$(taskdag_resolve_facts_tip "$tip") || return 2
+    TASKDAG_RECON_FACTS_TIP=$tip
     TASKDAG_FACTS_TIP_OID=$TASKDAG_RECON_FACTS_TIP
 
     TASKDAG_RECON_CUR=$(taskdag_current_repo) || { echo "Error: cannot resolve current repo to reconcile the graph" >&2; return 2; }
-    taskdag_recon_build_child_map
+    taskdag_recon_build_child_map || return 2
     TASKDAG_RECON_READY=true
     return 0
 }

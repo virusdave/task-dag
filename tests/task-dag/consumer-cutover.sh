@@ -68,8 +68,10 @@ tip=$(git rev-parse HEAD); tree=$(git rev-parse HEAD^{tree})
 done_commit=$(git commit-tree "$tree" -p "$tip" -p "$dep" -m 'Complete dependency')
 git update-ref refs/heads/master "$done_commit"; git reset -q --soft "$done_commit"
 if "$TD" deps "$wait" --no-fetch --check-complete >/dev/null 2>&1; then
-  ok "explicit-tip offline consumer uses its pinned local facts tip"
-else bad "explicit-tip consumer leaked ambient origin/master facts"; fi
+  bad "standalone offline consumer rebuilt containment from unattested local refs"
+else
+  ok "standalone offline consumer requires a prepared authoritative child snapshot"
+fi
 git push -q origin master:master
 frontier=$($TD frontier --json)
 "$TD" deps "$wait" --check-complete >/dev/null 2>&1; deps_rc=$?
@@ -222,6 +224,40 @@ if [[ "$child" =~ ^[0-9a-f]{40}$ ]] \
 else
   bad "activated breakdown did not publish its fenced update set"
 fi
+
+# A child published while consumer preparation is settling is part of the
+# accepted authoritative generation. The post-prepare guard must reject the
+# caller's planned children rather than treating a successful prepare as
+# permission to decompose the same root twice.
+race_root=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: raced root\nIssue: #9840\nType: epic')
+git update-ref refs/heads/tasks/pending/9840 "$race_root"
+git push -q origin refs/heads/tasks/pending/9840
+"$TD" claim-root 9840 >/dev/null
+export RACE_PARENT="$race_root" RACE_MARK="$ROOT/race-child-published"
+taskdag_consumer_test_after_prepare_hook() {
+  [ -e "$RACE_MARK" ] && return 0
+  local raced raced_short
+  raced=$(git commit-tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
+    -p "$RACE_PARENT" -m 'Task: concurrently published child') || return 1
+  raced_short=$(git rev-parse --short "$raced") || return 1
+  git push -q origin "$raced:refs/heads/tasks/frontier/$raced_short" || return 1
+  : >"$RACE_MARK"
+}
+export -f taskdag_consumer_test_after_prepare_hook
+race_before=$(git ls-remote origin 'refs/heads/tasks/frontier/*' | wc -l | tr -d ' ')
+if "$TD" breakdown "$race_root" --spec-file="$ROOT/breakdown.json" >/dev/null 2>&1; then
+  bad "breakdown accepted a child published during semantic preparation"
+else
+  race_after=$(git ls-remote origin 'refs/heads/tasks/frontier/*' | wc -l | tr -d ' ')
+  if [ -e "$RACE_MARK" ] && [ "$race_after" -eq $((race_before + 1)) ] \
+     && git --git-dir="$ROOT/origin" show-ref --verify --quiet refs/heads/tasks/root-active/9840; then
+    ok "post-prepare child check rejects raced duplicate without consuming root claim"
+  else
+    bad "raced breakdown rejection had partial effects or lost its root claim"
+  fi
+fi
+unset -f taskdag_consumer_test_after_prepare_hook
+unset RACE_PARENT RACE_MARK
 
 "$TD" block "$dep" --reason="fixture" >/dev/null
 authority_before_unblock=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
@@ -611,7 +647,7 @@ if [ "$reason_token" = activation-token ] \
    && [ "$reason_graph" = graph-tip ] \
    && [ "$reason_master" = master-tip ] \
    && [ "$reason_refs" = task-refs ] \
-   && [ -z "$reason_tip" ] \
+   && [ "$reason_tip" = master-tip ] \
    && jq -e '.status=="ready" and .reason==null and .attempts==1' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null; then
   ok "consumer mismatch reasons and replacement result have deterministic semantics"
 else
@@ -640,6 +676,11 @@ if (
   taskdag_resolve_facts_tip() { printf 'm\n'; }
   taskdag_cas_sleep() { return 0; }
   taskdag_sha256_hex() { sha256sum | awk '{print $1}'; }
+  fixture_prepare_child_map() {
+    TASKDAG_CHILD_MAP_READY=true
+    TASKDAG_CHILD_MAP_MASTER=m
+    TASKDAG_CHILD_MAP_REFS='r refs/heads/tasks/pending/1'
+  }
   git() {
     case "$*" in
       *'merge-base --is-ancestor'*) return 0 ;;
@@ -648,10 +689,11 @@ if (
       *) command git "$@" ;;
     esac
   }
+  fixture_prepare_child_map
   taskdag_consumer_prepare unit-exhaust --no-fetch >/dev/null 2>&1 && exit 1
   jq -e '.status=="exhausted" and .reason=="activation-authority"' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
   [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ] || exit 1
-  fixture_authority_mismatch=false; : >"$fixture_authority_calls"
+  fixture_authority_mismatch=false; : >"$fixture_authority_calls"; fixture_prepare_child_map
   taskdag_consumer_prepare unit-ready --no-fetch >/dev/null 2>&1 || exit 1
   jq -e '.status=="ready" and .reason==null' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
   [ "$TASKDAG_CONSUMER_READY" = true ] && [ "$TASKDAG_RECON_READY" = true ] || exit 1
@@ -661,7 +703,7 @@ if (
   jq -e '.status=="error" and .reason==null and .attempts==1' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
   [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ] || exit 1
   taskdag_sha256_hex() { sha256sum | awk '{print $1}'; }
-  fixture_authority_mismatch=true; : >"$fixture_authority_calls"; TASKDAG_CAS_MAX_ATTEMPTS=1
+  fixture_authority_mismatch=true; : >"$fixture_authority_calls"; TASKDAG_CAS_MAX_ATTEMPTS=1; fixture_prepare_child_map
   taskdag_consumer_test_after_prepare_hook() { [ "$1" -eq 1 ] || return 91; }
   taskdag_consumer_prepare unit-hard-error --no-fetch >/dev/null 2>&1; hard_rc=$?
   [ "$hard_rc" -eq 91 ] || exit 1
