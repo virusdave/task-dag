@@ -49,14 +49,14 @@ rc_of() {
 # complete_is <yes|no> <label> <node>
 complete_is() {
     local exp="$1" label="$2" node="$3"
-    if [ "$exp" = yes ]; then rc_of 0 "$label" -- "$TD" reconcile --no-fetch --node "$node"
-    else rc_of 1 "$label" -- "$TD" reconcile --no-fetch --node "$node"; fi
+    if [ "$exp" = yes ]; then rc_of 0 "$label" -- "$TD" reconcile --node "$node"
+    else rc_of 1 "$label" -- "$TD" reconcile --node "$node"; fi
 }
 # ready_is <yes|no> <label> <node>
 ready_is() {
     local exp="$1" label="$2" node="$3"
-    if [ "$exp" = yes ]; then rc_of 0 "$label" -- "$TD" reconcile --no-fetch --ready --node "$node"
-    else rc_of 1 "$label" -- "$TD" reconcile --no-fetch --ready --node "$node"; fi
+    if [ "$exp" = yes ]; then rc_of 0 "$label" -- "$TD" reconcile --ready --node "$node"
+    else rc_of 1 "$label" -- "$TD" reconcile --ready --node "$node"; fi
 }
 
 # ===========================================================================
@@ -254,20 +254,24 @@ close_issue "$R" 6
 ready_is yes "C4 satisfied requires-edge ⇒ ready" "$NRDY"
 # Blocked ⇒ not ready.
 git update-ref "refs/heads/tasks/blocked/$Rdy" "$Rdy"
+git push -q origin "refs/heads/tasks/blocked/$Rdy"
 ready_is no "C5 blocked leaf is not ready" "$NRDY"
 git update-ref -d "refs/heads/tasks/blocked/$Rdy"
+git push -q origin ":refs/heads/tasks/blocked/$Rdy"
 ready_is yes "C6 unblocked again ⇒ ready" "$NRDY"
 # Claimed (tasks/active/<short>) ⇒ not ready.
 RDYSHORT=$(git rev-parse --short "$Rdy")
 git update-ref "refs/heads/tasks/active/$RDYSHORT" "$Rdy"
+git push -q origin "refs/heads/tasks/active/$RDYSHORT"
 ready_is no "C7 claimed leaf is not ready" "$NRDY"
 git update-ref -d "refs/heads/tasks/active/$RDYSHORT"
+git push -q origin ":refs/heads/tasks/active/$RDYSHORT"
 
 # ===========================================================================
 # Part D — PROPERTY invariants.
 # ===========================================================================
 # D1 idempotency: evaluating the same node twice yields the same verdict.
-v1=$("$TD" reconcile --no-fetch --json --node "$NR"); v2=$("$TD" reconcile --no-fetch --json --node "$NR")
+v1=$("$TD" reconcile --json --node "$NR"); v2=$("$TD" reconcile --json --node "$NR")
 if [ "$v1" = "$v2" ] && [ "$(printf '%s' "$v1" | jq -r .complete)" = true ]; then
     ok "D1 complete() is idempotent (twice ≡ once)"
 else bad "D1 complete() not idempotent (v1=$v1 v2=$v2)"; fi
@@ -280,8 +284,8 @@ Type: leaf")
 NW="task:$REPO@$W"
 add_edge "$NW" "issue:$REPO#5" requires      # #5 closed (satisfied)
 add_edge "$NW" "issue:$REPO#6" requires      # #6 closed (satisfied)
-solo=$("$TD" reconcile --no-fetch --json --node "$NW" | jq -c '{complete,ready}')
-intable=$("$TD" reconcile --no-fetch --json | jq -c --arg n "$NW" '.[] | select(.node==$n) | {complete,ready}')
+solo=$("$TD" reconcile --json --node "$NW" | jq -c '{complete,ready}')
+intable=$("$TD" reconcile --json | jq -c --arg n "$NW" '.[] | select(.node==$n) | {complete,ready}')
 # NW is a not-done leaf whose two requires-edges are both satisfied ⇒ NOT
 # complete but READY; the invariant is that both evaluation paths agree.
 if [ -n "$solo" ] && [ "$solo" = "$intable" ] && [ "$(printf '%s' "$solo" | jq -r .ready)" = true ]; then
@@ -290,10 +294,10 @@ else bad "D2 verdict order-dependent (solo=$solo table=$intable)"; fi
 
 # D3 monotonicity: a node that is complete stays complete after master
 # advances with MORE completions (completion is monotonic; can't un-complete).
-before=$("$TD" reconcile --no-fetch --node "$NR" >/dev/null 2>&1; echo $?)
+before=$("$TD" reconcile --node "$NR" >/dev/null 2>&1; echo $?)
 Extra=$(mk_task "Task: extra unrelated
 Type: leaf"); complete_task "$Extra"
-after=$("$TD" reconcile --no-fetch --node "$NR" >/dev/null 2>&1; echo $?)
+after=$("$TD" reconcile --node "$NR" >/dev/null 2>&1; echo $?)
 if [ "$before" = 0 ] && [ "$after" = 0 ]; then
     ok "D3 complete() is monotonic (advancing master never un-completes)"
 else bad "D3 monotonicity violated (before=$before after=$after)"; fi
@@ -304,9 +308,9 @@ complete_is yes "D4 supersede-correctness (satisfied ⟹ complete)" "$NY"
 
 # D5 boundedness: reconcile creates ZERO new refs (bounded-ref invariant).
 before_refs=$(git for-each-ref | wc -l)
-"$TD" reconcile --no-fetch >/dev/null 2>&1
-"$TD" reconcile --no-fetch --json >/dev/null 2>&1
-"$TD" reconcile --no-fetch --node "$NR" >/dev/null 2>&1 || true
+"$TD" reconcile >/dev/null 2>&1
+"$TD" reconcile --json >/dev/null 2>&1
+"$TD" reconcile --node "$NR" >/dev/null 2>&1 || true
 after_refs=$(git for-each-ref | wc -l)
 if [ "$before_refs" = "$after_refs" ]; then
     ok "D5 reconcile creates zero refs (bounded)"
@@ -316,49 +320,50 @@ else bad "D5 reconcile changed ref count ($before_refs → $after_refs)"; fi
 # Part E — CLI surface + parity.
 # ===========================================================================
 # E1 text single-node complete.
-out=$("$TD" reconcile --no-fetch --node "$NL")
+out=$("$TD" reconcile --node "$NL")
 [ "$out" = "$(printf '%s\tcomplete' "$NL")" ] && ok "E1 --node text: complete" || bad "E1 --node text (got: $out)"
 # E2 text single-node incomplete (NX is a not-done leaf throughout).
-out=$("$TD" reconcile --no-fetch --node "$NX")
+out=$("$TD" reconcile --node "$NX")
 [ "$out" = "$(printf '%s\tincomplete' "$NX")" ] && ok "E2 --node text: incomplete" || bad "E2 --node text (got: $out)"
 # E3 --ready text.
-out=$("$TD" reconcile --no-fetch --ready --node "$NRDY")
+out=$("$TD" reconcile --ready --node "$NRDY")
 [ "$out" = "$(printf '%s\tready' "$NRDY")" ] && ok "E3 --ready text: ready" || bad "E3 --ready text (got: $out)"
 # E4 --json single-node shape.
-js=$("$TD" reconcile --no-fetch --json --node "$NR")
+js=$("$TD" reconcile --json --node "$NR")
 if [ "$(printf '%s' "$js" | jq -r '.node')" = "$NR" ] \
    && [ "$(printf '%s' "$js" | jq -r '.complete')" = true ] \
    && [ "$(printf '%s' "$js" | jq 'has("ready")')" = true ]; then
     ok "E4 --json single-node shape {node,complete,ready}"
 else bad "E4 --json single-node shape (got: $js)"; fi
 # E5 --json table is a valid array of the shape.
-arr=$("$TD" reconcile --no-fetch --json)
+arr=$("$TD" reconcile --json)
 if printf '%s' "$arr" | jq -e 'type=="array" and all(.[]; has("node") and has("complete") and has("ready"))' >/dev/null; then
     ok "E5 --json table is an array of {node,complete,ready}"
 else bad "E5 --json table shape (got: $arr)"; fi
 # E6 human table has a header + rows and exits 0. Capture first (a `| grep -q`
 # would SIGPIPE the producer under pipefail and false-fail).
-tbl=$("$TD" reconcile --no-fetch 2>/dev/null)
+tbl=$("$TD" reconcile 2>/dev/null)
 if printf '%s\n' "$tbl" | grep -q "COMPLETE"; then
     ok "E6 human table renders a header"
 else bad "E6 human table missing header"; fi
 # E7 malformed node fails loud (rc 2).
-rc_of 2 "E7 malformed node ⇒ rc 2" -- "$TD" reconcile --no-fetch --node "not-a-node"
+rc_of 2 "E7 malformed node ⇒ rc 2" -- "$TD" reconcile --node "not-a-node"
 # E9 fail-CLOSED: a current-repo task node that is NOT present locally as a
 # task commit is indeterminate ⇒ rc 2 (never silently reported ready/complete).
 BOGUS40=$(printf 'f%.0s' {1..40})
-rc_of 2 "E9 unresolvable current-repo task node ⇒ rc 2 (complete)" -- "$TD" reconcile --no-fetch --node "task:$REPO@$BOGUS40"
-rc_of 2 "E10 unresolvable current-repo task node ⇒ rc 2 (--ready)" -- "$TD" reconcile --no-fetch --ready --node "task:$REPO@$BOGUS40"
+rc_of 2 "E9 unresolvable current-repo task node ⇒ rc 2 (complete)" -- "$TD" reconcile --node "task:$REPO@$BOGUS40"
+rc_of 2 "E10 unresolvable current-repo task node ⇒ rc 2 (--ready)" -- "$TD" reconcile --ready --node "task:$REPO@$BOGUS40"
 # E11 a FOREIGN-repo task node is not locally derivable ⇒ not complete (rc 1),
 # NOT an error (its completion is carried by the cross-repo siblings).
-rc_of 1 "E11 foreign-repo task node ⇒ incomplete (not an error)" -- "$TD" reconcile --no-fetch --node "task:other/repo@$BOGUS40"
+rc_of 1 "E11 foreign-repo task node ⇒ incomplete (not an error)" -- "$TD" reconcile --node "task:other/repo@$BOGUS40"
 # E12 an issue node closed via Closes-Epic is complete (leaf branch, done()).
-rc_of 0 "E12 closed issue node ⇒ complete" -- "$TD" reconcile --no-fetch --node "issue:$REPO#5"
-# E8 --no-fetch offline path works (used throughout above) — confirm it does
-# NOT try origin by pointing origin at a bogus path and still succeeding.
+rc_of 0 "E12 closed issue node ⇒ complete" -- "$TD" reconcile --node "issue:$REPO#5"
+# E8 a standalone offline invocation has no attested child snapshot and must
+# fail closed rather than reconstructing containment from ambient local refs.
 ( git remote set-url origin /nonexistent/nope.git
-  "$TD" reconcile --no-fetch --node "$NL" >/dev/null 2>&1 ) \
-  && ok "E8 --no-fetch is fully offline" || bad "E8 --no-fetch touched origin"
+  "$TD" reconcile --no-fetch --node "$NL" >/dev/null 2>&1; [ $? -eq 2 ] ) \
+  && ok "E8 standalone --no-fetch fails closed without a prepared snapshot" \
+  || bad "E8 standalone --no-fetch accepted ambient local refs"
 git remote set-url origin "$ROOT/origin.git"
 
 echo "PASS=$PASS FAIL=$FAIL"

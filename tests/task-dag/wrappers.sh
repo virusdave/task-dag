@@ -56,6 +56,7 @@ mk_task() {
     sha=$(git commit-tree "$EMPTY_TREE" -p "$parent" -m "$msg")
     short=$(git rev-parse --short "$sha")
     git update-ref "refs/heads/tasks/frontier/$short" "$sha"
+    git push -q origin "refs/heads/tasks/frontier/$short"
     printf '%s\n' "$sha"
 }
 # close_issue <2nd-parent-sha> <N>: land a Closes-Epic:#N merge on master (the
@@ -70,7 +71,7 @@ Closes-Epic: #$n")
     git update-ref "refs/heads/gh/issues/$n" "$epic"
     git symbolic-ref HEAD refs/heads/master 2>/dev/null || true
     git reset -q --soft "$merge"
-    git push -q origin master:master
+    git push -q origin master:master "refs/heads/gh/issues/$n"
 }
 graph_tip() { git rev-parse -q --verify "$GRAPH_REF" 2>/dev/null || echo none; }
 n_edges()   { "$TD" edges --json --no-fetch 2>/dev/null | jq 'length'; }
@@ -171,7 +172,7 @@ Type: leaf")
 
 # Before #57 is done, the superseded leaf is NOT complete (satisfies edge
 # points at a not-yet-done target).
-if "$TD" reconcile --no-fetch --node "$NZ57" >/dev/null 2>&1; then
+if "$TD" reconcile --node "$NZ57" >/dev/null 2>&1; then
     bad "B1 superseded leaf is complete BEFORE its --by target is done"
 else
     ok "B1 superseded leaf is not complete until its --by target is done"
@@ -181,13 +182,13 @@ fi
 close_issue "$WORK" 57
 
 # The reconciler now sees the satisfies edge satisfied ⇒ the leaf is COMPLETE.
-if "$TD" reconcile --no-fetch --node "$NZ57" >/dev/null 2>&1; then
+if "$TD" reconcile --node "$NZ57" >/dev/null 2>&1; then
     ok "B2 #57 scenario: superseded leaf is COMPLETE once --by completes"
 else
     bad "B2 #57 scenario: superseded leaf did NOT become complete"
 fi
 # A complete node is never a pickable leaf.
-if "$TD" reconcile --no-fetch --ready --node "$NZ57" >/dev/null 2>&1; then
+if "$TD" reconcile --ready --node "$NZ57" >/dev/null 2>&1; then
     bad "B3 #57 scenario: a superseded (complete) leaf is still 'ready'"
 else
     ok "B3 #57 scenario: a superseded (complete) leaf is NOT ready"
