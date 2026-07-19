@@ -78,6 +78,7 @@ import { registerSweedAuthEventsRoutes } from '../routes/sweedAuthEvents.js'
 import { registerSweedSessionsRoutes } from '../routes/sweedSessions.js'
 import { registerUtilitiesPromoNamesRoutes } from '../routes/utilitiesPromoNames.js'
 import { registerWarehouseLocationsRoutes } from '../routes/warehouseLocations.js'
+import { registerVendorRoutes } from '../routes/vendors.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
 import { registerAgentWasteRoutes } from '../routes/agentWaste.js'
 import { registerUsersRoutes } from '../routes/users.js'
@@ -262,6 +263,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerCatalogRoutes(server)
   await registerCatalogMaintenanceRoutes(server)
   await registerWarehouseLocationsRoutes(server)
+  await registerVendorRoutes(server)
   await registerCatalogMarketMatchRoutes(server)
   await registerCatalogLitalertsBrandOverridesRoutes(server)
   await registerCatalogReviewRoutes(server)
