@@ -28,6 +28,32 @@ _taskdag_census_capture_api() { # repo repository-id output
     ' <<<"$pages" >"$out"
 }
 
+_taskdag_census_capture_peer_id() { # activation literal-peer aliases-ndjson
+    local activation=$1 peer=$2 aliases=$3 peer_lower response status metadata peer_id canonical resolution name candidate_count rc
+    peer_lower=$(printf '%s' "$peer" | tr '[:upper:]' '[:lower:]')
+    peer_id=$(jq -r --arg r "$peer_lower" '.registrySnapshot.repositories[]|select(.repository==$r)|.repositoryId' "$activation")
+    if [ -n "$peer_id" ]; then printf '%s\n' "$peer_id"; return 0; fi
+    peer_id=$(jq -sr --arg r "$peer_lower" '.[]|select((.declaredName|ascii_downcase)==$r)|.repositoryId' "$aliases")
+    if [ -n "$peer_id" ]; then printf '%s\n' "$peer_id"; return 0; fi
+    response=$(gh api --include --header 'X-GitHub-Api-Version: 2022-11-28' "repos/$peer" 2>/dev/null); rc=$?
+    status=$(sed -n '1{s/\r$//;s/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p;}' <<<"$response")
+    if [ "$rc" -eq 0 ]; then
+      [[ "$status" =~ ^2[0-9][0-9]$ ]] || return 1
+      metadata=$(awk 'found{print} /^[[:space:]]*$/{found=1}' <<<"$response")
+      peer_id=$(jq -r '.node_id // empty' <<<"$metadata"); canonical=$(jq -r '.full_name // empty | ascii_downcase' <<<"$metadata"); resolution=github-node-id
+    else
+      [ "$status" = 404 ] || { echo "Error: cannot resolve historical peer due to non-404 GitHub failure: $peer" >&2; return 1; }
+      name=${peer_lower#*/}; candidate_count=$(jq --arg name "$name" '[.registrySnapshot.repositories[]|select((.repository|split("/")[1])==$name)]|length' "$activation")
+      [ "$candidate_count" -eq 1 ] || { echo "Error: historical peer is neither GitHub-resolvable nor a unique registry name: $peer" >&2; return 1; }
+      canonical=$(jq -r --arg name "$name" '.registrySnapshot.repositories[]|select((.repository|split("/")[1])==$name)|.repository' "$activation")
+      peer_id=$(jq -r --arg canonical "$canonical" '.registrySnapshot.repositories[]|select(.repository==$canonical)|.repositoryId' "$activation"); resolution=registry-unique-name
+    fi
+    [[ "$peer_id" =~ ^[A-Za-z0-9_=-]+$ && "$canonical" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] || return 1
+    jq -e --arg id "$peer_id" --arg canonical "$canonical" 'any(.registrySnapshot.repositories[];.repositoryId==$id and .repository==$canonical)' "$activation" >/dev/null || return 1
+    jq -ncS --arg canonicalName "$canonical" --arg declaredName "$peer" --arg repositoryId "$peer_id" --arg resolution "$resolution" '{canonicalName:$canonicalName,declaredName:$declaredName,repositoryId:$repositoryId,resolution:$resolution}' >>"$aliases" || return 1
+    printf '%s\n' "$peer_id"
+}
+
 cmd_materialise_census_capture() {
     case "${1:-}" in -h|--help) echo 'Usage: task-dag materialise-census-capture --spec-file FILE --output-dir DIR'; return 0;; esac
     [ "$#" -eq 4 ] && [ "$1" = --spec-file ] && [ "$3" = --output-dir ] || return 2
@@ -97,7 +123,7 @@ cmd_materialise_census_capture() {
         jq -ncS --arg path "$clone_rel" --arg repository "$repo" --arg tip "$tip" '{path:$path,repository:$repository,tip:$tip}' >>"$stage/repositories.ndjson"
     done < <(jq -r '.repositories[]|[.repository,.path]|@tsv' "$input")
 
-    : >"$stage/markers.ndjson"; : >"$stage/completions.ndjson"; : >"$stage/delegations.ndjson"; : >"$stage/declarations.ndjson"
+    : >"$stage/markers.ndjson"; : >"$stage/completions.ndjson"; : >"$stage/delegations.ndjson"; : >"$stage/declarations.ndjson"; : >"$stage/aliases.ndjson"
     while IFS=$'\t' read -r repo path; do
         path="$stage/$path"
         while IFS=$'\t' read -r oid refname; do
@@ -129,8 +155,7 @@ cmd_materialise_census_capture() {
                 review_count=$(jq --arg repo "$repo" --arg commit "$commit" --argjson ordinal "$group_ordinal" '[.terminalDeclarations[]?|select(.sourceRepo.name==$repo and .declarationCommit==$commit and .groupOrdinal==$ordinal)]|length' "$input") || return 2
                 [ "$review_count" -le 1 ] || return 3
                 [ "$review_count" -eq 0 ] || continue
-                peer_id=$(jq -r --arg r "${peer,,}" '.registrySnapshot.repositories[]|select(.repository==$r)|.repositoryId' "$activation")
-                [ -n "$peer_id" ] || return 3
+                peer_id=$(_taskdag_census_capture_peer_id "$activation" "$peer" "$stage/aliases.ndjson") || return 3
                 body_file=$(jq -r .bodyFile <<<"$group"); body_len=$(git -C "$path" cat-file -s "$commit:$body_file") || return 3
                 git -C "$path" cat-file blob "$commit:$body_file" >"$stage/body.tmp" || return 3
                 body_sha=$(_taskdag_materialise_sha256_file "$stage/body.tmp") || return 3
@@ -159,16 +184,16 @@ cmd_materialise_census_capture() {
         ' "$page_file" >"$page_file.new" || return 3
         mv "$page_file.new" "$page_file"
     done
-    if [ "$input_schema" = 2 ]; then
-      jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" --argjson terminalDeclarations "$(cat "$stage/terminal-declarations.json")" \
-        '{schema:2,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories,terminalDeclarations:$terminalDeclarations}' >"$stage/spec.json" || return 2
+    if [ "$input_schema" = 2 ] || [ -s "$stage/aliases.ndjson" ]; then
+      jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" --argjson terminalDeclarations "$([ "$input_schema" = 2 ] && cat "$stage/terminal-declarations.json" || echo '[]')" --slurpfile aliases "$stage/aliases.ndjson" \
+        '{schema:2,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories,repositoryAliases:($aliases|sort_by(.declaredName)),terminalDeclarations:$terminalDeclarations}' >"$stage/spec.json" || return 2
     else
       jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" \
         '{schema:1,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories}' >"$stage/spec.json" || return 2
     fi
     echo 'census-capture: validating candidate with canonical census builder' >&2
     (cd "$stage" && _taskdag_census_build spec.json census.preview.json) || return 3
-    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage/body.tmp" "$stage/terminal-validation.json" "$stage/terminal-declarations.json"
+    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage/body.tmp" "$stage/terminal-validation.json" "$stage/terminal-declarations.json" "$stage/aliases.ndjson"
     [ ! -e "$destination" ] || return 3
     mv -T "$stage" "$destination" || return 2; stage=""
     jq -ncS --arg outputDir "$destination" --arg spec "$destination/spec.json" --arg preview "$destination/census.preview.json" \

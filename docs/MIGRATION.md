@@ -528,6 +528,19 @@ no declaration, state, adoption, rearm, producer, reconciliation, or GitHub
 effect for them. Schema 1 remains valid only when no terminal review is
 required.
 
+Schema 2 also carries a sorted `repositoryAliases` array for historical
+declared peer names that GitHub resolves to a renamed or transferred registry
+repository. Capture records the literal declared name, canonical current
+name, immutable repository node ID, and whether GitHub resolved the old name
+directly. If GitHub no longer resolves it, capture may use the sole registry
+repository with the same repository-name component; zero or multiple matches
+fail closed. The builder requires the
+canonical name and ID to match the frozen activation registry, requires every
+alias to be consumed by at least one declaration with that exact literal name
+and ID, and retains the mapping in the reviewed artifact and digest. The
+literal historical name remains part of declaration identity; aliases neither
+rewrite intent nor permit a non-registry peer.
+
 The census writes canonical artifact bytes and a separate lowercase SHA-256
 digest. `materialise-import` requires those exact files and the same input,
 repeats census, byte-compares it, then performs one activation-fenced atomic

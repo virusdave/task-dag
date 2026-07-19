@@ -34,8 +34,11 @@ cat >"$ROOT/capture-bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 endpoint="${*: -1}"
-if [[ "$endpoint" == repos/virusdave/task-dag ]]; then
+if [[ "${endpoint,,}" == repos/virusdave/task-dag ]]; then
   printf '%s\n' '{"full_name":"virusdave/task-dag","node_id":"R_fixture"}'
+elif [[ "${endpoint,,}" == repos/legacy/task-dag ]]; then
+  if [ "${PEER_FAILURE:-}" = 1 ]; then printf 'HTTP/2.0 500 Internal Server Error\r\n\r\n'; else printf 'HTTP/2.0 404 Not Found\r\n\r\n'; fi
+  exit 1
 else
   count=0; [ ! -n "${CAPTURE_COUNTER:-}" ] || { count=$(cat "$CAPTURE_COUNTER" 2>/dev/null || echo 0); count=$((count+1)); printf '%s\n' "$count" >"$CAPTURE_COUNTER"; }
   [ "${CAPTURE_MODE:-}" != mutate-ref ] || [ "$count" -ne 1 ] || git -C "$CAPTURE_REPO" update-ref refs/heads/tasks/mutated "$CAPTURE_TIP"
@@ -55,12 +58,15 @@ PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$RO
   && jq -e '.issues[0].completionEvidence[0].disposition=="partial-implementation" and .issues[0].liveDelegations[0].disposition=="live-obligation"' "$ROOT/captured/pages/virusdave_task-dag.0001.json" >/dev/null \
   && ok "capture emits validated conservative census inputs" || bad "valid census capture"
 git clone -q "$ROOT/repo" "$ROOT/mixed-repo"; git -C "$ROOT/mixed-repo" config user.name fixture; git -C "$ROOT/mixed-repo" config user.email fixture@example.test; git -C "$ROOT/mixed-repo" config taskdag.current-repo virusdave/task-dag
-printf body >"$ROOT/mixed-repo/body"; git -C "$ROOT/mixed-repo" add body; git -C "$ROOT/mixed-repo" commit -qm $'fixture\n\nMaterialise-Child-Epic: VirusDave/Task-Dag\nChild-Epic-Title: Mixed case fixture\nChild-Epic-Body-File: body\nParent-Issue: 1'
+printf body >"$ROOT/mixed-repo/body"; git -C "$ROOT/mixed-repo" add body; git -C "$ROOT/mixed-repo" commit -qm $'fixture\n\nMaterialise-Child-Epic: Legacy/Task-Dag\nChild-Epic-Title: Renamed fixture\nChild-Epic-Body-File: body\nParent-Issue: 1'
 mixed_tip=$(git -C "$ROOT/mixed-repo" rev-parse HEAD); jq --arg tip "$mixed_tip" '.sourceTips[0].commit=$tip' "$ROOT/capture-activation" >"$ROOT/mixed-activation"
 jq -ncS --arg activation "$ROOT/mixed-activation" --arg path "$ROOT/mixed-repo" '{schema:1,activationRecord:$activation,repositories:[{path:$path,repository:"virusdave/task-dag"}]}' >"$ROOT/mixed-input"
 PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/mixed-input" --output-dir "$ROOT/mixed-capture" >/dev/null \
-  && jq -e '.issues[0].declarations[0].peerRepo.name=="VirusDave/Task-Dag"' "$ROOT/mixed-capture/pages/virusdave_task-dag.0001.json" >/dev/null \
-  && ok "capture preserves mixed-case legacy declaration identity" || bad "mixed-case census capture"
+  && jq -e '.issues[0].declarations[0].peerRepo.name=="Legacy/Task-Dag"' "$ROOT/mixed-capture/pages/virusdave_task-dag.0001.json" >/dev/null \
+  && jq -e '.schema==2 and .repositoryAliases==[{canonicalName:"virusdave/task-dag",declaredName:"Legacy/Task-Dag",repositoryId:"R_fixture",resolution:"registry-unique-name"}]' "$ROOT/mixed-capture/spec.json" >/dev/null \
+  && ok "capture preserves renamed legacy identity with registry alias" || bad "renamed census capture"
+if PEER_FAILURE=1 PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/mixed-input" --output-dir "$ROOT/peer-failure" >/dev/null 2>&1 \
+  || [ -e "$ROOT/peer-failure" ]; then bad "capture treated provider failure as repository absence"; else ok "renamed peer fallback requires an authoritative 404"; fi
 if PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured" >/dev/null 2>&1; then bad "capture overwrote existing output"; else ok "capture output is no-clobber"; fi
 CAPTURE_MODE=pages CAPTURE_COUNTER="$ROOT/pages-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured-pages" >/dev/null \
   && [ "$(jq '.issuePages|length' "$ROOT/captured-pages/spec.json")" -eq 2 ] \
@@ -103,7 +109,7 @@ jq -ncS '{schema:1,issues:[]}' >"$ROOT/evidence-page"
 jq -ncS --arg commit "$terminal_commit" --arg evidenceTip "$evidence_tip" --arg bodySha "$terminal_body_sha" --arg noEffect "$no_effect_oid" --arg supersession "$supersession_oid" \
   '{schema:1,disposition:"superseded-no-effect",sourceRepo:{id:"R_fixture",name:"virusdave/task-dag"},declarationCommit:$commit,groupOrdinal:0,parentIssue:{id:"I_fixture",number:1},peerRepo:"missing/repository",title:"Terminal declaration",bodyFile:"terminal-body",body:"terminal body",bodyLength:13,bodySha256:$bodySha,slug:null,delegationNote:null,evidence:[{role:"no-effect",repository:{id:"R_evidence",name:"evidence/repo"},commit:$evidenceTip,path:"no-effect",blobOid:$noEffect},{role:"supersession",repository:{id:"R_evidence",name:"evidence/repo"},commit:$evidenceTip,path:"supersession",blobOid:$supersession}]}' >"$ROOT/terminal-review"
 jq -ncS --arg activation "$ROOT/terminal-activation" --arg sourcePath "$ROOT/terminal-repo" --arg sourceTip "$terminal_tip" --arg evidencePath "$ROOT/evidence-repo" --arg evidenceTip "$evidence_tip" --arg page "$ROOT/page" --arg evidencePage "$ROOT/evidence-page" --slurpfile terminal "$ROOT/terminal-review" \
-  '{schema:2,activationRecord:$activation,repositories:[{path:$evidencePath,repository:"evidence/repo",tip:$evidenceTip},{path:$sourcePath,repository:"virusdave/task-dag",tip:$sourceTip}],issuePages:[{file:$evidencePage,hasNextPage:false,page:1,repository:"evidence/repo"},{file:$page,hasNextPage:false,page:1,repository:"virusdave/task-dag"}],terminalDeclarations:$terminal}' >"$ROOT/terminal-spec"
+  '{schema:2,activationRecord:$activation,repositories:[{path:$evidencePath,repository:"evidence/repo",tip:$evidenceTip},{path:$sourcePath,repository:"virusdave/task-dag",tip:$sourceTip}],issuePages:[{file:$evidencePage,hasNextPage:false,page:1,repository:"evidence/repo"},{file:$page,hasNextPage:false,page:1,repository:"virusdave/task-dag"}],repositoryAliases:[],terminalDeclarations:$terminal}' >"$ROOT/terminal-spec"
 "$TD" materialise-census --spec-file "$ROOT/terminal-spec" --artifact "$ROOT/terminal-artifact" --digest-file "$ROOT/terminal-digest" \
   && jq -e '.schema==2 and .slots==[] and (.terminalDeclarations|length)==1 and .terminalDeclarations[0].disposition=="superseded-no-effect"' "$ROOT/terminal-artifact" >/dev/null \
   && ok "reviewed terminal declaration is retained without a slot" || bad "reviewed terminal declaration census"

@@ -270,7 +270,10 @@ _taskdag_validate_census_artifact() { # canonical census artifact file
     jq -e '
       type=="object" and
       ((.schema==1 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","schema","slots"]) or
-       (.schema==2 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","schema","slots","terminalDeclarations"] and
+       (.schema==2 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","repositoryAliases","schema","slots","terminalDeclarations"] and
+        (.repositoryAliases|type=="array" and .==sort_by(.declaredName) and (map(.declaredName|ascii_downcase)|length==(unique|length)) and all(.[];
+          keys==["canonicalName","declaredName","repositoryId","resolution"] and (.declaredName|test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
+          (.canonicalName|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and (.repositoryId|type=="string" and length>0) and (.resolution=="github-node-id" or .resolution=="registry-unique-name"))) and
         (.terminalDeclarations|type=="array" and .==sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal) and all(.[];
           type=="object" and keys==["body","bodyFile","bodyLength","bodySha256","declarationCommit","delegationNote","disposition","evidence","groupOrdinal","parentIssue","peerRepo","schema","slug","sourceRepo","title"] and
           .schema==1 and .disposition=="superseded-no-effect" and (.declarationCommit|test("^[0-9a-f]{40}$")) and (.groupOrdinal|type=="number" and floor==. and .>=0) and
@@ -911,7 +914,10 @@ _taskdag_census_build() { # spec output
     _taskdag_materialise_no_duplicate_keys "$spec" || return 2
     jq -e 'type=="object" and
       ((.schema==1 and keys==["activationRecord","issuePages","repositories","schema"]) or
-       (.schema==2 and keys==["activationRecord","issuePages","repositories","schema","terminalDeclarations"])) and
+       (.schema==2 and keys==["activationRecord","issuePages","repositories","repositoryAliases","schema","terminalDeclarations"] and
+        (.repositoryAliases|type=="array" and .==sort_by(.declaredName) and (map(.declaredName|ascii_downcase)|length==(unique|length)) and all(.[];
+          keys==["canonicalName","declaredName","repositoryId","resolution"] and (.declaredName|test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
+          (.canonicalName|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and (.repositoryId|type=="string" and length>0) and (.resolution=="github-node-id" or .resolution=="registry-unique-name"))))) and
       (.activationRecord|type=="string" and length>0) and
       (.repositories|type=="array" and .==sort_by(.repository) and (map(.repository)|length==(unique|length)) and all(.[];type=="object" and keys==["path","repository","tip"] and (.path|type=="string" and length>0) and (.repository|type=="string") and (.tip|test("^[0-9a-f]{40}$")))) and
       (.issuePages|type=="array" and .==sort_by(.repository,.page) and all(.[];type=="object" and keys==["file","hasNextPage","page","repository"] and (.page|type=="number" and floor==. and .>=1) and (.hasNextPage|type=="boolean") and (.file|type=="string" and length>0)))' "$spec" >/dev/null || return 2
@@ -920,6 +926,7 @@ _taskdag_census_build() { # spec output
     if [ "$(jq -r .schema "$spec")" = 2 ]; then _taskdag_validate_terminal_declarations "$spec" "$activation" || return 2; fi
     repos=$(jq -c '.repositories|map({repository,tip})' "$spec"); [ "$repos" = "$(jq -c '.sourceTips|map({repository,tip:.commit})' "$activation")" ] || return 3
     [ "$(jq -c '.repositories|map(.repository)' "$spec")" = "$(jq -c '.registrySnapshot.repositories|map(.repository)' "$activation")" ] || return 3
+    jq -e --argjson registry "$(jq -c '.registrySnapshot.repositories' "$activation")" 'all(.repositoryAliases[]?; . as $alias | any($registry[];.repository==$alias.canonicalName and .repositoryId==$alias.repositoryId))' "$spec" >/dev/null || return 3
     tmp=$(mktemp -d) || return 2
     : >"$tmp/refs"; : >"$tmp/issues"; : >"$tmp/historical-declarations"; : >"$tmp/terminal-declarations"; : >"$tmp/terminal-used"
     while IFS=$'\t' read -r repo path expected; do
@@ -1017,9 +1024,10 @@ _taskdag_census_build() { # spec output
             (if .disposition=="verified-child-close" then .parentRepoNodeId==$id and .parentIssueNodeId==$issue.id else true end)))' --slurp "$tmp/issues" >/dev/null || return 3
     done < <(jq -r '.registrySnapshot.repositories[]|[.repository,.repositoryId]|@tsv' "$activation")
     # Every parsed peer, including a non-verified obligation, is registry-known.
-    jq -se --argjson registry "$(jq -c '.registrySnapshot.repositories' "$activation")" '
+    jq -se --argjson registry "$(jq -c '.registrySnapshot.repositories' "$activation")" --argjson aliases "$(jq -c '.repositoryAliases // []' "$spec")" '
       all(.[];
-        all(.declarations[]?; .peerRepo as $peer | any($registry[];.repositoryId==$peer.id and .repository==($peer.name|ascii_downcase)) and
+        all(.declarations[]?; .peerRepo as $peer | ($peer.name|test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
+          (any($registry[];.repositoryId==$peer.id and .repository==($peer.name|ascii_downcase)) or any($aliases[];.repositoryId==$peer.id and (.declaredName|ascii_downcase)==($peer.name|ascii_downcase))) and
           (if .disposition=="issue-adopted" then .adoptedIssue.repositoryId==$peer.id else true end)) and
         all(.liveDelegations[]?; . as $delegation | $delegation.peerRepo as $peer | any($registry[];.repository==($peer|ascii_downcase) and
           (if $delegation.disposition=="verified-child-close" then .repositoryId==$delegation.peerRepoNodeId else true end))))' "$tmp/issues" >/dev/null || return 3
@@ -1084,13 +1092,14 @@ _taskdag_census_build() { # spec output
     jq -s '[.[] as $i|$i.markers[]?,$i.completionEvidence[]?,$i.liveDelegations[]?|{repository:$i.repository,ref,oid}]|sort_by(.repository,.ref,.oid)' "$tmp/issues" >"$tmp/evidence-refs"
     jq -s '[.[]|select(.ref|test("^refs/heads/(gh/child-epic(s|\u002dslots)?/|tasks/(completions|delegated)/)"))|{repository,ref,oid}]|sort_by(.repository,.ref,.oid)' "$tmp/refs" >"$tmp/frozen-evidence-refs"
     cmp -s "$tmp/evidence-refs" "$tmp/frozen-evidence-refs" || return 3
-    jq -ncS --argjson schema "$(jq -r .schema "$spec")" --arg activationDigest "$(_taskdag_materialise_sha256_file "$activation")" --slurpfile issues "$tmp/issues" --slurpfile refs "$tmp/refs" --slurpfile terminals "$tmp/terminal-declarations" '
+    jq -e --argjson issues "$(jq -s '.' "$tmp/issues")" 'all(.repositoryAliases[]?; . as $alias | any($issues[].declarations[]?; .peerRepo.id==$alias.repositoryId and (.peerRepo.name|ascii_downcase)==($alias.declaredName|ascii_downcase)))' "$spec" >/dev/null || return 3
+    jq -ncS --argjson schema "$(jq -r .schema "$spec")" --arg activationDigest "$(_taskdag_materialise_sha256_file "$activation")" --argjson aliases "$(jq -c '.repositoryAliases // []' "$spec")" --slurpfile issues "$tmp/issues" --slurpfile refs "$tmp/refs" --slurpfile terminals "$tmp/terminal-declarations" '
       def r($p): [$refs[]|select(.ref|test($p))];
       {schema:$schema,activationRecordDigest:$activationDigest,issues:($issues|sort_by(.repository,.number)),
        slots:([$issues[] as $i|$i.declarations[]|.+{issueNodeId:$i.id,repository:$i.repository,issueNumber:$i.number}]|sort_by(.slotId)),
        legacyCompletionRefs:(r("^refs/heads/tasks/completions/")|map(. as $r|$r+([ $issues[]|select(.repository==$r.repository)|.completionEvidence[]|select(.ref==$r.ref and .oid==$r.oid) ][0]))|sort_by(.repository,.ref)),
        liveDelegations:(r("^refs/heads/tasks/delegated/")|map(. as $r|$r+([ $issues[]|select(.repository==$r.repository)|.liveDelegations[]|select(.ref==$r.ref and .oid==$r.oid) ][0]))|sort_by(.repository,.ref))}
-       + if $schema==2 then {terminalDeclarations:($terminals|sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal))} else {} end' >"$out"
+       + if $schema==2 then {repositoryAliases:$aliases,terminalDeclarations:($terminals|sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal))} else {} end' >"$out"
     local rc=$?; if [ "$rc" -eq 0 ]; then _taskdag_validate_census_artifact "$out"; rc=$?; fi; rm -rf "$tmp"; return "$rc"
 }
 
@@ -1117,7 +1126,7 @@ cmd_materialise_import() {
     [ "$(cat "$digest" 2>/dev/null)" = "$(_taskdag_materialise_sha256_file "$artifact")" ] || { rm -rf "$tmp"; return 3; }
     _taskdag_census_build "$spec" "$tmp/census" || { rc=$?; rm -rf "$tmp"; return "$rc"; }; cmp -s "$artifact" "$tmp/census" || { rm -rf "$tmp"; return 3; }
     jq -e '((.schema==1 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","schema","slots"]) or
-      (.schema==2 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","schema","slots","terminalDeclarations"])) and
+      (.schema==2 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","repositoryAliases","schema","slots","terminalDeclarations"])) and
       (all(.slots[];.disposition=="issue-adopted" or .disposition=="create-in-flight-or-uncertain" or .disposition=="blocked-repair")) and
       (all(.legacyCompletionRefs[];.disposition!="malformed-evidence"))' "$artifact" >/dev/null || { rm -rf "$tmp"; return 3; }
     current_repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || { rm -rf "$tmp"; return 3; }
