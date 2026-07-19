@@ -300,6 +300,105 @@ if ! "$TD" release "$invalid_task" >/dev/null 2>&1; then
   bad "semantic invalidation fixture could not release its synthetic claim"
 fi
 
+prepare_publish_candidate() {
+  local label=$1 base short
+  base=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+  git fetch -q origin "$base"; git reset -q --hard FETCH_HEAD
+  prepared_task=$(git commit-tree "$EMPTY_TREE" -p "$base" -m "Task: publication $label")
+  short=$(git rev-parse --short "$prepared_task")
+  git update-ref "refs/heads/tasks/frontier/$short" "$prepared_task"
+  git push -q origin "refs/heads/tasks/frontier/$short"
+  "$TD" claim "$prepared_task" >/dev/null
+  printf '%s\n' "$label" >"publication-$label"
+  git add "publication-$label"; git commit -qm "Implement publication $label"
+  "$TD" complete "$prepared_task" >/dev/null
+  prepared_tip=$(git rev-parse HEAD)
+  prepared_base=$base
+}
+
+# A hook rejection proves no effect, preserves the exact candidate, and never
+# triggers an automatic retry. Removing the rejection allows that candidate to
+# publish without recreation.
+prepare_publish_candidate rejection
+: >"$ROOT/rejection-attempts"
+cat >"$ROOT/origin/hooks/pre-receive" <<EOF
+#!/usr/bin/env bash
+printf x >>'$ROOT/rejection-attempts'
+echo 'fixture rejects publication' >&2
+exit 1
+EOF
+chmod +x "$ROOT/origin/hooks/pre-receive"
+rejection_output=$($TD publish 2>&1); rejection_rc=$?
+rm -f "$ROOT/origin/hooks/pre-receive"
+master_after_rejection=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+rejection_retry_output=$($TD publish "$prepared_tip" 2>&1); rejection_retry_rc=$?
+if [ "$rejection_rc" -eq 3 ] \
+   && grep -q 'rejected with confirmed no remote effect' <<<"$rejection_output" \
+   && [ "$(wc -c <"$ROOT/rejection-attempts")" -eq 1 ] \
+   && [ "$master_after_rejection" = "$prepared_base" ] \
+   && [ "$rejection_retry_rc" -eq 0 ] \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$prepared_tip" ]; then
+  ok "confirmed no-effect rejection preserves a retryable exact candidate"
+else
+  bad "confirmed rejection retried, moved master, or lost its candidate (rc=$rejection_rc retry=$rejection_retry_rc out=$rejection_output retry-out=$rejection_retry_output)"
+fi
+
+# Simulate an accepted push whose readback is unavailable. Publish must stop as
+# indeterminate; an explicit retry then converges from remote ancestry.
+prepare_publish_candidate ambiguous
+fixture_fail_publish_readback=false
+git() {
+  if [ "$fixture_fail_publish_readback" = true ] && [ "${1:-}" = ls-remote ]; then return 1; fi
+  command git "$@"
+}
+taskdag_activation_test_after_fenced_push_hook() { fixture_fail_publish_readback=true; }
+export fixture_fail_publish_readback
+export -f git taskdag_activation_test_after_fenced_push_hook
+ambiguous_output=$($TD publish 2>&1); ambiguous_rc=$?
+unset -f git taskdag_activation_test_after_fenced_push_hook
+authority_before_ambiguous_retry=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+ambiguous_retry_output=$($TD publish "$prepared_tip" 2>&1); ambiguous_retry_rc=$?
+authority_after_ambiguous_retry=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+if [ "$ambiguous_rc" -eq 3 ] \
+   && grep -q 'outcome is indeterminate' <<<"$ambiguous_output" \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$prepared_tip" ] \
+   && [ "$ambiguous_retry_rc" -eq 0 ] \
+   && [ "$authority_before_ambiguous_retry" = "$authority_after_ambiguous_retry" ]; then
+  ok "accepted response loss stops indeterminate and explicit retry converges"
+else
+  bad "accepted response loss retried or advanced authority twice (rc=$ambiguous_rc retry=$ambiguous_retry_rc out=$ambiguous_output retry-out=$ambiguous_retry_output)"
+fi
+
+# A later unrelated guard can replace our accepted guard before readback. Its
+# Expected-Authority-Tip permanently proves our publication was applied.
+prepare_publish_candidate successor
+successor_side=$(printf 'publish successor\n' | git commit-tree "$EMPTY_TREE")
+export successor_side
+authority_before_successor=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+taskdag_activation_test_after_fenced_push_hook() {
+  unset -f taskdag_activation_test_after_fenced_push_hook
+  local successor_token
+  successor_token=$(taskdag_activation_snapshot_token) || return
+  taskdag_activation_fenced_push "$successor_token" fixture publish-successor fixture 2026-07-18T00:00:11Z \
+    refs/heads/fixture-publish-successor "" "$successor_side" >/dev/null
+}
+export -f taskdag_activation_test_after_fenced_push_hook
+successor_output=$($TD publish 2>&1); successor_rc=$?
+unset -f taskdag_activation_test_after_fenced_push_hook
+authority_after_successor=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+git fetch -q origin "$authority_after_successor"
+successor_message=$(git log -1 --format=%B FETCH_HEAD)
+if [ "$successor_rc" -eq 0 ] \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$prepared_tip" ] \
+   && [ "$(git ls-remote origin refs/heads/fixture-publish-successor | awk '{print $1}')" = "$successor_side" ] \
+   && [ "$authority_after_successor" != "$authority_before_successor" ] \
+   && grep -q '^Operation: publish-successor$' <<<"$successor_message" \
+   && grep -q 'Published canonical task-dag completion' <<<"$successor_output"; then
+  ok "authority successor before readback preserves applied publication"
+else
+  bad "authority successor made an applied publication ambiguous (rc=$successor_rc out=$successor_output)"
+fi
+
 stale_task=$(git commit-tree "$EMPTY_TREE" -p "$remote_master" -m 'Task: stale completion candidate')
 stale_tip=$(git commit-tree "$(git rev-parse "$remote_master^{tree}")" -p "$remote_master" -p "$stale_task" -m 'Stale completion candidate')
 current_master=$(git ls-remote origin refs/heads/master | awk '{print $1}')
