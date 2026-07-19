@@ -21,6 +21,36 @@ _xrepo_watchdog_token_valid_for "$tmp/watchdog-token" 480
 ! _xrepo_watchdog_token_valid_for "$tmp/missing-token" 480
 taskdag_comment_watchdog_check_file() { [ "$2" -le 300 ]; }
 ! _xrepo_watchdog_token_valid_for "$tmp/watchdog-token" 480
+
+# Peer epic identity alternatives are authoritative independently: canonical
+# close retires pending, while legacy roots may predate gh/issues.
+git init -q --bare "$tmp/peer-origin.git"
+git init -q "$tmp/peer"
+git -C "$tmp/peer" remote add origin "$tmp/peer-origin.git"
+git -C "$tmp/peer" config user.name test
+git -C "$tmp/peer" config user.email test@example.com
+echo peer >"$tmp/peer/state"
+git -C "$tmp/peer" add state
+git -C "$tmp/peer" commit -qm peer
+git -C "$tmp/peer" push -q origin HEAD:master
+peer_root=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -m 'Peer epic')
+stale_root=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -m 'Stale peer epic')
+git -C "$tmp/peer" push -q origin "$peer_root:refs/heads/gh/issues/1"
+git -C "$tmp/peer" update-ref refs/heads/tasks/pending/1 "$stale_root"
+[ "$(_xrepo_refresh_peer_issue_root "$tmp/peer" 1)" = "$peer_root" ]
+! git -C "$tmp/peer" show-ref --verify --quiet refs/heads/tasks/pending/1
+git --git-dir="$tmp/peer-origin.git" update-ref -d refs/heads/gh/issues/1
+git -C "$tmp/peer" push -q origin "$peer_root:refs/heads/tasks/pending/1"
+git -C "$tmp/peer" update-ref refs/heads/gh/issues/1 "$stale_root"
+[ "$(_xrepo_refresh_peer_issue_root "$tmp/peer" 1)" = "$peer_root" ]
+! git -C "$tmp/peer" show-ref --verify --quiet refs/heads/gh/issues/1
+git -C "$tmp/peer" push -q origin "$peer_root:refs/heads/gh/issues/1"
+[ "$(_xrepo_refresh_peer_issue_root "$tmp/peer" 1)" = "$peer_root" ]
+git -C "$tmp/peer" push -q --force origin "$stale_root:refs/heads/gh/issues/1"
+! _xrepo_refresh_peer_issue_root "$tmp/peer" 1 >/dev/null
+git --git-dir="$tmp/peer-origin.git" update-ref -d refs/heads/gh/issues/1
+git --git-dir="$tmp/peer-origin.git" update-ref -d refs/heads/tasks/pending/1
+! _xrepo_refresh_peer_issue_root "$tmp/peer" 1 >/dev/null
 metadata_sha=0123456789abcdef0123456789abcdef01234567
 [ "$(classify 10 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = machine-skip ]
 [ "$(classify 11 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = human ]

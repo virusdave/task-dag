@@ -807,17 +807,42 @@ _xrepo_validate_delegated_close_v1() {
 # Sole live delegated-close writer. Completion comments are hints only; this
 # operation derives the oldest valid close from the peer's authoritative tip
 # and create-only publishes parent-authoritative evidence.
+_xrepo_refresh_peer_issue_root() { # peer-worktree issue
+    local wt="$1" issue="$2" listing sha ref gh_root="" pending_root="" fetched
+    listing=$(env -u GIT_DIR git -C "$wt" ls-remote --refs origin \
+        "refs/heads/gh/issues/${issue}" "refs/heads/tasks/pending/${issue}") || return 2
+    while IFS=$'\t' read -r sha ref; do
+        [ -n "$ref" ] || continue
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 2
+        case "$ref" in
+            "refs/heads/gh/issues/${issue}") [ -z "$gh_root" ] || return 2; gh_root="$sha" ;;
+            "refs/heads/tasks/pending/${issue}") [ -z "$pending_root" ] || return 2; pending_root="$sha" ;;
+            *) return 2 ;;
+        esac
+    done <<<"$listing"
+    [ -n "$gh_root" ] || [ -n "$pending_root" ] || return 2
+    [ -z "$gh_root" ] || [ -z "$pending_root" ] || [ "$gh_root" = "$pending_root" ] || return 2
+    for ref in "refs/heads/gh/issues/${issue}" "refs/heads/tasks/pending/${issue}"; do
+        if [ "$ref" = "refs/heads/gh/issues/${issue}" ]; then sha="$gh_root"; else sha="$pending_root"; fi
+        if [ -n "$sha" ]; then
+            env -u GIT_DIR git -C "$wt" fetch -q --no-tags origin "+${ref}:${ref}" || return 2
+            fetched=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "${ref}^{commit}" 2>/dev/null) || return 2
+            [ "$fetched" = "$sha" ] || return 2
+        else
+            env -u GIT_DIR git -C "$wt" update-ref -d "$ref" || return 2
+        fi
+    done
+    printf '%s\n' "${gh_root:-$pending_root}"
+}
+
 _xrepo_reconcile_delegated_close() { # parent-issue peer-repo peer-issue delegation-sha
     local top_issue=$1 peer_repo=$2 peer_issue=$3 delegation=$4 top_repo wt tip root close="" candidate ref existing rc=0 updates evidence
     top_repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 2
     wt=$(taskdag_peer_worktree_for "$peer_repo" 2>/dev/null) || return 0
     env -u GIT_DIR git -C "$wt" fetch -q --no-tags origin \
-        '+refs/heads/master:refs/remotes/origin/master' \
-        "+refs/heads/gh/issues/${peer_issue}:refs/heads/gh/issues/${peer_issue}" \
-        "+refs/heads/tasks/pending/${peer_issue}:refs/heads/tasks/pending/${peer_issue}" || return 2
+        '+refs/heads/master:refs/remotes/origin/master' || return 2
     tip=$(env -u GIT_DIR git -C "$wt" rev-parse refs/remotes/origin/master^{commit}) || return 2
-    root=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/gh/issues/${peer_issue}^{commit}" 2>/dev/null \
-        || env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/tasks/pending/${peer_issue}^{commit}" 2>/dev/null) || return 2
+    root=$(_xrepo_refresh_peer_issue_root "$wt" "$peer_issue") || return 2
     while IFS= read -r candidate; do
         local parents first second extra tree first_tree trailer
         parents=$(env -u GIT_DIR git -C "$wt" show -s --format='%P' "$candidate") || return 2
