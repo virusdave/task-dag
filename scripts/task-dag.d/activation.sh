@@ -296,8 +296,34 @@ _taskdag_activation_authority_token() {
     jq -ncS --argjson record "$record" --arg activationCommit "$active" --arg authorityTip "$authority" --arg digest "$digest" '{activationCommit:$activationCommit,authorityTip:$authorityTip,digest:$digest,record:$record}'
 }
 
+# Structured evidence from the most recent fenced multi-push in this shell.
+# Existing callers continue to consume only the numeric status (0 applied,
+# 2 local/transport setup error, 3 semantic or indeterminate failure).  A
+# caller that needs recovery decisions may inspect this canonical JSON value
+# after the call instead of reverse-engineering Git's diagnostics.
+TASKDAG_ACTIVATION_FENCED_PUSH_RESULT=''
+
+_taskdag_activation_push_diagnostic() { # file
+    # Git can echo an authenticated remote URL.  Retain useful diagnostics,
+    # but strip URL userinfo and control characters and impose a hard bound.
+    sed -E 's#(https?://)[^/@[:space:]]+@#\1[redacted]@#g; s/[[:cntrl:]]/ /g' "$1" \
+      | awk 'BEGIN { limit=4096 } { line=$0 ORS; if (used<limit) { part=substr(line,1,limit-used); printf "%s",part; used+=length(part) } }'
+}
+
+_taskdag_activation_set_push_result() { # outcome push-rc diagnostic expected-authority observed-authority guard updates readback
+    local outcome=$1 push_rc=$2 diagnostic=$3 expected=$4 observed=$5 guard=$6 updates=$7 readback=$8
+    TASKDAG_ACTIVATION_FENCED_PUSH_RESULT=$(jq -ncS \
+      --arg outcome "$outcome" --argjson pushExit "$push_rc" --arg diagnostic "$diagnostic" \
+      --arg expectedAuthority "$expected" --arg observedAuthority "$observed" --arg guard "$guard" \
+      --argjson updates "$updates" --argjson readback "$readback" \
+      '{schema:1,outcome:$outcome,push:{exit:$pushExit,diagnostic:$diagnostic},authority:{expected:$expectedAuthority,observed:$observedAuthority,guard:$guard},updates:$updates,readback:$readback}') || return 2
+}
+
 taskdag_activation_fenced_multi_push() { # <token-json> <writer> <operation> <actor> <timestamp> <updates-json>
     local token=$1 writer=$2 operation=$3 actor=$4 timestamp=$5 updates=$6 current active tree guard message info authority path digest record origin ref old new args=() requested_refs=() readback winning_updates
+    local push_log push_rc diagnostic readback_json all_new all_old any_other fetched oid_width requested_count
+    local authority_guard_valid=false authority_expected=""
+    TASKDAG_ACTIVATION_FENCED_PUSH_RESULT=''
     jq -e 'def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
       type=="object" and keys==["activationCommit","authorityTip","digest","epoch","guardVersion","minimumCompatibleTaskDagCommit","origin","runtimeCommit","state"] and
       (.activationCommit|oid) and (.authorityTip|oid) and (.runtimeCommit|oid) and
@@ -326,28 +352,104 @@ taskdag_activation_fenced_multi_push() { # <token-json> <writer> <operation> <ac
         ref=$(jq -r .ref <<<"$update"); old=$(jq -r .old <<<"$update"); new=$(jq -r .new <<<"$update")
         args+=("--force-with-lease=$ref:$old" "$new:$ref")
     done < <(jq -c '.[]' <<<"$updates")
-    git push -q --atomic origin --force-with-lease="$TASKDAG_ACTIVATION_REF:$current" "${args[@]}" "$guard:$TASKDAG_ACTIVATION_REF" 2>/dev/null || :
+    requested_count=$(jq -r length <<<"$updates") || return 2
+    mapfile -t requested_refs < <(jq -r '.[].ref' <<<"$updates")
+    [ "${#requested_refs[@]}" -eq "$requested_count" ] || return 2
+    if declare -F taskdag_activation_test_pre_fenced_push_hook >/dev/null; then
+        taskdag_activation_test_pre_fenced_push_hook || return $?
+    fi
+    push_log=$(mktemp) || return 2
+    if git push -q --atomic origin --force-with-lease="$TASKDAG_ACTIVATION_REF:$current" "${args[@]}" "$guard:$TASKDAG_ACTIVATION_REF" 2>"$push_log"; then
+        push_rc=0
+    else
+        push_rc=$?
+    fi
+    diagnostic=$(_taskdag_activation_push_diagnostic "$push_log") || { rm -f "$push_log"; return 2; }
+    rm -f "$push_log"
+    if declare -F taskdag_activation_test_after_fenced_push_hook >/dev/null; then
+        taskdag_activation_test_after_fenced_push_hook || return $?
+    fi
     # One advertisement is the authoritative outcome snapshot.  In
     # particular, never accept a mixture assembled by several ls-remote
     # calls while another writer is advancing refs.  An exact same-payload
     # concurrent winner is success even when its guard commit differs.
-    mapfile -t requested_refs < <(jq -r '.[].ref' <<<"$updates")
-    readback=$(git ls-remote --refs origin "$TASKDAG_ACTIVATION_REF" "${requested_refs[@]}" 2>/dev/null) || return 3
-    while IFS= read -r update; do
-        ref=$(jq -r .ref <<<"$update"); new=$(jq -r .new <<<"$update")
-        [ "$(awk -v r="$ref" '$2==r {print $1}' <<<"$readback")" = "$new" ] || return 3
-    done < <(jq -c '.[]' <<<"$updates")
-    authority=$(awk -v r="$TASKDAG_ACTIVATION_REF" '$2==r {print $1}' <<<"$readback")
-    [ "$authority" = "$guard" ] && return 0
-    [[ "$authority" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 3
-    # Fetch the object named by the same advertisement used for every target
-    # readback.  A later ref advance must not substitute a different guard.
-    git fetch -q --no-tags origin "$authority" || return 3
-    [ "$(git rev-parse FETCH_HEAD)" = "$authority" ] || return 3
-    _taskdag_activation_parse_guard "$authority" "$active" "$(jq -r .epoch <<<"$token")" "$(jq -r .digest <<<"$token")" || return 3
-    winning_updates=$(git log -1 --format=%B "$authority" | sed -n 's/^Target-Updates: //p')
-    [ "$winning_updates" = "$(jq -cS . <<<"$updates")" ] || return 3
-    return 0
+    if ! readback=$(git ls-remote --refs origin "$TASKDAG_ACTIVATION_REF" "${requested_refs[@]}" 2>/dev/null); then
+        _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "" "$guard" "$updates" null || return 2
+        return 3
+    fi
+    oid_width=${#current}
+    if ! readback_json=$(jq -encS --arg raw "$readback" --arg activation "$TASKDAG_ACTIVATION_REF" --argjson width "$oid_width" --argjson updates "$updates" '
+      ($raw|split("\n")|map(select(length>0)|split("\t"))) as $rows |
+      ($updates|map(.ref)) as $targets |
+      ($rows|map(.[1])) as $seen |
+      if ($rows|all(.[]; . as $row | length==2 and (.[0]|test("^[0-9a-f]+$") and length==$width) and (.[1]==$activation or ($targets|index($row[1]))!=null)))
+         and (($seen|length)==($seen|unique|length))
+         and ($rows|map(select(.[1]==$activation))|length)==1
+      then ($rows|map({key:.[1],value:.[0]})|from_entries) as $refs |
+        {authority:$refs[$activation],targets:($updates|map({ref,oid:($refs[.ref] // "")})|sort_by(.ref))}
+      else error("malformed fenced-push readback") end' 2>/dev/null); then
+        _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "" "$guard" "$updates" null || return 2
+        return 3
+    fi
+    authority=$(jq -r .authority <<<"$readback_json") || return 2
+    all_new=$(jq -n --argjson updates "$updates" --argjson readback "$readback_json" '
+      all($updates[]; . as $u | any($readback.targets[]; .ref==$u.ref and .oid==$u.new))') || return 2
+    all_old=$(jq -n --argjson updates "$updates" --argjson readback "$readback_json" '
+      all($updates[]; . as $u | any($readback.targets[]; .ref==$u.ref and .oid==$u.old))') || return 2
+    any_other=$(jq -n --argjson updates "$updates" --argjson readback "$readback_json" '
+      any($updates[]; . as $u | any($readback.targets[]; .ref==$u.ref and (.oid!=$u.old and .oid!=$u.new)))') || return 2
+    if [ "$all_new" = true ] && [ "$authority" = "$guard" ]; then
+        _taskdag_activation_set_push_result applied "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+        return 0
+    fi
+    if ! [[ "$authority" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+        _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+        return 3
+    fi
+    # Fetch and parse the exact authority from the same advertisement.  A
+    # different hex object is not retryable contention until it is proven to
+    # be a canonical sibling guard in this activation generation.
+    if [ "$authority" != "$current" ] && git fetch -q --no-tags origin "$authority" \
+      && fetched=$(git rev-parse FETCH_HEAD) && [ "$fetched" = "$authority" ] \
+      && _taskdag_activation_parse_guard "$authority" "$active" "$(jq -r .epoch <<<"$token")" "$(jq -r .digest <<<"$token")"; then
+        authority_guard_valid=true
+        authority_expected=$(git log -1 --format=%B "$authority" | sed -n 's/^Expected-Authority-Tip: //p') \
+          || { _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2; return 3; }
+        winning_updates=$(git log -1 --format=%B "$authority" | sed -n 's/^Target-Updates: //p') \
+          || { _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2; return 3; }
+    fi
+    if [ "$all_new" = true ] && [ "$authority_guard_valid" = true ]; then
+        # A successor guard names our accepted guard as its expected authority.
+        # An identical concurrent winner instead names our original snapshot
+        # and carries the exact same target payload.
+        if [ "$authority_expected" = "$guard" ] \
+          || { [ "$authority_expected" = "$current" ] && [ "$winning_updates" = "$(jq -cS . <<<"$updates")" ]; }; then
+            _taskdag_activation_set_push_result applied "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+            return 0
+        fi
+    fi
+    if [ "$all_old" = true ]; then
+        if [ "$authority_guard_valid" = true ] && [ "$authority_expected" = "$current" ]; then
+            _taskdag_activation_set_push_result authority-contention "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+        elif [ "$push_rc" -ne 0 ]; then
+            if [ "$authority" = "$current" ]; then
+                _taskdag_activation_set_push_result rejected-no-effect "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+            else
+                _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+            fi
+        else
+            _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+        fi
+        return 3
+    fi
+    if [ "$any_other" = true ]; then
+        _taskdag_activation_set_push_result target-changed "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+        return 3
+    fi
+    # A mixture containing only expected old/new values is either insufficient
+    # evidence or an atomicity violation, never a safe target-change diagnosis.
+    _taskdag_activation_set_push_result indeterminate "$push_rc" "$diagnostic" "$current" "$authority" "$guard" "$updates" "$readback_json" || return 2
+    return 3
 }
 
 taskdag_activation_fenced_push() { # compatibility wrapper

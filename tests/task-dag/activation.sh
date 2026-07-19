@@ -61,10 +61,14 @@ ok "cross-origin and forged state/digest/epoch/floor tokens move neither ref"
 (cd "$ROOT/wc" && taskdag_activation_fenced_push "$token" fixture mutate fixture 2026-07-17T00:00:01Z refs/heads/fixture-target "" "$one"); first_guard=$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/activation)
 two=$(printf 'two\n' | git -C "$ROOT/wc" commit-tree "$empty" -p "$one")
 token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
-(cd "$ROOT/wc" && taskdag_activation_fenced_push "$token" fixture mutate fixture 2026-07-17T00:00:02Z refs/heads/fixture-target "$one" "$two"); second_guard=$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/activation)
+result=$(cd "$ROOT/wc" && taskdag_activation_fenced_push "$token" fixture mutate fixture 2026-07-17T00:00:02Z refs/heads/fixture-target "$one" "$two" && printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"); second_guard=$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/activation)
 stale_token=$token
 active=$(jq -r .activationCommit <<<"$token")
-if [ "$(git --git-dir="$ROOT/origin" rev-parse "$second_guard^")" = "$active" ] && git --git-dir="$ROOT/origin" log -1 --format=%B "$second_guard" | grep -qx "Expected-Authority-Tip: $first_guard"; then ok "consecutive fenced writes retain one current sibling guard"; else bad "repeated guard did not bind and replace prior authority"; fi
+if [ "$(git --git-dir="$ROOT/origin" rev-parse "$second_guard^")" = "$active" ] \
+  && git --git-dir="$ROOT/origin" log -1 --format=%B "$second_guard" | grep -qx "Expected-Authority-Tip: $first_guard" \
+  && jq -e '.schema==1 and .outcome=="applied" and .push.exit==0 and .authority.observed==.authority.guard and (.readback.targets|length)==1' <<<"$result" >/dev/null; then
+  ok "consecutive fenced writes retain one current sibling guard and structured applied evidence"
+else bad "repeated guard or applied evidence contract failed"; fi
 
 jq '.state="disabled" | .authoritativeTimestamp="2026-07-17T00:00:01Z"' "$ROOT/spec" >"$ROOT/disabled"
 out=$(cd "$ROOT/wc" && "$TD" activation apply --spec-file "$ROOT/disabled" 2>/dev/null); rc=$?
@@ -103,6 +107,97 @@ candidate=$(printf 'candidate\n' | git -C "$ROOT/wc" commit-tree "$empty" -p "$t
 [ "$rc" -eq 3 ] && [ "$authority_snapshot" = "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/activation)" ] \
   && [ "$contender" = "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/fixture-target)" ] \
   && ok "target contention moves neither activation nor target" || bad "target contention was not atomic"
+
+# Every non-success outcome has stable machine-readable evidence while the
+# legacy return-code contract remains 3.  These seams run only in fixtures.
+target_changed=$(cd "$ROOT/wc"; taskdag_activation_fenced_push "$current_token" fixture target-changed fixture 2026-07-17T00:00:04Z refs/heads/fixture-target "$target_snapshot" "$candidate" >/dev/null 2>&1; rc=$?; printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"; exit "$rc"); rc=$?
+[ "$rc" -eq 3 ] && jq -e '.outcome=="target-changed" and .readback.targets[0].oid!=""' <<<"$target_changed" >/dev/null \
+  && ok "target movement has structured evidence and legacy rc 3" || bad "target movement outcome contract failed"
+
+current_token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+side=$(printf 'side\n' | git -C "$ROOT/wc" commit-tree "$empty")
+next=$(printf 'next\n' | git -C "$ROOT/wc" commit-tree "$empty" -p "$contender")
+taskdag_activation_test_pre_fenced_push_hook() {
+  unset -f taskdag_activation_test_pre_fenced_push_hook
+  taskdag_activation_fenced_push "$current_token" fixture authority-winner fixture 2026-07-17T00:00:05Z refs/heads/fixture-side "" "$side" >/dev/null
+}
+authority_contention=$(cd "$ROOT/wc"; taskdag_activation_fenced_push "$current_token" fixture authority-loser fixture 2026-07-17T00:00:05Z refs/heads/fixture-target "$contender" "$next" >/dev/null 2>&1; rc=$?; printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"; exit "$rc"); rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+[ "$rc" -eq 3 ] && jq -e '.outcome=="authority-contention" and .authority.observed!=.authority.expected and .readback.targets[0].oid==.updates[0].old' <<<"$authority_contention" >/dev/null \
+  && ok "authority contention has retryable structured evidence and legacy rc 3" || bad "authority contention outcome contract failed"
+
+current_token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+cat >"$ROOT/origin/hooks/pre-receive" <<'EOF'
+#!/usr/bin/env bash
+echo 'rejected https://secret@example.invalid/private and https://other-secret@example.invalid/again' >&2
+head -c 5000 /dev/zero | tr '\0' x >&2
+exit 1
+EOF
+chmod +x "$ROOT/origin/hooks/pre-receive"
+rejected=$(cd "$ROOT/wc"; taskdag_activation_fenced_push "$current_token" fixture rejected fixture 2026-07-17T00:00:06Z refs/heads/fixture-target "$contender" "$next" >/dev/null 2>&1; rc=$?; printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"; exit "$rc"); rc=$?
+rm -f "$ROOT/origin/hooks/pre-receive"
+[ "$rc" -eq 3 ] && jq -e '.outcome=="rejected-no-effect" and .push.exit!=0 and (.push.diagnostic|contains("rejected https://[redacted]@example.invalid/private and https://[redacted]@example.invalid/again")) and (.push.diagnostic|contains("secret")|not) and (.push.diagnostic|length)<=4096 and .authority.observed==.authority.expected' <<<"$rejected" >/dev/null \
+  && ok "confirmed no-effect rejection retains sanitized evidence and legacy rc 3" || bad "no-effect rejection outcome contract failed"
+
+current_token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+fail_fenced_readback=false
+git() {
+  if [ "$fail_fenced_readback" = true ] && [ "${1:-}" = ls-remote ]; then return 1; fi
+  command git "$@"
+}
+taskdag_activation_test_after_fenced_push_hook() { fail_fenced_readback=true; }
+indeterminate=$(cd "$ROOT/wc"; taskdag_activation_fenced_push "$current_token" fixture ambiguous fixture 2026-07-17T00:00:07Z refs/heads/fixture-target "$contender" "$next" >/dev/null 2>&1; rc=$?; printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"; exit "$rc"); rc=$?
+unset -f taskdag_activation_test_after_fenced_push_hook git
+[ "$rc" -eq 3 ] && jq -e '.outcome=="indeterminate" and .readback==null' <<<"$indeterminate" >/dev/null \
+  && ok "unavailable readback is indeterminate with legacy rc 3" || bad "indeterminate outcome contract failed"
+
+# Accepted outer target plus a later unrelated fenced successor remains
+# provably applied because the successor names the outer guard as authority.
+current_token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+after_next=$(printf 'after-next\n' | git -C "$ROOT/wc" commit-tree "$empty" -p "$next")
+side2=$(printf 'side-two\n' | git -C "$ROOT/wc" commit-tree "$empty" -p "$side")
+taskdag_activation_test_after_fenced_push_hook() {
+  unset -f taskdag_activation_test_after_fenced_push_hook
+  local successor_token
+  successor_token=$(taskdag_activation_snapshot_token) || return
+  taskdag_activation_fenced_push "$successor_token" fixture successor fixture 2026-07-17T00:00:08Z refs/heads/fixture-side "$side" "$side2" >/dev/null
+}
+successor=$(cd "$ROOT/wc"; taskdag_activation_fenced_push "$current_token" fixture predecessor fixture 2026-07-17T00:00:08Z refs/heads/fixture-target "$next" "$after_next" >/dev/null 2>&1; rc=$?; printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"; exit "$rc"); rc=$?
+unset -f taskdag_activation_test_after_fenced_push_hook
+[ "$rc" -eq 0 ] && jq -e '.outcome=="applied" and .authority.observed!=.authority.guard and .readback.targets[0].oid==.updates[0].new' <<<"$successor" >/dev/null \
+  && ok "accepted fenced push survives an unrelated authority successor before readback" || bad "fenced successor was not proven applied"
+
+# A syntactically malformed advertisement can never prove success, including
+# a deletion where a dropped row would otherwise resemble an absent ref.
+current_token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+malformed_candidate=$(printf 'malformed-readback\n' | git -C "$ROOT/wc" commit-tree "$empty" -p "$after_next")
+malformed_readback=false
+git() {
+  if [ "$malformed_readback" = true ] && [ "${1:-}" = ls-remote ]; then
+    command git "$@" | sed -n '1p;1p;2,$p'
+    return "${PIPESTATUS[0]}"
+  fi
+  command git "$@"
+}
+taskdag_activation_test_after_fenced_push_hook() { malformed_readback=true; }
+malformed_result=$(cd "$ROOT/wc"; taskdag_activation_fenced_push "$current_token" fixture malformed-readback fixture 2026-07-17T00:00:09Z refs/heads/fixture-target "$after_next" "$malformed_candidate" >/dev/null 2>&1; rc=$?; printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"; exit "$rc"); rc=$?
+unset -f taskdag_activation_test_after_fenced_push_hook git
+[ "$rc" -eq 3 ] && jq -e '.outcome=="indeterminate" and .readback==null' <<<"$malformed_result" >/dev/null \
+  && ok "duplicate readback rows are indeterminate" || bad "malformed readback was treated as coherent"
+
+# A hex-shaped but non-guard authority cannot be called retryable contention.
+current_token=$(cd "$ROOT/wc" && taskdag_activation_snapshot_token)
+authority_now=$(jq -r .authorityTip <<<"$current_token")
+arbitrary=$(printf 'not a guard\n' | git -C "$ROOT/wc" commit-tree "$(git -C "$ROOT/wc" rev-parse "$authority_now^{tree}")" -p "$authority_now")
+taskdag_activation_test_pre_fenced_push_hook() {
+  unset -f taskdag_activation_test_pre_fenced_push_hook
+  command git push -q origin "$arbitrary:$TASKDAG_ACTIVATION_REF"
+}
+untrusted_authority=$(cd "$ROOT/wc"; taskdag_activation_fenced_push "$current_token" fixture untrusted-authority fixture 2026-07-17T00:00:10Z refs/heads/fixture-side "$side2" "$side" >/dev/null 2>&1; rc=$?; printf '%s\n' "$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT"; exit "$rc"); rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+[ "$rc" -eq 3 ] && jq -e '.outcome=="indeterminate" and .authority.observed!=.authority.expected' <<<"$untrusted_authority" >/dev/null \
+  && ok "unvalidated authority movement is indeterminate, not retryable" || bad "unvalidated authority was classified as contention"
+git -C "$ROOT/wc" push -q origin --force-with-lease="$TASKDAG_ACTIVATION_REF:$arbitrary" "$authority_now:$TASKDAG_ACTIVATION_REF"
 
 cp "$ROOT/spec" "$ROOT/bad"; jq '.unknown=true' "$ROOT/bad" >"$ROOT/bad.n"; mv "$ROOT/bad.n" "$ROOT/bad"
 (cd "$ROOT/wc" && "$TD" activation apply --spec-file "$ROOT/bad" >/dev/null 2>&1); rc=$?
