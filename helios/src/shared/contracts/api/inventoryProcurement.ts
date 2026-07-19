@@ -5,13 +5,14 @@ import { z } from 'zod'
 //
 // Backs the /metrics → "Inventory" (a.k.a. "Reordering") tab. ONE
 // consolidated endpoint returns a per-SKU fact table (product-grain)
-// plus per-distributor lead-time / cadence stats. The client derives
+// plus per-distributor fulfillment cadence stats. The client derives
 // all four procurement views from this single payload without further
 // round-trips:
 //
 //   * Reorder Queue     — out-now-and-regretting + runout-soon, with
 //                         recommended order quantities.
-//   * Distributor Baskets — batched per-distributor order guidance
+//   * Vendor Baskets    — batched per-vendor order guidance, retaining
+//                         observed distributor fulfillment context
 //                         (order now / short order / wait).
 //   * Exit / Liquidate  — deadweight capital, aging, stop-carry.
 //   * Mix Drift         — inventory $/unit mix vs sales/margin mix at
@@ -101,7 +102,27 @@ export const InventorySkuRowSchema = z.object({
    *  history. Paired with lifetimeUnitsSold; approximate (no canceled
    *  filter, horizon bounded by ingested history). */
   lifetimeSoldRevenue: z.number(),
+  /** Canonical purchasing identity resolved through the SKU's primary
+   * brand association. Null means the brand still needs vendor mapping. */
+  vendorId: z.number().int().positive().nullable(),
+  vendorName: z.string().nullable(),
+  /** Vendor/brand ordering terms. A null case size is intentional: migration
+   * 104 did not invent structured case sizes from free-text seed comments. */
+  vendorTargetDaysOnHand: z.number().positive().nullable(),
+  vendorMinimumOrderDollars: z.number().nonnegative().nullable(),
+  caseSizeUnits: z.number().int().positive().nullable(),
+  /** Explains whether quantity rounding came from canonical vendor data or
+   * the documented legacy fallback retained only for unmapped brands. */
+  quantityRuleSource: z.enum([
+    'vendor_case_size',
+    'vendor_no_case_size',
+    'unmapped_brand_fallback',
+  ]),
+  /** Distributor remains fulfillment context, not the basket identity. */
   distributorName: z.string().nullable(),
+  /** Every distributor observed across the SKU's current packages. The
+   * singular field above is populated only when this has exactly one value. */
+  distributorNames: z.array(z.string()),
 
   // Inventory facts (latest snapshot per package, summed to SKU grain).
   physicalUnits: z.number(),
@@ -141,6 +162,9 @@ export const InventorySkuRowSchema = z.object({
   targetCoverDays: z.number(),
   recommendedQty: z.number(),
   recommendedCost: z.number(),
+  /** False when quantity guidance exists but current unit cost is unavailable;
+   * recommendedCost is then a non-authoritative zero for numeric rollups. */
+  recommendedCostKnown: z.boolean(),
   orderByDate: z.string().nullable(),
   /** Days of supply the SKU would have AFTER the case-snapped order
    *  (sellable + snapped qty) / forecast daily units. Null when there's
@@ -197,6 +221,7 @@ export const InventoryProcurementSummarySchema = z.object({
   outRegrettedLostMarginPerDay: z.number(),
   soonOutCount: z.number(),
   recommendedOrderCostTotal: z.number(),
+  recommendedOrderCostComplete: z.boolean(),
   deadweightCapital: z.number(),
   zeroVelocityCapital: z.number(),
   expiringSoonCost: z.number(),

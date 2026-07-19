@@ -80,7 +80,11 @@ interface FactRow {
   subcategory_name: string | null
   brand_name: string | null
   list_price_dollars: string | number | null
-  distributor_name: string | null
+  vendor_id: string | number | null
+  vendor_name: string | null
+  vendor_target_days_on_hand: string | number | null
+  vendor_minimum_order_dollars: string | number | null
+  distributor_names: string[] | null
   physical_units: string | number | null
   held_units: string | number | null
   sellable_units: string | number | null
@@ -176,18 +180,34 @@ taxonomy AS (
   WHERE cg.deleted_at IS NULL AND prod->>'productId' IS NOT NULL
   ORDER BY (prod->>'productId')::bigint, cg.updated_at DESC NULLS LAST
 ),
+vendor_directory AS (
+  -- The primary brand association is the canonical ordering identity.
+  -- Case size is deliberately absent: migration 104 preserved source notes
+  -- as prose rather than pretending they were reliable structured terms.
+  SELECT lower(a.brand_name) AS brand_key, v.id AS vendor_id, v.name AS vendor_name,
+    a.target_days_on_hand, a.minimum_order_dollars
+  FROM vendor_brand_associations a
+  JOIN vendors v ON v.id = a.vendor_id
+  WHERE a.is_primary
+),
 inv AS (
   SELECT
     pl.dealer_id, pl.product_id,
     max(pl.product_name)     AS product_name,
     max(pl.product_sku)      AS product_sku,
-    max(pl.distributor_name) AS distributor_name,
+    array_remove(array_agg(DISTINCT pl.distributor_name ORDER BY pl.distributor_name), NULL) AS distributor_names,
     sum(greatest(pl.current_qty,0))   AS physical_units,
     sum(greatest(pl.hold_qty,0))      AS held_units,
     sum(greatest(pl.available_qty,0)) AS sellable_units,
     sum(greatest(pl.current_qty,0) * coalesce(pl.wholesale_cost_dollars,0)) AS on_hand_cost,
     CASE WHEN sum(greatest(pl.current_qty,0)) > 0
-      THEN sum(greatest(pl.current_qty,0) * coalesce(pl.wholesale_cost_dollars,0)) / sum(greatest(pl.current_qty,0))
+      THEN CASE
+        WHEN count(*) FILTER (
+          WHERE greatest(pl.current_qty,0) > 0 AND pl.wholesale_cost_dollars IS NULL
+        ) = 0
+        THEN sum(greatest(pl.current_qty,0) * pl.wholesale_cost_dollars) / sum(greatest(pl.current_qty,0))
+        ELSE NULL
+      END
       ELSE max(pl.wholesale_cost_dollars) END AS unit_cost_current,
     count(*) AS pkg_count,
     min(coalesce(pl.received_at, fs.first_observed_on_hand_at)) AS first_received_at,
@@ -226,7 +246,9 @@ sales AS (
 )
 SELECT
   inv.dealer_id, inv.product_id, inv.product_name, inv.product_sku,
-  tx.category_name, tx.subcategory_name, tx.brand_name, tx.list_price_dollars, inv.distributor_name,
+  tx.category_name, tx.subcategory_name, tx.brand_name, tx.list_price_dollars,
+  vd.vendor_id, vd.vendor_name, vd.target_days_on_hand AS vendor_target_days_on_hand,
+  vd.minimum_order_dollars AS vendor_minimum_order_dollars, inv.distributor_names,
   inv.physical_units, inv.held_units, inv.sellable_units, inv.on_hand_cost,
   inv.unit_cost_current, inv.pkg_count, inv.first_received_at, inv.avg_inventory_age_days,
   inv.nearest_expiration, inv.expiring_units_60, inv.expiring_cost_60, inv.snapshot_age_hours,
@@ -235,6 +257,7 @@ SELECT
 FROM inv
 LEFT JOIN sales s ON s.dealer_id = inv.dealer_id AND s.product_id = inv.product_id
 LEFT JOIN taxonomy tx ON tx.product_id = inv.product_id
+LEFT JOIN vendor_directory vd ON vd.brand_key = lower(tx.brand_name)
 WHERE inv.product_id IS NOT NULL
 `
 
@@ -288,8 +311,9 @@ FROM po
 GROUP BY dealer_id, distributor_name
 `
 
-// Supplier case-sizing knobs (uniform approximation until we record true
-// per-SKU case sizes / MOQs).
+// Fallback used ONLY when a brand has no canonical vendor association. A
+// mapped vendor with no structured case size gets an honest whole-unit
+// recommendation instead of silently inheriting made-up 5/10 terms.
 const ORDER_MULTIPLE_UNITS = 5
 const MIN_ORDER_UNITS = 10
 // A case-rounded order may exceed the target coverage window, but not by
@@ -298,6 +322,65 @@ const MIN_ORDER_UNITS = 10
 // misleading — suppress the recommendation (see skip_min_order_overshoots).
 const MAX_CASE_OVERSHOOT_MULTIPLE = 2
 const MAX_CASE_COVER_DAYS = 60
+
+export interface OrderQuantityTerms {
+  rawRecommendedQty: number
+  vendorMapped: boolean
+  caseSizeUnits: number | null
+}
+
+export function applyOrderQuantityTerms(terms: OrderQuantityTerms): {
+  quantity: number
+  source: InventorySkuRow['quantityRuleSource']
+} {
+  if (terms.rawRecommendedQty <= 0) {
+    return {
+      quantity: 0,
+      source: terms.vendorMapped ? 'vendor_no_case_size' : 'unmapped_brand_fallback',
+    }
+  }
+  if (terms.caseSizeUnits !== null) {
+    return {
+      quantity: Math.ceil(terms.rawRecommendedQty / terms.caseSizeUnits) * terms.caseSizeUnits,
+      source: 'vendor_case_size',
+    }
+  }
+  if (terms.vendorMapped) {
+    return { quantity: Math.ceil(terms.rawRecommendedQty), source: 'vendor_no_case_size' }
+  }
+  return {
+    quantity: Math.max(
+      MIN_ORDER_UNITS,
+      Math.ceil(terms.rawRecommendedQty / ORDER_MULTIPLE_UNITS) * ORDER_MULTIPLE_UNITS,
+    ),
+    source: 'unmapped_brand_fallback',
+  }
+}
+
+export function deriveOrderCostEconomics(input: {
+  avgUnitPrice: number | null
+  unitCostCurrent: number | null
+  recommendedQty: number
+}): {
+  unitMargin: number | null
+  gmPct: number | null
+  recommendedCost: number
+  recommendedCostKnown: boolean
+} {
+  const unitMargin =
+    input.avgUnitPrice !== null && input.unitCostCurrent !== null
+      ? input.avgUnitPrice - input.unitCostCurrent
+      : null
+  return {
+    unitMargin,
+    gmPct:
+      input.avgUnitPrice !== null && input.avgUnitPrice > 0 && unitMargin !== null
+        ? unitMargin / input.avgUnitPrice
+        : null,
+    recommendedCost: input.recommendedQty * (input.unitCostCurrent ?? 0),
+    recommendedCostKnown: input.unitCostCurrent !== null,
+  }
+}
 
 // Inventory-turn framing (operator policy). We want every dollar of
 // inventory to sell through within ~3 weeks; by 60 days the buy has
@@ -391,7 +474,15 @@ export async function getInventoryProcurement(
     const dealer = getHeliosPendingPurchaseSiteDealer(dealerId)
     const siteKey = dealer?.siteKey ?? String(dealerId)
     const siteLabel = dealer?.siteLabel ?? String(dealerId)
-    const distributorName = r.distributor_name
+    const distributorNames = r.distributor_names ?? []
+    const distributorName = distributorNames.length === 1 ? distributorNames[0] : null
+    const vendorId = asNum(r.vendor_id)
+    const vendorName = r.vendor_name
+    const vendorTargetDaysOnHand = asNum(r.vendor_target_days_on_hand)
+    const vendorMinimumOrderDollars = asNum(r.vendor_minimum_order_dollars)
+    // No structured case-size source exists yet. Keeping this explicit and
+    // nullable lets the planned history-inference work replace it safely.
+    const caseSizeUnits = null
 
     const physicalUnits = num(r.physical_units)
     const heldUnits = num(r.held_units)
@@ -417,12 +508,12 @@ export async function getInventoryProcurement(
         : Math.min(3 * velocityW, Math.max(velocityW, 0.6 * velocity7 + 0.4 * velocityW))
 
     const avgUnitPrice = unitsW > 0 ? revenueW / unitsW : null
-    const unitMargin =
-      avgUnitPrice !== null ? avgUnitPrice - (unitCostCurrent ?? 0) : null
-    const gmPct =
-      avgUnitPrice !== null && avgUnitPrice > 0 && unitMargin !== null
-        ? unitMargin / avgUnitPrice
-        : null
+    const costEconomics = deriveOrderCostEconomics({
+      avgUnitPrice,
+      unitCostCurrent,
+      recommendedQty: 0,
+    })
+    const { unitMargin, gmPct } = costEconomics
 
     const daysSupply = forecastDailyUnits > 0 ? sellableUnits / forecastDailyUnits : null
     const projectedStockoutAt =
@@ -434,20 +525,18 @@ export async function getInventoryProcurement(
     const cadenceDays = dist?.cadenceDays ?? 14
     const safetyDays = Math.max(2, Math.ceil(0.25 * leadTimeDays))
     const reorderPointDays = leadTimeDays + safetyDays
-    const targetCoverDays = clamp(leadTimeDays + cadenceDays + safetyDays, 10, 45)
+    const targetCoverDays = vendorTargetDaysOnHand ?? clamp(leadTimeDays + cadenceDays + safetyDays, 10, 45)
 
     const rawRecommendedQty =
       forecastDailyUnits <= 0
         ? 0
         : Math.max(0, Math.ceil(forecastDailyUnits * targetCoverDays - sellableUnits))
-    // Supplier orders are snapped to case sizes (almost always multiples
-    // of 5). We don't yet record true per-SKU case sizing, so until we can
-    // infer/record it, round any nonzero recommendation UP to the nearest
-    // multiple of 5 with a 10-unit minimum.
-    const snappedRecommendedQty =
-      rawRecommendedQty > 0
-        ? Math.max(MIN_ORDER_UNITS, Math.ceil(rawRecommendedQty / ORDER_MULTIPLE_UNITS) * ORDER_MULTIPLE_UNITS)
-        : 0
+    const quantityTerms = applyOrderQuantityTerms({
+      rawRecommendedQty,
+      vendorMapped: vendorId !== null,
+      caseSizeUnits,
+    })
+    const snappedRecommendedQty = quantityTerms.quantity
     // Days of supply the SKU would carry AFTER the snapped order lands.
     const coverageAfterSnappedOrderDays =
       forecastDailyUnits > 0 && snappedRecommendedQty > 0
@@ -465,7 +554,11 @@ export async function getInventoryProcurement(
       coverageAfterSnappedOrderDays > maxCaseCoverDays
     const recommendedQty = minOrderOvershootsTarget ? 0 : snappedRecommendedQty
     const suppressedRecommendedQty = minOrderOvershootsTarget ? snappedRecommendedQty : null
-    const recommendedCost = recommendedQty * (unitCostCurrent ?? 0)
+    const { recommendedCostKnown, recommendedCost } = deriveOrderCostEconomics({
+      avgUnitPrice,
+      unitCostCurrent,
+      recommendedQty,
+    })
     const orderByDate =
       recommendedQty > 0 && projectedStockoutAt !== null
         ? new Date(new Date(projectedStockoutAt).getTime() - reorderPointDays * DAY_MS).toISOString()
@@ -538,7 +631,14 @@ export async function getInventoryProcurement(
       listPrice: asNum(r.list_price_dollars),
       lifetimeUnitsSold: soldLife?.unitsLife ?? 0,
       lifetimeSoldRevenue: soldLife?.revenueLife ?? 0,
+      vendorId,
+      vendorName,
+      vendorTargetDaysOnHand,
+      vendorMinimumOrderDollars,
+      caseSizeUnits,
+      quantityRuleSource: quantityTerms.source,
       distributorName,
+      distributorNames,
       physicalUnits,
       heldUnits,
       sellableUnits,
@@ -572,6 +672,7 @@ export async function getInventoryProcurement(
       targetCoverDays,
       recommendedQty,
       recommendedCost,
+      recommendedCostKnown,
       orderByDate,
       coverageAfterSnappedOrderDays,
       minOrderOvershootsTarget,
@@ -664,6 +765,9 @@ export async function getInventoryProcurement(
     outRegrettedLostMarginPerDay: round2(sum(skus.filter((s) => s.outRegretted).map((s) => s.lostMarginPerDay))),
     soonOutCount: skus.filter((s) => s.forecastDailyUnits > 0 && s.daysSupply !== null && s.daysSupply <= s.reorderPointDays).length,
     recommendedOrderCostTotal: round2(sum(skus.filter((s) => !s.doNotReorder).map((s) => s.recommendedCost))),
+    recommendedOrderCostComplete: skus
+      .filter((s) => !s.doNotReorder && s.recommendedQty > 0)
+      .every((s) => s.recommendedCostKnown),
     deadweightCapital: round2(sum(skus.filter((s) => s.deadweightScore >= 70).map((s) => s.onHandCost))),
     zeroVelocityCapital: round2(sum(skus.filter((s) => s.units90 === 0 && s.physicalUnits > 0).map((s) => s.onHandCost))),
     expiringSoonCost: round2(sum(skus.map((s) => s.expiringCost60))),
@@ -884,13 +988,13 @@ function classifyAction(row: InventorySkuRow): InventoryAction {
 
   // Out / reorder.
   if (row.sellableUnits === 0) {
-    if (row.recommendedQty > 0 && row.distributorName) return 'order_now'
+    if (row.recommendedQty > 0 && row.vendorName) return 'order_now'
     if (row.recommendedQty > 0) return 'order_now_supplier_unknown'
     if (row.recentSeller) return 'accept_stockout'
     return 'do_not_reorder'
   }
   if (row.recommendedQty > 0 && row.daysSupply !== null && row.daysSupply <= row.reorderPointDays) {
-    return row.distributorName ? 'order_now' : 'order_now_supplier_unknown'
+    return row.vendorName ? 'order_now' : 'order_now_supplier_unknown'
   }
   if (row.recommendedQty > 0) return 'reorder_soon'
 
@@ -920,10 +1024,10 @@ const METHODOLOGY: string[] = [
   'Sell-through (velocity) comes from sweed_order_items_flat over a trailing window (default 28d), mapped package→product via the latest snapshot. Revenue is pre-discount list price (order-level discounts are tiny and unallocated).',
   'Unit cost = current-quantity-weighted average wholesale cost across the SKU\'s on-hand packages. Unit margin = avg unit price − unit cost. COGS is not joined per-sale.',
   'Forecast daily units blends 7d and window velocity (0.6·v7 + 0.4·vW), capped at 3× the window velocity to damp spikes.',
-  'Days supply = sellable units ÷ forecast daily units. Reorder point = lead time + safety (¼ lead, min 2d). Target cover = clamp(lead + cadence + safety, 10..45). Recommended qty = ceil(forecast·targetCover − sellable units), floored at 0.',
-  'Recommended quantities are snapped to supplier case sizing: any nonzero recommendation is rounded UP to the nearest multiple of 5, with a 10-unit minimum per SKU. (True per-SKU case sizes are not yet recorded; this is a uniform approximation.)',
+  'Days supply = sellable units ÷ forecast daily units. Reorder point = lead time + safety (¼ lead, min 2d). Target cover uses the canonical vendor/brand target-days term when present, otherwise clamp(lead + cadence + safety, 10..45). Recommended qty = ceil(forecast·targetCover − sellable units), floored at 0.',
+  'Mapped brands use canonical vendor terms. Because no structured case size is recorded yet, their recommendation stays at honest whole-unit grain and the missing case size is explicit. Only unmapped brands retain the legacy fallback: round up to a multiple of 5 with a 10-unit minimum. Vendor minimum-order dollars are evaluated at basket grain, not incorrectly forced onto each SKU.',
   'When the case-rounded minimum order would overstock a slow mover — pushing post-order days-of-supply past min(2× target cover, 60 days) — the recommendation is SUPPRESSED (recommendedQty = 0, action "skip_min_order_overshoots") rather than misleading the operator into an uneconomic buy. There is real demand, but the minimum case is too chunky; the qty we declined is shown as suppressedRecommendedQty. No brand/category variety exception exists yet, so these are not auto-ordered.',
-  'Lead time defaults to a configurable constant (PO line received-at is not populated in source data); reorder cadence is the median gap between distributor delivery dates, clamped 7..45 days.',
+  'Vendor is the ordering identity, resolved through the primary brand association. Distributor is retained as fulfillment context. Lead time defaults to a configurable constant (PO line received-at is not populated in source data); reorder cadence is the median gap between distributor delivery dates, clamped 7..45 days.',
   'Package received-at is not populated upstream, so inventory age is recovered from the FIRST snapshot in which we observed the package on hand (qty > 0); it is a lower bound on true age (coalesce(received_at, first-observed-on-hand, latest snapshot time)).',
   'Inventory-turn policy: we target a ~21-day turn and treat 60 days as the "already paid for it" mark. Slow-velocity and age deadweight terms ramp to full over the 21→60-day window (no-sale stock pegs at 1). Exit advice is driven by this turn framing, not by an arbitrary deadweight-score cutoff: any SKU with stock and zero 90-day sales is flagged liquidate/burn-down, and weak or aged holdings that won\'t clear by 60 days are flagged stop-carry.',
   'Reorder priority blends expected margin loss before replenishment (50%), reorder gap (25%), lost margin/day (15%), confidence (10%), minus a deadweight penalty. Deadweight score blends slow velocity, capital tied up, age, expiry proximity, and weak margin.',

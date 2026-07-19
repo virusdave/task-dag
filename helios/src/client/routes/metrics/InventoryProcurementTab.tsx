@@ -18,8 +18,8 @@ import { defaultSiteSelection, normaliseSiteSelection, toggleSiteSelection } fro
 // ---------------------------------------------------------------------------
 // Inventory / Procurement workspace (the /metrics → "Inventory" /
 // "Reordering" tab). One consolidated /api/inventory-procurement fetch
-// returns a per-SKU fact table + per-distributor cadence stats; all four
-// procurement views (Reorder Queue / Distributor Baskets / Exit &
+// returns a per-SKU fact table + fulfillment cadence stats; all four
+// procurement views (Reorder Queue / Vendor Baskets / Exit &
 // Liquidate / Mix Drift) are derived client-side from that payload.
 //
 // Design: oracle thread T-019e6edf (2026-06-04). Procurement-grade —
@@ -47,7 +47,8 @@ const WINDOW_PRESETS: ReadonlyArray<{ days: number; label: string }> = [
 type SubTab = 'reorder' | 'distributors' | 'exit' | 'mix'
 const SUBTABS: ReadonlyArray<{ id: SubTab; label: string }> = [
   { id: 'reorder', label: 'Reorder queue' },
-  { id: 'distributors', label: 'Distributor baskets' },
+  // Keep the historical URL id so saved links continue to work.
+  { id: 'distributors', label: 'Vendor baskets' },
   { id: 'exit', label: 'Exit / liquidate' },
   { id: 'mix', label: 'Mix drift' },
 ]
@@ -78,6 +79,9 @@ function fmtDate(iso: string | null | undefined): string {
   const t = new Date(iso).getTime()
   if (Number.isNaN(t)) return '—'
   return nyMonthDaySlash(t)
+}
+function fmtRecommendedCost(r: InventorySkuRow): string {
+  return r.recommendedCostKnown ? fmtMoney(r.recommendedCost) : 'Cost unavailable'
 }
 function daysAgo(iso: string | null | undefined): number | null {
   if (!iso) return null
@@ -234,9 +238,12 @@ function catalogCohortHref(r: InventorySkuRow, section: string, windowDays: numb
 // distributor. NY-local date in the filename per repo canon.
 // ---------------------------------------------------------------------------
 
-function csvCell(v: string | number | null | undefined): string {
+export function csvCell(v: string | number | null | undefined): string {
   if (v === null || v === undefined) return ''
-  const s = typeof v === 'number' ? (Number.isFinite(v) ? String(v) : '') : v
+  const raw = typeof v === 'number' ? (Number.isFinite(v) ? String(v) : '') : v
+  // Spreadsheet programs execute formula-leading CSV cells. Vendor/product
+  // names are external catalog data, so neutralize them before quoting.
+  const s = typeof v === 'string' && /^[=+\-@]/.test(raw) ? `'${raw}` : raw
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
@@ -361,7 +368,9 @@ function buildSkuJustification(r: InventorySkuRow, mode: InsightMode): {
   sentence: string
   caveat: string | null
 } {
-  const dist = r.distributorName ? ` from ${r.distributorName}` : ''
+  const vendor = r.vendorName
+    ? ` from ${r.vendorName}${r.distributorNames.length > 0 ? ` (fulfilled by ${r.distributorNames.join(', ')})` : ''}`
+    : ''
   const ds = fmtDays(r.daysSupply ?? undefined)
   const fcst = fmtNum(r.forecastDailyUnits, 1)
   let sentence: string
@@ -370,7 +379,7 @@ function buildSkuJustification(r: InventorySkuRow, mode: InsightMode): {
     case 'order_now':
     case 'order_now_supplier_unknown':
       sentence =
-        `Order ${fmtNum(r.recommendedQty)} units${dist} (~${fmtMoney(r.recommendedCost)}). ` +
+        `Order ${fmtNum(r.recommendedQty)} units${vendor} (~${fmtRecommendedCost(r)}). ` +
         `Only ${fmtNum(r.sellableUnits)} sellable (~${ds} at ${fcst}/day) and restock needs ` +
         `~${fmtDays(r.reorderPointDays)}; waiting risks ${fmtMoney(r.expectedMarginLossBeforeReplenishment)} ` +
         `of margin before stock lands.` +
@@ -378,7 +387,7 @@ function buildSkuJustification(r: InventorySkuRow, mode: InsightMode): {
       break
     case 'reorder_soon':
       sentence =
-        `Reorder ~${fmtNum(r.recommendedQty)} units${dist} soon — ${ds} of supply at ${fcst}/day ` +
+        `Reorder ~${fmtNum(r.recommendedQty)} units${vendor} soon — ${ds} of supply at ${fcst}/day ` +
         `vs a ${fmtDays(r.reorderPointDays)} reorder point. Not urgent yet.`
       break
     case 'check_hidden_stock':
@@ -607,7 +616,7 @@ function reorderFacts(r: InventorySkuRow): Array<{ label: string; value: string;
     { label: 'Cadence', value: fmtDays(r.cadenceDays) },
     { label: 'Target cover', value: fmtDays(r.targetCoverDays) },
     { label: 'Rec qty', value: fmtNum(r.recommendedQty) },
-    { label: 'Est cost', value: fmtMoney(r.recommendedCost) },
+    { label: 'Est cost', value: fmtRecommendedCost(r) },
     { label: 'Unit margin', value: fmtMoney(r.unitMargin, 2) },
     { label: 'Lost $/day', value: fmtMoney(r.lostMarginPerDay, 2), warn: r.lostMarginPerDay > 0 },
     { label: 'Confidence', value: fmtPct(r.confidenceScore), warn: r.confidenceScore < 0.6 },
@@ -745,11 +754,21 @@ function ExpandableSkuRow({
       <tr
         className={`${canExpand ? 'inv-proc-clickable' : ''}${isOpen ? ' is-expanded' : ''}${rowClassName ? ` ${rowClassName}` : ''}`}
         onClick={canExpand ? () => onToggleExpand(key) : undefined}
+        onKeyDown={canExpand ? (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            onToggleExpand(key)
+          }
+        } : undefined}
+        tabIndex={canExpand ? 0 : undefined}
+        role={canExpand ? 'button' : undefined}
+        aria-expanded={canExpand ? isOpen : undefined}
+        aria-controls={canExpand ? `sku-detail-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}` : undefined}
       >
         {cells}
       </tr>
       {isOpen ? (
-        <tr className="inv-proc-sku-detail">
+        <tr id={`sku-detail-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`} className="inv-proc-sku-detail">
           <td colSpan={detailColSpan}>
             <div className="inv-insight-head">
               <span className="subtle-copy">{detailLabel}</span>
@@ -908,7 +927,7 @@ export function InventoryProcurementTab() {
             />
           ) : null}
           {subTab === 'distributors' ? (
-            <DistributorBasketsView
+            <VendorBasketsView
               data={data}
               expandedSku={expandedSku}
               onToggleExpand={toggleExpand}
@@ -989,7 +1008,10 @@ function ReorderQueueView({ data, expandedSku, onToggleExpand, sites }: SkuViewP
         <Kpi value={String(s.outRegrettedCount)} label="Out & regretting" warn={s.outRegrettedCount > 0} />
         <Kpi value={fmtMoney(s.outRegrettedLostMarginPerDay)} label="Lost margin / day (out)" warn={s.outRegrettedLostMarginPerDay > 0} />
         <Kpi value={String(s.soonOutCount)} label="Runout before reorder lands" />
-        <Kpi value={fmtMoney(s.recommendedOrderCostTotal)} label="Recommended order cost" />
+        <Kpi
+          value={`${fmtMoney(s.recommendedOrderCostTotal)}${s.recommendedOrderCostComplete ? '' : ' + unavailable'}`}
+          label="Known recommended order cost"
+        />
         <Kpi value={String(s.lowConfidenceCount)} label="Low-confidence rows" />
       </div>
 
@@ -1115,7 +1137,7 @@ function SkuRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
         <div className="subtle-copy inv-proc-prod-sub">{r.brandName ?? ''}</div>
       </td>
       <td>{[r.categoryName, r.subcategoryName].filter(Boolean).join(' · ') || '—'}</td>
-      <td>{r.distributorName ?? <span className="subtle-copy">unknown</span>}</td>
+      <td>{r.distributorNames.join(', ') || <span className="subtle-copy">unknown</span>}</td>
       <td className="num">{last === null ? '—' : `${last}d ago`}</td>
       <td className="num">{fmtNum(r.units28)}</td>
       <td className="num">{fmtNum(r.forecastDailyUnits, 1)}</td>
@@ -1124,7 +1146,7 @@ function SkuRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
       <td className="num">
         <strong>{fmtNum(r.recommendedQty)}</strong>
       </td>
-      <td className="num">{fmtMoney(r.recommendedCost)}</td>
+      <td className="num">{fmtRecommendedCost(r)}</td>
       <td>
         <ConfidencePill score={r.confidenceScore} />
       </td>
@@ -1150,7 +1172,7 @@ function QueueRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
           {[r.brandName, r.categoryName].filter(Boolean).join(' · ')}
         </div>
       </td>
-      <td>{r.distributorName ?? <span className="subtle-copy">unknown</span>}</td>
+      <td>{r.distributorNames.join(', ') || <span className="subtle-copy">unknown</span>}</td>
       <td className="num">{fmtNum(r.sellableUnits)}</td>
       <td className="num">{fmtDays(r.daysSupply ?? undefined)}</td>
       <td className="num">{fmtDate(r.projectedStockoutAt)}</td>
@@ -1170,7 +1192,7 @@ function QueueRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
           </div>
         )}
       </td>
-      <td className="num">{fmtMoney(r.recommendedCost)}</td>
+      <td className="num">{fmtRecommendedCost(r)}</td>
       <td>
         <ConfidencePill score={r.confidenceScore} />
       </td>
@@ -1214,11 +1236,12 @@ function ExitRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
-// Tab 2 — Distributor Baskets
+// Tab 2 — Vendor Baskets
 // ---------------------------------------------------------------------------
 
 interface BasketLine {
   r: InventorySkuRow
+  economicsKnown: boolean
   lossIfOrderNow: number
   lossIfWait: number
   earlyCarry: number
@@ -1252,6 +1275,7 @@ function basketExcludeReason(l: BasketLine): string | null {
     return `Well-stocked — ${fmtDays(r.daysSupply ?? undefined)} supply ≥ ${fmtDays(r.targetCoverDays)} target`
   }
   // Has a recommended qty, but not urgent enough to pull into THIS order.
+  if (!l.economicsKnown) return `Can wait — low priority (${r.reorderPriorityScore}), early-order value unavailable`
   return `Can wait — low priority (${r.reorderPriorityScore}), early-order value ${fmtMoney(l.orderNowValue, 2)}`
 }
 
@@ -1264,19 +1288,25 @@ function excludedSortRank(r: InventorySkuRow): number {
   if (r.forecastDailyUnits <= 0) return 3
   return 1 // well-stocked
 }
-interface DistBasket {
+export interface VendorBasket {
   key: string
   siteLabel: string
-  distributorName: string
+  vendorName: string
+  vendorMapped: boolean
+  distributorNames: string[]
+  minimumOrderDollars: number | null
+  minimumGapDollars: number | null
   leadTimeDays: number
-  cadenceDays: number
+  cadenceDays: number | null
   lastDeliveryDate: string | null
-  waitDays: number
+  waitDays: number | null
   lines: BasketLine[]
   /** Carried SKUs for this distributor left OUT of the order, each with a
    *  reason. Shown dimmed beneath the basket for exclusion justification. */
   excludedLines: BasketLine[]
   basketCost: number
+  basketCostKnown: boolean
+  economicsKnown: boolean
   basketUnits: number
   urgentCount: number
   outRegrettedCount: number
@@ -1286,43 +1316,81 @@ interface DistBasket {
   guidance: 'order_now' | 'short_order' | 'wait' | 'no_action'
 }
 
-function buildBaskets(data: InventoryProcurementResponse): DistBasket[] {
+export function buildVendorBaskets(data: InventoryProcurementResponse): VendorBasket[] {
   const distByKey = new Map<string, InventoryDistributorStat>()
   for (const d of data.distributors) distByKey.set(`${d.dealerId}|${d.distributorName}`, d)
 
   const groups = new Map<string, InventorySkuRow[]>()
   for (const r of data.skus) {
-    if (!r.distributorName) continue
-    const k = `${r.dealerId}|${r.distributorName}`
+    const identity = r.vendorId !== null
+      ? `vendor:${r.vendorId}`
+      : `unmapped:${(r.brandName ?? r.productName).toLocaleLowerCase('en-US')}`
+    const k = `${r.dealerId}|${identity}`
     const arr = groups.get(k)
     if (arr) arr.push(r)
     else groups.set(k, [r])
   }
 
-  const baskets: DistBasket[] = []
+  const baskets: VendorBasket[] = []
   for (const [k, rows] of groups) {
     const first = rows[0]
-    const dist = distByKey.get(k)
-    const leadTimeDays = first.leadTimeDays
-    const cadenceDays = dist?.cadenceDays ?? first.cadenceDays
-    const lastDeliveryDate = dist?.lastDeliveryDate ?? null
-    const nextOrderMs = lastDeliveryDate
+    const distributorNames = Array.from(
+      new Set(rows.flatMap((r) => r.distributorNames)),
+    ).sort((a, b) => a.localeCompare(b))
+    const fulfillmentStats = distributorNames
+      .map((name) => distByKey.get(`${first.dealerId}|${name}`))
+      .filter((stat): stat is InventoryDistributorStat => stat !== undefined)
+    const leadTimeDays = Math.max(first.leadTimeDays, ...fulfillmentStats.map((d) => d.leadTimeDays))
+    // A vendor can travel through multiple distributors. Never combine one
+    // distributor's cadence with another's delivery date into a fake schedule.
+    const singleFulfillment = distributorNames.length === 1 && fulfillmentStats.length === 1
+      ? fulfillmentStats[0]
+      : undefined
+    const cadenceDays = singleFulfillment?.cadenceDays ?? null
+    const lastDeliveryDate = singleFulfillment?.lastDeliveryDate ?? null
+    const vendorMapped = first.vendorId !== null
+    const vendorName = first.vendorName ?? `${first.brandName ?? 'Unknown brand'} (vendor unmapped)`
+    const minimumTerms = rows
+      .map((r) => r.vendorMinimumOrderDollars)
+      .filter((amount): amount is number => amount !== null)
+    const minimumOrderDollars = minimumTerms.length > 0 ? Math.max(...minimumTerms) : null
+    const nextOrderMs = lastDeliveryDate && cadenceDays !== null
       ? new Date(lastDeliveryDate).getTime() + cadenceDays * DAY_MS
       : Date.now()
-    const waitDays = Math.max(0, Math.round((nextOrderMs - Date.now()) / DAY_MS))
+    const waitDays = cadenceDays === null ? null : Math.max(0, Math.round((nextOrderMs - Date.now()) / DAY_MS))
     const dailyCarry = CARRY_ANNUAL_RATE / 365
 
     const lines: BasketLine[] = rows.map((r) => {
+      const fulfillment = r.distributorNames.length === 1
+        ? distByKey.get(`${r.dealerId}|${r.distributorNames[0]!}`)
+        : undefined
+      const lineCadence = fulfillment?.cadenceDays ?? r.cadenceDays
+      const lineNextOrderMs = fulfillment?.lastDeliveryDate
+        ? new Date(fulfillment.lastDeliveryDate).getTime() + lineCadence * DAY_MS
+        : Date.now()
+      const lineWaitDays = Math.max(0, Math.round((lineNextOrderMs - Date.now()) / DAY_MS))
       const ds = r.daysSupply ?? Infinity
-      const lossIfOrderNow = r.lostMarginPerDay * Math.max(0, leadTimeDays - ds)
-      const lossIfWait = r.lostMarginPerDay * Math.max(0, leadTimeDays + waitDays - ds)
-      const earlyCarry = r.recommendedCost * dailyCarry * waitDays
+      const lineLeadTimeDays = fulfillment?.leadTimeDays ?? r.leadTimeDays
+      const lossIfOrderNow = r.lostMarginPerDay * Math.max(0, lineLeadTimeDays - ds)
+      const lossIfWait = r.lostMarginPerDay * Math.max(0, lineLeadTimeDays + lineWaitDays - ds)
+      const earlyCarry = r.recommendedCostKnown ? r.recommendedCost * dailyCarry * lineWaitDays : 0
       const orderNowValue = lossIfWait - lossIfOrderNow - earlyCarry
+      const economicsKnown =
+        fulfillment !== undefined && r.recommendedCostKnown && r.unitMargin !== null
       const include =
         r.recommendedQty > 0 &&
         !r.doNotReorder &&
-        (r.reorderPriorityScore >= 50 || orderNowValue > 0 || r.outRegretted)
-      const line: BasketLine = { r, lossIfOrderNow, lossIfWait, earlyCarry, orderNowValue, include, excludeReason: null }
+        (r.reorderPriorityScore >= 50 || (economicsKnown && orderNowValue > 0) || r.outRegretted)
+      const line: BasketLine = {
+        r,
+        economicsKnown,
+        lossIfOrderNow,
+        lossIfWait,
+        earlyCarry,
+        orderNowValue,
+        include,
+        excludeReason: null,
+      }
       line.excludeReason = basketExcludeReason(line)
       return line
     })
@@ -1336,33 +1404,43 @@ function buildBaskets(data: InventoryProcurementResponse): DistBasket[] {
           b.r.reorderPriorityScore - a.r.reorderPriorityScore,
       )
     const basketCost = included.reduce((t, l) => t + l.r.recommendedCost, 0)
+    const basketCostKnown = included.every((l) => l.r.recommendedCostKnown)
+    const economicsKnown = included.every((l) => l.economicsKnown)
+    const minimumGapDollars =
+      basketCostKnown && minimumOrderDollars !== null
+        ? Math.max(0, minimumOrderDollars - basketCost)
+        : null
     const basketUnits = included.reduce((t, l) => t + l.r.recommendedQty, 0)
     // Only count rows we'd actually order toward basket urgency — a slow
     // mover whose minimum case overshoots target (recommendedQty === 0) must
     // not flip a distributor to "ORDER NOW" for something we won't buy.
-    const urgentCount = rows.filter(
-      (r) =>
+    const urgentCount = included.filter(
+      ({ r }) =>
         r.recommendedQty > 0 &&
         r.daysSupply !== null &&
         r.forecastDailyUnits > 0 &&
         r.daysSupply <= r.reorderPointDays,
     ).length
-    const outRegrettedCount = rows.filter((r) => r.outRegretted && r.recommendedQty > 0).length
+    const outRegrettedCount = included.filter(({ r }) => r.outRegretted && r.recommendedQty > 0).length
     const orderNowValue = included.reduce((t, l) => t + l.orderNowValue, 0)
     const lossIfOrderNow = included.reduce((t, l) => t + l.lossIfOrderNow, 0)
     const lossIfWait = included.reduce((t, l) => t + l.lossIfWait, 0)
 
-    let guidance: DistBasket['guidance']
-    if (basketCost <= 0) guidance = 'no_action'
-    else if (orderNowValue >= ORDER_NOW_VALUE_THRESHOLD || outRegrettedCount > 0 || urgentCount >= 3)
+    let guidance: VendorBasket['guidance']
+    if (included.length === 0) guidance = 'no_action'
+    else if ((economicsKnown && orderNowValue >= ORDER_NOW_VALUE_THRESHOLD) || outRegrettedCount > 0 || urgentCount >= 3)
       guidance = 'order_now'
-    else if (orderNowValue > 0 && basketCost >= MIN_BASKET_COST) guidance = 'short_order'
+    else if (economicsKnown && orderNowValue > 0 && (!basketCostKnown || basketCost >= MIN_BASKET_COST)) guidance = 'short_order'
     else guidance = 'wait'
 
     baskets.push({
       key: k,
       siteLabel: first.siteLabel,
-      distributorName: first.distributorName ?? '(unknown)',
+      vendorName,
+      vendorMapped,
+      distributorNames,
+      minimumOrderDollars,
+      minimumGapDollars,
       leadTimeDays,
       cadenceDays,
       lastDeliveryDate,
@@ -1370,6 +1448,8 @@ function buildBaskets(data: InventoryProcurementResponse): DistBasket[] {
       lines: included.sort((a, b) => b.orderNowValue - a.orderNowValue),
       excludedLines,
       basketCost,
+      basketCostKnown,
+      economicsKnown,
       basketUnits,
       urgentCount,
       outRegrettedCount,
@@ -1380,15 +1460,24 @@ function buildBaskets(data: InventoryProcurementResponse): DistBasket[] {
     })
   }
 
-  const rank: Record<DistBasket['guidance'], number> = { order_now: 0, short_order: 1, wait: 2, no_action: 3 }
+  const rank: Record<VendorBasket['guidance'], number> = {
+    order_now: 0,
+    short_order: 1,
+    wait: 2,
+    no_action: 3,
+  }
   return baskets
-    .filter((b) => b.basketCost > 0)
+    .filter((b) => b.lines.length > 0)
     .sort((a, b) => rank[a.guidance] - rank[b.guidance] || b.orderNowValue - a.orderNowValue)
 }
 
-const BASKET_CSV_HEADER: ReadonlyArray<string> = [
+export const BASKET_CSV_HEADER: ReadonlyArray<string> = [
   'Site',
-  'Distributor',
+  'Vendor',
+  'Vendor mapped',
+  'Fulfillment distributor',
+  'Vendor minimum order',
+  'Minimum gap',
   'Guidance',
   'Product',
   'Brand',
@@ -1400,6 +1489,8 @@ const BASKET_CSV_HEADER: ReadonlyArray<string> = [
   'Forecast/day',
   'Unit cost',
   'Recommended qty',
+  'Case size units',
+  'Quantity rule',
   'Extended cost',
   'Order-now value',
 ]
@@ -1409,8 +1500,8 @@ function round2(n: number | null | undefined): number | null {
   return Math.round(n * 100) / 100
 }
 
-function basketCsvRows(
-  baskets: ReadonlyArray<DistBasket>,
+export function basketCsvRows(
+  baskets: ReadonlyArray<VendorBasket>,
 ): Array<Array<string | number | null>> {
   const rows: Array<Array<string | number | null>> = []
   for (const b of baskets) {
@@ -1418,7 +1509,11 @@ function basketCsvRows(
       const r = l.r
       rows.push([
         b.siteLabel,
-        b.distributorName,
+        b.vendorName,
+        b.vendorMapped ? 'yes' : 'no',
+        r.distributorNames.join(' | '),
+        round2(b.minimumOrderDollars),
+        round2(b.minimumGapDollars),
         GUIDANCE_META[b.guidance].label,
         r.productName,
         r.brandName ?? '',
@@ -1430,22 +1525,28 @@ function basketCsvRows(
         round2(r.forecastDailyUnits),
         round2(r.unitCostCurrent),
         r.recommendedQty,
-        round2(r.recommendedCost),
-        round2(l.orderNowValue),
+        r.caseSizeUnits,
+        r.quantityRuleSource === 'unmapped_brand_fallback'
+          ? 'Fallback: 5-unit multiple / 10-unit minimum'
+          : r.caseSizeUnits === null
+            ? 'Vendor mapped; case size not configured'
+            : `Vendor case size: ${r.caseSizeUnits}`,
+        r.recommendedCostKnown ? round2(r.recommendedCost) : '',
+        l.economicsKnown ? round2(l.orderNowValue) : '',
       ])
     }
   }
   return rows
 }
 
-const GUIDANCE_META: Record<DistBasket['guidance'], { label: string; cls: string }> = {
+const GUIDANCE_META: Record<VendorBasket['guidance'], { label: string; cls: string }> = {
   order_now: { label: 'ORDER NOW', cls: 'inv-pill--danger' },
   short_order: { label: 'SHORT ORDER', cls: 'inv-pill--warn' },
   wait: { label: 'WAIT', cls: 'inv-pill--info' },
   no_action: { label: 'NO ACTION', cls: 'inv-pill--muted' },
 }
 
-// Cells for one basket sub-line (9 columns). `excluded` lines are the
+// Cells for one basket sub-line (10 columns). `excluded` lines are the
 // carried-but-not-ordered SKUs: they carry the exclusion reason as muted
 // product subtext and show the qty we *would* have / declined to order
 // rather than a committed order qty.
@@ -1478,28 +1579,47 @@ function BasketRowCells({ l, isOpen, excluded }: { l: BasketLine; isOpen: boolea
           <strong>{fmtNum(r.recommendedQty)}</strong>
         )}
       </td>
-      <td className="num">{excluded && r.recommendedQty <= 0 ? '—' : fmtMoney(r.recommendedCost)}</td>
-      <td className="num">{fmtMoney(l.orderNowValue, 2)}</td>
+      <td>
+        {r.caseSizeUnits !== null
+          ? `${fmtNum(r.caseSizeUnits)} units`
+          : r.quantityRuleSource === 'unmapped_brand_fallback'
+            ? 'Fallback 5 / min 10'
+            : 'Whole units; case size not configured'}
+      </td>
+      <td className="num">
+        {excluded && r.recommendedQty <= 0
+          ? '—'
+          : r.recommendedCostKnown
+            ? fmtMoney(r.recommendedCost)
+            : 'Cost unavailable'}
+      </td>
+      <td className="num">{l.economicsKnown ? fmtMoney(l.orderNowValue, 2) : 'Unavailable'}</td>
     </>
   )
 }
 
-function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: SkuViewProps) {
-  const baskets = useMemo(() => buildBaskets(data), [data])
+export function VendorBasketsView({ data, expandedSku, onToggleExpand, sites }: SkuViewProps) {
+  const baskets = useMemo(() => buildVendorBaskets(data), [data])
   const [expanded, setExpanded] = useState<string | null>(null)
   const win = data.params.windowDays
 
   const orderNowCount = baskets.filter((b) => b.guidance === 'order_now').length
   const totalBasketCost = baskets
-    .filter((b) => b.guidance === 'order_now' || b.guidance === 'short_order')
+    .filter((b) => b.basketCostKnown && (b.guidance === 'order_now' || b.guidance === 'short_order'))
     .reduce((t, b) => t + b.basketCost, 0)
-  const marginSaved = baskets.reduce((t, b) => t + Math.max(0, b.lossIfWait - b.lossIfOrderNow), 0)
+  const hasUnknownActionableCost = baskets.some(
+    (b) => !b.basketCostKnown && (b.guidance === 'order_now' || b.guidance === 'short_order'),
+  )
+  const marginSaved = baskets
+    .filter((b) => b.economicsKnown)
+    .reduce((t, b) => t + Math.max(0, b.lossIfWait - b.lossIfOrderNow), 0)
+  const hasUnknownEconomics = baskets.some((b) => !b.economicsKnown)
 
   const actionableBaskets = baskets.filter(
     (b) => b.guidance === 'order_now' || b.guidance === 'short_order',
   )
 
-  function exportBaskets(toExport: ReadonlyArray<DistBasket>, label: string) {
+  function exportBaskets(toExport: ReadonlyArray<VendorBasket>, label: string) {
     const rows = basketCsvRows(toExport)
     if (rows.length === 0) return
     downloadCsv(`procurement-baskets-${label}-${nyIsoDate(Date.now())}.csv`, BASKET_CSV_HEADER, rows)
@@ -1508,15 +1628,21 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
   return (
     <div className="inv-proc-view">
       <div className="budtender-totals-strip">
-        <Kpi value={String(orderNowCount)} label="Distributors to order now" warn={orderNowCount > 0} />
-        <Kpi value={fmtMoney(totalBasketCost)} label="Recommended basket cost" />
-        <Kpi value={fmtMoney(marginSaved)} label="Margin saved vs waiting" />
-        <Kpi value={String(baskets.length)} label="Distributors with a basket" />
+        <Kpi value={String(orderNowCount)} label="Vendors to order now" warn={orderNowCount > 0} />
+        <Kpi
+          value={`${fmtMoney(totalBasketCost)}${hasUnknownActionableCost ? ' + unknown' : ''}`}
+          label="Known recommended cost"
+        />
+        <Kpi
+          value={`${fmtMoney(marginSaved)}${hasUnknownEconomics ? ' + unavailable' : ''}`}
+          label="Known margin saved vs waiting"
+        />
+        <Kpi value={String(baskets.length)} label="Vendors with a basket" />
       </div>
 
       <article className="metric-chart-card">
         <div className="inv-proc-section-head">
-          <h3 className="inv-proc-section-title">Distributor order board</h3>
+          <h3 className="inv-proc-section-title">Vendor order board</h3>
           <button
             type="button"
             className="metrics-site-chip inv-proc-export-btn"
@@ -1527,18 +1653,22 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
             ⬇ Export order baskets (CSV)
           </button>
         </div>
-        <p className="subtle-copy inv-proc-section-sub">
-          Batched per-distributor guidance. "Order-now value" = margin lost by waiting minus early
-          carrying cost. Click a distributor to see its basket; click any basket line to show the
-          work (or open ↗ in a new tab). Each basket also lists, dimmed, the carried SKUs left
-          OUT of the order and why — so you can confirm both what to buy and what to skip.
-        </p>
+        <details className="inv-proc-methodology">
+          <summary>How vendor baskets work</summary>
+          <p className="subtle-copy inv-proc-section-sub">
+            Orders are grouped by the vendor you buy from; distributors remain visible as fulfillment
+            context. Vendor minimums are evaluated at basket grain. Mapped vendors without a configured
+            case size stay at whole-unit recommendations rather than using a made-up case. Unmapped
+            brands are labeled and retain the legacy 5-unit / 10-unit-minimum fallback.
+          </p>
+        </details>
         <div className="inv-proc-table-scroll">
-          <table className="budtender-leaderboard inv-proc-table">
+          <table className="budtender-leaderboard inv-proc-table inv-proc-vendor-board">
             <thead>
               <tr>
                 <th>Site</th>
-                <th>Distributor</th>
+                <th>Vendor</th>
+                <th>Fulfilled by</th>
                 <th>Guidance</th>
                 <th className="num">Lines</th>
                 <th className="num">Units</th>
@@ -1553,23 +1683,40 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
             <tbody>
               {baskets.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="subtle-copy">
-                    No distributor baskets to recommend right now.
+                  <td colSpan={12} className="subtle-copy">
+                    No vendor baskets to recommend right now.
                   </td>
                 </tr>
               ) : (
                 baskets.map((b) => (
-                  <>
+                  <Fragment key={b.key}>
                     <tr
-                      key={b.key}
                       className="inv-proc-clickable"
-                      onClick={() => setExpanded((e) => (e === b.key ? null : b.key))}
                     >
                       <td>{b.siteLabel}</td>
                       <td>
-                        {expanded === b.key ? '▾ ' : '▸ '}
-                        {b.distributorName}
+                        <button
+                          type="button"
+                          className="inv-proc-basket-toggle"
+                          aria-expanded={expanded === b.key}
+                          aria-controls={`vendor-basket-${b.key.replace(/[^a-zA-Z0-9_-]/g, '-')}`}
+                          onClick={() => setExpanded((e) => (e === b.key ? null : b.key))}
+                        >
+                          <span aria-hidden="true">{expanded === b.key ? '▾ ' : '▸ '}</span>
+                          {b.vendorName}
+                        </button>
+                        {b.minimumGapDollars !== null && b.minimumGapDollars > 0 ? (
+                          <div className="inv-proc-minimum-gap">
+                            {fmtMoney(b.minimumGapDollars)} short of {fmtMoney(b.minimumOrderDollars)} minimum
+                          </div>
+                        ) : b.minimumOrderDollars !== null && !b.basketCostKnown ? (
+                          <div className="inv-proc-minimum-gap">Minimum status unavailable until costs are complete</div>
+                        ) : null}
+                        <div className="inv-proc-basket-mobile-summary">
+                          {GUIDANCE_META[b.guidance].label} · {b.basketCostKnown ? fmtMoney(b.basketCost) : 'Cost unavailable'} · {b.urgentCount} urgent · {b.outRegrettedCount} out
+                        </div>
                       </td>
+                      <td>{b.distributorNames.join(', ') || 'Unknown'}</td>
                       <td>
                         <span className={`inv-pill ${GUIDANCE_META[b.guidance].cls}`}>
                           {GUIDANCE_META[b.guidance].label}
@@ -1578,21 +1725,30 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
                       <td className="num">{b.lines.length}</td>
                       <td className="num">{fmtNum(b.basketUnits)}</td>
                       <td className="num">
-                        <strong>{fmtMoney(b.basketCost)}</strong>
+                        <strong>{b.basketCostKnown ? fmtMoney(b.basketCost) : 'Cost unavailable'}</strong>
                       </td>
                       <td className="num">{b.urgentCount}</td>
                       <td className="num">{b.outRegrettedCount}</td>
-                      <td className="num">{fmtDays(b.cadenceDays)}</td>
-                      <td className="num">{b.waitDays === 0 ? 'now' : `${b.waitDays}d`}</td>
-                      <td className="num">{fmtMoney(b.orderNowValue)}</td>
+                      <td className="num">{b.cadenceDays === null ? 'Per distributor' : fmtDays(b.cadenceDays)}</td>
+                      <td className="num">{b.waitDays === null ? 'Per distributor' : b.waitDays === 0 ? 'now' : `${b.waitDays}d`}</td>
+                      <td className="num">{b.economicsKnown ? fmtMoney(b.orderNowValue) : 'Unavailable'}</td>
                     </tr>
                     {expanded === b.key ? (
-                      <tr key={`${b.key}-detail`} className="inv-proc-basket-detail">
-                        <td colSpan={11}>
+                      <tr
+                        id={`vendor-basket-${b.key.replace(/[^a-zA-Z0-9_-]/g, '-')}`}
+                        className="inv-proc-basket-detail"
+                      >
+                        <td colSpan={12}>
                           <div className="inv-proc-basket-detail-head">
                             <span className="subtle-copy">
-                              {b.distributorName} · {b.siteLabel} · {b.lines.length} line
-                              {b.lines.length === 1 ? '' : 's'} · {fmtMoney(b.basketCost)}
+                              {b.vendorName} · {b.siteLabel} · fulfilled by {b.distributorNames.join(', ') || 'unknown'} · {b.lines.length} line
+                              {b.lines.length === 1 ? '' : 's'} · {b.basketCostKnown ? fmtMoney(b.basketCost) : 'cost unavailable'}
+                              {b.minimumOrderDollars !== null
+                                ? ` · ${fmtMoney(b.minimumOrderDollars)} vendor minimum`
+                                : ' · no vendor minimum configured'}
+                              {b.minimumGapDollars !== null && b.minimumGapDollars > 0
+                                ? ` · ${fmtMoney(b.minimumGapDollars)} short`
+                                : ''}
                               {b.excludedLines.length > 0
                                 ? ` · ${b.excludedLines.length} carried SKU${b.excludedLines.length === 1 ? '' : 's'} excluded`
                                 : ''}
@@ -1600,12 +1756,12 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
                             <button
                               type="button"
                               className="metrics-site-chip inv-proc-export-btn"
-                              title="Download this distributor's basket as a CSV"
+                              title="Download this vendor's basket as a CSV"
                               onClick={(e) => {
                                 e.stopPropagation()
                                 exportBaskets(
                                   [b],
-                                  `${b.distributorName}-${b.siteLabel}`
+                                  `${b.vendorName}-${b.siteLabel}`
                                     .toLowerCase()
                                     .replace(/[^a-z0-9]+/g, '-')
                                     .replace(/^-+|-+$/g, ''),
@@ -1625,6 +1781,7 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
                                 <th className="num">Fcst/day</th>
                                 <th className="num">Unit cost</th>
                                 <th className="num">Rec qty</th>
+                                <th>Case / qty rule</th>
                                 <th className="num">Ext cost</th>
                                 <th className="num">Order-now value</th>
                               </tr>
@@ -1635,7 +1792,7 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
                                   key={rowKey(l.r)}
                                   r={l.r}
                                   mode="reorder"
-                                  detailColSpan={9}
+                                  detailColSpan={10}
                                   expandedSku={expandedSku}
                                   onToggleExpand={onToggleExpand}
                                   detailHref={skuDetailHref('reorder', sites, win, skuKey(l.r))}
@@ -1645,7 +1802,7 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
                               ))}
                               {b.excludedLines.length > 0 ? (
                                 <tr className="inv-proc-excluded-divider">
-                                  <td colSpan={9} className="subtle-copy">
+                                  <td colSpan={10} className="subtle-copy">
                                     Available but excluded — {b.excludedLines.length} carried SKU
                                     {b.excludedLines.length === 1 ? '' : 's'} not in this order (expand any
                                     row to confirm)
@@ -1657,7 +1814,7 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
                                   key={rowKey(l.r)}
                                   r={l.r}
                                   mode="reorder"
-                                  detailColSpan={9}
+                                  detailColSpan={10}
                                   expandedSku={expandedSku}
                                   onToggleExpand={onToggleExpand}
                                   detailHref={skuDetailHref('reorder', sites, win, skuKey(l.r))}
@@ -1672,7 +1829,7 @@ function DistributorBasketsView({ data, expandedSku, onToggleExpand, sites }: Sk
                         </td>
                       </tr>
                     ) : null}
-                  </>
+                  </Fragment>
                 ))
               )}
             </tbody>

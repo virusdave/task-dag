@@ -9544,7 +9544,7 @@ span.metric-chart-legend-item {
 
 /* =====================================================================
  * Inventory / Procurement workspace (/metrics → Inventory / Reordering).
- * Bespoke tab — reorder queue / distributor baskets / exit-liquidate /
+ * Bespoke tab — reorder queue / vendor baskets / exit-liquidate /
  * mix drift. Reuses .metric-chart-card, .budtender-kpi/-leaderboard
  * chrome; adds table-scroll, status pills, and the mix-drift gap bar.
  * ===================================================================== */
@@ -9640,6 +9640,45 @@ span.metric-chart-legend-item {
 }
 .inv-proc-clickable:hover td {
   background: rgba(155, 74, 34, 0.05);
+}
+.inv-proc-clickable:focus-visible {
+  outline: 2px solid var(--accent-strong, #9b4a22);
+  outline-offset: -2px;
+}
+.inv-proc-basket-toggle {
+  min-height: 44px;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.inv-proc-minimum-gap {
+  color: #8a5a2b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: normal;
+}
+.inv-proc-basket-mobile-summary {
+  display: none;
+}
+
+@media (max-width: 700px) {
+  .inv-proc-vendor-board > thead > tr > :nth-child(n + 3),
+  .inv-proc-vendor-board > tbody > tr:not(.inv-proc-basket-detail) > :nth-child(n + 3) {
+    display: none;
+  }
+  .inv-proc-basket-mobile-summary {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: normal;
+  }
 }
 
 /* Divider introducing the carried-but-excluded SKUs beneath a basket. */

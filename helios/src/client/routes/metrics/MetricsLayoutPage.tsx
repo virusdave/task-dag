@@ -404,7 +404,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     id: 'inventory',
     label: 'Inventory',
     description:
-      'Procurement workspace: reorder queue (out-now + runout-soon with recommended order qty), distributor baskets (order now / short order / wait), exit / liquidate (deadweight capital), and mix drift (inventory $/unit vs sales/margin mix).',
+      'Procurement workspace: reorder queue (out-now + runout-soon with recommended order qty), vendor baskets with distributor fulfillment context, exit / liquidate (deadweight capital), and mix drift (inventory $/unit vs sales/margin mix).',
     defaultAgg: 'date',
     defaultStackMode: 'none',
     // The inventory tab renders its OWN UI (see InventoryProcurementTab) —
@@ -1035,7 +1035,7 @@ export function MetricsLayoutPage() {
           <TimeOfDayTab />
         ) : activeTab.id === 'inventory' ? (
           // Inventory / Reordering: a bespoke procurement workspace
-          // (reorder queue / distributor baskets / exit-liquidate / mix
+          // (reorder queue / vendor baskets / exit-liquidate / mix
           // drift) backed by one consolidated /api/inventory-procurement
           // fetch. Owns its full UI; the shared toolbar doesn't apply.
           <InventoryProcurementTab />
