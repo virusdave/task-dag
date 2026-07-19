@@ -541,12 +541,22 @@ and ID, and retains the mapping in the reviewed artifact and digest. The
 literal historical name remains part of declaration identity; aliases neither
 rewrite intent nor permit a non-registry peer.
 
+Schema 2 retains every actionable trailer occurrence in sorted
+`historicalOccurrences`, binding source repository identity, declaring commit,
+zero-based group ordinal, declaration digest, and slot ID. Repeated occurrences
+of the exact same declaration converge on one issue declaration and one slot;
+the occurrence records preserve the complete history in the artifact and
+digest. Repeated slot requests with different declaration digests fail before
+publication. Schema 1 remains strict one-occurrence-per-slot and capture
+automatically emits schema 2 when frozen history contains an exact repeat.
+
 The census writes canonical artifact bytes and a separate lowercase SHA-256
 digest. `materialise-import` requires those exact files and the same input,
 repeats census, byte-compares it, then performs one activation-fenced atomic
 multi-ref compare-and-swap. The artifact has separately keyed `slots`,
 `legacyCompletionRefs`, and `liveDelegations` arrays; schema 2 additionally
-has `terminalDeclarations`. Every member carries exactly one disposition. Any inaccessible repository, tip drift, evidence
+has `historicalOccurrences`, `repositoryAliases`, and
+`terminalDeclarations`. Every member carries exactly one disposition. Any inaccessible repository, tip drift, evidence
 omission, incomplete pagination, collision, or corruption fails before a
 write. Import persists the reviewed census, exact bodies and declarations,
 and a generation-zero append-only state for every slot. Imported slots can

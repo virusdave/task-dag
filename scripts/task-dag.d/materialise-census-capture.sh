@@ -170,6 +170,10 @@ cmd_materialise_census_capture() {
         done < <(git -C "$path" rev-list --reverse "$tip")
     done < <(jq -sr 'sort_by(.repository)[]|[.repository,.path]|@tsv' "$stage/repositories.ndjson")
 
+    jq -se 'group_by(.declaration.slotId)|all(.[];(map(.declaration.declarationDigest)|unique|length)==1)' "$stage/declarations.ndjson" >/dev/null \
+      || { echo 'Error: repeated historical slot has conflicting declarations' >&2; return 3; }
+    if [ "$(jq -s 'length-(unique_by(.declaration.slotId)|length)' "$stage/declarations.ndjson")" -gt 0 ]; then touch "$stage/repeated-declarations"; fi
+
     for page_file in "$stage"/pages/*.json; do
         repo_id=$(jq -r '.issues[0].repositoryId // empty' "$page_file")
         repo=$(jq -r --arg id "$repo_id" '.registrySnapshot.repositories[]|select(.repositoryId==$id)|.repository' "$activation")
@@ -180,11 +184,11 @@ cmd_materialise_census_capture() {
             .markers=[$m[]|select(.repository==$repo and .issue==$i.number)|{oid,ref}]|.markers|=sort_by(.ref) |
             .completionEvidence=[$c[]|select(.repository==$repo and .issue==$i.number)|{disposition,oid,ref}]|.completionEvidence|=sort_by(.ref) |
             .liveDelegations=[$l[]|select(.repository==$repo and .issue==$i.number)|del(.repository,.issue)]|.liveDelegations|=sort_by(.ref) |
-            .declarations=[$d[]|select(.repository==$repo and .issue==$i.number)|.declaration]|.declarations|=sort_by(.slotId))
+            .declarations=([$d[]|select(.repository==$repo and .issue==$i.number)|.declaration]|unique_by(.slotId))|.declarations|=sort_by(.slotId))
         ' "$page_file" >"$page_file.new" || return 3
         mv "$page_file.new" "$page_file"
     done
-    if [ "$input_schema" = 2 ] || [ -s "$stage/aliases.ndjson" ]; then
+    if [ "$input_schema" = 2 ] || [ -s "$stage/aliases.ndjson" ] || [ -e "$stage/repeated-declarations" ]; then
       jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" --argjson terminalDeclarations "$([ "$input_schema" = 2 ] && cat "$stage/terminal-declarations.json" || echo '[]')" --slurpfile aliases "$stage/aliases.ndjson" \
         '{schema:2,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories,repositoryAliases:($aliases|sort_by(.declaredName)),terminalDeclarations:$terminalDeclarations}' >"$stage/spec.json" || return 2
     else
@@ -193,7 +197,7 @@ cmd_materialise_census_capture() {
     fi
     echo 'census-capture: validating candidate with canonical census builder' >&2
     (cd "$stage" && _taskdag_census_build spec.json census.preview.json) || return 3
-    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage/body.tmp" "$stage/terminal-validation.json" "$stage/terminal-declarations.json" "$stage/aliases.ndjson"
+    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage/body.tmp" "$stage/terminal-validation.json" "$stage/terminal-declarations.json" "$stage/aliases.ndjson" "$stage/repeated-declarations"
     [ ! -e "$destination" ] || return 3
     mv -T "$stage" "$destination" || return 2; stage=""
     jq -ncS --arg outputDir "$destination" --arg spec "$destination/spec.json" --arg preview "$destination/census.preview.json" \

@@ -59,14 +59,22 @@ PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$RO
   && ok "capture emits validated conservative census inputs" || bad "valid census capture"
 git clone -q "$ROOT/repo" "$ROOT/mixed-repo"; git -C "$ROOT/mixed-repo" config user.name fixture; git -C "$ROOT/mixed-repo" config user.email fixture@example.test; git -C "$ROOT/mixed-repo" config taskdag.current-repo virusdave/task-dag
 printf body >"$ROOT/mixed-repo/body"; git -C "$ROOT/mixed-repo" add body; git -C "$ROOT/mixed-repo" commit -qm $'fixture\n\nMaterialise-Child-Epic: Legacy/Task-Dag\nChild-Epic-Title: Renamed fixture\nChild-Epic-Body-File: body\nParent-Issue: 1'
+git -C "$ROOT/mixed-repo" commit --allow-empty -qm $'Repeated fixture\n\nMaterialise-Child-Epic: Legacy/Task-Dag\nChild-Epic-Title: Renamed fixture\nChild-Epic-Body-File: body\nParent-Issue: 1'
 mixed_tip=$(git -C "$ROOT/mixed-repo" rev-parse HEAD); jq --arg tip "$mixed_tip" '.sourceTips[0].commit=$tip' "$ROOT/capture-activation" >"$ROOT/mixed-activation"
 jq -ncS --arg activation "$ROOT/mixed-activation" --arg path "$ROOT/mixed-repo" '{schema:1,activationRecord:$activation,repositories:[{path:$path,repository:"virusdave/task-dag"}]}' >"$ROOT/mixed-input"
 PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/mixed-input" --output-dir "$ROOT/mixed-capture" >/dev/null \
   && jq -e '.issues[0].declarations[0].peerRepo.name=="Legacy/Task-Dag"' "$ROOT/mixed-capture/pages/virusdave_task-dag.0001.json" >/dev/null \
   && jq -e '.schema==2 and .repositoryAliases==[{canonicalName:"virusdave/task-dag",declaredName:"Legacy/Task-Dag",repositoryId:"R_fixture",resolution:"registry-unique-name"}]' "$ROOT/mixed-capture/spec.json" >/dev/null \
-  && ok "capture preserves renamed legacy identity with registry alias" || bad "renamed census capture"
+  && jq -e '(.slots|length)==1 and (.historicalOccurrences|length)==2' "$ROOT/mixed-capture/census.preview.json" >/dev/null \
+  && ok "capture preserves renamed identity and repeated occurrences" || bad "renamed repeated census capture"
 if PEER_FAILURE=1 PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/mixed-input" --output-dir "$ROOT/peer-failure" >/dev/null 2>&1 \
   || [ -e "$ROOT/peer-failure" ]; then bad "capture treated provider failure as repository absence"; else ok "renamed peer fallback requires an authoritative 404"; fi
+git clone -q "$ROOT/mixed-repo" "$ROOT/conflicting-repeat"; git -C "$ROOT/conflicting-repeat" config user.name fixture; git -C "$ROOT/conflicting-repeat" config user.email fixture@example.test; git -C "$ROOT/conflicting-repeat" config taskdag.current-repo virusdave/task-dag
+git -C "$ROOT/conflicting-repeat" commit --allow-empty -qm $'Conflicting repeat\n\nMaterialise-Child-Epic: Legacy/Task-Dag\nChild-Epic-Title: Changed declaration\nChild-Epic-Body-File: body\nParent-Issue: 1'
+conflicting_tip=$(git -C "$ROOT/conflicting-repeat" rev-parse HEAD); jq --arg tip "$conflicting_tip" '.sourceTips[0].commit=$tip' "$ROOT/capture-activation" >"$ROOT/conflicting-activation"
+jq -ncS --arg activation "$ROOT/conflicting-activation" --arg path "$ROOT/conflicting-repeat" '{schema:1,activationRecord:$activation,repositories:[{path:$path,repository:"virusdave/task-dag"}]}' >"$ROOT/conflicting-input"
+if PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/conflicting-input" --output-dir "$ROOT/conflicting-capture" >/dev/null 2>&1 \
+  || [ -e "$ROOT/conflicting-capture" ]; then bad "capture merged conflicting repeated declarations"; else ok "conflicting repeated slot fails closed"; fi
 if PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured" >/dev/null 2>&1; then bad "capture overwrote existing output"; else ok "capture output is no-clobber"; fi
 CAPTURE_MODE=pages CAPTURE_COUNTER="$ROOT/pages-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured-pages" >/dev/null \
   && [ "$(jq '.issuePages|length' "$ROOT/captured-pages/spec.json")" -eq 2 ] \
