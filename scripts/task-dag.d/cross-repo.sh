@@ -765,7 +765,7 @@ _xrepo_validate_completion_fact() {
 _xrepo_validate_delegated_close_v1() {
     local sha="$1" delegation_sha="$2" top_repo="$3" top_issue="$4"
     local peer_repo="$5" peer_issue="$6" peer_tip peer_close peer_root wt parents first second extra tree first_tree close_issue resolved
-    local key record_value delegation_value
+    local key record_value delegation_value legacy_values legacy_delegation
     [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] || return 2
     [ "$(git rev-parse "$sha^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] || return 2
     [ "$(git show -s --format='%P' "$sha")" = "$delegation_sha" ] || return 2
@@ -774,13 +774,24 @@ _xrepo_validate_delegated_close_v1() {
     [ "$(_xrepo_exact_trailer "$sha" Parent-Issue)" = "#${top_issue}" ] || return 2
     [ "$(_xrepo_exact_trailer "$sha" Peer-Repo)" = "$peer_repo" ] || return 2
     [ "$(_xrepo_exact_trailer "$sha" Peer-Issue)" = "#${peer_issue}" ] || return 2
-    for key in Parent-Repo-Node-Id Parent-Issue-Node-Id Peer-Repo-Node-Id Peer-Issue-Node-Id Materialisation-Operation-Id Declaration-Digest; do
-        record_value=$(_xrepo_exact_trailer "$sha" "$key") || return 2
-        delegation_value=$(_xrepo_exact_trailer "$delegation_sha" "$key") || return 2
-        [ -n "$record_value" ] && [ "$record_value" = "$delegation_value" ] || return 2
-    done
-    record_value=$(_xrepo_exact_trailer "$sha" Declaration-Digest) || return 2
-    [[ "$record_value" =~ ^[0-9a-f]{64}$ ]] || return 2
+    if _xrepo_trailer_present "$sha" Legacy-Delegation; then
+        legacy_delegation=$(_xrepo_exact_trailer "$sha" Legacy-Delegation) || return 2
+        [ "$legacy_delegation" = "$delegation_sha" ] || return 2
+        for key in Parent-Repo-Node-Id Parent-Issue-Node-Id Peer-Repo-Node-Id Peer-Issue-Node-Id Materialisation-Operation-Id Declaration-Digest; do
+            ! _xrepo_trailer_present "$sha" "$key" || return 2
+            ! _xrepo_trailer_present "$delegation_sha" "$key" || return 2
+        done
+    else
+        for key in Parent-Repo-Node-Id Parent-Issue-Node-Id Peer-Repo-Node-Id Peer-Issue-Node-Id Materialisation-Operation-Id Declaration-Digest; do
+            _xrepo_trailer_present "$sha" "$key" || return 2
+            _xrepo_trailer_present "$delegation_sha" "$key" || return 2
+            record_value=$(_xrepo_exact_trailer "$sha" "$key") || return 2
+            delegation_value=$(_xrepo_exact_trailer "$delegation_sha" "$key") || return 2
+            [ -n "$record_value" ] && [ "$record_value" = "$delegation_value" ] || return 2
+        done
+        record_value=$(_xrepo_exact_trailer "$sha" Declaration-Digest) || return 2
+        [[ "$record_value" =~ ^[0-9a-f]{64}$ ]] || return 2
+    fi
     peer_tip=$(_xrepo_exact_trailer "$sha" Peer-Tip) || return 2
     peer_close=$(_xrepo_exact_trailer "$sha" Peer-Close) || return 2
     peer_root=$(_xrepo_exact_trailer "$sha" Peer-Epic) || return 2
@@ -900,15 +911,29 @@ _xrepo_reconcile_delegated_close() { # parent-issue peer-repo peer-issue delegat
     resolved=$(_xrepo_resolve_peer_close "$wt" "$tip" "$peer_issue") || return 2
     [ -n "$resolved" ] || return 0
     IFS=$'\t' read -r close root <<<"$resolved"
+    local parent_repo_node parent_issue_node peer_repo_node peer_issue_node operation_id declaration_digest identity_count=0 legacy_delegation=""
+    parent_repo_node=""; parent_issue_node=""; peer_repo_node=""; peer_issue_node=""; operation_id=""; declaration_digest=""
+    for key in Parent-Repo-Node-Id Parent-Issue-Node-Id Peer-Repo-Node-Id Peer-Issue-Node-Id Materialisation-Operation-Id Declaration-Digest; do
+        if _xrepo_trailer_present "$delegation" "$key"; then
+            record_value=$(_xrepo_exact_trailer "$delegation" "$key") || return 2
+            identity_count=$((identity_count+1))
+            case "$key" in
+                Parent-Repo-Node-Id) parent_repo_node="$record_value";; Parent-Issue-Node-Id) parent_issue_node="$record_value";;
+                Peer-Repo-Node-Id) peer_repo_node="$record_value";; Peer-Issue-Node-Id) peer_issue_node="$record_value";;
+                Materialisation-Operation-Id) operation_id="$record_value";; Declaration-Digest) declaration_digest="$record_value";;
+            esac
+        fi
+    done
+    if [ "$identity_count" -eq 0 ]; then legacy_delegation="$delegation"
+    elif [ "$identity_count" -ne 6 ]; then return 2
+    fi
     evidence=$(jq -ncS --arg parentRepo "$top_repo" --argjson parentIssue "$top_issue" --arg peerRepo "$peer_repo" --argjson peerIssue "$peer_issue" \
-        --arg parentRepoNodeId "$(_xrepo_exact_trailer "$delegation" Parent-Repo-Node-Id)" \
-        --arg parentIssueNodeId "$(_xrepo_exact_trailer "$delegation" Parent-Issue-Node-Id)" \
-        --arg peerRepoNodeId "$(_xrepo_exact_trailer "$delegation" Peer-Repo-Node-Id)" \
-        --arg peerIssueNodeId "$(_xrepo_exact_trailer "$delegation" Peer-Issue-Node-Id)" \
-        --arg materialisationOperationId "$(_xrepo_exact_trailer "$delegation" Materialisation-Operation-Id)" \
-        --arg declarationDigest "$(_xrepo_exact_trailer "$delegation" Declaration-Digest)" \
+        --arg parentRepoNodeId "$parent_repo_node" --arg parentIssueNodeId "$parent_issue_node" \
+        --arg peerRepoNodeId "$peer_repo_node" --arg peerIssueNodeId "$peer_issue_node" \
+        --arg materialisationOperationId "$operation_id" --arg declarationDigest "$declaration_digest" \
+        --arg legacyDelegationSha "$legacy_delegation" \
         --arg peerTip "$tip" --arg peerClose "$close" --arg peerEpic "$root" \
-        '{parentRepo:$parentRepo,parentIssue:$parentIssue,peerRepo:$peerRepo,peerIssue:$peerIssue,parentRepoNodeId:$parentRepoNodeId,parentIssueNodeId:$parentIssueNodeId,peerRepoNodeId:$peerRepoNodeId,peerIssueNodeId:$peerIssueNodeId,materialisationOperationId:$materialisationOperationId,declarationDigest:$declarationDigest,peerTip:$peerTip,peerClose:$peerClose,peerEpic:$peerEpic}') || return 2
+        '{parentRepo:$parentRepo,parentIssue:$parentIssue,peerRepo:$peerRepo,peerIssue:$peerIssue,parentRepoNodeId:$parentRepoNodeId,parentIssueNodeId:$parentIssueNodeId,peerRepoNodeId:$peerRepoNodeId,peerIssueNodeId:$peerIssueNodeId,materialisationOperationId:$materialisationOperationId,declarationDigest:$declarationDigest,legacyDelegationSha:$legacyDelegationSha,peerTip:$peerTip,peerClose:$peerClose,peerEpic:$peerEpic}') || return 2
     candidate=$(_taskdag_delegated_close_message "$evidence" | git commit-tree "$(_xrepo_empty_tree)" -p "$delegation") || return 2
     _xrepo_validate_delegated_close_v1 "$candidate" "$delegation" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue" || return 2
     ref="refs/heads/tasks/delegated-close/v1/${top_issue}/${peer_repo}/${peer_issue}"
@@ -944,6 +969,12 @@ _xrepo_exact_trailer() {
     [ "$(printf '%s\n' "$values" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || return 2
     [ -n "$values" ] || return 2
     printf '%s\n' "$values"
+}
+
+_xrepo_trailer_present() {
+    local commit="$1" key="$2" keys
+    keys=$(git show -s --format="%(trailers:key=${key},keyonly,separator=%x0A)" "$commit" 2>/dev/null) || return 2
+    [ -n "$keys" ]
 }
 
 # Validate one isolated delegated/close snapshot and report whether every

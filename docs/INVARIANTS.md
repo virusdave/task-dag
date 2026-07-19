@@ -642,7 +642,11 @@ are the contract you must preserve when editing a minter.
 - **Delegation** (`tasks/delegated/…`): `kind: delegated`, parent = epic.
   Canonical materialisation also binds the immutable parent/peer repository
   and issue node IDs, materialisation operation ID, and declaration digest;
-  delegated-close evidence must repeat those exact bindings.
+  delegated-close evidence must repeat those exact bindings. A legacy
+  delegation that predates **all** six bindings may produce a close record
+  carrying `Legacy-Delegation: <exact-delegation-sha>` instead; the record is
+  still parented by that delegation and must pass the same strict peer
+  tip/close/root checks. Partially populated modern identity is invalid.
 - **Completion record** (`tasks/completions/…`): `kind: completion`.
 - **Completion merge** (on `master`, from `complete`): a merge whose
   non-first parent is the task commit, carrying `Task-Commit:` +

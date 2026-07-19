@@ -758,7 +758,12 @@ cmd_materialise_child() {
 # bytes reproducible and makes an omitted/inaccessible peer a hard failure.
 _taskdag_delegated_close_message() { # evidence-json
     local evidence=$1
-    jq -r '"Record delegated close\n\nTask-Dag-Delegated-Close: v1\nParent-Repo: \(.parentRepo)\nParent-Issue: #\(.parentIssue)\nPeer-Repo: \(.peerRepo)\nPeer-Issue: #\(.peerIssue)\nParent-Repo-Node-Id: \(.parentRepoNodeId)\nParent-Issue-Node-Id: \(.parentIssueNodeId)\nPeer-Repo-Node-Id: \(.peerRepoNodeId)\nPeer-Issue-Node-Id: \(.peerIssueNodeId)\nMaterialisation-Operation-Id: \(.materialisationOperationId)\nDeclaration-Digest: \(.declarationDigest)\nPeer-Tip: \(.peerTip)\nPeer-Close: \(.peerClose)\nPeer-Epic: \(.peerEpic)"' <<<"$evidence"
+    jq -r '
+      if ((.legacyDelegationSha // "") != "") then
+        "Record delegated close\n\nTask-Dag-Delegated-Close: v1\nParent-Repo: \(.parentRepo)\nParent-Issue: #\(.parentIssue)\nPeer-Repo: \(.peerRepo)\nPeer-Issue: #\(.peerIssue)\nLegacy-Delegation: \(.legacyDelegationSha)\nPeer-Tip: \(.peerTip)\nPeer-Close: \(.peerClose)\nPeer-Epic: \(.peerEpic)"
+      else
+        "Record delegated close\n\nTask-Dag-Delegated-Close: v1\nParent-Repo: \(.parentRepo)\nParent-Issue: #\(.parentIssue)\nPeer-Repo: \(.peerRepo)\nPeer-Issue: #\(.peerIssue)\nParent-Repo-Node-Id: \(.parentRepoNodeId)\nParent-Issue-Node-Id: \(.parentIssueNodeId)\nPeer-Repo-Node-Id: \(.peerRepoNodeId)\nPeer-Issue-Node-Id: \(.peerIssueNodeId)\nMaterialisation-Operation-Id: \(.materialisationOperationId)\nDeclaration-Digest: \(.declarationDigest)\nPeer-Tip: \(.peerTip)\nPeer-Close: \(.peerClose)\nPeer-Epic: \(.peerEpic)"
+      end' <<<"$evidence"
 }
 
 _taskdag_import_commit_tree() {

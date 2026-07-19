@@ -15,6 +15,7 @@ classify() {
   printf '%s\n' "${result%%$'\x1f'*}"
 }
 source "$(dirname "$TD")/task-dag.d/cross-repo.sh"
+source "$(dirname "$TD")/task-dag.d/materialise.sh"
 touch "$tmp/watchdog-token"
 taskdag_comment_watchdog_check_file() { [ "$1" = "$tmp/watchdog-token" ] && [ "$2" -eq 510 ]; }
 _xrepo_watchdog_token_valid_for "$tmp/watchdog-token" 480
@@ -82,8 +83,40 @@ record=$(printf '%s\n' 'Record delegated close' '' 'Task-Dag-Delegated-Close: v1
   | git -C "$tmp/work" commit-tree "$empty" -p "$delegation")
 (cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$record" "$delegation" \
   acme/widgets 99 peer/repo 2)
+empty_legacy_marker=$(printf '%s\n' "$(git -C "$tmp/work" show -s --format=%B "$record")" 'Legacy-Delegation:' \
+  | git -C "$tmp/work" commit-tree "$empty" -p "$delegation")
+! (cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$empty_legacy_marker" "$delegation" \
+  acme/widgets 99 peer/repo 2)
 ! git -C "$tmp/peer" show-ref --verify --quiet refs/heads/gh/issues/2
 ! git -C "$tmp/peer" show-ref --verify --quiet refs/heads/tasks/pending/2
+
+legacy_delegation=$(printf '%s\n' 'Legacy delegation' | git -C "$tmp/work" commit-tree "$empty")
+legacy_evidence=$(jq -ncS --arg close "$legacy_close" --arg root "$legacy_root" --arg delegation "$legacy_delegation" \
+  '{parentRepo:"acme/widgets",parentIssue:99,peerRepo:"peer/repo",peerIssue:2,legacyDelegationSha:$delegation,peerTip:$close,peerClose:$close,peerEpic:$root}')
+legacy_record=$(_taskdag_delegated_close_message "$legacy_evidence" \
+  | git -C "$tmp/work" commit-tree "$empty" -p "$legacy_delegation")
+(cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$legacy_record" "$legacy_delegation" \
+  acme/widgets 99 peer/repo 2)
+wrong_legacy_record=$(printf '%s\n' "$(git -C "$tmp/work" show -s --format=%B "$legacy_record" | sed "s/Legacy-Delegation: .*/Legacy-Delegation: $delegation/")" \
+  | git -C "$tmp/work" commit-tree "$empty" -p "$legacy_delegation")
+! (cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$wrong_legacy_record" "$legacy_delegation" \
+  acme/widgets 99 peer/repo 2)
+partial_delegation=$(printf '%s\n' 'Partial delegation' '' 'Parent-Repo-Node-Id: PR_parent' \
+  | git -C "$tmp/work" commit-tree "$empty")
+partial_evidence=$(jq -ncS --arg close "$legacy_close" --arg root "$legacy_root" --arg delegation "$partial_delegation" \
+  '{parentRepo:"acme/widgets",parentIssue:99,peerRepo:"peer/repo",peerIssue:2,legacyDelegationSha:$delegation,peerTip:$close,peerClose:$close,peerEpic:$root}')
+partial_record=$(_taskdag_delegated_close_message "$partial_evidence" \
+  | git -C "$tmp/work" commit-tree "$empty" -p "$partial_delegation")
+! (cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$partial_record" "$partial_delegation" \
+  acme/widgets 99 peer/repo 2)
+empty_partial_delegation=$(printf '%s\n' 'Partial delegation' '' 'Parent-Repo-Node-Id:' \
+  | git -C "$tmp/work" commit-tree "$empty")
+empty_partial_evidence=$(jq -ncS --arg close "$legacy_close" --arg root "$legacy_root" --arg delegation "$empty_partial_delegation" \
+  '{parentRepo:"acme/widgets",parentIssue:99,peerRepo:"peer/repo",peerIssue:2,legacyDelegationSha:$delegation,peerTip:$close,peerClose:$close,peerEpic:$root}')
+empty_partial_record=$(_taskdag_delegated_close_message "$empty_partial_evidence" \
+  | git -C "$tmp/work" commit-tree "$empty" -p "$empty_partial_delegation")
+! (cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$empty_partial_record" "$empty_partial_delegation" \
+  acme/widgets 99 peer/repo 2)
 
 # Two structurally valid historical roots for one issue are ambiguous.
 ambiguous_a=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -m $'Task: Ambiguous A\n\nIssue: #3\nStatus: pending\nType: epic')
