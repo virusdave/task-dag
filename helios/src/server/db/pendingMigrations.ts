@@ -1758,6 +1758,24 @@ const SENTINELS: MigrationSentinel[] = [
       'vendors + vendor_brand_associations normalized purchasing directory ' +
       '(automation#79), including case-insensitive vendor/brand uniqueness ' +
       'and the at-most-one-primary-vendor rule.',
+    blessing: {
+      ref: 'https://ampcode.com/threads/T-019f77d2-749e-7558-a11d-186d0ad3ca69',
+      reviewedSha: 'ecfe5087ea7f8566bcb87c8ea80844829b378252',
+      artifactSha256: 'e3723c9583a630ee8696ef0f72e189ac5ba09d7769bcdbf1e7ee1422f8b1a9af',
+      transactionMode: 'transactional',
+      operatorExplanation:
+        'This migration adds the vendor directory that Helios needs to treat ' +
+        'vendors, rather than shared distributors, as the ordering identity. ' +
+        'It creates normalized vendor and vendor-to-brand association tables, ' +
+        'loads 84 vendors and 232 primary brand associations from the reviewed ' +
+        'seed, and enforces case-insensitive uniqueness plus at most one primary ' +
+        'vendor per brand. It does not rewrite existing application tables or ' +
+        'start any recurring workload.',
+      note:
+        'Oracle-approved additive migration. Self-wrapped in begin/commit with ' +
+        '5s lock_timeout and no CREATE INDEX CONCURRENTLY. The down migration is ' +
+        'destructive and is not part of the admin apply flow.',
+    },
     check: vendorBrandAssociationsSchemaApplied,
   },
   // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and
