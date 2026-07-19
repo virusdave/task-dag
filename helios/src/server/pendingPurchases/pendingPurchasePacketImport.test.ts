@@ -80,7 +80,7 @@ describe('persistPendingPurchasePacket refinement lineage', () => {
     expect(persisted).toEqual({ auditEventId: 123, importedRowCount: 1, packetId: 74 })
     expect(migrationApplied).toHaveBeenCalledWith(client)
     expect(calls.map((call) => call.text)).toEqual(expect.arrayContaining([
-      expect.stringMatching(/lock table pending_purchase_packets in exclusive mode/i),
+      expect.stringMatching(/lock table pending_purchase_packets in access exclusive mode/i),
       expect.stringMatching(/update pending_purchase_packets[\s\S]*packet_root_id in[\s\S]*root_status = 'active'/i),
       expect.stringMatching(/update pending_purchase_packet_roots[\s\S]*root_status = 'superseded'/i),
       expect.stringMatching(/update pending_purchase_rows[\s\S]*row_lineage_id = 'pprline_' \|\| id::text/i),
@@ -98,7 +98,7 @@ describe('persistPendingPurchasePacket refinement lineage', () => {
     await persistPendingPurchasePacket(client, input())
 
     const sql = calls.map((call) => call.text).join('\n')
-    expect(sql).toMatch(/lock table pending_purchase_packets in exclusive mode/i)
+    expect(sql).toMatch(/lock table pending_purchase_packets in access exclusive mode/i)
     expect(sql).not.toMatch(/pending_purchase_packet_roots/i)
     expect(sql).not.toMatch(/row_lineage_id/i)
     expect(sql).not.toMatch(/revision_status = 'superseded'/i)
@@ -118,7 +118,7 @@ describe('persistPendingPurchasePacket refinement lineage', () => {
     })
 
     const sql = calls.map((call) => call.text).join('\n')
-    expect(sql).toMatch(/lock table pending_purchase_packets in exclusive mode/i)
+    expect(sql).toMatch(/lock table pending_purchase_packets in access exclusive mode/i)
     expect(sql).not.toMatch(/set status = 'superseded'/i)
     expect(sql).not.toMatch(/insert into pending_purchase_packets/i)
     expect(sql).not.toMatch(/insert into audit_events/i)

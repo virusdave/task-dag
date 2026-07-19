@@ -142,9 +142,9 @@ export async function persistPendingPurchasePacket(
 
   // Take this unconditionally before the schema probe: migration 102 also
   // locks this table, so it cannot commit between a false probe and a legacy
-  // packet insert. Old writers and refinement switches take ROW EXCLUSIVE;
-  // EXCLUSIVE serializes them while still permitting unrelated reads.
-  await db.query('lock table pending_purchase_packets in exclusive mode')
+  // packet insert. ACCESS EXCLUSIVE also waits for packet readers, preventing
+  // a refinement request from retaining stale root state across supersession.
+  await db.query('lock table pending_purchase_packets in access exclusive mode')
   const hasRefinementLineage = await isPendingPurchaseRefinementSchemaAvailable(db)
 
   if (input.jobId !== null) {
