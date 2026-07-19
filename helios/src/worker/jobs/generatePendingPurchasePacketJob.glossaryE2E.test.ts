@@ -126,6 +126,15 @@ function classifierInput(
         unitCost: 18,
         currentDistributorLinkProductId: null,
         sweedSuggestions: [],
+        vendorEvidence: {
+          status: 'unknown',
+          vendorId: null,
+          vendorName: null,
+          confidence: 'none',
+          allowedBrandNames: [],
+          allowedCatalogProductIds: [],
+          evidence: [],
+        },
       },
     ],
     catalogCandidates: [
