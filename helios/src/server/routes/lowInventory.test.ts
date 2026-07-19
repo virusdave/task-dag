@@ -318,7 +318,7 @@ describe('low-inventory routes', () => {
 
     const config = await server.inject({ method: 'GET', url: '/api/low-inventory/transfer-config?dealerId=210705' })
     expect(config.json()).toMatchObject({
-      dealerId: 210705, destinationName: 'NOT FOR SALE - Hold for Dave inspection', transferEnabled: false,
+      dealerId: 210705, destinationName: 'NOT FOR SALE - Quantity Audit', transferEnabled: false,
     })
     const unbounded = await server.inject({ method: 'GET', url: '/api/low-inventory/audits?dealerId=210705&limit=101' })
     expect(unbounded.statusCode).toBe(400)

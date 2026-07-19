@@ -33,7 +33,7 @@ import {
 
 const config = {
   dealerId: 210705,
-  destinationName: 'NOT FOR SALE - Hold for Dave inspection',
+  destinationName: 'NOT FOR SALE - Quantity Audit',
   transferEnabled: true,
   updatedAt: null,
   updatedBy: null,
@@ -57,7 +57,7 @@ beforeEach(() => {
     updatedBy: 'admin@example.com', value: config,
   })
   listLocationsMock.mockResolvedValue([
-    { id: 8, name: 'NOT FOR SALE - Hold for Dave inspection', enabled: true, stockTypeId: 80 },
+    { id: 8, name: 'NOT FOR SALE - Quantity Audit', enabled: true, stockTypeId: 80 },
   ])
   listLotsMock.mockResolvedValue([{
     inventoryItemId: 'pkg-1', externalTrackCode: 'TAG-1', availableQty: 1, currentQty: 1,
@@ -91,7 +91,7 @@ describe('low-inventory transfer service', () => {
       }])
       .mockResolvedValueOnce([{
         inventoryItemId: 'pkg-1', externalTrackCode: 'TAG-1', availableQty: 1, currentQty: 1,
-        stockLocationId: 8, stockLocationName: 'NOT FOR SALE - Hold for Dave inspection', stockTypeId: 80,
+        stockLocationId: 8, stockLocationName: 'NOT FOR SALE - Quantity Audit', stockTypeId: 80,
         isTradeSample: false,
       }])
     const result = await confirmLowInventoryTransfer({

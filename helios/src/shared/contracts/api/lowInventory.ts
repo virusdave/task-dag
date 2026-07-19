@@ -94,7 +94,7 @@ export const LowInventoryResponseSchema = z.object({
 })
 export type LowInventoryResponse = z.infer<typeof LowInventoryResponseSchema>
 
-export const LOW_INVENTORY_DEFAULT_DESTINATION = 'NOT FOR SALE - Hold for Dave inspection'
+export const LOW_INVENTORY_DEFAULT_DESTINATION = 'NOT FOR SALE - Quantity Audit'
 export const LowInventoryClassificationSchema = z.enum(['equal', 'short', 'zero', 'over', 'held'])
 export type LowInventoryClassification = z.infer<typeof LowInventoryClassificationSchema>
 
