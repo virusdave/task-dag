@@ -33,9 +33,11 @@ cmd_materialise_census_capture() {
     [ "$#" -eq 4 ] && [ "$1" = --spec-file ] && [ "$3" = --output-dir ] || return 2
     local input=$2 destination=$4 base activation_source destination_parent destination_name stage activation
     local repo path clone clone_rel ref tip repo_id before after clone_manifest page page_file page_count issue oid refname tail owner name peer commit
-    local source_id peer_id parent_id body_file body_len body_sha slug note slug_present note_present slot declaration operation group
+    local source_id peer_id parent_id body_file body_len body_sha slug note slug_present note_present slot declaration operation group group_entry group_ordinal review_count input_schema
     [ -f "$input" ] && [ ! -L "$input" ] && _taskdag_materialise_no_duplicate_keys "$input" || return 2
-    jq -e 'type=="object" and keys==["activationRecord","repositories","schema"] and .schema==1 and
+    jq -e 'type=="object" and
+      ((.schema==1 and keys==["activationRecord","repositories","schema"]) or
+       (.schema==2 and keys==["activationRecord","repositories","schema","terminalDeclarations"] and (.terminalDeclarations|type=="array"))) and
       (.activationRecord|type=="string" and length>0) and
       (.repositories|type=="array" and length>0 and .==sort_by(.repository) and
        (map(.repository)|length==(unique|length)) and all(.[];keys==["path","repository"] and
@@ -50,6 +52,12 @@ cmd_materialise_census_capture() {
     trap 'rm -rf "${stage:-}"' RETURN
     cp "$activation_source" "$stage/activation.json" || return 2; activation="$stage/activation.json"
     jq -e '.schema==1 and .state=="enabled" and (.sourceTips|type=="array") and (.registrySnapshot.repositories|type=="array")' "$activation" >/dev/null || return 3
+    input_schema=$(jq -r .schema "$input")
+    if [ "$input_schema" = 2 ]; then
+      jq -cS '.terminalDeclarations' "$input" >"$stage/terminal-declarations.json" || return 2
+      jq -ncS --argjson terminalDeclarations "$(cat "$stage/terminal-declarations.json")" '{schema:2,activationRecord:"activation.json",issuePages:[],repositories:[],terminalDeclarations:$terminalDeclarations}' >"$stage/terminal-validation.json" || return 2
+      _taskdag_validate_terminal_declarations "$stage/terminal-validation.json" "$activation" || return 2
+    fi
     [ "$(jq -c '[.repositories[].repository]' "$input")" = "$(jq -c '[.registrySnapshot.repositories[].repository]' "$activation")" ] || return 3
     mkdir "$stage/pages" "$stage/manifests" "$stage/repos"
     : >"$stage/repositories.ndjson"; : >"$stage/pages.ndjson"
@@ -111,12 +119,18 @@ cmd_materialise_census_capture() {
         source_id=$(jq -r --arg r "$repo" '.registrySnapshot.repositories[]|select(.repository==$r)|.repositoryId' "$activation")
         tip=$(jq -r --arg r "$repo" '.sourceTips[]|select(.repository==$r)|.commit' "$activation")
         while IFS= read -r commit; do
-            while IFS= read -r group; do
-                [ -n "$group" ] || continue
+            while IFS= read -r group_entry; do
+                [ -n "$group_entry" ] || continue
+                group_ordinal=$(jq -r .key <<<"$group_entry"); group=$(jq -c .value <<<"$group_entry")
                 issue=$(taskdag_materialise_parent_number "$(jq -r .parent <<<"$group")") || return 3
-                peer=$(jq -r .peer <<<"$group"); peer_id=$(jq -r --arg r "${peer,,}" '.registrySnapshot.repositories[]|select(.repository==$r)|.repositoryId' "$activation")
+                peer=$(jq -r .peer <<<"$group")
                 parent_id=$(jq -r --argjson issue "$issue" '[.[][]|select(.number==$issue)][0].id // empty' "$stage/${repo//\//_}.pass1")
-                [ -n "$peer_id" ] && [ -n "$parent_id" ] || return 3
+                [ -n "$parent_id" ] || return 3
+                review_count=$(jq --arg repo "$repo" --arg commit "$commit" --argjson ordinal "$group_ordinal" '[.terminalDeclarations[]?|select(.sourceRepo.name==$repo and .declarationCommit==$commit and .groupOrdinal==$ordinal)]|length' "$input") || return 2
+                [ "$review_count" -le 1 ] || return 3
+                [ "$review_count" -eq 0 ] || continue
+                peer_id=$(jq -r --arg r "${peer,,}" '.registrySnapshot.repositories[]|select(.repository==$r)|.repositoryId' "$activation")
+                [ -n "$peer_id" ] || return 3
                 body_file=$(jq -r .bodyFile <<<"$group"); body_len=$(git -C "$path" cat-file -s "$commit:$body_file") || return 3
                 git -C "$path" cat-file blob "$commit:$body_file" >"$stage/body.tmp" || return 3
                 body_sha=$(_taskdag_materialise_sha256_file "$stage/body.tmp") || return 3
@@ -127,7 +141,7 @@ cmd_materialise_census_capture() {
                 jq -ncS --rawfile body "$stage/body.tmp" --arg repo "$repo" --arg sourceId "$source_id" --arg peerRepo "$peer" --arg peerId "$peer_id" --arg parentId "$parent_id" --argjson issue "$issue" \
                   --arg title "$(jq -r .title <<<"$group")" --argjson bodyLength "$body_len" --arg bodySha256 "$body_sha" --arg slotId "$slot" --arg declarationDigest "$declaration" --arg operationId "$operation" --arg slug "$slug" --arg note "$note" --argjson slugPresent "$slug_present" --argjson notePresent "$note_present" \
                   '{repository:$repo,issue:$issue,declaration:({schema:1,sourceRepo:{id:$sourceId,name:$repo},parentIssue:{id:$parentId,number:$issue},peerRepo:{id:$peerId,name:$peerRepo},title:$title,body:$body,bodyLength:$bodyLength,bodySha256:$bodySha256,slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,disposition:"create-in-flight-or-uncertain"} + (if $slugPresent then {slug:$slug} else {} end) + (if $notePresent then {delegationNote:$note} else {} end))}' >>"$stage/declarations.ndjson"
-            done < <(git -C "$path" log -1 --format='%B' "$commit" | taskdag_materialise_groups_json_from_message | jq -c '.[]')
+            done < <(git -C "$path" log -1 --format='%B' "$commit" | taskdag_materialise_groups_json_from_message | jq -c 'to_entries[]')
         done < <(git -C "$path" rev-list --reverse "$tip")
     done < <(jq -sr 'sort_by(.repository)[]|[.repository,.path]|@tsv' "$stage/repositories.ndjson")
 
@@ -145,11 +159,16 @@ cmd_materialise_census_capture() {
         ' "$page_file" >"$page_file.new" || return 3
         mv "$page_file.new" "$page_file"
     done
-    jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" \
-      '{schema:1,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories}' >"$stage/spec.json" || return 2
+    if [ "$input_schema" = 2 ]; then
+      jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" --argjson terminalDeclarations "$(cat "$stage/terminal-declarations.json")" \
+        '{schema:2,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories,terminalDeclarations:$terminalDeclarations}' >"$stage/spec.json" || return 2
+    else
+      jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" \
+        '{schema:1,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories}' >"$stage/spec.json" || return 2
+    fi
     echo 'census-capture: validating candidate with canonical census builder' >&2
     (cd "$stage" && _taskdag_census_build spec.json census.preview.json) || return 3
-    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage/body.tmp"
+    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage/body.tmp" "$stage/terminal-validation.json" "$stage/terminal-declarations.json"
     [ ! -e "$destination" ] || return 3
     mv -T "$stage" "$destination" || return 2; stage=""
     jq -ncS --arg outputDir "$destination" --arg spec "$destination/spec.json" --arg preview "$destination/census.preview.json" \

@@ -83,6 +83,40 @@ jq -ncS --arg activation "$ROOT/activation" --arg path "$ROOT/repo" --arg tip "$
 "$TD" materialise-census --spec-file "$ROOT/spec" --artifact "$ROOT/b" --digest-file "$ROOT/bd" || bad "repeat census"
 cmp -s "$ROOT/a" "$ROOT/b" && cmp -s "$ROOT/ad" "$ROOT/bd" && ok "artifact and digest are deterministic" || bad "deterministic bytes"
 jq -e 'keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","schema","slots"] and .slots==[] and (.legacyCompletionRefs|length)==1 and .legacyCompletionRefs[0].disposition=="partial-implementation" and (.liveDelegations|length)==1 and .liveDelegations[0].disposition=="live-obligation"' "$ROOT/a" >/dev/null && ok "marker is not completion and old/live refs have independent dispositions" || bad "artifact disposition arrays"
+
+# A reviewed terminal declaration remains in the census but cannot become a
+# materialisation slot. Both evidence roles and every declared byte are bound
+# to the frozen history.
+git clone -q "$ROOT/repo" "$ROOT/terminal-repo"; git -C "$ROOT/terminal-repo" config user.name fixture; git -C "$ROOT/terminal-repo" config user.email fixture@example.test; git -C "$ROOT/terminal-repo" config taskdag.current-repo virusdave/task-dag
+printf 'terminal body' >"$ROOT/terminal-repo/terminal-body"; git -C "$ROOT/terminal-repo" add terminal-body
+git -C "$ROOT/terminal-repo" commit -qm $'Terminal fixture\n\nMaterialise-Child-Epic: missing/repository\nChild-Epic-Title: Terminal declaration\nChild-Epic-Body-File: terminal-body\nParent-Issue: 1'
+terminal_commit=$(git -C "$ROOT/terminal-repo" rev-parse HEAD); printf later >"$ROOT/terminal-repo/later"; git -C "$ROOT/terminal-repo" add later; git -C "$ROOT/terminal-repo" commit -qm 'Later source history'
+terminal_tip=$(git -C "$ROOT/terminal-repo" rev-parse HEAD); terminal_body_sha=$(printf 'terminal body' | sha256sum | awk '{print $1}')
+git init -q "$ROOT/evidence-repo"; git -C "$ROOT/evidence-repo" config user.name fixture; git -C "$ROOT/evidence-repo" config user.email fixture@example.test; git -C "$ROOT/evidence-repo" config taskdag.current-repo evidence/repo
+printf 'no effect' >"$ROOT/evidence-repo/no-effect"; printf superseded >"$ROOT/evidence-repo/supersession"; git -C "$ROOT/evidence-repo" add .; git -C "$ROOT/evidence-repo" commit -qm evidence
+evidence_tip=$(git -C "$ROOT/evidence-repo" rev-parse HEAD); no_effect_oid=$(git -C "$ROOT/evidence-repo" rev-parse "$evidence_tip:no-effect"); supersession_oid=$(git -C "$ROOT/evidence-repo" rev-parse "$evidence_tip:supersession")
+git -C "$ROOT/terminal-repo" update-ref refs/heads/gh/child-epic-slots/1/virusdave/task-dag/slot "$tip"
+git -C "$ROOT/terminal-repo" update-ref refs/heads/tasks/completions/1/virusdave/task-dag/2/abcdef0 "$tip"
+git -C "$ROOT/terminal-repo" update-ref refs/heads/tasks/delegated/1/virusdave/task-dag/2 "$tip"
+jq -ncS --arg terminalTip "$terminal_tip" --arg evidenceTip "$evidence_tip" '{schema:1,sourceTips:[{repository:"evidence/repo",ref:"refs/heads/master",commit:$evidenceTip},{repository:"virusdave/task-dag",ref:"refs/heads/master",commit:$terminalTip}],registrySnapshot:{repositories:[{repository:"evidence/repo",repositoryId:"R_evidence",name:"repo"},{repository:"virusdave/task-dag",repositoryId:"R_fixture",name:"task-dag"}]}}' >"$ROOT/terminal-activation"
+jq -ncS '{schema:1,issues:[]}' >"$ROOT/evidence-page"
+jq -ncS --arg commit "$terminal_commit" --arg evidenceTip "$evidence_tip" --arg bodySha "$terminal_body_sha" --arg noEffect "$no_effect_oid" --arg supersession "$supersession_oid" \
+  '{schema:1,disposition:"superseded-no-effect",sourceRepo:{id:"R_fixture",name:"virusdave/task-dag"},declarationCommit:$commit,groupOrdinal:0,parentIssue:{id:"I_fixture",number:1},peerRepo:"missing/repository",title:"Terminal declaration",bodyFile:"terminal-body",body:"terminal body",bodyLength:13,bodySha256:$bodySha,slug:null,delegationNote:null,evidence:[{role:"no-effect",repository:{id:"R_evidence",name:"evidence/repo"},commit:$evidenceTip,path:"no-effect",blobOid:$noEffect},{role:"supersession",repository:{id:"R_evidence",name:"evidence/repo"},commit:$evidenceTip,path:"supersession",blobOid:$supersession}]}' >"$ROOT/terminal-review"
+jq -ncS --arg activation "$ROOT/terminal-activation" --arg sourcePath "$ROOT/terminal-repo" --arg sourceTip "$terminal_tip" --arg evidencePath "$ROOT/evidence-repo" --arg evidenceTip "$evidence_tip" --arg page "$ROOT/page" --arg evidencePage "$ROOT/evidence-page" --slurpfile terminal "$ROOT/terminal-review" \
+  '{schema:2,activationRecord:$activation,repositories:[{path:$evidencePath,repository:"evidence/repo",tip:$evidenceTip},{path:$sourcePath,repository:"virusdave/task-dag",tip:$sourceTip}],issuePages:[{file:$evidencePage,hasNextPage:false,page:1,repository:"evidence/repo"},{file:$page,hasNextPage:false,page:1,repository:"virusdave/task-dag"}],terminalDeclarations:$terminal}' >"$ROOT/terminal-spec"
+"$TD" materialise-census --spec-file "$ROOT/terminal-spec" --artifact "$ROOT/terminal-artifact" --digest-file "$ROOT/terminal-digest" \
+  && jq -e '.schema==2 and .slots==[] and (.terminalDeclarations|length)==1 and .terminalDeclarations[0].disposition=="superseded-no-effect"' "$ROOT/terminal-artifact" >/dev/null \
+  && ok "reviewed terminal declaration is retained without a slot" || bad "reviewed terminal declaration census"
+jq '.terminalDeclarations[0].title="mismatched"' "$ROOT/terminal-spec" >"$ROOT/terminal-mismatch"
+if "$TD" materialise-census --spec-file "$ROOT/terminal-mismatch" --artifact "$ROOT/terminal-no" --digest-file "$ROOT/terminal-no-digest" >/dev/null 2>&1; then bad "mismatched terminal review accepted"; else ok "mismatched terminal review fails closed"; fi
+jq '.terminalDeclarations += [.terminalDeclarations[0]]' "$ROOT/terminal-spec" >"$ROOT/terminal-duplicate"
+if "$TD" materialise-census --spec-file "$ROOT/terminal-duplicate" --artifact "$ROOT/terminal-no" --digest-file "$ROOT/terminal-no-digest" >/dev/null 2>&1; then bad "duplicate terminal review accepted"; else ok "duplicate terminal review fails closed"; fi
+jq '.terminalDeclarations[0].groupOrdinal=1' "$ROOT/terminal-spec" >"$ROOT/terminal-unused"
+if "$TD" materialise-census --spec-file "$ROOT/terminal-unused" --artifact "$ROOT/terminal-no" --digest-file "$ROOT/terminal-no-digest" >/dev/null 2>&1; then bad "unused terminal review accepted"; else ok "unused terminal review fails closed"; fi
+terminal_tree=$(git -C "$ROOT/evidence-repo" rev-parse "$evidence_tip^{tree}")
+jq --arg oid "$terminal_tree" '(.terminalDeclarations[0].evidence[0]) += {path:".",blobOid:$oid}' "$ROOT/terminal-spec" >"$ROOT/terminal-tree-evidence"
+if "$TD" materialise-census --spec-file "$ROOT/terminal-tree-evidence" --artifact "$ROOT/terminal-no" --digest-file "$ROOT/terminal-no-digest" >/dev/null 2>&1; then bad "terminal tree accepted as evidence blob"; else ok "terminal evidence requires an immutable blob"; fi
+
 git -C "$ROOT/repo" config taskdag.current-repo substitute/repo
 if "$TD" materialise-census --spec-file "$ROOT/spec" --artifact "$ROOT/wrong-repo" --digest-file "$ROOT/wrong-repo-digest" >/dev/null 2>&1; then bad "mislabeled source checkout accepted"; else ok "source checkout identity is registry-bound"; fi
 git -C "$ROOT/repo" config taskdag.current-repo virusdave/task-dag

@@ -478,8 +478,9 @@ configuration toggle or legacy fallback participates.
 
 ### Offline census/import/adoption schemas
 
-`materialise-census` accepts one strict schema-1 JSON object with exactly
-`activationRecord`, `issuePages`, `repositories`, and `schema`. Repositories
+`materialise-census` accepts either a strict schema-1 JSON object with exactly
+`activationRecord`, `issuePages`, `repositories`, and `schema`, or schema 2
+with the additional `terminalDeclarations` array described below. Repositories
 are sorted `{path,repository,tip}` objects and must equal both the activation
 registry and `sourceTips`; every path is a full local checkout at that exact
 tip. Issue pages are sorted `{file,hasNextPage,page,repository}` objects. Each
@@ -512,12 +513,27 @@ API, pagination, identity, source-tip, ref-mutation, snapshot, schema, or
 validation failures publish nothing. The published directory is a
 self-contained offline input; review and retain it unchanged through import.
 
+Schema 2 supports a reviewed `superseded-no-effect` disposition for a
+historical declaration that conclusively had no effect and was superseded by a
+later operator decision. Each terminal record binds the source repository ID,
+declaration commit and zero-based group ordinal, parent issue ID and number,
+all literal trailer fields, exact body path/bytes/hash/length, and exactly one
+frozen-tip evidence blob for each of the `no-effect` and `supersession` roles.
+Evidence repository IDs, commits, paths, and blob OIDs are verified against
+the frozen checkouts. Reviews must be sorted and unique; an omitted, invented,
+duplicate, mismatched, or unused review fails the complete census. The
+terminal records are retained in the artifact and its digest but are
+structurally excluded from issue declarations and `slots`, so import creates
+no declaration, state, adoption, rearm, producer, reconciliation, or GitHub
+effect for them. Schema 1 remains valid only when no terminal review is
+required.
+
 The census writes canonical artifact bytes and a separate lowercase SHA-256
 digest. `materialise-import` requires those exact files and the same input,
 repeats census, byte-compares it, then performs one activation-fenced atomic
 multi-ref compare-and-swap. The artifact has separately keyed `slots`,
-`legacyCompletionRefs`, and `liveDelegations` arrays; every member carries
-exactly one disposition. Any inaccessible repository, tip drift, evidence
+`legacyCompletionRefs`, and `liveDelegations` arrays; schema 2 additionally
+has `terminalDeclarations`. Every member carries exactly one disposition. Any inaccessible repository, tip drift, evidence
 omission, incomplete pagination, collision, or corruption fails before a
 write. Import persists the reviewed census, exact bodies and declarations,
 and a generation-zero append-only state for every slot. Imported slots can
