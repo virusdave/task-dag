@@ -764,8 +764,7 @@ _xrepo_validate_completion_fact() {
 # binds immutable GitHub identities plus the exact peer close witness.
 _xrepo_validate_delegated_close_v1() {
     local sha="$1" delegation_sha="$2" top_repo="$3" top_issue="$4"
-    local peer_repo="$5" peer_issue="$6" peer_tip peer_close peer_root wt parents first second extra tree first_tree close_issue
-    local gh_root pending_root
+    local peer_repo="$5" peer_issue="$6" peer_tip peer_close peer_root wt parents first second extra tree first_tree close_issue resolved
     local key record_value delegation_value
     [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] || return 2
     [ "$(git rev-parse "$sha^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] || return 2
@@ -789,10 +788,8 @@ _xrepo_validate_delegated_close_v1() {
     wt=$(taskdag_peer_worktree_for "$peer_repo") || return 2
     env -u GIT_DIR git -C "$wt" rev-list --first-parent "$peer_tip" 2>/dev/null \
         | awk -v close_oid="$peer_close" '$0 == close_oid { found=1 } END { exit !found }' || return 2
-    gh_root=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/gh/issues/${peer_issue}^{commit}" 2>/dev/null || true)
-    pending_root=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "refs/heads/tasks/pending/${peer_issue}^{commit}" 2>/dev/null || true)
-    [ -z "$gh_root" ] || [ -z "$pending_root" ] || [ "$gh_root" = "$pending_root" ] || return 2
-    [ "${gh_root:-$pending_root}" = "$peer_root" ] || return 2
+    resolved=$(_xrepo_resolve_peer_close "$wt" "$peer_tip" "$peer_issue") || return 2
+    [ "$resolved" = "$peer_close"$'\t'"$peer_root" ] || return 2
     parents=$(env -u GIT_DIR git -C "$wt" show -s --format='%P' "$peer_close" 2>/dev/null) || return 2
     read -r first second extra <<<"$parents"
     [ -n "$first" ] && [ "$second" = "$peer_root" ] && [ -z "${extra:-}" ] || return 2
@@ -820,7 +817,6 @@ _xrepo_refresh_peer_issue_root() { # peer-worktree issue
             *) return 2 ;;
         esac
     done <<<"$listing"
-    [ -n "$gh_root" ] || [ -n "$pending_root" ] || return 2
     [ -z "$gh_root" ] || [ -z "$pending_root" ] || [ "$gh_root" = "$pending_root" ] || return 2
     for ref in "refs/heads/gh/issues/${issue}" "refs/heads/tasks/pending/${issue}"; do
         if [ "$ref" = "refs/heads/gh/issues/${issue}" ]; then sha="$gh_root"; else sha="$pending_root"; fi
@@ -832,30 +828,78 @@ _xrepo_refresh_peer_issue_root() { # peer-worktree issue
             env -u GIT_DIR git -C "$wt" update-ref -d "$ref" || return 2
         fi
     done
+    [ -n "$gh_root" ] || [ -n "$pending_root" ] || return 1
     printf '%s\n' "${gh_root:-$pending_root}"
 }
 
+_xrepo_peer_historical_root_matches() { # peer-worktree root issue
+    local wt="$1" root="$2" issue="$3" tree first first_tree subject type issue_value
+    tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$root^{tree}" 2>/dev/null) || return 1
+    [ "$tree" = "$(_xrepo_empty_tree)" ] || return 1
+    type=$(env -u GIT_DIR git -C "$wt" show -s --format=%B "$root" 2>/dev/null \
+        | awk -v key=Type '
+            /^$/ { section++; if (section == 2) exit; next }
+            section == 1 && index($0,key ": ") == 1 { count++; value=substr($0,length(key)+3) }
+            END { if (count == 1) print value; else exit 1 }') || return 1
+    issue_value=$(env -u GIT_DIR git -C "$wt" show -s --format=%B "$root" 2>/dev/null \
+        | awk -v key=Issue '
+            /^$/ { section++; if (section == 2) exit; next }
+            section == 1 && index($0,key ": ") == 1 { count++; value=substr($0,length(key)+3) }
+            END { if (count == 1) print value; else exit 1 }') || return 1
+    [ "$type" = epic ] && [ "$issue_value" = "#${issue}" ] || return 1
+    subject=$(env -u GIT_DIR git -C "$wt" show -s --format=%s "$root" 2>/dev/null) || return 1
+    [[ "$subject" = "Task: "* ]] || return 1
+    first=$(env -u GIT_DIR git -C "$wt" rev-parse -q --verify "$root^" 2>/dev/null || true)
+    if [ -n "$first" ]; then
+        first_tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$first^{tree}" 2>/dev/null || true)
+        if [ "$first_tree" = "$(_xrepo_empty_tree)" ] \
+            && [[ "$(env -u GIT_DIR git -C "$wt" show -s --format=%s "$first" 2>/dev/null)" = "Task: "* ]]; then
+            return 1
+        fi
+    fi
+}
+
+_xrepo_resolve_peer_close() { # peer-worktree peer-tip issue
+    local wt="$1" tip="$2" issue="$3" candidate parents first root extra tree first_tree trailer
+    local candidates="" roots="" identity="" rc=0 close=""
+    while IFS= read -r candidate; do
+        parents=$(env -u GIT_DIR git -C "$wt" show -s --format='%P' "$candidate") || return 2
+        read -r first root extra <<<"$parents"
+        [ -n "$first" ] && [ -n "$root" ] && [ -z "${extra:-}" ] || continue
+        tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$candidate^{tree}") || return 2
+        first_tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$first^{tree}") || return 2
+        [ "$tree" = "$first_tree" ] || continue
+        trailer=$(env -u GIT_DIR git -C "$wt" show -s \
+            --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$candidate") || return 2
+        [ "$trailer" = "#${issue}" ] || continue
+        _xrepo_peer_historical_root_matches "$wt" "$root" "$issue" || continue
+        candidates+="${candidate}"$'\t'"${root}"$'\n'
+    done < <(env -u GIT_DIR git -C "$wt" rev-list --first-parent --reverse "$tip")
+    [ -n "$candidates" ] || return 0
+
+    identity=$(_xrepo_refresh_peer_issue_root "$wt" "$issue") || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        roots=$(printf '%s' "$candidates" | cut -f2 | LC_ALL=C sort -u)
+        [ "$(printf '%s\n' "$roots" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || return 2
+        identity="$roots"
+    elif [ "$rc" -ne 0 ]; then
+        return 2
+    fi
+    close=$(printf '%s' "$candidates" | awk -F '\t' -v root="$identity" '$2==root {print $1; exit}')
+    [ -n "$close" ] || return 2
+    printf '%s\t%s\n' "$close" "$identity"
+}
+
 _xrepo_reconcile_delegated_close() { # parent-issue peer-repo peer-issue delegation-sha
-    local top_issue=$1 peer_repo=$2 peer_issue=$3 delegation=$4 top_repo wt tip root close="" candidate ref existing rc=0 updates evidence
+    local top_issue=$1 peer_repo=$2 peer_issue=$3 delegation=$4 top_repo wt tip root close="" resolved ref existing rc=0 updates evidence
     top_repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 2
     wt=$(taskdag_peer_worktree_for "$peer_repo" 2>/dev/null) || return 0
     env -u GIT_DIR git -C "$wt" fetch -q --no-tags origin \
         '+refs/heads/master:refs/remotes/origin/master' || return 2
     tip=$(env -u GIT_DIR git -C "$wt" rev-parse refs/remotes/origin/master^{commit}) || return 2
-    root=$(_xrepo_refresh_peer_issue_root "$wt" "$peer_issue") || return 2
-    while IFS= read -r candidate; do
-        local parents first second extra tree first_tree trailer
-        parents=$(env -u GIT_DIR git -C "$wt" show -s --format='%P' "$candidate") || return 2
-        read -r first second extra <<<"$parents"
-        [ -n "$first" ] && [ "$second" = "$root" ] && [ -z "${extra:-}" ] || continue
-        tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$candidate^{tree}") || return 2
-        first_tree=$(env -u GIT_DIR git -C "$wt" rev-parse "$first^{tree}") || return 2
-        [ "$tree" = "$first_tree" ] || continue
-        trailer=$(env -u GIT_DIR git -C "$wt" show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$candidate") || return 2
-        [ "$trailer" = "#${peer_issue}" ] || continue
-        close=$candidate; break
-    done < <(env -u GIT_DIR git -C "$wt" rev-list --first-parent --reverse "$tip")
-    [ -n "$close" ] || return 0
+    resolved=$(_xrepo_resolve_peer_close "$wt" "$tip" "$peer_issue") || return 2
+    [ -n "$resolved" ] || return 0
+    IFS=$'\t' read -r close root <<<"$resolved"
     evidence=$(jq -ncS --arg parentRepo "$top_repo" --argjson parentIssue "$top_issue" --arg peerRepo "$peer_repo" --argjson peerIssue "$peer_issue" \
         --arg parentRepoNodeId "$(_xrepo_exact_trailer "$delegation" Parent-Repo-Node-Id)" \
         --arg parentIssueNodeId "$(_xrepo_exact_trailer "$delegation" Parent-Issue-Node-Id)" \

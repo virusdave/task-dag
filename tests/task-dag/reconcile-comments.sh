@@ -51,6 +51,48 @@ git -C "$tmp/peer" push -q --force origin "$stale_root:refs/heads/gh/issues/1"
 git --git-dir="$tmp/peer-origin.git" update-ref -d refs/heads/gh/issues/1
 git --git-dir="$tmp/peer-origin.git" update-ref -d refs/heads/tasks/pending/1
 ! _xrepo_refresh_peer_issue_root "$tmp/peer" 1 >/dev/null
+
+# A peer with no close is still waiting, not erroneous. A strict historical
+# close can recover its unique root after both legacy identity refs are gone.
+[ -z "$(_xrepo_resolve_peer_close "$tmp/peer" "$(git -C "$tmp/peer" rev-parse HEAD)" 2)" ]
+legacy_root=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -m $'Task: Legacy peer epic\n\nIssue: #2\nStatus: pending\nType: epic')
+legacy_base=$(git -C "$tmp/peer" rev-parse HEAD)
+legacy_close=$(git -C "$tmp/peer" commit-tree "$(git -C "$tmp/peer" rev-parse "${legacy_base}^{tree}")" \
+  -p "$legacy_base" -p "$legacy_root" -m $'Close legacy peer epic\n\nCloses-Epic: #2')
+git -C "$tmp/peer" update-ref refs/heads/master "$legacy_close"
+git -C "$tmp/peer" push -q origin master:master
+[ "$(_xrepo_resolve_peer_close "$tmp/peer" "$legacy_close" 2)" = "$legacy_close"$'\t'"$legacy_root" ]
+
+# The durable delegated-close validator uses the same historical resolver;
+# both remote and stale local identity refs remain absent.
+git -C "$tmp/work" config taskdag.peer-path.peer/repo.path "$tmp/peer"
+taskdag_peer_worktree_for() { [ "$1" = peer/repo ] && printf '%s\n' "$tmp/peer"; }
+digest=$(printf x | sha256sum | awk '{print $1}')
+delegation=$(printf '%s\n' 'Delegation' '' \
+  'Parent-Repo-Node-Id: PR_parent' 'Parent-Issue-Node-Id: PI_parent' \
+  'Peer-Repo-Node-Id: PR_peer' 'Peer-Issue-Node-Id: PI_peer' \
+  'Materialisation-Operation-Id: operation-2' "Declaration-Digest: $digest" \
+  | git -C "$tmp/work" commit-tree "$empty")
+record=$(printf '%s\n' 'Record delegated close' '' 'Task-Dag-Delegated-Close: v1' \
+  'Parent-Repo: acme/widgets' 'Parent-Issue: #99' 'Peer-Repo: peer/repo' 'Peer-Issue: #2' \
+  'Parent-Repo-Node-Id: PR_parent' 'Parent-Issue-Node-Id: PI_parent' \
+  'Peer-Repo-Node-Id: PR_peer' 'Peer-Issue-Node-Id: PI_peer' \
+  'Materialisation-Operation-Id: operation-2' "Declaration-Digest: $digest" \
+  "Peer-Tip: $legacy_close" "Peer-Close: $legacy_close" "Peer-Epic: $legacy_root" \
+  | git -C "$tmp/work" commit-tree "$empty" -p "$delegation")
+(cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$record" "$delegation" \
+  acme/widgets 99 peer/repo 2)
+! git -C "$tmp/peer" show-ref --verify --quiet refs/heads/gh/issues/2
+! git -C "$tmp/peer" show-ref --verify --quiet refs/heads/tasks/pending/2
+
+# Two structurally valid historical roots for one issue are ambiguous.
+ambiguous_a=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -m $'Task: Ambiguous A\n\nIssue: #3\nStatus: pending\nType: epic')
+ambiguous_b=$(git -C "$tmp/peer" commit-tree "$empty" -p HEAD -m $'Task: Ambiguous B\n\nIssue: #3\nStatus: pending\nType: epic')
+ambiguous_close_a=$(git -C "$tmp/peer" commit-tree "$(git -C "$tmp/peer" rev-parse "${legacy_close}^{tree}")" \
+  -p "$legacy_close" -p "$ambiguous_a" -m $'Close ambiguous A\n\nCloses-Epic: #3')
+ambiguous_close_b=$(git -C "$tmp/peer" commit-tree "$(git -C "$tmp/peer" rev-parse "${ambiguous_close_a}^{tree}")" \
+  -p "$ambiguous_close_a" -p "$ambiguous_b" -m $'Close ambiguous B\n\nCloses-Epic: #3')
+! _xrepo_resolve_peer_close "$tmp/peer" "$ambiguous_close_b" 3 >/dev/null
 metadata_sha=0123456789abcdef0123456789abcdef01234567
 [ "$(classify 10 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = machine-skip ]
 [ "$(classify 11 "Task metadata commit: $metadata_sha | Branch: tasks/pending/10")" = human ]
