@@ -14,6 +14,52 @@ git -C "$ROOT/repo" update-ref refs/heads/gh/child-epic-slots/1/virusdave/task-d
 git -C "$ROOT/repo" update-ref refs/heads/tasks/completions/1/virusdave/task-dag/2/abcdef0 "$tip"
 git -C "$ROOT/repo" update-ref refs/heads/tasks/delegated/1/virusdave/task-dag/2 "$tip"
 jq -ncS --arg tip "$tip" '{schema:1,sourceTips:[{repository:"virusdave/task-dag",ref:"refs/heads/master",commit:$tip}],registrySnapshot:{repositories:[{repository:"virusdave/task-dag",repositoryId:"R_fixture",name:"task-dag"}]}}' >"$ROOT/activation"
+jq '.state="enabled"' "$ROOT/activation" >"$ROOT/capture-activation"
+mkdir "$ROOT/capture-bin"
+cat >"$ROOT/capture-bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+endpoint="${*: -1}"
+if [[ "$endpoint" == repos/virusdave/task-dag ]]; then
+  printf '%s\n' '{"full_name":"virusdave/task-dag","node_id":"R_fixture"}'
+else
+  count=0; [ ! -n "${CAPTURE_COUNTER:-}" ] || { count=$(cat "$CAPTURE_COUNTER" 2>/dev/null || echo 0); count=$((count+1)); printf '%s\n' "$count" >"$CAPTURE_COUNTER"; }
+  [ "${CAPTURE_MODE:-}" != mutate-ref ] || [ "$count" -ne 1 ] || git -C "$CAPTURE_REPO" update-ref refs/heads/tasks/mutated "$CAPTURE_TIP"
+  case "${CAPTURE_MODE:-}" in
+    pages) printf '%s\n' '[[{"body":"fixture body\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture","user":{"login":"fixture"}}],[{"body":"pr\n","created_at":"2026-07-17T00:00:01Z","node_id":"PR_fixture","number":2,"pull_request":{},"state":"open","title":"PR","user":{"login":"fixture"}},{"body":"second\n","created_at":"2026-07-17T00:00:02Z","node_id":"I_second","number":3,"state":"closed","title":"Second","user":{"login":"fixture"}}]]' ;;
+    unstable) printf '[[{"body":"fixture body\\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture %s","user":{"login":"fixture"}}]]\n' "$count" ;;
+    pr-unstable) printf '[[{"body":"fixture body\\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture","user":{"login":"fixture"}},{"body":"pr\\n","created_at":"2026-07-17T00:00:01Z","node_id":"PR_fixture","number":2,"pull_request":{},"state":"open","title":"PR %s","user":{"login":"fixture"}}]]\n' "$count" ;;
+    *) printf '%s\n' '[[{"body":"fixture body\n","created_at":"2026-07-17T00:00:00Z","node_id":"I_fixture","number":1,"state":"open","title":"Fixture","user":{"login":"fixture"}}]]' ;;
+  esac
+fi
+EOF
+chmod +x "$ROOT/capture-bin/gh"
+jq -ncS --arg activation "$ROOT/capture-activation" --arg path "$ROOT/repo" \
+  '{schema:1,activationRecord:$activation,repositories:[{path:$path,repository:"virusdave/task-dag"}]}' >"$ROOT/capture-input"
+PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured" >/dev/null \
+  && jq -e '.issues[0].completionEvidence[0].disposition=="partial-implementation" and .issues[0].liveDelegations[0].disposition=="live-obligation"' "$ROOT/captured/pages/virusdave_task-dag.0001.json" >/dev/null \
+  && ok "capture emits validated conservative census inputs" || bad "valid census capture"
+git clone -q "$ROOT/repo" "$ROOT/mixed-repo"; git -C "$ROOT/mixed-repo" config user.name fixture; git -C "$ROOT/mixed-repo" config user.email fixture@example.test; git -C "$ROOT/mixed-repo" config taskdag.current-repo virusdave/task-dag
+printf body >"$ROOT/mixed-repo/body"; git -C "$ROOT/mixed-repo" add body; git -C "$ROOT/mixed-repo" commit -qm $'fixture\n\nMaterialise-Child-Epic: VirusDave/Task-Dag\nChild-Epic-Title: Mixed case fixture\nChild-Epic-Body-File: body\nParent-Issue: 1'
+mixed_tip=$(git -C "$ROOT/mixed-repo" rev-parse HEAD); jq --arg tip "$mixed_tip" '.sourceTips[0].commit=$tip' "$ROOT/capture-activation" >"$ROOT/mixed-activation"
+jq -ncS --arg activation "$ROOT/mixed-activation" --arg path "$ROOT/mixed-repo" '{schema:1,activationRecord:$activation,repositories:[{path:$path,repository:"virusdave/task-dag"}]}' >"$ROOT/mixed-input"
+PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/mixed-input" --output-dir "$ROOT/mixed-capture" >/dev/null \
+  && jq -e '.issues[0].declarations[0].peerRepo.name=="VirusDave/Task-Dag"' "$ROOT/mixed-capture/pages/virusdave_task-dag.0001.json" >/dev/null \
+  && ok "capture preserves mixed-case legacy declaration identity" || bad "mixed-case census capture"
+if PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured" >/dev/null 2>&1; then bad "capture overwrote existing output"; else ok "capture output is no-clobber"; fi
+CAPTURE_MODE=pages CAPTURE_COUNTER="$ROOT/pages-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/captured-pages" >/dev/null \
+  && [ "$(jq '.issuePages|length' "$ROOT/captured-pages/spec.json")" -eq 2 ] \
+  && jq -se '[.[].issues[]|.number]==[1,2,3]' "$ROOT/captured-pages/pages/"*.json >/dev/null \
+  && ok "capture preserves complete issues-endpoint pagination" || bad "paginated census capture"
+if CAPTURE_MODE=unstable CAPTURE_COUNTER="$ROOT/unstable-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/unstable" >/dev/null 2>&1 \
+  || [ -e "$ROOT/unstable" ]; then bad "capture accepted changing API snapshots"; else ok "capture rejects changing API snapshots without output"; fi
+if CAPTURE_MODE=pr-unstable CAPTURE_COUNTER="$ROOT/pr-unstable-counter" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/pr-unstable" >/dev/null 2>&1 \
+  || [ -e "$ROOT/pr-unstable" ]; then bad "capture accepted changing pull request snapshots"; else ok "capture rejects pull request-only API mutation"; fi
+if CAPTURE_MODE=mutate-ref CAPTURE_COUNTER="$ROOT/mutate-counter" CAPTURE_REPO="$ROOT/repo" CAPTURE_TIP="$tip" PATH="$ROOT/capture-bin:$PATH" "$TD" materialise-census-capture --spec-file "$ROOT/capture-input" --output-dir "$ROOT/mutated" >/dev/null 2>&1 \
+  || [ -e "$ROOT/mutated" ]; then bad "capture accepted repository mutation"; else ok "capture rejects repository mutation without output"; fi
+git -C "$ROOT/repo" update-ref -d refs/heads/tasks/mutated
+"$TD" materialise-census --spec-file "$ROOT/captured/spec.json" --artifact "$ROOT/captured-again" --digest-file "$ROOT/captured-again.digest" \
+  && ok "published capture is a self-contained offline input" || bad "self-contained capture replay"
 jq -ncS --arg oid "$tip" '{schema:1,issues:[{body:"fixture body\n",completionEvidence:[{disposition:"partial-implementation",oid:$oid,ref:"refs/heads/tasks/completions/1/virusdave/task-dag/2/abcdef0"}],createdAt:"2026-07-17T00:00:00Z",creator:"fixture",declarations:[],id:"I_fixture",liveDelegations:[{disposition:"live-obligation",oid:$oid,parentIssue:1,parentRepo:"virusdave/task-dag",peerIssue:2,peerRepo:"virusdave/task-dag",ref:"refs/heads/tasks/delegated/1/virusdave/task-dag/2"}],markers:[{oid:$oid,ref:"refs/heads/gh/child-epic-slots/1/virusdave/task-dag/slot"}],number:1,repositoryId:"R_fixture",state:"OPEN",title:"Fixture"}]}' >"$ROOT/page"
 jq -ncS --arg activation "$ROOT/activation" --arg path "$ROOT/repo" --arg tip "$tip" --arg page "$ROOT/page" '{schema:1,activationRecord:$activation,repositories:[{path:$path,repository:"virusdave/task-dag",tip:$tip}],issuePages:[{file:$page,hasNextPage:false,page:1,repository:"virusdave/task-dag"}]}' >"$ROOT/spec"
 "$TD" materialise-census --spec-file "$ROOT/spec" --artifact "$ROOT/a" --digest-file "$ROOT/ad" || bad "valid census"
@@ -71,7 +117,7 @@ for historical_body in adopt rearm initial; do
   GIT_INDEX_FILE="$historical_index" git -C "$REPO_ROOT" update-index --add --cacheinfo "100644,$historical_blob,$historical_body-body"
 done
 historical_tree=$(GIT_INDEX_FILE="$historical_index" git -C "$REPO_ROOT" write-tree); rm -f "$historical_index"
-parent_tip=$(printf '%s\n' $'Record historical materialisation declarations\n\nMaterialise-Child-Epic: peer/repo\nChild-Epic-Title: Adopt\nChild-Epic-Body-File: adopt-body\nParent-Issue: 1\nChild-Epic-Slug: fixture\n\nMaterialise-Child-Epic: peer/repo\nChild-Epic-Title: Rearm\nChild-Epic-Body-File: rearm-body\nParent-Issue: 1\nChild-Epic-Slug: rearm\n\nMaterialise-Child-Epic: peer/repo\nChild-Epic-Title: Initial\nChild-Epic-Body-File: initial-body\nParent-Issue: 1\nChild-Epic-Slug: initial' | git -C "$REPO_ROOT" commit-tree "$historical_tree" -p "$activation_floor")
+parent_tip=$(printf '%s\n' $'Record historical materialisation declarations\n\nMaterialise-Child-Epic: peer/repo\nChild-Epic-Title: Adopt\nChild-Epic-Body-File: adopt-body\nParent-Issue: 1\nChild-Epic-Slug: fixture\n\nMaterialise-Child-Epic: Peer/Repo\nChild-Epic-Title: Rearm\nChild-Epic-Body-File: rearm-body\nParent-Issue: 1\nChild-Epic-Slug: rearm\n\nMaterialise-Child-Epic: peer/repo\nChild-Epic-Title: Initial\nChild-Epic-Body-File: initial-body\nParent-Issue: 1\nChild-Epic-Slug: initial' | git -C "$REPO_ROOT" commit-tree "$historical_tree" -p "$activation_floor")
 git --git-dir="$I/origin" update-ref -d refs/heads/master
 git -C "$REPO_ROOT" push -q "$I/origin" "$parent_tip:refs/heads/master"
 git -C "$I/parent" fetch -q origin master; git -C "$I/parent" reset -q --hard "$parent_tip"
@@ -86,13 +132,14 @@ git --git-dir="$I/origin" show "$active:records/0000000000000001.json" >"$I/acti
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-producer.sh"
 make_declaration() { # disposition, title, body, slug, output
-  local disposition=$1 title=$2 body=$3 slug=$4 out=$5 body_sha body_len slot declaration operation slug_presence
+  local disposition=$1 title=$2 body=$3 slug=$4 out=$5 body_sha body_len slot declaration operation slug_presence peer_name=peer/repo
+  [ "$title" != Rearm ] || peer_name=Peer/Repo
   body_sha=$(printf %s "$body" | sha256sum | awk '{print $1}'); body_len=$(printf %s "$body" | wc -c)
   if [ -n "$slug" ]; then slug_presence=present; else slug_presence=absent; fi
   slot=$(_taskdag_materialise_id slot PR_parent PI_parent 1 PR_peer "$slug_presence" "$slug")
-  declaration=$(_taskdag_materialise_id declaration PR_parent virusdave/task-dag PI_parent 1 PR_peer peer/repo "$title" "$body_sha" "$body_len" "$slug_presence" "$slug" absent '')
+  declaration=$(_taskdag_materialise_id declaration PR_parent virusdave/task-dag PI_parent 1 PR_peer "$peer_name" "$title" "$body_sha" "$body_len" "$slug_presence" "$slug" absent '')
   operation=$(_taskdag_materialise_id operation "$slot" "$declaration")
-  jq -ncS --arg body "$body" --argjson bodyLength "$body_len" --arg bodySha256 "$body_sha" --arg declarationDigest "$declaration" --arg disposition "$disposition" --arg operationId "$operation" --arg slotId "$slot" --arg title "$title" --arg slug "$slug" '{schema:1,sourceRepo:{id:"PR_parent",name:"virusdave/task-dag"},parentIssue:{id:"PI_parent",number:1},peerRepo:{id:"PR_peer",name:"peer/repo"},title:$title,body:$body,bodyLength:$bodyLength,bodySha256:$bodySha256,slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,disposition:$disposition} + (if $slug=="" then {} else {slug:$slug} end)' >"$out"
+  jq -ncS --arg body "$body" --argjson bodyLength "$body_len" --arg bodySha256 "$body_sha" --arg declarationDigest "$declaration" --arg disposition "$disposition" --arg operationId "$operation" --arg slotId "$slot" --arg title "$title" --arg slug "$slug" --arg peerName "$peer_name" '{schema:1,sourceRepo:{id:"PR_parent",name:"virusdave/task-dag"},parentIssue:{id:"PI_parent",number:1},peerRepo:{id:"PR_peer",name:$peerName},title:$title,body:$body,bodyLength:$bodyLength,bodySha256:$bodySha256,slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,disposition:$disposition} + (if $slug=="" then {} else {slug:$slug} end)' >"$out"
 }
 make_declaration blocked-repair Adopt 'adopt body' fixture "$I/adopt-declaration"
 make_declaration create-in-flight-or-uncertain Rearm 'rearm body' rearm "$I/rearm-declaration"

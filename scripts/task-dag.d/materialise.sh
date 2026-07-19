@@ -854,8 +854,9 @@ _taskdag_census_snapshot() { # source-spec workspace; prints snapped spec path
       source_ref=$(jq -r --arg r "$repo" '.sourceTips[]|select(.repository==$r)|.ref' "$work/activation.json")
       expected=$(jq -r --arg r "$repo" '.sourceTips[]|select(.repository==$r)|.commit' "$work/activation.json")
       [ -n "$source_ref" ] && [ "$(git -C "$path" rev-parse "$source_ref^{commit}" 2>/dev/null)" = "$expected" ] || return 3
-      clone="$work/repo.$n.git"; git clone -q --bare --no-local "$path" "$clone" || return 3
-      git -C "$clone" config taskdag.snapshot-repository "$repo"
+      clone="$work/repo.$n.git"; git clone -q --mirror --no-local "$path" "$clone" || return 3
+      git -C "$clone" remote set-url origin "$clone" || return 3
+      git -C "$clone" config taskdag.current-repo "$repo"
       [ "$(git -C "$clone" rev-parse "$source_ref^{commit}" 2>/dev/null)" = "$expected" ] || return 3
       jq --arg r "$repo" --arg p "$clone" '(.repositories[]|select(.repository==$r).path)=$p' "$snap" >"$work/spec.1" || return 2
       mv "$work/spec.1" "$snap"; n=$((n+1))
@@ -960,9 +961,9 @@ _taskdag_census_build() { # spec output
     # Every parsed peer, including a non-verified obligation, is registry-known.
     jq -se --argjson registry "$(jq -c '.registrySnapshot.repositories' "$activation")" '
       all(.[];
-        all(.declarations[]?; .peerRepo as $peer | any($registry[];.repositoryId==$peer.id and .repository==$peer.name) and
+        all(.declarations[]?; .peerRepo as $peer | any($registry[];.repositoryId==$peer.id and .repository==($peer.name|ascii_downcase)) and
           (if .disposition=="issue-adopted" then .adoptedIssue.repositoryId==$peer.id else true end)) and
-        all(.liveDelegations[]?; . as $delegation | $delegation.peerRepo as $peer | any($registry[];.repository==$peer and
+        all(.liveDelegations[]?; . as $delegation | $delegation.peerRepo as $peer | any($registry[];.repository==($peer|ascii_downcase) and
           (if $delegation.disposition=="verified-child-close" then .repositoryId==$delegation.peerRepoNodeId else true end))))' "$tmp/issues" >/dev/null || return 3
     jq -se '(group_by(.id)|all(.[];length==1)) and (group_by([.repository,.number])|all(.[];length==1)) and
       ([.[].declarations[]?.slotId]|length==(unique|length)) and
@@ -995,7 +996,7 @@ _taskdag_census_build() { # spec output
     while IFS=$'\t' read -r parent_issue ref; do
       [[ "$ref" =~ ^refs/heads/tasks/completions/${parent_issue}/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*/[A-Za-z0-9._-]+$ ]] || return 3
       peer_repo=${ref#refs/heads/tasks/completions/$parent_issue/}; peer_repo=${peer_repo%/*/*}
-      jq -e --arg peer "$peer_repo" 'any(.registrySnapshot.repositories[];.repository==$peer)' "$activation" >/dev/null || return 3
+      jq -e --arg peer "$peer_repo" 'any(.registrySnapshot.repositories[];.repository==($peer|ascii_downcase))' "$activation" >/dev/null || return 3
     done < <(jq -r '. as $issue|.completionEvidence[]?|[($issue.number|tostring),.ref]|@tsv' "$tmp/issues")
     while IFS=$'\t' read -r ref delegation_ref; do
       completion_identity=${ref#refs/heads/tasks/completions/}; completion_identity=${completion_identity%/*}
@@ -1007,7 +1008,7 @@ _taskdag_census_build() { # spec output
          || "$ref" =~ ^refs/heads/gh/child-epic-slots/${parent_issue}/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 3
       peer_repo=${ref#refs/heads/gh/child-epics/$parent_issue/}
       [ "$peer_repo" != "$ref" ] || { peer_repo=${ref#refs/heads/gh/child-epic-slots/$parent_issue/}; peer_repo=${peer_repo%/*}; }
-      jq -e --arg peer "$peer_repo" 'any(.registrySnapshot.repositories[];.repository==$peer)' "$activation" >/dev/null || return 3
+      jq -e --arg peer "$peer_repo" 'any(.registrySnapshot.repositories[];.repository==($peer|ascii_downcase))' "$activation" >/dev/null || return 3
     done < <(jq -r '. as $issue|.markers[]?|[($issue.number|tostring),.ref]|@tsv' "$tmp/issues")
     while IFS= read -r evidence; do
       [ "$(jq -r .parentRepo <<<"$evidence")" = "$(jq -r .repository <<<"$evidence")" ] || return 3

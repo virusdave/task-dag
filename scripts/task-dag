@@ -66,6 +66,8 @@ TASKDAG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
 # shellcheck source=task-dag.d/materialise.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
+# shellcheck source=task-dag.d/materialise-census-capture.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-census-capture.sh"
 # shellcheck source=task-dag.d/materialise-producer.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-producer.sh"
 # shellcheck source=task-dag.d/materialise-reconcile.sh
@@ -1740,6 +1742,8 @@ COMMANDS:
                            disabled by migration policy (exit 75).
     materialise-census --spec-file FILE --artifact FILE --digest-file FILE
                            Freeze and classify the activation registry universe.
+    materialise-census-capture --spec-file FILE --output-dir DIR
+                           Capture complete read-only census inputs.
     materialise-import --spec-file FILE --artifact FILE --digest-file FILE
                            Re-census exact reviewed bytes, then atomically import.
     materialise-adopt|materialise-rearm --spec-file FILE
@@ -8033,6 +8037,7 @@ main() {
         materialise-batch) cmd_materialise_batch "$@" ;;
         materialise-child) cmd_materialise_child "$@" ;;
         materialise-census) cmd_materialise_census "$@" ;;
+        materialise-census-capture) cmd_materialise_census_capture "$@" ;;
         materialise-import) cmd_materialise_import "$@" ;;
         materialise-adopt) cmd_materialise_adopt "$@" ;;
         materialise-rearm) cmd_materialise_rearm "$@" ;;

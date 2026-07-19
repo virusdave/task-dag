@@ -497,6 +497,21 @@ from an absent note. Pages start at 1, are contiguous, end in
 `(repository,number)` pairs, slot IDs, and adopted issue node IDs are globally
 unique.
 
+Use `materialise-census-capture --spec-file FILE --output-dir DIR` to produce
+the strict input instead of assembling it manually. Its schema-1 input names
+the enabled activation record and gives one local path for every sorted
+registry repository. The command performs two complete, byte-identical,
+paginated GitHub issue reads per repository while its repository identity,
+activation source tip, `HEAD`, and relevant `gh/*` and `tasks/*` ref manifest
+remain unchanged. The complete issues-endpoint pages, including pull request
+records, are retained. It snapshots each repository into an isolated bare
+clone, reconstructs evidence with the canonical census
+builder, and atomically publishes a no-clobber directory containing the API
+pages, clones, generated `spec.json`, and preview artifact. Authentication,
+API, pagination, identity, source-tip, ref-mutation, snapshot, schema, or
+validation failures publish nothing. The published directory is a
+self-contained offline input; review and retain it unchanged through import.
+
 The census writes canonical artifact bytes and a separate lowercase SHA-256
 digest. `materialise-import` requires those exact files and the same input,
 repeats census, byte-compares it, then performs one activation-fenced atomic
