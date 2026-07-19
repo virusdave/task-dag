@@ -9,9 +9,23 @@
 # present on origin.
 
 taskdag_extract_materialise_trailers_from_message() {
-    local line key val key_lc in_group=0
+    local line key val key_lc in_group=0 in_fence=false fence_char="" fence_len=0 marker rest
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
+        if [[ "$line" =~ ^[[:space:]]{0,3}(\`{3,}|~{3,}) ]]; then
+            marker=${BASH_REMATCH[1]}
+            if [ "$in_fence" = false ]; then
+                in_fence=true; fence_char=${marker:0:1}; fence_len=${#marker}
+                continue
+            fi
+            rest=${line#*"$marker"}
+            if [ "${marker:0:1}" = "$fence_char" ] && [ "${#marker}" -ge "$fence_len" ] \
+              && [[ "$rest" =~ ^[[:space:]]*$ ]]; then
+                in_fence=false; fence_char=""; fence_len=0
+            fi
+            continue
+        fi
+        [ "$in_fence" = false ] || continue
         [[ "$line" =~ ^[A-Za-z0-9-]+: ]] || continue
         key="${line%%:*}"
         val="${line#*:}"

@@ -13,9 +13,12 @@ bare=$(printf '%s\n' 'Materialise-Child-Epic:) are allowed.' | taskdag_materiali
 partial=$(printf '%s\n' 'Materialise-Child-Epic: peer/repo' 'Child-Epic-Title: incomplete' | taskdag_materialise_groups_json_from_message)
 present_empty=$(printf '%s\n' 'Materialise-Child-Epic: peer/repo' 'Parent-Issue:' | taskdag_materialise_groups_json_from_message)
 complete=$(printf '%s\n' 'Materialise-Child-Epic: peer/repo' 'Child-Epic-Title: title' 'Child-Epic-Body-File: body' 'Parent-Issue: 1' | taskdag_materialise_groups_json_from_message)
+fenced=$(printf '%s\n' '```text' 'Materialise-Child-Epic: peer/example' 'Child-Epic-Title: example' 'Child-Epic-Body-File: body' 'Parent-Issue: #<THIS>' '```' '~~~' 'Materialise-Child-Epic: peer/tilde-example' 'Child-Epic-Title: example' '~~~' | taskdag_materialise_groups_json_from_message)
+after_fence=$(printf '%s\n' '```' 'Materialise-Child-Epic: ignored/example' '```' 'Materialise-Child-Epic: peer/repo' 'Child-Epic-Title: title' 'Child-Epic-Body-File: body' 'Parent-Issue: 1' | taskdag_materialise_groups_json_from_message)
 jq -e 'length==0' <<<"$bare" >/dev/null && jq -e 'length==1 and .[0].title=="incomplete" and .[0].parent==""' <<<"$partial" >/dev/null \
   && jq -e 'length==1 and .[0].parent==""' <<<"$present_empty" >/dev/null \
   && jq -e 'length==1 and .[0].parent=="1" and .[0].bodyFile=="body"' <<<"$complete" >/dev/null \
+  && jq -e 'length==0' <<<"$fenced" >/dev/null && jq -e 'length==1 and .[0].peer=="peer/repo"' <<<"$after_fence" >/dev/null \
   && ok "shared parser ignores only bare marker prose" || bad "bare marker parser semantics"
 git init -q "$ROOT/repo"; git -C "$ROOT/repo" config user.name fixture; git -C "$ROOT/repo" config user.email fixture@example.test
 git -C "$ROOT/repo" config taskdag.current-repo virusdave/task-dag
