@@ -53,10 +53,12 @@ git -C "$I/parent" config taskdag.current-repo virusdave/task-dag
 git init -q "$I/peer"; git -C "$I/peer" config user.name fixture; git -C "$I/peer" config user.email fixture@example.test
 git -C "$I/peer" config taskdag.current-repo peer/repo
 printf peer >"$I/peer/file"; git -C "$I/peer" add file; git -C "$I/peer" commit -qm base
-empty=$(git -C "$I/peer" mktree </dev/null); peer_root=$(git -C "$I/peer" commit-tree "$empty" -p HEAD -m $'Peer epic\n\nIssue: #2\nType: epic')
+empty=$(git -C "$I/peer" mktree </dev/null); peer_root=$(git -C "$I/peer" commit-tree "$empty" -p HEAD -m $'Task: Peer epic\n\nIssue: #2\nType: epic')
 git -C "$I/peer" update-ref refs/heads/gh/issues/2 "$peer_root"; peer_first=$(git -C "$I/peer" rev-parse HEAD)
 peer_close=$(git -C "$I/peer" commit-tree "$(git -C "$I/peer" rev-parse "$peer_first^{tree}")" -p "$peer_first" -p "$peer_root" -m $'Close peer epic\n\nCloses-Epic: #2')
 git -C "$I/peer" update-ref refs/heads/master "$peer_close"
+git init -q --bare "$I/peer-origin"; git -C "$I/peer" remote add origin "$I/peer-origin"
+git -C "$I/peer" push -q origin refs/heads/master refs/heads/gh/issues/2
 parent_empty=$(git -C "$I/parent" mktree </dev/null); dd=$(printf declaration | sha256sum | awk '{print $1}')
 delegation=$(git -C "$I/parent" commit-tree "$parent_empty" -m $'kind: delegated\nrole: system\nintent: delegated-child\n\nissue:\n  repo: virusdave/task-dag\n  number: 1\n\ndelegated:\n  repo: peer/repo\n  number: 2\n\nParent-Repo-Node-Id: PR_parent\nParent-Issue-Node-Id: PI_parent\nPeer-Repo-Node-Id: PR_peer\nPeer-Issue-Node-Id: PI_peer\nMaterialisation-Operation-Id: operation-1\nDeclaration-Digest: '"$dd")
 git -C "$I/parent" update-ref refs/heads/tasks/delegated/1/peer/repo/2 "$delegation"
