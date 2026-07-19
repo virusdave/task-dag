@@ -8266,14 +8266,8 @@ sanctioned_tip_requirements_satisfied() {
     fi
 }
 
-cmd_publish() {
-    local tip old first updates rc=0 close_issue close_root
-    case "${1:-}" in
-        -h|--help) echo "Usage: task-dag publish [<completion-or-close-tip>]"; return 0 ;;
-        "") tip=HEAD ;;
-        *) tip=$1; [ "$#" -eq 1 ] || { echo "Usage: task-dag publish [<completion-or-close-tip>]" >&2; return 2; } ;;
-    esac
-    tip=$(git rev-parse --verify "${tip}^{commit}") || return 2
+_taskdag_publish_attempt() { # immutable completion candidate
+    local tip=$1 old first updates rc=0 close_issue close_root outcome diagnostic
     first=$(get_first_parent "$tip") || return 2
     # Observe current master before validating the candidate. A retry after an
     # accepted-but-ambiguous publish is success even if close cleanup already
@@ -8324,14 +8318,63 @@ cmd_publish() {
     updates=$(jq -ncS --arg ref refs/heads/master --arg old "$old" --arg new "$tip" '[{ref:$ref,old:$old,new:$new}]') || return 2
     if declare -F _xrepo_watchdog_fence >/dev/null 2>&1; then _xrepo_watchdog_fence || return 3; fi
     export TASKDAG_FENCED_PUBLISH=1
+    TASKDAG_ACTIVATION_FENCED_PUSH_RESULT=''
     taskdag_consumer_fenced_scheduling_push publish-completion "${TASK_DAG_CLAIMER:-publisher}" "$updates" || rc=$?
     unset TASKDAG_FENCED_PUBLISH
     [ "$rc" -eq 0 ] || {
-        echo "Error: canonical completion publication lost its semantic-generation fence; re-prepare and retry." >&2
+        if ! jq -e 'type=="object" and .schema==1 and (.outcome=="authority-contention" or .outcome=="target-changed" or .outcome=="rejected-no-effect" or .outcome=="indeterminate")' \
+          <<<"$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT" >/dev/null 2>&1; then
+            echo "Error: completion publication failed before a trustworthy remote outcome was available. Nothing is proven about remote effect; do not recreate or retry automatically. Re-run publish only after inspecting origin/master and activation authority." >&2
+            return "$rc"
+        fi
+        outcome=$(jq -r .outcome <<<"$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT") || return 2
+        diagnostic=$(jq -r .push.diagnostic <<<"$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT") || return 2
+        [ -z "$diagnostic" ] || printf 'Git push diagnostic (sanitized): %s\n' "$diagnostic" >&2
+        case "$outcome" in
+            authority-contention)
+                # Internal-only status consumed by cmd_publish's bounded loop.
+                return 75
+                ;;
+            target-changed)
+                echo "Error: origin/master is now neither the expected old tip nor the exact completion candidate. Prior application is unknown; do not retry or recreate automatically. Inspect whether current master contains the candidate, then run publish again to determine whether it is present, still valid, or must be recreated." >&2
+                ;;
+            rejected-no-effect)
+                echo "Error: completion publication was rejected with confirmed no remote effect. The exact candidate may be retried after fixing the reported transport, authentication, or hook rejection; do not recreate it solely for this failure." >&2
+                ;;
+            indeterminate)
+                echo "Error: completion publication outcome is indeterminate. Remote effect is unknown; do not recreate or retry automatically. Inspect origin/master and activation authority, then retry this exact candidate only if it is not already present." >&2
+                ;;
+        esac
         return "$rc"
     }
     git update-ref refs/remotes/origin/master "$tip" 2>/dev/null || true
     echo "Published canonical task-dag completion to origin/master: $tip"
+}
+
+cmd_publish() {
+    local tip retry=0 rc
+    case "${1:-}" in
+        -h|--help) echo "Usage: task-dag publish [<completion-or-close-tip>]"; return 0 ;;
+        "") tip=HEAD ;;
+        *) tip=$1; [ "$#" -eq 1 ] || { echo "Usage: task-dag publish [<completion-or-close-tip>]" >&2; return 2; } ;;
+    esac
+    tip=$(git rev-parse --verify "${tip}^{commit}") || return 2
+    [[ "$TASKDAG_CAS_MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "Error: TASKDAG_CAS_MAX_ATTEMPTS must be a non-negative integer" >&2; return 2; }
+    while :; do
+        if _taskdag_publish_attempt "$tip"; then
+            return 0
+        else
+            rc=$?
+        fi
+        [ "$rc" -eq 75 ] || return "$rc"
+        if [ "$retry" -ge "$TASKDAG_CAS_MAX_ATTEMPTS" ]; then
+            echo "Error: completion publication exhausted ${TASKDAG_CAS_MAX_ATTEMPTS} retries under proven activation-authority contention. Every failed attempt left origin/master unchanged. The exact candidate may be retried; recreate it only if fresh validation reports changed requirements or master ancestry." >&2
+            return 3
+        fi
+        retry=$((retry+1))
+        echo "Activation authority advanced during completion publication; revalidating the same candidate before bounded retry ${retry}/${TASKDAG_CAS_MAX_ATTEMPTS}." >&2
+        taskdag_cas_sleep "$retry" || return 2
+    done
 }
 
 cmd_guard_pre_push() {

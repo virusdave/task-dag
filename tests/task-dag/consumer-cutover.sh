@@ -223,17 +223,81 @@ if env -u TASK_DAG_CLAIMER -u TASK_DAG_CLAIMER_HOST -u TASK_DAG_CLAIMER_PID \
 else
   ok "activated raw semantic push is rejected even without claimer identity"
 fi
-if "$TD" publish >/dev/null \
+contention_side_zero=$(printf 'publication contention zero\n' | git commit-tree "$EMPTY_TREE")
+contention_side_retry=$(printf 'publication contention retry\n' | git commit-tree "$EMPTY_TREE")
+contention_marker="$ROOT/publish-contention-zero"
+contention_ref=refs/heads/fixture-publish-contention-zero
+contention_value=$contention_side_zero
+export ROOT contention_marker contention_ref contention_value
+taskdag_activation_test_pre_fenced_push_hook() {
+  [ ! -e "$contention_marker" ] || return 0
+  : >"$contention_marker"
+  unset -f taskdag_activation_test_pre_fenced_push_hook
+  taskdag_activation_fenced_push "$token" fixture publish-contender fixture 2026-07-18T00:00:10Z \
+    "$contention_ref" "" "$contention_value" >/dev/null
+}
+export -f taskdag_activation_test_pre_fenced_push_hook
+zero_output=$(TASKDAG_CAS_MAX_ATTEMPTS=0 "$TD" publish 2>&1); zero_rc=$?
+if [ "$zero_rc" -eq 3 ] \
+   && grep -q 'exhausted 0 retries under proven activation-authority contention' <<<"$zero_output" \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$remote_master" ]; then
+  ok "zero retry budget still performs one fenced attempt and fails loud on contention"
+else
+  bad "zero retry budget skipped or retried its initial push (rc=$zero_rc out=$zero_output)"
+fi
+contention_marker="$ROOT/publish-contention-retry"
+contention_ref=refs/heads/fixture-publish-contention-retry
+contention_value=$contention_side_retry
+export contention_marker contention_ref contention_value
+publish_output=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 TASKDAG_CAS_MAX_ATTEMPTS=1 "$TD" publish 2>&1); publish_rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+if [ "$publish_rc" -eq 0 ] \
+   && grep -q 'revalidating the same candidate before bounded retry 1/1' <<<"$publish_output" \
    && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$completion_tip" ] \
    && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_publish" ]; then
-  ok "canonical publish atomically advances master and semantic generation"
+  ok "canonical publish revalidates and recovers from authority contention"
 else
-  bad "canonical completion publication was not fenced"
+  bad "canonical completion publication did not recover from contention (rc=$publish_rc out=$publish_output)"
 fi
 if "$TD" publish "$completion_tip" >/dev/null; then
   ok "accepted publication retry converges idempotently"
 else
   bad "accepted publication retry did not converge"
+fi
+
+# A contention retry re-runs canonical requirements, rather than blindly
+# replaying the candidate. Inject a new unsatisfied dependency while advancing
+# activation authority between validation and the first push.
+invalid_task=$(git commit-tree "$EMPTY_TREE" -p "$completion_tip" -m 'Task: invalidated publication candidate')
+invalid_short=$(git rev-parse --short "$invalid_task")
+unmet_task=$(git commit-tree "$EMPTY_TREE" -p "$completion_tip" -m 'Task: newly required work')
+git update-ref "refs/heads/tasks/frontier/$invalid_short" "$invalid_task"
+git push -q origin "refs/heads/tasks/frontier/$invalid_short"
+"$TD" claim "$invalid_task" >/dev/null
+echo invalidated >invalidated; git add invalidated; git commit -qm 'Implement invalidated candidate'
+"$TD" complete "$invalid_task" >/dev/null
+master_before_invalid=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+export TD invalid_task unmet_task
+taskdag_activation_test_pre_fenced_push_hook() {
+  [ ! -e "$ROOT/publish-invalidation-injected" ] || return 0
+  : >"$ROOT/publish-invalidation-injected"
+  "$TD" dep add --from "task:virusdave/task-dag@$invalid_task" --to "task:virusdave/task-dag@$unmet_task" \
+    --relation requires --repo-id 1 --witness publication-invalidation >/dev/null
+}
+export -f taskdag_activation_test_pre_fenced_push_hook
+invalid_output=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 "$TD" publish 2>&1); invalid_rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+if [ "$invalid_rc" -eq 2 ] \
+   && grep -q 'revalidating the same candidate before bounded retry 1/' <<<"$invalid_output" \
+   && grep -q 'canonical requirements changed' <<<"$invalid_output" \
+   && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$master_before_invalid" ]; then
+  ok "contention retry rejects a semantically invalidated completion"
+else
+  bad "contention retry skipped semantic revalidation (rc=$invalid_rc out=$invalid_output)"
+fi
+git reset -q --hard "$completion_tip"
+if ! "$TD" release "$invalid_task" >/dev/null 2>&1; then
+  bad "semantic invalidation fixture could not release its synthetic claim"
 fi
 
 stale_task=$(git commit-tree "$EMPTY_TREE" -p "$remote_master" -m 'Task: stale completion candidate')
