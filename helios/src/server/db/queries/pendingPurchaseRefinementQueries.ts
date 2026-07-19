@@ -12,6 +12,7 @@ import type {
 } from '../../../shared/contracts/index.js'
 import { sha256 } from '../../../shared/util/hash.js'
 import type { Queryable } from '../pool.js'
+import { pendingPurchaseRefinementSchemaApplied } from '../pendingPurchaseRefinementSchema.js'
 
 export class PendingPurchaseRefinementConflictError extends Error {}
 
@@ -118,13 +119,8 @@ interface ApplyGateRow extends QueryResultRow {
   is_applyable: boolean
   packet_root_id: number | null
   revision_status: 'current' | 'candidate' | 'superseded' | 'failed'
-}
-
-interface SchemaProbeRow extends QueryResultRow {
-  has_packet_roots: boolean
-  has_packet_revision_status: boolean
-  has_refinement_turns: boolean
-  has_row_lineage: boolean
+  root_status: 'active' | 'superseded' | 'archived' | null
+  status: string
 }
 
 interface LineageRow extends QueryResultRow {
@@ -416,6 +412,7 @@ export async function createPendingPurchaseCandidateRevision(
   turnId: number,
   refinement: PendingPurchaseCandidateRefinement,
 ): Promise<CandidateCreationResult> {
+  await db.query('lock table pending_purchase_packets in row exclusive mode')
   const turn = await lockRefinementTurn(db, turnId)
   if (turn.status === 'candidate_created' && turn.candidate_packet_id !== null) {
     const existing = await loadPacketRevisionById(db, turn.candidate_packet_id)
@@ -882,6 +879,7 @@ export async function switchPendingPurchaseCurrentRevision(
   root: PendingPurchasePacketRootSummary
   selectedRevision: PendingPurchasePacketRevisionSummary
 }> {
+  await db.query('lock table pending_purchase_packets in row exclusive mode')
   const rootResult = await db.query<PacketRootDbRow>(
     `
       select r.id, r.root_key, r.current_packet_id, r.current_revision_number, r.root_status, r.version, r.updated_at
@@ -898,6 +896,9 @@ export async function switchPendingPurchaseCurrentRevision(
   }
   if (root.version !== input.expectedRootVersion) {
     throw new PendingPurchaseRefinementConflictError('This packet revision changed. Refresh and try again.')
+  }
+  if (root.root_status !== 'active' || root.current_packet_id === null) {
+    throw new PendingPurchaseRefinementConflictError('This packet root is no longer active.')
   }
   const selected = await loadPacketRevisionById(db, input.selectedPacketId)
   if (!selected || selected.packetRootId !== root.id) {
@@ -966,7 +967,8 @@ export async function assertPendingPurchasePacketApplyable(db: Queryable, packet
   }
   const result = await db.query<ApplyGateRow>(
     `
-      select p.packet_root_id, p.revision_status, p.is_applyable, r.current_packet_id
+      select p.packet_root_id, p.status, p.revision_status, p.is_applyable,
+             r.current_packet_id, r.root_status
       from pending_purchase_packets p
       left join pending_purchase_packet_roots r on r.id = p.packet_root_id
       where p.id = $1
@@ -978,37 +980,23 @@ export async function assertPendingPurchasePacketApplyable(db: Queryable, packet
     throw new PendingPurchaseRefinementConflictError('Pending-purchase packet not found.')
   }
   if (row.packet_root_id === null) {
-    return
+    if (row.status === 'ready') {
+      return
+    }
+    throw new PendingPurchaseRefinementConflictError('Only the current applyable packet revision can be applied.')
   }
-  if (row.current_packet_id !== packetId || row.revision_status !== 'current' || !row.is_applyable) {
+  if (
+    row.root_status !== 'active'
+    || row.current_packet_id !== packetId
+    || row.revision_status !== 'current'
+    || !row.is_applyable
+  ) {
     throw new PendingPurchaseRefinementConflictError('Only the current applyable packet revision can be applied.')
   }
 }
 
 export async function isPendingPurchaseRefinementSchemaAvailable(db: Queryable): Promise<boolean> {
-  const result = await db.query<SchemaProbeRow>(
-    `
-      select
-        to_regclass('pending_purchase_packet_roots') is not null as has_packet_roots,
-        to_regclass('pending_purchase_refinement_turns') is not null as has_refinement_turns,
-        exists (
-          select 1
-          from information_schema.columns
-          where table_schema = current_schema()
-            and table_name = 'pending_purchase_packets'
-            and column_name = 'revision_status'
-        ) as has_packet_revision_status,
-        exists (
-          select 1
-          from information_schema.columns
-          where table_schema = current_schema()
-            and table_name = 'pending_purchase_rows'
-            and column_name = 'row_lineage_id'
-        ) as has_row_lineage
-    `,
-  )
-  const row = result.rows[0]
-  return row.has_packet_roots && row.has_refinement_turns && row.has_packet_revision_status && row.has_row_lineage
+  return pendingPurchaseRefinementSchemaApplied(db)
 }
 
 async function getPendingPurchaseRefinementTurn(

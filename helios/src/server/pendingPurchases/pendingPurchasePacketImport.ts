@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 
+import type { PoolClient } from 'pg'
 import { z } from 'zod'
 
 import type {
@@ -10,6 +11,7 @@ import type {
 } from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import type { Queryable } from '../db/pool.js'
+import { isPendingPurchaseRefinementSchemaAvailable } from '../db/queries/pendingPurchaseRefinementQueries.js'
 
 const PendingPurchaseRowImportSchema = z.object({
   actionType: z.string().trim().min(1),
@@ -92,6 +94,13 @@ interface PreparedPendingPurchaseRow {
   targetVariantName: string | null
 }
 
+interface ExistingJobPacketRow {
+  audit_event_id: number | null
+  audit_row_count: number | null
+  id: number
+  row_count: number
+}
+
 export interface ImportPendingPurchasePacketInput {
   createdByUserId: number | null
   importFileName: string | null
@@ -115,22 +124,111 @@ export async function readPendingPurchasePacketFromFile(filePath: string): Promi
 }
 
 export async function importPendingPurchasePacket(
-  db: Queryable,
+  db: PoolClient,
   input: ImportPendingPurchasePacketInput,
 ): Promise<ImportPendingPurchasePacketResult> {
   return persistPendingPurchasePacket(db, input)
 }
 
 export async function persistPendingPurchasePacket(
-  db: Queryable,
+  db: PoolClient,
   input: ImportPendingPurchasePacketInput,
 ): Promise<ImportPendingPurchasePacketResult> {
   const preparedRows = preparePendingPurchaseRows(input.packet.rows)
+  const auditEventType = input.source === 'generated'
+    ? 'pending_purchase.packet.generated'
+    : 'pending_purchase.packet.imported'
+  const actionLabel = input.source === 'generated' ? 'Generated' : 'Imported'
+
+  // Take this unconditionally before the schema probe: migration 102 also
+  // locks this table, so it cannot commit between a false probe and a legacy
+  // packet insert. Old writers and refinement switches take ROW EXCLUSIVE;
+  // EXCLUSIVE serializes them while still permitting unrelated reads.
+  await db.query('lock table pending_purchase_packets in exclusive mode')
+  const hasRefinementLineage = await isPendingPurchaseRefinementSchemaAvailable(db)
+
+  if (input.jobId !== null) {
+    const existingResult = await db.query<ExistingJobPacketRow>(
+      `
+        select
+          p.id,
+          count(rows.id)::integer as row_count,
+          audit.id as audit_event_id,
+          audit.imported_row_count as audit_row_count
+        from pending_purchase_packets p
+        left join lateral (
+          select
+            audit_event.id,
+            (audit_event.payload_json ->> 'importedRowCount')::integer as imported_row_count
+          from audit_events audit_event
+          where audit_event.entity_type = 'pending_purchase_packet'
+            and audit_event.entity_id = p.id::text
+            and audit_event.event_type = $2
+          order by audit_event.id desc
+          limit 1
+        ) audit on true
+        left join pending_purchase_rows rows on rows.packet_id = p.id
+        where p.job_id = $1
+          and p.source = $3
+        group by p.id, audit.id, audit.imported_row_count
+        order by p.id asc
+      `,
+      [input.jobId, auditEventType, input.source],
+    )
+    if (existingResult.rows.length > 1) {
+      throw new Error(`Pending-purchase job ${input.jobId} already has multiple persisted packets.`)
+    }
+    const existing = existingResult.rows[0]
+    if (existing !== undefined) {
+      if (existing.audit_event_id === null || existing.audit_row_count !== existing.row_count) {
+        throw new Error(`Pending-purchase job ${input.jobId} has incomplete persisted packet ${existing.id}.`)
+      }
+      return {
+        auditEventId: existing.audit_event_id,
+        importedRowCount: existing.row_count,
+        packetId: existing.id,
+      }
+    }
+  }
+
+  if (hasRefinementLineage) {
+    await db.query(
+      `
+        update pending_purchase_packets
+        set revision_status = 'superseded',
+            is_applyable = false,
+            updated_at = now()
+        where packet_root_id in (
+          select id
+          from pending_purchase_packet_roots
+          where root_status = 'active'
+        )
+          and id in (
+            select current_packet_id
+            from pending_purchase_packet_roots
+            where root_status = 'active'
+          )
+          and (revision_status <> 'superseded' or is_applyable)
+      `,
+    )
+    await db.query(
+      `
+        update pending_purchase_packet_roots
+        set current_packet_id = null,
+            current_revision_number = null,
+            root_status = 'superseded',
+            version = version + 1,
+            updated_at = now()
+        where root_status = 'active'
+      `,
+    )
+  }
 
   await db.query(
     `
       update pending_purchase_packets
       set status = 'superseded',
+          ${hasRefinementLineage ? "revision_status = 'superseded', is_applyable = false," : ''}
           updated_at = now()
       where status = 'ready'
     `,
@@ -178,10 +276,50 @@ export async function persistPendingPurchasePacket(
     await insertPendingPurchaseRows(db, packetId, batchRows)
   }
 
-  const auditEventType = input.source === 'generated'
-    ? 'pending_purchase.packet.generated'
-    : 'pending_purchase.packet.imported'
-  const actionLabel = input.source === 'generated' ? 'Generated' : 'Imported'
+  if (hasRefinementLineage) {
+    await db.query(
+      `
+        update pending_purchase_rows
+        set row_lineage_id = 'pprline_' || id::text,
+            lineage_revision_number = 1
+        where packet_id = $1
+          and row_lineage_id is null
+      `,
+      [packetId],
+    )
+    const rootInsert = await db.query<{ id: number }>(
+      `
+        insert into pending_purchase_packet_roots (
+          root_key,
+          source_packet_id,
+          current_packet_id,
+          current_revision_number,
+          root_status,
+          created_by_user_id,
+          current_updated_by_user_id,
+          current_updated_at
+        )
+        values ('pprroot_' || $1::text, $1, $1, 1, 'active', $2, $2, now())
+        returning id
+      `,
+      [packetId, input.createdByUserId],
+    )
+    await db.query(
+      `
+        update pending_purchase_packets
+        set packet_root_id = $2,
+            revision_number = 1,
+            revision_status = 'current',
+            is_applyable = true,
+            revision_created_reason = 'Initial persisted packet.',
+            accepted_at = coalesce(generated_at, created_at, now()),
+            accepted_by_user_id = $3,
+            updated_at = now()
+        where id = $1
+      `,
+      [packetId, rootInsert.rows[0].id, input.createdByUserId],
+    )
+  }
 
   const auditEventId = await appendAuditEvent(db, {
     actorType: 'system',

@@ -24,6 +24,7 @@
 // sync.
 
 import type { Queryable } from './pool.js'
+import { pendingPurchaseRefinementSchemaApplied } from './pendingPurchaseRefinementSchema.js'
 
 /**
  * Transaction handling of a migration artifact, recorded from the reviewed
@@ -1712,37 +1713,7 @@ const SENTINELS: MigrationSentinel[] = [
         'prod scale (~70 packets/~945 rows). Down file is destructive and not part ' +
         'of admin apply.',
     },
-    check: async (db) => {
-      const [
-        hasRoots,
-        hasTurns,
-        hasPacketRoot,
-        hasPacketStatus,
-        hasRowLineage,
-        hasRowSnapshot,
-        hasCurrentIndex,
-        hasActiveTurnIndex,
-      ] = await Promise.all([
-        tableExists(db, 'pending_purchase_packet_roots'),
-        tableExists(db, 'pending_purchase_refinement_turns'),
-        columnExists(db, 'pending_purchase_packets', 'packet_root_id'),
-        columnExists(db, 'pending_purchase_packets', 'revision_status'),
-        columnExists(db, 'pending_purchase_rows', 'row_lineage_id'),
-        columnExists(db, 'pending_purchase_rows', 'row_snapshot_sha256'),
-        indexExists(db, 'pending_purchase_packets_one_current_per_root_idx'),
-        indexExists(db, 'pending_purchase_refinement_turns_one_active_idx'),
-      ])
-      return (
-        hasRoots &&
-        hasTurns &&
-        hasPacketRoot &&
-        hasPacketStatus &&
-        hasRowLineage &&
-        hasRowSnapshot &&
-        hasCurrentIndex &&
-        hasActiveTurnIndex
-      )
-    },
+    check: pendingPurchaseRefinementSchemaApplied,
   },
   {
     migrationId: '103_low_inventory_physical_counts',

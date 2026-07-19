@@ -45,8 +45,14 @@ describe('hashJsonForPendingPurchaseRefinement', () => {
 })
 
 describe('assertPendingPurchasePacketApplyable', () => {
-  it('allows legacy unrooted packets', async () => {
-    await expect(assertPendingPurchasePacketApplyable(fakeGateDb({ packet_root_id: null }), 123)).resolves.toBeUndefined()
+  it('allows ready legacy unrooted packets after migration', async () => {
+    await expect(assertPendingPurchasePacketApplyable(fakeGateDb({ packet_root_id: null, status: 'ready' }), 123)).resolves.toBeUndefined()
+  })
+
+  it('rejects superseded unrooted packets after migration', async () => {
+    await expect(
+      assertPendingPurchasePacketApplyable(fakeGateDb({ packet_root_id: null, status: 'superseded' }), 123),
+    ).rejects.toBeInstanceOf(PendingPurchaseRefinementConflictError)
   })
 
   it('allows apply before the refinement migration exists', async () => {
@@ -61,6 +67,8 @@ describe('assertPendingPurchasePacketApplyable', () => {
           is_applyable: true,
           packet_root_id: 1,
           revision_status: 'current',
+          root_status: 'active',
+          status: 'ready',
         }),
         123,
       ),
@@ -75,6 +83,8 @@ describe('assertPendingPurchasePacketApplyable', () => {
           is_applyable: false,
           packet_root_id: 1,
           revision_status: 'candidate',
+          root_status: 'active',
+          status: 'superseded',
         }),
         123,
       ),
@@ -91,6 +101,7 @@ describe('createPendingPurchaseCandidateRevision', () => {
       revisionNumber: 2,
     })
 
+    expect(db.calls[0]?.text).toMatch(/lock table pending_purchase_packets in row exclusive mode/i)
     const insertPacket = db.calls.find((call) => /insert into pending_purchase_packets/i.test(call.text))
     expect(insertPacket?.text).toMatch(/'candidate'/)
     expect(insertPacket?.text).toMatch(/false,\s*id,\s*\$1/s)
@@ -177,12 +188,7 @@ function fakeGateDb(row: Record<string, unknown>, hasSchema = true): Queryable {
           rowCount: 1,
           oid: 0,
           fields: [],
-          rows: [{
-            has_packet_roots: hasSchema,
-            has_packet_revision_status: hasSchema,
-            has_refinement_turns: hasSchema,
-            has_row_lineage: hasSchema,
-          }],
+          rows: [{ schema_applied: hasSchema }],
         }
       }
       return { command: 'SELECT', rowCount: 1, oid: 0, fields: [], rows: [row] }
