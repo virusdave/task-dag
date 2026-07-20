@@ -1750,6 +1750,25 @@ const SENTINELS: MigrationSentinel[] = [
       'sweed_orders.invoice_status_name typed projection and v2 dealer/time ' +
       'covering index — removes recurring cancellation filters from the large ' +
       'raw_json envelope while preserving status after the envelope drain.',
+    blessing: {
+      ref: 'https://ampcode.com/threads/T-019f7e40-7edf-7439-b6ca-50848e7bec27',
+      reviewedSha: '706cd75aa92219e4987759b542562a94f16f3085',
+      artifactSha256: 'fc60961aec7b1564f1891a6996f64583da7052a34a5644080d02af72c488dfde',
+      transactionMode: 'mixed',
+      operatorExplanation:
+        'This migration copies Sweed invoice status into a narrow typed order ' +
+        'column, backfills the retained recent envelope tail, and replaces the ' +
+        'dealer/time covering index so cancellation filtering no longer reads ' +
+        'the large raw invoice JSON. It also reasserts the already-applied ' +
+        'cashier projection. It does not change order totals or recover status ' +
+        'from envelopes that were already drained.',
+      note:
+        'Oracle-approved mixed migration: short transactions add/backfill the ' +
+        'column, then CREATE/DROP INDEX CONCURRENTLY replaces the covering ' +
+        'index outside a transaction. Lock and statement waits are bounded. ' +
+        'The down migration restores the old index before dropping the column; ' +
+        'status loss after later envelope draining makes rollback destructive.',
+    },
     check: async (db) => {
       const [hasColumn, hasValidCoveringIndex, oldIndex] = await Promise.all([
         columnExists(db, 'sweed_orders', 'invoice_status_name'),
