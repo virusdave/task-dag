@@ -350,46 +350,64 @@ describe('POST /api/agent-waste/clusters', () => {
     expect(callClusterModelMock).not.toHaveBeenCalled()
   })
 
-  it('clusters every observation in a backlog larger than one model-call batch', async () => {
-    const many = Array.from({ length: 201 }, (_, i) => ({
+  it('clusters every observation with at most two model calls in flight', async () => {
+    const many = Array.from({ length: 401 }, (_, i) => ({
       time: 't',
       kind: 'k',
       id: `id-${i}`,
-      estimated_wasted_tokens: i === 200 ? 1_000 : 1,
+      estimated_wasted_tokens: i === 400 ? 1_000 : 1,
     }))
     setBacklogReader(readerFor(many))
-    callClusterModelMock
-      .mockResolvedValueOnce({
-        clusters: [{ label: 'first batch', primaryKey: 0, memberKeys: Array.from({ length: 200 }, (_, i) => i) }],
-      })
-      .mockResolvedValueOnce({
-        clusters: [{ label: 'second batch', primaryKey: 0, memberKeys: [0] }],
-      })
+    let activeCalls = 0
+    let maxActiveCalls = 0
+    callClusterModelMock.mockImplementation(async (batch) => {
+      activeCalls += 1
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls)
+      await Promise.resolve()
+      activeCalls -= 1
+      return {
+        clusters: [{
+          label: `batch ${batch[0].id}`,
+          primaryKey: 0,
+          memberKeys: Array.from({ length: batch.length }, (_, i) => i),
+        }],
+      }
+    })
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.clusters.flatMap((cluster: { members: Array<{ id: string }> }) => cluster.members)).toHaveLength(201)
+    expect(body.clusters.flatMap((cluster: { members: Array<{ id: string }> }) => cluster.members)).toHaveLength(401)
     expect(body.clusters.map((cluster: { label: string }) => cluster.label)).toEqual([
-      'second batch',
-      'first batch',
+      'batch id-400',
+      'batch id-0',
+      'batch id-200',
     ])
     expect(body.unclustered).toEqual([])
-    expect(callClusterModelMock).toHaveBeenCalledTimes(2)
+    expect(maxActiveCalls).toBe(2)
+    expect(callClusterModelMock).toHaveBeenCalledTimes(3)
     expect(callClusterModelMock.mock.calls[0][0]).toHaveLength(200)
-    expect(callClusterModelMock.mock.calls[1][0]).toHaveLength(1)
+    expect(callClusterModelMock.mock.calls[1][0]).toHaveLength(200)
+    expect(callClusterModelMock.mock.calls[2][0]).toHaveLength(1)
   })
 
-  it('fails the whole request when a later batch fails instead of returning a partial result', async () => {
-    const many = Array.from({ length: 201 }, (_, i) => ({ time: 't', kind: 'k', id: `id-${i}` }))
+  it('fails the whole request without starting more batches after a concurrent failure', async () => {
+    const many = Array.from({ length: 401 }, (_, i) => ({ time: 't', kind: 'k', id: `id-${i}` }))
     setBacklogReader(readerFor(many))
+    let resolveSibling!: (raw: RawClusterModelOutput) => void
+    const sibling = new Promise<RawClusterModelOutput>((resolve) => {
+      resolveSibling = resolve
+    })
     callClusterModelMock
-      .mockResolvedValueOnce({
-        clusters: [{ label: 'first batch', primaryKey: 0, memberKeys: [0] }],
-      })
       .mockRejectedValueOnce(new ClusterModelError('bedrock_http_error', 'HTTP 500'))
+      .mockReturnValueOnce(sibling)
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
     expect(res.statusCode).toBe(502)
     expect(res.json().error).toBe('bedrock_http_error')
+    expect(callClusterModelMock).toHaveBeenCalledTimes(2)
+
+    resolveSibling({ clusters: [{ label: 'sibling', primaryKey: 0, memberKeys: [0] }] })
+    await sibling
+    await Promise.resolve()
     expect(callClusterModelMock).toHaveBeenCalledTimes(2)
   })
 

@@ -352,14 +352,40 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
       const unclustered: AgentWasteClustersResponse['unclustered'] = []
       try {
         // Keep each model prompt within the proven single-call budget while
-        // covering the entire backlog. Calls are deliberately sequential to
-        // avoid a large backlog creating an unbounded burst at the gateway.
-        // If any batch fails, the whole request fails rather than returning a
-        // partial result that looks complete.
+        // covering the entire backlog. Two workers keep gateway concurrency
+        // bounded while preventing two normal batches from accumulating past
+        // the reverse proxy's request deadline. If any batch fails, the whole
+        // request fails rather than returning a partial result that looks
+        // complete.
+        const batches: Array<readonly (typeof observations)[number][]> = []
         for (let offset = 0; offset < observations.length; offset += CLUSTER_BATCH_SIZE) {
-          const batch = observations.slice(offset, offset + CLUSTER_BATCH_SIZE)
-          const raw = await callClusterModel(batch, model, { env: getServerEnv() })
-          const result = rehydrateClusters(batch, raw)
+          batches.push(observations.slice(offset, offset + CLUSTER_BATCH_SIZE))
+        }
+
+        const results: Array<ReturnType<typeof rehydrateClusters>> = new Array(batches.length)
+        let nextBatch = 0
+        let failed = false
+        async function clusterWorker(): Promise<void> {
+          while (!failed && nextBatch < batches.length) {
+            const batchIndex = nextBatch
+            nextBatch += 1
+            const batch = batches[batchIndex]
+            try {
+              const raw = await callClusterModel(batch, model, { env: getServerEnv() })
+              results[batchIndex] = rehydrateClusters(batch, raw)
+            } catch (error) {
+              // Let an already-running sibling finish, but prevent it from
+              // starting more paid work after this request has failed.
+              failed = true
+              throw error
+            }
+          }
+        }
+        await Promise.all(
+          Array.from({ length: Math.min(2, batches.length) }, () => clusterWorker()),
+        )
+
+        for (const result of results) {
           clusters.push(...result.clusters)
           unclustered.push(...result.unclustered)
         }
