@@ -177,6 +177,34 @@ else
     bad "D1 graph-converge did not close child-complete epic"
 fi
 
+# The close candidate is valid only for the exact origin-backed semantic
+# generation that produced it. A task-ref change during the nested publication
+# preparation must force a fresh evaluation rather than publishing stale work.
+EP_DRIFT=$(mk_task "$ROOT/same" "Task: authority drift epic
+
+Issue: #93
+Type: epic")
+publish_pending_epic "$ROOT/same" 93 "$EP_DRIFT"
+CH_DRIFT=$(mk_task "$ROOT/same" "Task: authority drift child
+Type: leaf" "$EP_DRIFT")
+complete_task "$ROOT/same" "$CH_DRIFT" >/dev/null
+if ( cd "$ROOT/same" && source "$TD" --help >/dev/null && prepare_count=0 && \
+    taskdag_consumer_test_after_prepare_hook() {
+        prepare_count=$((prepare_count+1))
+        if [ "$prepare_count" -eq 2 ]; then
+            local drift drift_short
+            drift=$(git commit-tree "$EMPTY_TREE" -m 'Task: concurrent authority change') || return 1
+            drift_short=$(git rev-parse --short "$drift") || return 1
+            git push -q origin "$drift:refs/heads/tasks/frontier/$drift_short" || return 1
+        fi
+    } && \
+    ! taskdag_emit_origin_epic_close 93 "$EP_DRIFT" false >/dev/null 2>&1 ) \
+    && ! has_close_merge "$ROOT/same" 93 "$EP_DRIFT"; then
+    ok "D2 auto-close fails closed when semantic authority changes before publication"
+else
+    bad "D2 auto-close published across an authority-generation change"
+fi
+
 # ── E. epic auto-close over cross-repo requires obligations ───────────────
 EPX=$(mk_task "$ROOT/dst" "Task: cross-repo requires epic
 

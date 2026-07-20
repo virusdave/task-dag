@@ -958,7 +958,9 @@ _xrepo_reconcile_delegated_close() { # parent-issue peer-repo peer-issue delegat
     taskdag_consumer_fenced_scheduling_push reconcile-delegated-close "${TASK_DAG_CLAIMER:-comment-reconciler}" "$updates" || :
     existing=$(_xrepo_remote_sha "$ref") || return 2; [ -n "$existing" ] || return 2
     git fetch -q --no-tags origin "$ref" || return 2
-    _xrepo_validate_delegated_close_v1 "$existing" "$delegation" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue"
+    _xrepo_validate_delegated_close_v1 "$existing" "$delegation" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue" \
+        || return $?
+    _XREPO_RECONCILE_CREATED_CLOSES=$(( ${_XREPO_RECONCILE_CREATED_CLOSES:-0} + 1 ))
 }
 
 _xrepo_reconcile_issue_delegated_closes() { # issue
@@ -1770,8 +1772,15 @@ EOF
             || { _xrepo_reconcile_argument_failure "$mode" "invalid, stale, or insufficient watchdog lease"; return 2; }
     fi
 
-    local began now deadline repo tmp listing rc=0 fatal=false real_git
+    local began now deadline convergence_reserve repo tmp listing rc=0 terminal_rc=0 fatal=false real_git snapshot_rc=0
     began=$(date +%s); deadline=$((began + max_seconds)); repo=$(printf '%s' "$(_xrepo_current_repo_offline)" | tr '[:upper:]' '[:lower:]')
+    # A close can prepare consumers, derive facts, reconcile delegated peers,
+    # and publish. Do not begin that transaction in the tail of a sweep. The
+    # proportional reserve scales down for focused fixtures and is capped so
+    # long production sweeps still spend most of their budget on ingestion.
+    convergence_reserve=$((max_seconds / 4))
+    [ "$convergence_reserve" -ge 1 ] || convergence_reserve=1
+    [ "$convergence_reserve" -le 120 ] || convergence_reserve=120
     local GITHUB_REPOSITORY="$repo"
     tmp=$(mktemp -d)
     real_git=$(command -v git)
@@ -1786,30 +1795,65 @@ EOF
     export TASKDAG_RECONCILE_DEADLINE="$deadline" TASKDAG_RECONCILE_REAL_GIT="$real_git"
     local PATH="$tmp/bin:$PATH"
     local requests=0 pages=0 returned=0 unique=0 eligible=0 prs=0 pre=0 receipted=0 missing=0 human=0 completion=0 machine=0 attempted=0 applied=0 deferred=0 failures=0 remaining=null reset=null
+    local _XREPO_RECONCILE_CREATED_CLOSES=0
     local failure_file="$tmp/failures"; : >"$failure_file"
     _rc_fail() { failures=$((failures+1)); if [ "$failures" -le 100 ]; then jq -nc --arg stage "$1" --arg issue "${2:-}" --arg comment_id "${3:-}" --arg message "$4" '{stage:$stage,issue:(if ($issue|test("^[1-9][0-9]*$")) then ($issue|tonumber) else null end),comment_id:(if ($comment_id|test("^[1-9][0-9]*$")) then ($comment_id|tonumber) else null end),message:$message}' >>"$failure_file"; fi; return 0; }
     _rc_time() { [ "$(date +%s)" -lt "$deadline" ]; }
+    _rc_timeout() { terminal_rc=124; fatal=true; _rc_fail "$1" "${2:-}" "${3:-}" "time ceiling reached"; }
+    _rc_convergence_time() { [ $((deadline - $(date +%s))) -ge "$convergence_reserve" ]; }
     # One authoritative namespace advertisement. It is also the proof used by
     # the private no-initial-probe ingestion mode.
-    listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 2>"$tmp/git.err") || { _rc_fail snapshot "" "" "$(cat "$tmp/git.err")"; fatal=true; listing=""; }
+    listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 2>"$tmp/git.err") || snapshot_rc=$?
+    if [ "$snapshot_rc" -ne 0 ]; then
+        if [ "$snapshot_rc" -eq 124 ]; then terminal_rc=124; _rc_fail snapshot "" "" "time ceiling reached"
+        else _rc_fail snapshot "" "" "$(cat "$tmp/git.err")"
+        fi
+        fatal=true; listing=""
+    fi
+    : >"$tmp/manifest"; : >"$tmp/receipts"; : >"$tmp/converge-issues"
+    if [ "$fatal" = false ]; then
     _xrepo_write_sorted_listing "$listing" "$tmp/manifest"
     if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
     printf '%s\n' "$listing" | awk '$2 ~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ {print $2}' >"$tmp/receipts"
-    git init -q --bare "$tmp/snapshot.git" && git --git-dir="$tmp/snapshot.git" remote add origin "$(git remote get-url origin)" || { _rc_fail snapshot "" "" "cannot initialize isolated snapshot"; fatal=true; }
+    snapshot_rc=0
+    git init -q --bare "$tmp/snapshot.git" && git --git-dir="$tmp/snapshot.git" remote add origin "$(git remote get-url origin)" || snapshot_rc=$?
+    if [ "$snapshot_rc" -ne 0 ]; then
+        if [ "$snapshot_rc" -eq 124 ] || ! _rc_time; then _rc_timeout snapshot "" ""
+        else _rc_fail snapshot "" "" "cannot initialize isolated snapshot"; fatal=true
+        fi
+    fi
     if [ "$fatal" = false ] && [ -s "$tmp/manifest" ]; then
+        snapshot_rc=0
         timeout "${max_seconds}s" git --git-dir="$tmp/snapshot.git" fetch -q --no-tags origin \
             '+refs/heads/gh/comments/*:refs/heads/gh/comments/*' \
             '+refs/heads/tasks/completions/*:refs/heads/tasks/completions/*' \
             '+refs/heads/tasks/delegated/*:refs/heads/tasks/delegated/*' \
-            '+refs/heads/tasks/delegated-close/v1/*:refs/heads/tasks/delegated-close/v1/*' || { _rc_fail snapshot "" "" "isolated snapshot fetch failed"; fatal=true; }
+            '+refs/heads/tasks/delegated-close/v1/*:refs/heads/tasks/delegated-close/v1/*' || snapshot_rc=$?
+        if [ "$snapshot_rc" -ne 0 ]; then
+            [ "$snapshot_rc" -eq 124 ] && { terminal_rc=124; _rc_fail snapshot "" "" "time ceiling reached"; } \
+                || _rc_fail snapshot "" "" "isolated snapshot fetch failed"
+            fatal=true
+        fi
     fi
-    git --git-dir="$tmp/snapshot.git" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/gh/comments refs/heads/tasks/completions refs/heads/tasks/delegated refs/heads/tasks/delegated-close/v1 | LC_ALL=C sort >"$tmp/fetched"
-    cmp -s "$tmp/manifest" "$tmp/fetched" || { _rc_fail snapshot "" "" "snapshot changed during fetch"; fatal=true; }
-    : >"$tmp/converge-issues"
+    if [ "$fatal" = false ]; then
+    snapshot_rc=0
+    git --git-dir="$tmp/snapshot.git" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/gh/comments refs/heads/tasks/completions refs/heads/tasks/delegated refs/heads/tasks/delegated-close/v1 \
+        | LC_ALL=C sort >"$tmp/fetched" || snapshot_rc=$?
+    if [ "$snapshot_rc" -ne 0 ]; then
+        if [ "$snapshot_rc" -eq 124 ] || ! _rc_time; then _rc_timeout snapshot "" ""
+        else _rc_fail snapshot "" "" "snapshot readback failed"; fatal=true
+        fi
+    elif ! cmp -s "$tmp/manifest" "$tmp/fetched"; then
+        if ! _rc_time; then _rc_timeout snapshot "" ""
+        else _rc_fail snapshot "" "" "snapshot changed during fetch"; fatal=true
+        fi
+    fi
+    if [ "$fatal" = false ]; then
     while IFS=$'\t' read -r sha ref; do
         if [[ "$ref" =~ ^refs/heads/gh/comments/([1-9][0-9]*)/([1-9][0-9]*)$ ]]; then
             local receipt_issue="${BASH_REMATCH[1]}" receipt_id="${BASH_REMATCH[2]}" receipt_info
             if ! receipt_info=$(GIT_DIR="$tmp/snapshot.git" _xrepo_validate_receipt "$sha" "$repo" "$receipt_issue" "$receipt_id"); then
+                if ! _rc_time; then _rc_timeout snapshot "$receipt_issue" "$receipt_id"; break; fi
                 _rc_fail snapshot "$receipt_issue" "$receipt_id" "malformed comment receipt"; fatal=true
             elif [[ "$receipt_info" = completion* || "$receipt_info" = legacy-completion* ]]; then
                 printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"
@@ -1818,6 +1862,7 @@ EOF
             local legacy_issue="${BASH_REMATCH[1]}" legacy_id="${BASH_REMATCH[2]}" legacy_info
             if ! legacy_info=$(GIT_DIR="$tmp/snapshot.git" _xrepo_validate_receipt "$sha" "$repo" "$legacy_issue" "$legacy_id") \
                 || [ "$legacy_info" != legacy-completion ]; then
+                if ! _rc_time; then _rc_timeout snapshot "$legacy_issue" ""; break; fi
                 _rc_fail snapshot "$legacy_issue" "" "malformed historical completion provenance"; fatal=true
             else
                 printf '%s\n' "$legacy_issue" >>"$tmp/converge-issues"
@@ -1826,18 +1871,36 @@ EOF
             local delegated_issue="${BASH_REMATCH[1]}" delegated_owner="${BASH_REMATCH[2]}" delegated_repo="${BASH_REMATCH[3]}" delegated_peer="${BASH_REMATCH[4]}"
             GIT_DIR="$tmp/snapshot.git" _xrepo_validate_delegation "$sha" "$repo" \
                 "$delegated_issue" "${delegated_owner}/${delegated_repo}" "$delegated_peer" \
-                || { _rc_fail snapshot "$delegated_issue" "" "malformed delegation fact"; fatal=true; }
+                || { if ! _rc_time; then _rc_timeout snapshot "$delegated_issue" ""; break; fi; _rc_fail snapshot "$delegated_issue" "" "malformed delegation fact"; fatal=true; }
+        elif [[ "$ref" =~ ^refs/heads/tasks/delegated-close/v1/([1-9][0-9]*)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/([1-9][0-9]*)$ ]]; then
+            local close_issue="${BASH_REMATCH[1]}" close_owner="${BASH_REMATCH[2]}" close_repo="${BASH_REMATCH[3]}" close_peer="${BASH_REMATCH[4]}" close_parent
+            local close_parent_rc=0
+            close_parent=$(git --git-dir="$tmp/snapshot.git" rev-parse -q --verify \
+                "refs/heads/tasks/delegated/${close_issue}/${close_owner}/${close_repo}/${close_peer}^{commit}") || close_parent_rc=$?
+            if [ "$close_parent_rc" -eq 124 ] || ! _rc_time; then _rc_timeout snapshot "$close_issue" ""; break
+            elif [ "$close_parent_rc" -ne 0 ]; then _rc_fail snapshot "$close_issue" "" "delegated-close has no canonical delegation"; fatal=true; continue
+            fi
+            GIT_DIR="$tmp/snapshot.git" _xrepo_validate_delegated_close_v1 "$sha" "$close_parent" "$repo" \
+                "$close_issue" "${close_owner}/${close_repo}" "$close_peer" \
+                || { if ! _rc_time; then _rc_timeout snapshot "$close_issue" ""; break; fi; _rc_fail snapshot "$close_issue" "" "malformed delegated-close fact"; fatal=true; continue; }
+            printf '%s\n' "$close_issue" >>"$tmp/converge-issues"
         elif [[ "$ref" =~ ^refs/heads/tasks/completions/([1-9][0-9]*)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/([1-9][0-9]*)/([0-9a-f]{7,40})$ ]]; then
             local fact_issue="${BASH_REMATCH[1]}" fact_owner="${BASH_REMATCH[2]}" fact_repo="${BASH_REMATCH[3]}" fact_peer="${BASH_REMATCH[4]}" fact_commit="${BASH_REMATCH[5]}" fact_parent
+            local fact_parent_rc=0
             fact_parent=$(git --git-dir="$tmp/snapshot.git" rev-parse -q --verify \
-                "refs/heads/tasks/delegated/${fact_issue}/${fact_owner}/${fact_repo}/${fact_peer}^{commit}") \
-                || { _rc_fail snapshot "$fact_issue" "" "completion fact has no canonical delegation"; fatal=true; continue; }
+                "refs/heads/tasks/delegated/${fact_issue}/${fact_owner}/${fact_repo}/${fact_peer}^{commit}") || fact_parent_rc=$?
+            if [ "$fact_parent_rc" -eq 124 ] || ! _rc_time; then _rc_timeout snapshot "$fact_issue" ""; break
+            elif [ "$fact_parent_rc" -ne 0 ]; then _rc_fail snapshot "$fact_issue" "" "completion fact has no canonical delegation"; fatal=true; continue
+            fi
             GIT_DIR="$tmp/snapshot.git" _xrepo_validate_completion_fact "$sha" "$fact_parent" "$repo" \
                 "$fact_issue" "${fact_owner}/${fact_repo}" "$fact_peer" "$fact_commit" \
-                || { _rc_fail snapshot "$fact_issue" "" "malformed completion fact"; fatal=true; }
+                || { if ! _rc_time; then _rc_timeout snapshot "$fact_issue" ""; break; fi; _rc_fail snapshot "$fact_issue" "" "malformed completion fact"; fatal=true; }
             printf '%s\n' "$fact_issue" >>"$tmp/converge-issues"
         fi
     done <"$tmp/manifest"
+    fi
+    fi
+    fi
 
     _rc_api() {
         local endpoint="$1" required="${2:-required}" try=0 code retry="" envelope="$tmp/envelope" headers="$tmp/headers"
@@ -1853,6 +1916,7 @@ EOF
             remaining=$(awk 'tolower($1)=="x-ratelimit-remaining:" {print $2}' "$headers" | tail -1); reset=$(awk 'tolower($1)=="x-ratelimit-reset:" {print $2}' "$headers" | tail -1)
             [[ "$remaining" =~ ^[0-9]+$ ]] || remaining=null; [[ "$reset" =~ ^[0-9]+$ ]] || reset=null
             [ "$gh_rc" -eq 0 ] && [ "$(grep -c '^HTTP/' "$headers")" -eq 1 ] && [[ "$code" =~ ^2[0-9][0-9]$ ]] && jq -e . "$tmp/body" >/dev/null 2>&1 && return 0
+            [ "$gh_rc" -eq 124 ] && return 124
             if { [ "$code" = 403 ] || [ "$code" = 429 ]; } && [ "$try" -eq 0 ]; then
                 retry=$(awk 'tolower($1)=="retry-after:" {print $2}' "$headers" | tail -1)
                 if [[ "$retry" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) + retry )) -lt "$deadline" ]; then sleep "$retry"; try=1; continue; fi
@@ -1861,9 +1925,12 @@ EOF
         done
     }
 
-    local repo_numeric_id=""
+    local repo_numeric_id="" repo_rc=0
     if [ "$fatal" = false ]; then
-        if _rc_api "repos/$repo" && repo_numeric_id=$(jq -r '.id // empty' "$tmp/body") \
+        _rc_api "repos/$repo" || repo_rc=$?
+        if [ "$repo_rc" -eq 124 ]; then
+            _rc_timeout list "" ""
+        elif [ "$repo_rc" -eq 0 ] && repo_numeric_id=$(jq -r '.id // empty' "$tmp/body") \
             && [[ "$repo_numeric_id" =~ ^[1-9][0-9]*$ ]]; then
             :
         else
@@ -1872,6 +1939,100 @@ EOF
         fi
     fi
 
+    # Refresh each issue independently immediately before deciding to close.
+    # Delegations live outside master, so the initial run snapshot is not
+    # sufficient authority for a close several minutes later.
+    _rc_fresh_issue_status() {
+        local ci="$1"
+        local dir="$tmp/converge-${ci}.git" manifest="$tmp/converge-${ci}.manifest" fetched="$tmp/converge-${ci}.fetched"
+        local advertised
+        rm -rf "$dir"
+        advertised=$(git ls-remote --refs origin \
+            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*") || return $?
+        _xrepo_write_sorted_listing "$advertised" "$manifest"
+        git init -q --bare "$dir" && git --git-dir="$dir" remote add origin "$(git remote get-url origin)" || return $?
+        if [ -s "$manifest" ]; then
+            git --git-dir="$dir" fetch -q --no-tags origin \
+                "+refs/heads/tasks/delegated/${ci}/*:refs/heads/tasks/delegated/${ci}/*" \
+                "+refs/heads/tasks/delegated-close/v1/${ci}/*:refs/heads/tasks/delegated-close/v1/${ci}/*" || return $?
+        fi
+        git --git-dir="$dir" for-each-ref --format='%(objectname)%09%(refname)' \
+            "refs/heads/tasks/delegated/${ci}/" "refs/heads/tasks/delegated-close/v1/${ci}/" | LC_ALL=C sort >"$fetched" \
+            || return $?
+        cmp -s "$manifest" "$fetched" || return 2
+        _xrepo_strict_snapshot_status "$dir" "$repo" "$ci"
+    }
+    _rc_converge_issues() { # file containing one issue number per line
+        local issues_file=$1 converge_issue converge_rc strict_status root
+        [ "$dry" = false ] && [ "$fatal" = false ] || return 0
+        while IFS= read -r converge_issue; do
+            [ -n "$converge_issue" ] || continue
+            if ! _rc_convergence_time; then
+                deferred=$((deferred+1))
+                return 0
+            fi
+            _rc_time || { terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124; }
+            # Refresh state immediately before mutation. The earlier scan
+            # observation may have failed or the issue may have closed since.
+            converge_rc=0; _rc_api "repos/$repo/issues/$converge_issue" || converge_rc=$?
+            if [ "$converge_rc" -eq 124 ]; then
+                terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124
+            elif [ "$converge_rc" -ne 0 ]; then
+                _rc_fail convergence "$converge_issue" "" "issue request failed"; continue
+            elif ! jq -e --argjson issue "$converge_issue" 'type=="object" and .number==$issue and (.state=="open" or .state=="closed")' "$tmp/body" >/dev/null; then
+                _rc_fail convergence "$converge_issue" "" "malformed issue metadata"; continue
+            fi
+            cp "$tmp/body" "$tmp/issue-${converge_issue}.json"
+            # Completion receipts are immutable history and remain in every
+            # future snapshot. A closed issue is already converged; its live
+            # scheduling root was intentionally retired by close cleanup.
+            if jq -e '.state == "closed"' "$tmp/issue-${converge_issue}.json" >/dev/null; then
+                continue
+            fi
+            converge_rc=0; _xrepo_reconcile_issue_delegated_closes "$converge_issue" || converge_rc=$?
+            if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
+                terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124
+            elif [ "$converge_rc" -ne 0 ]; then
+                _rc_fail convergence "$converge_issue" "" "delegated-close reconciliation failed"; continue
+            fi
+            converge_rc=0; strict_status=$(_rc_fresh_issue_status "$converge_issue") || converge_rc=$?
+            if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
+                terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124
+            elif [ "$converge_rc" -ne 0 ]; then
+                _rc_fail convergence "$converge_issue" "" "cannot obtain a valid fresh delegation/completion snapshot"; continue
+            fi
+            [ "$strict_status" = ready ] || continue
+            converge_rc=0
+            root=$(ISSUE_TITLE="$(jq -r .title "$tmp/issue-${converge_issue}.json")" \
+                ISSUE_AUTHOR="$(jq -r .user.login "$tmp/issue-${converge_issue}.json")" \
+                ISSUE_URL="$(jq -r .html_url "$tmp/issue-${converge_issue}.json")" \
+                ISSUE_BODY="$(jq -r '.body // ""' "$tmp/issue-${converge_issue}.json")" \
+                _xrepo_ensure_issue_epic "$converge_issue") || converge_rc=$?
+            if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
+                _rc_timeout convergence "$converge_issue" ""; return 124
+            elif [ "$converge_rc" -ne 0 ]; then
+                _rc_fail convergence "$converge_issue" "" "cannot resolve epic root"; continue
+            fi
+            if ! _xrepo_watchdog_fence; then _rc_fail convergence "$converge_issue" "" "watchdog lease lost"; fatal=true; return 2; fi
+            converge_rc=0
+            _XREPO_STRICT_SNAPSHOT_GIT_DIR="$tmp/converge-${converge_issue}.git" \
+                taskdag_emit_origin_epic_close "$converge_issue" "$root" >"$tmp/close-${converge_issue}.out" \
+                || converge_rc=$?
+            if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
+                terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124
+            elif [ "$converge_rc" -ne 0 ]; then
+                _rc_fail convergence "$converge_issue" "" "strict epic close failed"
+            fi
+        done < <(LC_ALL=C sort -nu "$issues_file")
+    }
+
+    # Durable completion receipts are correctness backlog, not pagination
+    # latency. Converge the initial immutable snapshot while the run still has
+    # its full budget, then reserve the later pass for receipts created during
+    # this invocation.
+    _rc_converge_issues "$tmp/converge-issues" || :
+    : >"$tmp/converge-issues"
+
     local scan_from="$start"
     [ "$mode" = recent ] && scan_from="$since"
     scan_from=$(date -u -d "$scan_from - 900 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || fatal=true
@@ -1879,8 +2040,11 @@ EOF
     : >"$tmp/all"
     : >"$tmp/allow-receipts"
     while [ "$fatal" = false ] && [ -n "$endpoint" ]; do
-        _rc_time || { _rc_fail ceiling "" "" "time ceiling reached"; fatal=true; break; }
-        _rc_api "$endpoint" || { _rc_fail list "" "" "comment page request failed"; fatal=true; break; }
+        _rc_time || { _rc_timeout ceiling "" ""; break; }
+        local page_rc=0; _rc_api "$endpoint" || page_rc=$?
+        if [ "$page_rc" -eq 124 ]; then _rc_timeout list "" ""; break
+        elif [ "$page_rc" -ne 0 ]; then _rc_fail list "" "" "comment page request failed"; fatal=true; break
+        fi
         pages=$((pages+1)); jq -e 'type=="array"' "$tmp/body" >/dev/null || { _rc_fail list "" "" "page body is not an array"; fatal=true; break; }
         local n; n=$(jq length "$tmp/body"); returned=$((returned+n)); [ "$returned" -le "$max_comments" ] || { _rc_fail ceiling "" "" "comment ceiling reached"; fatal=true; break; }
         jq -c '.[]' "$tmp/body" >>"$tmp/all"
@@ -1906,7 +2070,10 @@ EOF
             printf '%s:%s\n' "$expected" "$cid" >>"$tmp/allow-receipts"
             continue
         fi
-        _rc_api "repos/$repo/issues/comments/$cid" || { _rc_fail allowlist "$expected" "$cid" "direct comment request failed"; fatal=true; continue; }
+        local allow_rc=0; _rc_api "repos/$repo/issues/comments/$cid" || allow_rc=$?
+        if [ "$allow_rc" -eq 124 ]; then _rc_timeout allowlist "$expected" "$cid"; break
+        elif [ "$allow_rc" -ne 0 ]; then _rc_fail allowlist "$expected" "$cid" "direct comment request failed"; fatal=true; continue
+        fi
         returned=$((returned+1)); if [ "$returned" -gt "$max_comments" ]; then _rc_fail ceiling "$expected" "$cid" "comment ceiling reached"; fatal=true; break; fi
         jq -c --arg expected "$expected" '. + {__allow_issue:$expected}' "$tmp/body" >>"$tmp/all"
     done
@@ -1918,7 +2085,7 @@ EOF
     unique=$(wc -l <"$tmp/sorted")
     declare -A issue_pr=()
     while IFS= read -r item; do
-        _rc_time || { _rc_fail ceiling "" "" "time ceiling reached"; fatal=true; break; }
+        _rc_time || { _rc_timeout ceiling "" ""; break; }
         cid=$(jq -r '.id|tostring' <<<"$item"); iu=$(jq -r .issue_url <<<"$item"); issue=${iu##*/}
         [[ "${iu,,}" == "https://api.github.com/repos/${repo}/issues/${issue}" && "$issue" =~ ^[1-9][0-9]*$ ]] || { _rc_fail validate "$issue" "$cid" "invalid issue_url"; continue; }
         ca=$(jq -r .created_at <<<"$item"); ua=$(jq -r .updated_at <<<"$item")
@@ -1927,7 +2094,10 @@ EOF
         if grep -qx "refs/heads/gh/comments/$issue/$cid" "$tmp/receipts"; then receipted=$((receipted+1)); continue; fi
         if [ -z "$expected" ] && [[ "$(jq -r .created_at <<<"$item")" < "$start" ]]; then pre=$((pre+1)); continue; fi
         if [ -z "${issue_pr[$issue]+x}" ]; then
-            if ! _rc_api "repos/$repo/issues/$issue"; then
+            local issue_rc=0; _rc_api "repos/$repo/issues/$issue" || issue_rc=$?
+            if [ "$issue_rc" -eq 124 ]; then
+                _rc_timeout issue "$issue" "$cid"; break
+            elif [ "$issue_rc" -ne 0 ]; then
                 issue_pr[$issue]=-1
                 _rc_fail issue "$issue" "$cid" "issue request failed"
             elif ! jq -e --argjson issue "$issue" 'type=="object" and .number==$issue and (.state=="open" or .state=="closed") and (.title|type)=="string" and (.html_url|type)=="string" and (.user.login|type)=="string" and ((.body|type)=="string" or .body==null) and ((has("pull_request")|not) or (.pull_request|type)=="object")' "$tmp/body" >/dev/null; then
@@ -1961,13 +2131,18 @@ EOF
         if [ "$dry" = true ]; then deferred=$((deferred+1)); continue; fi
         if [ "$attempted" -ge "$max_apply" ]; then deferred=$((deferred+1)); continue; fi
         attempted=$((attempted+1)); ca=$(jq -r .created_at <<<"$item"); ua=$(jq -r .updated_at <<<"$item"); author=$(jq -r '.user.login // "unknown"' <<<"$item"); url=$(jq -r .html_url <<<"$item")
-        if ISSUE_TITLE="$(jq -r .title "$tmp/issue-${issue}.json")" \
+        local ingest_rc=0
+        ISSUE_TITLE="$(jq -r .title "$tmp/issue-${issue}.json")" \
             ISSUE_AUTHOR="$(jq -r .user.login "$tmp/issue-${issue}.json")" \
             ISSUE_URL="$(jq -r .html_url "$tmp/issue-${issue}.json")" \
             ISSUE_BODY="$(jq -r '.body // ""' "$tmp/issue-${issue}.json")" \
             _XREPO_SNAPSHOT_ABSENT=true _XREPO_DEFER_CONVERGENCE=true \
-            _xrepo_ingest_observed_comment "$issue" "$cid" "$ca" "$ua" "$author" "$url" "$bodyf" "$classified"; then
+            _xrepo_ingest_observed_comment "$issue" "$cid" "$ca" "$ua" "$author" "$url" "$bodyf" "$classified" \
+            || ingest_rc=$?
+        if [ "$ingest_rc" -eq 0 ]; then
             applied=$((applied+1))
+        elif [ "$ingest_rc" -eq 124 ] || ! _rc_time; then
+            _rc_timeout ingest "$issue" "$cid"; break
         else
             _rc_fail ingest "$issue" "$cid" "atomic ingestion failed"
         fi
@@ -1979,65 +2154,7 @@ EOF
             unique=$((unique+1))
         fi
     done < <(LC_ALL=C sort -u "$tmp/allow-receipts")
-    # Refresh each issue independently immediately before deciding to close.
-    # Delegations live outside master, so the initial run snapshot is not
-    # sufficient authority for a close several minutes later.
-    _rc_fresh_issue_status() {
-        local ci="$1"
-        local dir="$tmp/converge-${ci}.git" manifest="$tmp/converge-${ci}.manifest" fetched="$tmp/converge-${ci}.fetched"
-        local advertised
-        rm -rf "$dir"
-        advertised=$(git ls-remote --refs origin \
-            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*") || return 2
-        _xrepo_write_sorted_listing "$advertised" "$manifest"
-        git init -q --bare "$dir" && git --git-dir="$dir" remote add origin "$(git remote get-url origin)" || return 2
-        if [ -s "$manifest" ]; then
-            git --git-dir="$dir" fetch -q --no-tags origin \
-                "+refs/heads/tasks/delegated/${ci}/*:refs/heads/tasks/delegated/${ci}/*" \
-                "+refs/heads/tasks/delegated-close/v1/${ci}/*:refs/heads/tasks/delegated-close/v1/${ci}/*" || return 2
-        fi
-        git --git-dir="$dir" for-each-ref --format='%(objectname)%09%(refname)' \
-            "refs/heads/tasks/delegated/${ci}/" "refs/heads/tasks/delegated-close/v1/${ci}/" | LC_ALL=C sort >"$fetched"
-        cmp -s "$manifest" "$fetched" || return 2
-        _xrepo_strict_snapshot_status "$dir" "$repo" "$ci"
-    }
-    if [ "$dry" = false ] && [ "$fatal" = false ]; then
-        while IFS= read -r issue; do
-            [ -n "$issue" ] || continue
-            _rc_time || { _rc_fail convergence "$issue" "" "time ceiling reached"; fatal=true; break; }
-            # Refresh state immediately before mutation. The earlier scan
-            # observation may have failed or the issue may have closed since.
-            if ! _rc_api "repos/$repo/issues/$issue"; then
-                _rc_fail convergence "$issue" "" "issue request failed"; continue
-            elif ! jq -e --argjson issue "$issue" 'type=="object" and .number==$issue and (.state=="open" or .state=="closed")' "$tmp/body" >/dev/null; then
-                _rc_fail convergence "$issue" "" "malformed issue metadata"; continue
-            fi
-            cp "$tmp/body" "$tmp/issue-${issue}.json"
-            # Completion receipts are immutable history and remain in every
-            # future snapshot. A closed issue is already converged; its live
-            # scheduling root was intentionally retired by close cleanup.
-            if jq -e '.state == "closed"' "$tmp/issue-${issue}.json" >/dev/null; then
-                continue
-            fi
-            if ! _xrepo_reconcile_issue_delegated_closes "$issue"; then
-                _rc_fail convergence "$issue" "" "delegated-close reconciliation failed"
-                continue
-            fi
-            local strict_status
-            if ! strict_status=$(_rc_fresh_issue_status "$issue"); then
-                _rc_fail convergence "$issue" "" "cannot obtain a valid fresh delegation/completion snapshot"
-                continue
-            fi
-            [ "$strict_status" = ready ] || continue
-            local root
-            root=$(_xrepo_ensure_issue_epic "$issue") || { _rc_fail convergence "$issue" "" "cannot resolve epic root"; continue; }
-            if ! _xrepo_watchdog_fence; then _rc_fail convergence "$issue" "" "watchdog lease lost"; fatal=true; break; fi
-            if ! _XREPO_STRICT_SNAPSHOT_GIT_DIR="$tmp/converge-${issue}.git" \
-                taskdag_emit_origin_epic_close "$issue" "$root" >"$tmp/close-${issue}.out"; then
-                _rc_fail convergence "$issue" "" "strict epic close failed"
-            fi
-        done < <(LC_ALL=C sort -nu "$tmp/converge-issues")
-    fi
+    _rc_converge_issues "$tmp/converge-issues" || :
     now=$(date +%s); local status=success exhausted=true
     if [ "$fatal" = true ] || [ "$failures" -gt 0 ]; then status=failed; exhausted=false
     elif [ "$dry" = false ] && [ "$deferred" -gt 0 ]; then status=partial; exhausted=false
@@ -2045,8 +2162,9 @@ EOF
     local failure_json='[]'; [ -s "$failure_file" ] && failure_json=$(jq -s . "$failure_file")
     local recent_at=null complete_at=null stamp
     if [ "$status" = success ] && [ "$dry" = false ] && [ "$exhausted" = true ]; then stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); [ "$mode" = recent ] && recent_at="\"$stamp\"" || complete_at="\"$stamp\""; fi
-    jq -nc --arg mode "$mode" --arg status "$status" --argjson dry_run "$dry" --argjson exhausted "$exhausted" --argjson requests "$requests" --argjson pages "$pages" --argjson returned "$returned" --argjson unique "$unique" --argjson eligible "$eligible" --argjson prs "$prs" --argjson pre "$pre" --argjson receipts "$receipted" --argjson missing "$missing" --argjson human "$human" --argjson completion "$completion" --argjson machine "$machine" --argjson attempted "$attempted" --argjson applied "$applied" --argjson deferred "$deferred" --argjson failures "$failures" --argjson items "$failure_json" --argjson duration "$((now-began))" --argjson remaining "$remaining" --argjson reset "$reset" --argjson recent "$recent_at" --argjson complete "$complete_at" '{schema_version:1,mode:$mode,status:$status,dry_run:$dry_run,exhausted:$exhausted,requests:$requests,pages:$pages,returned:$returned,unique:$unique,eligible:$eligible,pull_requests:$prs,pre_boundary:$pre,already_receipted:$receipts,missing:$missing,dispositions:{human:$human,completion:$completion,machine_skip:$machine},attempted:$attempted,applied:$applied,deferred:$deferred,failures:$failures,failure_items:$items,duration_seconds:$duration,rate_limit:{remaining:$remaining,reset:$reset},recent_success_at:$recent,complete_success_at:$complete}'
+    jq -nc --arg mode "$mode" --arg status "$status" --argjson dry_run "$dry" --argjson exhausted "$exhausted" --argjson requests "$requests" --argjson pages "$pages" --argjson returned "$returned" --argjson unique "$unique" --argjson eligible "$eligible" --argjson prs "$prs" --argjson pre "$pre" --argjson receipts "$receipted" --argjson missing "$missing" --argjson human "$human" --argjson completion "$completion" --argjson machine "$machine" --argjson attempted "$attempted" --argjson applied "$applied" --argjson delegated_closes_created "$_XREPO_RECONCILE_CREATED_CLOSES" --argjson deferred "$deferred" --argjson failures "$failures" --argjson items "$failure_json" --argjson duration "$((now-began))" --argjson remaining "$remaining" --argjson reset "$reset" --argjson recent "$recent_at" --argjson complete "$complete_at" '{schema_version:1,mode:$mode,status:$status,dry_run:$dry_run,exhausted:$exhausted,requests:$requests,pages:$pages,returned:$returned,unique:$unique,eligible:$eligible,pull_requests:$prs,pre_boundary:$pre,already_receipted:$receipts,missing:$missing,dispositions:{human:$human,completion:$completion,machine_skip:$machine},attempted:$attempted,applied:$applied,delegated_closes_created:$delegated_closes_created,deferred:$deferred,failures:$failures,failure_items:$items,duration_seconds:$duration,rate_limit:{remaining:$remaining,reset:$reset},recent_success_at:$recent,complete_success_at:$complete}'
     rm -rf "$tmp"
+    [ "$terminal_rc" -eq 0 ] || return "$terminal_rc"
     [ "$status" = success ]
 }
 

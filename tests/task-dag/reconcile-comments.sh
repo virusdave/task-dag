@@ -195,7 +195,10 @@ case "$endpoint" in
     ;;
   *issues/10) header; printf '\r\n{"number":10,"state":"open","title":"Issue ten","body":"","html_url":"https://github.com/acme/widgets/issues/10","user":{"login":"alice"}}\n' ;;
   *issues/11) header; printf '\r\n{"number":11,"state":"open","title":"Pull request","body":"","html_url":"https://github.com/acme/widgets/pull/11","user":{"login":"alice"},"pull_request":{}}\n' ;;
-  *issues/12) header; printf '\r\n{"number":12,"state":"closed","title":"Closed issue","body":"","html_url":"https://github.com/acme/widgets/issues/12","user":{"login":"alice"}}\n' ;;
+  *issues/12)
+    if [[ "${GH_TIMEOUT_ISSUE:-0}" == 1 ]]; then sleep 5; exit 1; fi
+    header; printf '\r\n{"number":12,"state":"closed","title":"Closed issue","body":"","html_url":"https://github.com/acme/widgets/issues/12","user":{"login":"alice"}}\n'
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -220,6 +223,7 @@ refs_after=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname
 # Apply mode: a late human comment on a closed issue is receipted without
 # recreating work, while an immutable historical completion receipt for that
 # same closed issue does not attempt close convergence against a retired root.
+: >"$GH_LOG"
 apply_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     GH_CLOSED_ONLY=1 CROSS="$(dirname "$TD")/task-dag.d/cross-repo.sh" \
     bash -c 'source "$CROSS"; taskdag_comment_watchdog_check_file() { :; }; \
@@ -234,6 +238,29 @@ receipt=$(git --git-dir="$tmp/origin.git" rev-parse refs/heads/gh/comments/12/5)
 git --git-dir="$tmp/origin.git" show -s --format=%B "$receipt" | grep -Fxq 'Disposition: machine-skip'
 ! git --git-dir="$tmp/origin.git" show-ref --verify --quiet refs/heads/tasks/pending/12
 ! git --git-dir="$tmp/origin.git" for-each-ref --format='%(refname)' refs/heads/tasks/frontier/ | grep -q .
+# Immutable completion backlog converges before the potentially long API
+# pagination scan, while the invocation still has its full time budget.
+issue_line=$(grep -n -m1 '^repos/acme/widgets/issues/12$' "$GH_LOG" | cut -d: -f1)
+list_line=$(grep -n -m1 '^repos/acme/widgets/issues/comments?' "$GH_LOG" | cut -d: -f1)
+[ "$issue_line" -lt "$list_line" ]
+
+# A deadline that expires inside convergence remains distinguishable from
+# corrupt or absent authority; do not continue into nested Git and misreport
+# the synthetic timeout as a missing master/HEAD tip.
+set +e
+timeout_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    GH_TIMEOUT_ISSUE=1 CROSS="$(dirname "$TD")/task-dag.d/cross-repo.sh" \
+    bash -c 'source "$CROSS"; taskdag_comment_watchdog_check_file() { :; }; \
+      _xrepo_reconcile_comments_impl --mode complete \
+        --ingestion-start-at 2025-01-01T00:00:00Z --max-seconds 3 \
+        --watchdog-token-file "'$tmp'/watchdog-token"' 2>"$tmp/timeout.err")
+timeout_rc=$?
+set -e
+[ "$timeout_rc" -eq 124 ]
+jq -e '.status == "failed" and .failures == 1 and
+       .failure_items == [{stage:"convergence",issue:12,comment_id:null,message:"time ceiling reached"}]' \
+  <<<"$timeout_out" >/dev/null
+! grep -Eq 'cannot resolve (a )?master/HEAD tip|integer expected' "$tmp/timeout.err"
 
 set +e
 mismatch_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets GH_BAD_NUMERIC_LINK=1 \

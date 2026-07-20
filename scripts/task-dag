@@ -8303,8 +8303,8 @@ _taskdag_publish_evidence() { # candidate attempt structured-result
     ' <<<"$result" >&2
 }
 
-_taskdag_publish_attempt() { # immutable completion candidate, 1-based attempt
-    local tip=$1 attempt=$2 old first updates rc=0 close_issue close_root outcome diagnostic
+_taskdag_publish_attempt() { # immutable completion candidate, 1-based attempt, optional expected authority generation
+    local tip=$1 attempt=$2 expected_generation=${3:-} old first updates rc=0 close_issue close_root outcome diagnostic observed_generation
     first=$(get_first_parent "$tip") || return 2
     # Observe current master before validating the candidate. A retry after an
     # accepted-but-ambiguous publish is success even if close cleanup already
@@ -8317,6 +8317,13 @@ _taskdag_publish_attempt() { # immutable completion candidate, 1-based attempt
         echo "Canonical task-dag completion is already present on origin/master: $tip"
         return 0
     fi
+    if [ -n "$expected_generation" ]; then
+        observed_generation=$(jq -cS '.observed' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT") || return 2
+        if [ "$observed_generation" != "$expected_generation" ]; then
+            echo "Error: canonical authority moved from the generation used to create this automatic close; re-evaluate before creating another candidate." >&2
+            return 2
+        fi
+    fi
     git merge-base --is-ancestor "$old" "$first" 2>/dev/null || {
         echo "Error: origin/master advanced outside this completion's first-parent history; rebase and recreate it." >&2
         return 2
@@ -8325,6 +8332,13 @@ _taskdag_publish_attempt() { # immutable completion candidate, 1-based attempt
         echo "Error: tip is not an exact canonical completion/close, or its canonical requirements changed." >&2
         return 2
     }
+    if [ -n "$expected_generation" ]; then
+        observed_generation=$(jq -cS '.observed' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT") || return 2
+        if [ "$observed_generation" != "$expected_generation" ]; then
+            echo "Error: canonical authority moved while validating this automatic close; re-evaluate before publication." >&2
+            return 2
+        fi
+    fi
     close_issue=$(git log -1 --format=%B "$tip" | sed -nE 's/^Closes-Epic:[[:space:]]*#([1-9][0-9]*)[[:space:]]*$/\1/p')
     if [ -n "$close_issue" ]; then
         close_root=$(git rev-parse "$tip^2") || return 2
@@ -8334,6 +8348,14 @@ _taskdag_publish_attempt() { # immutable completion candidate, 1-based attempt
             return 3
         }
         [ -n "$TASKDAG_MATERIALISATION_VALIDATED_TIP" ] || return 3
+    fi
+    if [ -n "$expected_generation" ]; then
+        taskdag_consumer_prepare publish-final --tip "$first" || return 2
+        observed_generation=$(jq -cS '.observed' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT") || return 2
+        if [ "$observed_generation" != "$expected_generation" ]; then
+            echo "Error: canonical authority moved before publishing this automatic close; re-evaluate before publication." >&2
+            return 2
+        fi
     fi
     old=$TASKDAG_CONSUMER_MASTER_TIP
     if git merge-base --is-ancestor "$tip" "$old" 2>/dev/null; then
@@ -8393,8 +8415,41 @@ _taskdag_publish_attempt() { # immutable completion candidate, 1-based attempt
     echo "Published canonical task-dag completion to origin/master: $tip"
 }
 
+_taskdag_publish_loop() { # exact candidate, optional expected authority generation
+    local tip=$1 expected_generation=${2:-} retry=0 rc
+    while :; do
+        if _taskdag_publish_attempt "$tip" "$((retry+1))" "$expected_generation"; then
+            return 0
+        else
+            rc=$?
+        fi
+        [ "$rc" -eq 75 ] || return "$rc"
+        if [ "$retry" -ge "$TASKDAG_CAS_MAX_ATTEMPTS" ]; then
+            echo "Error: completion publication candidate=$tip exhausted ${TASKDAG_CAS_MAX_ATTEMPTS} retries after $((retry+1)) fenced attempts under proven activation-authority contention. Every failed attempt left origin/master unchanged. Recovery command: task-dag publish $tip. Recreate only if fresh validation reports changed requirements or master ancestry." >&2
+            return 3
+        fi
+        retry=$((retry+1))
+        echo "Activation authority advanced during completion publication; revalidating the same candidate before bounded retry ${retry}/${TASKDAG_CAS_MAX_ATTEMPTS}." >&2
+        taskdag_cas_sleep "$retry" || return 2
+    done
+}
+
+taskdag_publish_expected() { # exact automatic candidate, captured authority generation
+    local tip=${1:-} expected_generation=${2:-}
+    [ "$#" -eq 2 ] && jq -e 'type=="object" and
+        (.activation==null or (.activation|type=="string")) and
+        (.graph==null or (.graph|type=="string")) and
+        (.master|type=="string" and test("^[0-9a-f]{40}$")) and
+        (.taskRefsDigest==null or (.taskRefsDigest|type=="string"))' \
+        <<<"$expected_generation" >/dev/null || return 2
+    expected_generation=$(jq -cS . <<<"$expected_generation") || return 2
+    tip=$(git rev-parse --verify "${tip}^{commit}") || return 2
+    [[ "$TASKDAG_CAS_MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "Error: TASKDAG_CAS_MAX_ATTEMPTS must be a non-negative integer" >&2; return 2; }
+    _taskdag_publish_loop "$tip" "$expected_generation"
+}
+
 cmd_publish() {
-    local tip retry=0 rc
+    local tip
     case "${1:-}" in
         -h|--help)
             cat <<'EOF'
@@ -8420,21 +8475,7 @@ EOF
     esac
     tip=$(git rev-parse --verify "${tip}^{commit}") || return 2
     [[ "$TASKDAG_CAS_MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "Error: TASKDAG_CAS_MAX_ATTEMPTS must be a non-negative integer" >&2; return 2; }
-    while :; do
-        if _taskdag_publish_attempt "$tip" "$((retry+1))"; then
-            return 0
-        else
-            rc=$?
-        fi
-        [ "$rc" -eq 75 ] || return "$rc"
-        if [ "$retry" -ge "$TASKDAG_CAS_MAX_ATTEMPTS" ]; then
-            echo "Error: completion publication candidate=$tip exhausted ${TASKDAG_CAS_MAX_ATTEMPTS} retries after $((retry+1)) fenced attempts under proven activation-authority contention. Every failed attempt left origin/master unchanged. Recovery command: task-dag publish $tip. Recreate only if fresh validation reports changed requirements or master ancestry." >&2
-            return 3
-        fi
-        retry=$((retry+1))
-        echo "Activation authority advanced during completion publication; revalidating the same candidate before bounded retry ${retry}/${TASKDAG_CAS_MAX_ATTEMPTS}." >&2
-        taskdag_cas_sleep "$retry" || return 2
-    done
+    _taskdag_publish_loop "$tip" ""
 }
 
 cmd_guard_pre_push() {

@@ -132,29 +132,35 @@ taskdag_sync_master() {
 # --merges (the close commit shape). Only positive decimals are accepted.
 taskdag__scan_closed_issues() {
     local tip="$1"
-    local commit first root parents issue expected_root commit_tree first_tree trailers
+    local commit first root parents issue expected_root commit_tree first_tree trailers history
+    history=$(git rev-list --first-parent --parents "$tip" 2>/dev/null) || return 2
     while IFS=' ' read -r commit first root parents; do
         [ -n "$commit" ] && [ -n "$first" ] && [ -n "$root" ] && [ -z "$parents" ] || continue
-        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
-        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
-        [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ] || continue
-        trailers=$(git show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$commit" 2>/dev/null)
+        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null) || return 2
+        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null) || return 2
+        [ "$commit_tree" = "$first_tree" ] || continue
+        trailers=$(git show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$commit" 2>/dev/null) || return 2
         [ "$(printf '%s\n' "$trailers" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || continue
         issue="${trailers#\#}"
         [[ "$issue" =~ ^[1-9][0-9]*$ ]] || continue
-        expected_root=$(taskdag_issue_root "$issue") || continue
+        local root_rc=0
+        expected_root=$(taskdag_issue_root "$issue") || root_rc=$?
+        [ "$root_rc" -eq 0 ] || { [ "$root_rc" -eq 1 ] && continue; return 2; }
         [ "$root" = "$expected_root" ] || continue
         printf '%s\t%s\t%s\n' "$issue" "$commit" "$root"
-    done < <(git rev-list --first-parent --parents "$tip" 2>/dev/null)
+    done <<<"$history"
 }
 
 # taskdag_issue_root <issue>: resolve the exact local structural identity.
 # gh/issues survives closure; tasks/pending is the live dispatch root. If both
 # exist they must agree. Missing or conflicting identity is indeterminate.
 taskdag_issue_root() {
-    local issue="$1" gh_root="" pending_root=""
-    gh_root=$(git rev-parse -q --verify "refs/heads/gh/issues/${issue}^{commit}" 2>/dev/null || true)
-    pending_root=$(git rev-parse -q --verify "refs/heads/tasks/pending/${issue}^{commit}" 2>/dev/null || true)
+    local issue="$1" gh_root="" pending_root="" rc=0
+    gh_root=$(git rev-parse -q --verify "refs/heads/gh/issues/${issue}^{commit}" 2>/dev/null) || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 2
+    rc=0
+    pending_root=$(git rev-parse -q --verify "refs/heads/tasks/pending/${issue}^{commit}" 2>/dev/null) || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 2
     if [ -n "$gh_root" ] && [ -n "$pending_root" ] && [ "$gh_root" != "$pending_root" ]; then
         return 2
     fi
@@ -183,7 +189,10 @@ taskdag_load_facts() {
         return 0
     fi
 
-    # Reset before repopulating (a stale key must never survive a re-derive).
+    # Reset keys before any fallible rebuild. A caller must never be able to
+    # mistake empty or partially populated arrays for the prior generation.
+    TASKDAG_FACTS_TIP_OID=""
+    TASKDAG_FACTS_ROOTS_DIGEST=""
     TASKDAG_DONE_TASKS=()
     TASKDAG_TASK_COMPLETION_WITNESSES=()
     TASKDAG_CLOSED_ISSUES=()
@@ -194,31 +203,34 @@ taskdag_load_facts() {
     # master's first-parent spine. Walking arbitrary ancestry would encounter
     # task commits themselves and falsely mark their structural/dependency
     # parents done. Build once so each done() query remains O(1).
-    local commit first rest sha commit_tree first_tree scan parent_count
+    local commit first rest commit_tree first_tree task_tree scan
     scan=$(git rev-list --first-parent --parents "$want_oid" 2>/dev/null) || return 2
     while read -r commit first rest; do
         [ -n "$commit" ] && [ -n "$first" ] && [ -n "$rest" ] || continue
-        parent_count=$(git show -s --format='%P' "$commit" | awk '{print NF}')
-        [ "$parent_count" -eq 2 ] || continue
-        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null || true)
-        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null || true)
-        [ -n "$commit_tree" ] && [ "$commit_tree" = "$first_tree" ] || continue
-        for sha in $rest; do
-            [ "$(git rev-parse "$sha^{tree}" 2>/dev/null || true)" = "$EMPTY_TREE" ] \
-                && TASKDAG_DONE_TASKS["$sha"]=1 \
-                && TASKDAG_TASK_COMPLETION_WITNESSES["$sha"]="$commit"
-        done
+        # rev-list already supplied the complete parent list. Exactly two
+        # parents means `rest` is one OID with no whitespace; avoid a second
+        # per-commit git process and never turn a failed object read into an
+        # ordinary non-completion.
+        [[ "$rest" != *[[:space:]]* ]] || continue
+        commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null) || return 2
+        first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null) || return 2
+        [ "$commit_tree" = "$first_tree" ] || continue
+        task_tree=$(git rev-parse "$rest^{tree}" 2>/dev/null) || return 2
+        [ "$task_tree" = "$EMPTY_TREE" ] || continue
+        TASKDAG_DONE_TASKS["$rest"]=1
+        TASKDAG_TASK_COMPLETION_WITNESSES["$rest"]="$commit"
     done <<< "$scan"
 
     # closed-issue set: Closes-Epic trailers on reachable merges.
-    local n witness root
+    local n witness root close_scan
+    close_scan=$(taskdag__scan_closed_issues "$want_oid") || return 2
     while IFS=$'\t' read -r n witness root; do
         if [ -n "$n" ]; then
             TASKDAG_CLOSED_ISSUES["$n"]=1
             TASKDAG_ISSUE_CLOSE_WITNESSES["$n"]="$witness"
             TASKDAG_ISSUE_CLOSE_ROOTS["$n"]="$root"
         fi
-    done < <(taskdag__scan_closed_issues "$want_oid")
+    done <<<"$close_scan"
 
     TASKDAG_FACTS_TIP_OID="$want_oid"
     TASKDAG_FACTS_ROOTS_DIGEST="$roots_digest"

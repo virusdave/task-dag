@@ -290,10 +290,12 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
             fi
             TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result retrying "$reason" "$attempt" "$before" "$local_activation" \
               "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
-            if ! taskdag_cas_sleep "$attempt"; then
+            local sleep_rc=0
+            taskdag_cas_sleep "$attempt" || sleep_rc=$?
+            if [ "$sleep_rc" -ne 0 ]; then
                 TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result error "" "$attempt" "$before" "$local_activation" \
                   "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
-                return 2
+                return "$sleep_rc"
             fi
             continue
         fi
@@ -511,10 +513,15 @@ taskdag_recon_prepare() {
     facts_args=("${args[@]}")
     [ -n "$tip" ] || tip=$TASKDAG_CHILD_MAP_MASTER
     tip=$(git rev-parse --verify -q "${tip}^{commit}") || return 2
+    # Load the canonical fact arrays in this shell before asking the edge
+    # serializer for its view. Command substitution runs in a subshell; it
+    # cannot populate this process's caches, so assigning only the cache key
+    # afterwards could falsely label stale arrays as belonging to this tip.
+    taskdag_load_facts "$tip" || return 2
+    [ "$TASKDAG_FACTS_TIP_OID" = "$tip" ] || return 2
     facts_args+=(--tip "$tip")
     TASKDAG_RECON_EDGES_JSON=$(taskdag_edges_with_facts "${facts_args[@]}") || return 2
     TASKDAG_RECON_FACTS_TIP=$tip
-    TASKDAG_FACTS_TIP_OID=$TASKDAG_RECON_FACTS_TIP
 
     TASKDAG_RECON_CUR=$(taskdag_current_repo) || { echo "Error: cannot resolve current repo to reconcile the graph" >&2; return 2; }
     taskdag_recon_build_child_map || return 2

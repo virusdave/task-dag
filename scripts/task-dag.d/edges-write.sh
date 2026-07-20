@@ -83,9 +83,15 @@ taskdag_cas_backoff_ms() {
 # taskdag_cas_sleep <attempt>: sleep the computed backoff for this attempt.
 # Kept separate from the pure computation so tests never actually sleep.
 taskdag_cas_sleep() {
-    local ms secs
+    local ms secs remaining
     ms=$(taskdag_cas_backoff_ms "$1") || return 1
     secs=$(awk -v ms="$ms" 'BEGIN{printf "%.3f", ms/1000}')
+    if [[ "${TASKDAG_RECONCILE_DEADLINE:-}" =~ ^[0-9]+$ ]]; then
+        remaining=$((TASKDAG_RECONCILE_DEADLINE - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 124
+        timeout --signal=TERM "${remaining}s" sleep "$secs"
+        return $?
+    fi
     sleep "$secs"
 }
 

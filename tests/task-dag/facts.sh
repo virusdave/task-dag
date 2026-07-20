@@ -419,6 +419,33 @@ else
     bad "E2: fact cache did not re-derive after master advanced"
 fi
 
+# A failed rebuild invalidates both cache keys before touching arrays. Retrying
+# after the transient object-read failure must perform a complete derivation,
+# never accept partial arrays under the previous generation's memoization key.
+FAIL_TASK=$(mk_task "Task: failed rebuild target")
+FAIL_BASE=$(command git rev-parse HEAD)
+FAIL_MERGE=$(command git commit-tree "$(command git rev-parse "$FAIL_BASE^{tree}")" \
+    -p "$FAIL_BASE" -p "$FAIL_TASK" -m 'Completion with transient read failure')
+command git update-ref refs/heads/master "$FAIL_MERGE"
+git() {
+    if [ "$*" = "rev-parse $FAIL_MERGE^{tree}" ]; then return 124; fi
+    command git "$@"
+}
+taskdag_load_facts "$FAIL_MERGE" >/dev/null 2>&1; fail_rebuild_rc=$?
+if [ "$fail_rebuild_rc" -eq 2 ] && [ -z "$TASKDAG_FACTS_TIP_OID" ] \
+    && [ -z "$TASKDAG_FACTS_ROOTS_DIGEST" ]; then
+    ok "E3: failed object read leaves no valid facts-cache generation"
+else
+    bad "E3: failed rebuild retained a cache key (rc=$fail_rebuild_rc tip=$TASKDAG_FACTS_TIP_OID roots=$TASKDAG_FACTS_ROOTS_DIGEST)"
+fi
+unset -f git
+if taskdag_load_facts "$FAIL_MERGE" && [ "$TASKDAG_FACTS_TIP_OID" = "$FAIL_MERGE" ] \
+    && [ -n "${TASKDAG_DONE_TASKS[$FAIL_TASK]:-}" ]; then
+    ok "E4: retry after failed rebuild repopulates complete fact arrays"
+else
+    bad "E4: retry accepted or retained incomplete fact arrays"
+fi
+
 # ===========================================================================
 # Part F — ZERO per-fact refs (bounded-ref invariant)
 # ===========================================================================

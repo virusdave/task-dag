@@ -715,6 +715,45 @@ else
   bad "actual consumer calls leaked exhausted, retrying, or reconciliation state"
 fi
 
+# Automatic close publication is stricter than interactive publication: the
+# exact activation/graph/master/task-ref generation captured when constructing
+# the candidate must survive every nested preparation through publication.
+if (
+  source "$TD" --help >/dev/null
+  publish_base=$(git rev-parse HEAD)
+  publish_task=$(git commit-tree "$EMPTY_TREE" -p "$publish_base" -m 'Task: generation fixture')
+  publish_candidate=$(git commit-tree "$(git rev-parse "$publish_base^{tree}")" \
+    -p "$publish_base" -p "$publish_task" -m 'Complete generation fixture')
+  generation_a=$(jq -ncS --arg master "$publish_base" \
+    '{activation:"a",graph:"g",master:$master,taskRefsDigest:"r1"}')
+  generation_b=$(jq -ncS --arg master "$publish_base" \
+    '{activation:"a",graph:"g",master:$master,taskRefsDigest:"r2"}')
+  fixture_generation=$generation_a
+  taskdag_consumer_prepare() {
+    TASKDAG_CONSUMER_MASTER_TIP=$publish_base
+    TASKDAG_CONSUMER_PREPARE_RESULT=$(jq -ncS --argjson observed "$fixture_generation" '{observed:$observed}')
+  }
+  sanctioned_tip_requirements_satisfied() {
+    fixture_generation=$generation_b
+    TASKDAG_CONSUMER_PREPARE_RESULT=$(jq -ncS --argjson observed "$fixture_generation" '{observed:$observed}')
+    return 0
+  }
+  _taskdag_publish_attempt "$publish_candidate" 1 "$generation_a" >/dev/null 2>&1
+  [ "$?" -eq 2 ] || exit 1
+  # Ambiguous-success recovery remains idempotent: an exact candidate already
+  # on master succeeds before comparing the necessarily advanced generation.
+  taskdag_consumer_prepare() {
+    TASKDAG_CONSUMER_MASTER_TIP=$publish_candidate
+    TASKDAG_CONSUMER_PREPARE_RESULT=$(jq -ncS --argjson observed "$generation_b" '{observed:$observed}')
+  }
+  _taskdag_publish_attempt "$publish_candidate" 1 "$generation_a" >/dev/null 2>&1
+  [ "$?" -eq 0 ]
+); then
+  ok "automatic publication rejects generation drift and preserves idempotent recovery"
+else
+  bad "automatic publication generation fencing or idempotent recovery failed"
+fi
+
 SOURCE=$(cd "$(dirname "$TD")/.." && pwd)/scripts/task-dag
 if ! sed -n '/^reap_leaf_claim()/,/^}/p; /^cmd_breakdown()/,/^}/p; /^cmd_complete_batch()/,/^}/p; /^cmd_show()/,/^}/p; /^cmd_context()/,/^}/p; /^owned_unresolved_active_claims()/,/^}/p' "$SOURCE" \
   | grep -Eq 'is_task_completed|get_dep_parents'; then

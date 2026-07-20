@@ -86,33 +86,32 @@ taskdag_emit_origin_epic_close() {
     local issue="$1" root_sha="$2" do_fetch="${3:-true}"
     _xrepo_ensure_git_identity
 
-    if [ "$do_fetch" != false ]; then
-        git fetch --quiet --no-tags origin '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1 \
-            || { echo "Error: could not sync origin/master before auto-closing epic #${issue}" >&2; return 1; }
+    local prepare_args=(auto-close-epic)
+    [ "$do_fetch" = false ] && prepare_args+=(--no-fetch)
+    local prepare_rc=0
+    taskdag_consumer_prepare "${prepare_args[@]}" || prepare_rc=$?
+    if [ "$prepare_rc" -ne 0 ]; then
+        echo "Error: could not prepare canonical origin authority before auto-closing epic #${issue}" >&2
+        return "$prepare_rc"
     fi
+    local base=$TASKDAG_CONSUMER_MASTER_TIP expected_generation
+    [ -n "$base" ] && [ "$TASKDAG_FACTS_TIP_OID" = "$base" ] \
+        && git cat-file -e "$base^{commit}" 2>/dev/null || {
+            echo "Error: canonical origin authority is incomplete before auto-closing epic #${issue}" >&2
+            return 1
+        }
+    expected_generation=$(jq -cS '.observed' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT") || return 1
 
-    if epic_already_closed_on "$issue" "$root_sha" "HEAD"; then
+    if epic_already_closed_on "$issue" "$root_sha" "$base"; then
         return 0
     fi
-    if git rev-parse --verify -q origin/master >/dev/null 2>&1 \
-        && epic_already_closed_on "$issue" "$root_sha" "origin/master"; then
-        return 0
-    fi
 
-    local intent_tip
-    intent_tip=$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
-        || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \
-        || git rev-parse --verify -q HEAD^{commit}) || return 1
-    if ! taskdag_materialisation_intents_durable "$issue" "$root_sha" "$intent_tip"; then
+    if ! taskdag_materialisation_intents_durable "$issue" "$root_sha" "$base"; then
         echo "Epic #${issue} has child-epic materialisation intent that is not durable; deferring auto-close." >&2
         return 0
     fi
 
-    local base tree msg close_sha readback
-    base=$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
-        || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \
-        || git rev-parse --verify -q HEAD^{commit}) \
-        || { echo "Error: cannot resolve master tip before auto-closing epic #${issue}" >&2; return 1; }
+    local tree msg close_sha readback
     tree=$(git rev-parse "${base}^{tree}") || return 1
     msg="Close epic #${issue} (obligations satisfied)
 
@@ -121,7 +120,7 @@ All task-dag obligations for this epic are satisfied.
 Closes-Epic: #${issue}"
     close_sha=$(printf '%s' "$msg" | git commit-tree "$tree" -p "$base" -p "$root_sha") || return 1
     if declare -F _xrepo_watchdog_fence >/dev/null 2>&1; then _xrepo_watchdog_fence || return 1; fi
-    cmd_publish "$close_sha" >/dev/null \
+    taskdag_publish_expected "$close_sha" "$expected_generation" >/dev/null \
         || { echo "Error: failed to publish auto-close commit for epic #${issue}" >&2; return 1; }
     readback=$(git ls-remote origin refs/heads/master 2>/dev/null | awk '{print $1}')
     [ "$readback" = "$close_sha" ] \
