@@ -355,6 +355,8 @@ export const AgentWasteClusterSchema = z
     aggregateWastedTokens: z.number().nonnegative(),
     /** sum(estimated_wasted_seconds over members; missing/invalid = 0). */
     aggregateWastedSeconds: z.number().nonnegative(),
+    /** Whether this grouping is the deterministic baseline or an accepted model replacement. */
+    provenance: z.enum(['deterministic', 'model_refined']),
   })
   .strict()
   .superRefine((val, ctx) => {
@@ -368,19 +370,56 @@ export const AgentWasteClusterSchema = z
   })
 export type AgentWasteCluster = z.infer<typeof AgentWasteClusterSchema>
 
+export const AGENT_WASTE_CLUSTER_WARNING_CODES = [
+  'model_lookup_failed',
+  'model_unconfigured',
+  'model_http_error',
+  'model_transport_error',
+  'model_invalid_response',
+  'coverage_invalid',
+  'partition_too_large',
+  'warnings_truncated',
+] as const
+export const AgentWasteClusterWarningSchema = z.object({
+  unit: z.number().int().nonnegative().nullable(),
+  code: z.enum(AGENT_WASTE_CLUSTER_WARNING_CODES),
+  count: z.number().int().positive(),
+}).strict()
+
 /** 200 body for POST /api/agent-waste/clusters. */
 export const AgentWasteClustersResponseSchema = z
   .object({
     /** Reused backlog source status (available/detail). */
     source: AgentWasteSourceStatusSchema,
-    /** The model id that actually ran (resolved override-then-default). */
-    model: z.string(),
+    /** Resolved attempted model, or null only when model lookup failed. */
+    model: z.string().nullable(),
     /** Clusters, sorted descending by aggregate agent waste. */
     clusters: z.array(AgentWasteClusterSchema),
     /** Observations the model left ungrouped (empty array, never omitted). */
     unclustered: z.array(AgentWasteObservationSchema),
+    inputCount: z.number().int().nonnegative(),
+    outputCount: z.number().int().nonnegative(),
+    coverageComplete: z.boolean(),
+    refinementComplete: z.boolean(),
+    refinementTotal: z.number().int().nonnegative(),
+    refinementSucceeded: z.number().int().nonnegative(),
+    refinementFailed: z.number().int().nonnegative(),
+    refinementSkipped: z.number().int().nonnegative(),
+    warnings: z.array(AgentWasteClusterWarningSchema).max(50),
   })
   .strict()
+  .superRefine((value, ctx) => {
+    if (value.refinementSucceeded + value.refinementFailed + value.refinementSkipped !== value.refinementTotal) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['refinementTotal'], message: 'refinement outcome counts must sum to refinementTotal' })
+    }
+    if (value.refinementComplete !== (value.refinementSucceeded === value.refinementTotal)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['refinementComplete'], message: 'must reflect whether every refinement unit succeeded' })
+    }
+    const memberCount = value.clusters.reduce((count, cluster) => count + cluster.count, 0) + value.unclustered.length
+    if (value.outputCount !== memberCount) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['outputCount'], message: 'must equal clustered plus unclustered occurrence count' })
+    }
+  })
 export type AgentWasteClustersResponse = z.infer<typeof AgentWasteClustersResponseSchema>
 
 // ─────────────────────────────────────────────────────────────────────────

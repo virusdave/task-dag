@@ -740,11 +740,14 @@ function ClusteredView({
 }) {
   return (
     <>
-      <p className="subtle-copy" style={{ marginBottom: '0.5rem' }}>
+      <p className="subtle-copy" role={clusters.warnings.length > 0 ? 'status' : undefined} style={{ marginBottom: '0.5rem' }}>
+        {clusters.warnings.length > 0
+          ? <>Partial model refinement · {clusters.coverageComplete ? `all ${clusters.outputCount} reports covered` : `${clusters.outputCount}/${clusters.inputCount} reports covered`} · {clusters.refinementSucceeded}/{clusters.refinementTotal} units refined · </>
+          : null}
         {clusters.clusters.length > 0
           ? <>{clusters.clusters.length} cluster{clusters.clusters.length === 1 ? '' : 's'}, most
-              aggregate waste first · grouped by <code>{clusters.model}</code> (display-only)</>
-          : <>No reports are currently grouped. Model: <code>{clusters.model}</code> (display-only)</>}
+              aggregate waste first · {clusters.model ? <>model <code>{clusters.model}</code></> : 'deterministic baseline'} (display-only)</>
+          : <>No reports are currently grouped. {clusters.model ? <>Model: <code>{clusters.model}</code></> : 'Deterministic baseline'} (display-only)</>}
         {clusters.unclustered.length > 0
           ? ` · ${clusters.unclustered.length} left ungrouped`
           : null}
@@ -798,13 +801,14 @@ function ClusterCard({
   const seconds =
     cluster.aggregateWastedSeconds > 0 ? formatSeconds(cluster.aggregateWastedSeconds) : null
   return (
-    <article className="history-card">
+    <article className="history-card agent-waste-cluster-card">
       <div className="history-card-topline">
         <div>
           <strong>{cluster.label}</strong>
           <p className="subtle-copy">
             aggregate {tokens ?? '0 tok'}
             {seconds ? ` · ${seconds}` : null}
+            {` · ${cluster.provenance === 'model_refined' ? 'model refined' : 'deterministic'}`}
           </p>
         </div>
         <Pill tone={cluster.count > 1 ? 'warning' : 'muted'}>

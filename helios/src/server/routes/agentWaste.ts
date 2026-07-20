@@ -31,9 +31,13 @@ import {
 import { listTicketRepositories } from '../agentWaste/ticketRepositoryCatalog.js'
 import { verifyTicketDraftSource } from '../agentWaste/ticketDraftSource.js'
 import {
-  CLUSTER_BATCH_SIZE,
+  buildDeterministicBaseline,
+  buildRefinementUnits,
   compareClustersByWaste,
+  compareCodeUnits,
+  occurrenceIdentity,
   rehydrateClusters,
+  type RefinementUnit,
 } from '../agentWaste/clusterBacklog.js'
 import { getServerEnv } from '../config/env.js'
 import { getPool } from '../db/pool.js'
@@ -47,6 +51,8 @@ import {
   PromoteAdvisoryRequestSchema,
   type AgentWasteBacklogResponse,
   type AgentWasteClustersResponse,
+  type AgentWasteCluster,
+  type AgentWasteObservation,
   type PromoteAdvisoryErrorResponse,
   type PromoteAdvisoryFailureCode,
   type PromoteAdvisoryResponse,
@@ -61,9 +67,60 @@ const CLUSTER_BODY_LIMIT_BYTES = 4 * 1024
 /** Fastify rejects oversized ticket-source requests before parsing JSON. */
 const TICKET_DRAFT_BODY_LIMIT_BYTES = AGENT_WASTE_TICKET_MAX_REQUEST_BYTES
 
-/** Map a cluster-model failure to an HTTP status (mirrors LLM route patterns). */
-function clusterModelStatus(code: ClusterModelError['code']): number {
-  return code === 'bedrock_unconfigured' ? 503 : 502
+type ClusterWarning = AgentWasteClustersResponse['warnings'][number]
+
+function modelWarningCode(error: ClusterModelError): ClusterWarning['code'] {
+  switch (error.code) {
+    case 'bedrock_unconfigured': return 'model_unconfigured'
+    case 'bedrock_http_error': return 'model_http_error'
+    case 'bedrock_transport_error': return 'model_transport_error'
+    case 'bedrock_unexpected_response': return 'model_invalid_response'
+  }
+}
+
+function baselineUnitResult(unit: RefinementUnit, observations: readonly AgentWasteObservation[]): {
+  clusters: AgentWasteCluster[]; clusterKeys: number[][]
+  unclustered: AgentWasteObservation[]; unclusteredKeys: number[]
+} {
+  const clustered = unit.components.filter((component) => component.keys.length > 1)
+  const unclustered = unit.components.filter((component) => component.keys.length === 1)
+  return {
+    clusters: clustered.map((component) => component.cluster),
+    clusterKeys: clustered.map((component) => component.keys),
+    unclustered: unclustered.map((component) => observations[component.keys[0]]),
+    unclusteredKeys: unclustered.map((component) => component.keys[0]),
+  }
+}
+
+function hasExactCoverage(raw: { clusters: Array<{ primaryKey: number; memberKeys: number[] }> }, count: number): boolean {
+  const keys: number[] = []
+  for (const cluster of raw.clusters) {
+    if (!cluster.memberKeys.includes(cluster.primaryKey)) return false
+    keys.push(...cluster.memberKeys)
+  }
+  keys.sort((a, b) => a - b)
+  return keys.length === count && keys.every((key, index) => key === index)
+}
+
+export function compactWarnings(warnings: ClusterWarning[]): ClusterWarning[] {
+  warnings.sort((a, b) => (a.unit ?? Number.MAX_SAFE_INTEGER) - (b.unit ?? Number.MAX_SAFE_INTEGER) || compareCodeUnits(a.code, b.code))
+  const collapsed: ClusterWarning[] = []
+  for (const warning of warnings) {
+    const previous = collapsed.at(-1)
+    if (previous && previous.unit === warning.unit && previous.code === warning.code) previous.count += warning.count
+    else collapsed.push({ ...warning })
+  }
+  if (collapsed.length <= 50) return collapsed
+  return [...collapsed.slice(0, 49), { unit: null, code: 'warnings_truncated', count: collapsed.length - 49 }]
+}
+
+function hasExactObservationCoverage(count: number, clusterKeys: readonly number[][], unclusteredKeys: readonly number[]): boolean {
+  const output = [...clusterKeys.flat(), ...unclusteredKeys].sort((a, b) => a - b)
+  return output.length === count && output.every((position, index) => position === index)
+}
+
+function lowestOccurrenceIdentity(observations: readonly AgentWasteObservation[], keys: readonly number[]): string {
+  return keys.map((key) => occurrenceIdentity(observations[key], key)).sort(compareCodeUnits)[0] ?? ''
 }
 
 function ticketDraftPublicMessage(code: TicketDraftModelError['code']): string {
@@ -328,91 +385,95 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
         })
       }
 
-      let observations
+      let observations: AgentWasteObservation[]
       try {
         observations = await getBacklog()
       } catch (error) {
         return handleAgentWasteError(server, reply, error, 'Failed to fetch agent-waste backlog')
       }
 
-      const model = await resolveBedrockModel(getPool(), 'agent_waste_clusterer')
-
-      // Empty backlog: nothing to cluster; skip the LLM call entirely.
-      if (observations.length === 0) {
-        const body: AgentWasteClustersResponse = {
-          source: getBacklogSourceStatus(),
-          model,
-          clusters: [],
-          unclustered: [],
-        }
-        return reply.send(body)
+      const baseline = buildDeterministicBaseline(observations)
+      const units = buildRefinementUnits(baseline.components)
+      const results = units.map((unit) => baselineUnitResult(unit, observations))
+      const warnings: ClusterWarning[] = []
+      let model: string | null = null
+      let succeeded = 0
+      let failed = 0
+      let skipped = 0
+      for (const unit of units) if (unit.oversized) {
+        skipped += 1
+        warnings.push({ unit: unit.index, code: 'partition_too_large', count: 1 })
       }
-
-      const clusters: AgentWasteClustersResponse['clusters'] = []
-      const unclustered: AgentWasteClustersResponse['unclustered'] = []
+      const eligible = units.filter((unit) => !unit.oversized)
       try {
-        // Keep each model prompt within the proven single-call budget while
-        // covering the entire backlog. Two workers keep gateway concurrency
-        // bounded while preventing two normal batches from accumulating past
-        // the reverse proxy's request deadline. If any batch fails, the whole
-        // request fails rather than returning a partial result that looks
-        // complete.
-        const batches: Array<readonly (typeof observations)[number][]> = []
-        for (let offset = 0; offset < observations.length; offset += CLUSTER_BATCH_SIZE) {
-          batches.push(observations.slice(offset, offset + CLUSTER_BATCH_SIZE))
-        }
-
-        const results: Array<ReturnType<typeof rehydrateClusters>> = new Array(batches.length)
-        let nextBatch = 0
-        let failed = false
-        async function clusterWorker(): Promise<void> {
-          while (!failed && nextBatch < batches.length) {
-            const batchIndex = nextBatch
-            nextBatch += 1
-            const batch = batches[batchIndex]
+        model = await resolveBedrockModel(getPool(), 'agent_waste_clusterer')
+      } catch (error) {
+        failed = eligible.length
+        for (const unit of eligible) warnings.push({ unit: unit.index, code: 'model_lookup_failed', count: 1 })
+        server.log.error(error, 'agent-waste clustering model lookup failed')
+      }
+      if (model !== null) {
+        const resolvedModel = model
+        let next = 0
+        async function worker(): Promise<void> {
+          while (next < eligible.length) {
+            const unit = eligible[next]
+            next += 1
+            const batch = unit.keys.map((key) => observations[key])
             try {
-              const raw = await callClusterModel(batch, model, { env: getServerEnv() })
-              results[batchIndex] = rehydrateClusters(batch, raw)
+              const raw = await callClusterModel(batch, resolvedModel, { env: getServerEnv() })
+              if (!hasExactCoverage(raw, batch.length)) {
+                failed += 1
+                warnings.push({ unit: unit.index, code: 'coverage_invalid', count: 1 })
+                continue
+              }
+              const refined = rehydrateClusters(batch, raw)
+              results[unit.index] = {
+                clusters: refined.clusters,
+                clusterKeys: refined.clusterKeys.map((keys) => keys.map((key) => unit.keys[key])),
+                unclustered: refined.unclustered,
+                unclusteredKeys: refined.unclusteredKeys.map((key) => unit.keys[key]),
+              }
+              succeeded += 1
             } catch (error) {
-              // Let an already-running sibling finish, but prevent it from
-              // starting more paid work after this request has failed.
-              failed = true
-              throw error
+              failed += 1
+              const code = error instanceof ClusterModelError ? modelWarningCode(error) : 'model_invalid_response'
+              warnings.push({ unit: unit.index, code, count: 1 })
+              server.log.error({ error, unit: unit.index, model }, 'agent-waste refinement unit failed')
             }
           }
         }
-        await Promise.all(
-          Array.from({ length: Math.min(2, batches.length) }, () => clusterWorker()),
-        )
-
-        for (const result of results) {
-          clusters.push(...result.clusters)
-          unclustered.push(...result.unclustered)
-        }
-      } catch (error) {
-        if (error instanceof ClusterModelError) {
-          // Note: the ClusterModelError message never contains the prompt
-          // (which includes notes) — only transport/gateway/shape detail.
-          server.log.error(
-            { event: 'agent_waste.cluster_failed', code: error.code, model },
-            'agent-waste clustering failed',
-          )
-          return reply.status(clusterModelStatus(error.code)).send({
-            error: error.code,
-            message: error.message,
-          })
-        }
-        return handleAgentWasteError(server, reply, error, 'Failed to cluster agent-waste backlog')
+        await Promise.all(Array.from({ length: Math.min(2, eligible.length) }, () => worker()))
       }
-
-      // Each batch is ranked independently during rehydration; restore one
-      // global aggregate-waste ordering after combining them.
-      clusters.sort(compareClustersByWaste)
+      const decoratedClusters = results.flatMap((result) => result.clusters.map((cluster, index) => ({
+        cluster,
+        keys: result.clusterKeys[index],
+      })))
+      decoratedClusters.sort((a, b) => compareClustersByWaste(a.cluster, b.cluster)
+        || compareCodeUnits(
+          lowestOccurrenceIdentity(observations, a.keys),
+          lowestOccurrenceIdentity(observations, b.keys),
+        ))
+      const clusters = decoratedClusters.map((entry) => entry.cluster)
+      const clusterKeys = decoratedClusters.map((entry) => entry.keys)
+      const unclustered = results.flatMap((result) => result.unclustered)
+      const unclusteredKeys = results.flatMap((result) => result.unclusteredKeys)
+      const outputCount = clusters.reduce((count, cluster) => count + cluster.members.length, 0) + unclustered.length
+      const coverageComplete = hasExactObservationCoverage(observations.length, clusterKeys, unclusteredKeys)
       const body: AgentWasteClustersResponse = {
         source: getBacklogSourceStatus(),
         model,
         clusters,
         unclustered,
+        inputCount: observations.length,
+        outputCount,
+        coverageComplete,
+        refinementComplete: succeeded === units.length,
+        refinementTotal: units.length,
+        refinementSucceeded: succeeded,
+        refinementFailed: failed,
+        refinementSkipped: skipped,
+        warnings: compactWarnings(warnings),
       }
       return reply.send(body)
     },

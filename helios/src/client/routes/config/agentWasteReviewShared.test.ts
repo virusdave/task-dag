@@ -230,6 +230,7 @@ function cluster(overrides: Partial<AgentWasteCluster>): AgentWasteCluster {
     count: 1,
     aggregateWastedTokens: 0,
     aggregateWastedSeconds: 0,
+    provenance: 'deterministic',
     ...overrides,
   }
 }
@@ -271,6 +272,15 @@ function clusterResponse(clusters: AgentWasteCluster[]): AgentWasteClustersRespo
     model: 'deepseek.v3.2',
     clusters,
     unclustered: [],
+    inputCount: clusters.reduce((count, entry) => count + entry.count, 0),
+    outputCount: clusters.reduce((count, entry) => count + entry.count, 0),
+    coverageComplete: true,
+    refinementComplete: true,
+    refinementTotal: 1,
+    refinementSucceeded: 1,
+    refinementFailed: 0,
+    refinementSkipped: 0,
+    warnings: [],
   }
 }
 
@@ -389,6 +399,7 @@ describe('fetchAgentWasteClusters', () => {
         count: 1,
         aggregateWastedTokens: 5,
         aggregateWastedSeconds: 0,
+        provenance: 'deterministic',
       },
       {
         label: 'big',
@@ -397,9 +408,19 @@ describe('fetchAgentWasteClusters', () => {
         count: 1,
         aggregateWastedTokens: 500,
         aggregateWastedSeconds: 0,
+        provenance: 'model_refined',
       },
     ],
     unclustered: [],
+    inputCount: 2,
+    outputCount: 2,
+    coverageComplete: true,
+    refinementComplete: true,
+    refinementTotal: 1,
+    refinementSucceeded: 1,
+    refinementFailed: 0,
+    refinementSkipped: 0,
+    warnings: [],
   }
 
   it('parses a 200 body and defensively re-sorts clusters by waste', async () => {

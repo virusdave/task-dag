@@ -56,7 +56,7 @@ vi.mock('../agentWaste/ticketDraftModel.js', async (importOriginal) => {
   return { ...actual, callTicketDraftModel: vi.fn() }
 })
 
-import { registerAgentWasteRoutes } from './agentWaste.js'
+import { compactWarnings, registerAgentWasteRoutes } from './agentWaste.js'
 import {
   __resetBacklogReaderForTests,
   setBacklogReader,
@@ -377,11 +377,10 @@ describe('POST /api/agent-waste/clusters', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.clusters.flatMap((cluster: { members: Array<{ id: string }> }) => cluster.members)).toHaveLength(401)
-    expect(body.clusters.map((cluster: { label: string }) => cluster.label)).toEqual([
-      'batch id-400',
-      'batch id-0',
-      'batch id-200',
-    ])
+    expect(body.refinementTotal).toBe(3)
+    expect(body.refinementSucceeded).toBe(3)
+    expect(body.refinementComplete).toBe(true)
+    expect(body.coverageComplete).toBe(true)
     expect(body.unclustered).toEqual([])
     expect(maxActiveCalls).toBe(2)
     expect(callClusterModelMock).toHaveBeenCalledTimes(3)
@@ -390,25 +389,60 @@ describe('POST /api/agent-waste/clusters', () => {
     expect(callClusterModelMock.mock.calls[2][0]).toHaveLength(1)
   })
 
-  it('fails the whole request without starting more batches after a concurrent failure', async () => {
+  it('retains complete baseline units when one refinement fails', async () => {
     const many = Array.from({ length: 401 }, (_, i) => ({ time: 't', kind: 'k', id: `id-${i}` }))
     setBacklogReader(readerFor(many))
-    let resolveSibling!: (raw: RawClusterModelOutput) => void
-    const sibling = new Promise<RawClusterModelOutput>((resolve) => {
-      resolveSibling = resolve
-    })
     callClusterModelMock
       .mockRejectedValueOnce(new ClusterModelError('bedrock_http_error', 'HTTP 500'))
-      .mockReturnValueOnce(sibling)
+      .mockImplementation(async (batch) => ({ clusters: [{ label: 'ok', primaryKey: 0, memberKeys: Array.from({ length: batch.length }, (_, i) => i) }] }))
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
-    expect(res.statusCode).toBe(502)
-    expect(res.json().error).toBe('bedrock_http_error')
-    expect(callClusterModelMock).toHaveBeenCalledTimes(2)
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ inputCount: 401, outputCount: 401, coverageComplete: true, refinementSucceeded: 2, refinementFailed: 1 })
+    expect(res.json().warnings).toEqual([{ unit: 0, code: 'model_http_error', count: 1 }])
+    expect(res.json().unclustered).toHaveLength(200)
+  })
 
-    resolveSibling({ clusters: [{ label: 'sibling', primaryKey: 0, memberKeys: [0] }] })
-    await sibling
-    await Promise.resolve()
-    expect(callClusterModelMock).toHaveBeenCalledTimes(2)
+  it('accounts independently for oversized, failed, and successful refinement units', async () => {
+    const oversized = Array.from({ length: 201 }, (_, index) => ({ time: `bulk-${index}`, kind: 'bulk', id: 'same' }))
+    const singles = Array.from({ length: 201 }, (_, index) => ({ time: `solo-${index}`, kind: `solo${index}`, id: `id${index}` }))
+    setBacklogReader(readerFor([...oversized, ...singles]))
+    callClusterModelMock
+      .mockRejectedValueOnce(new ClusterModelError('bedrock_http_error', 'HTTP 500'))
+      .mockImplementation(async (batch) => ({ clusters: [{ label: 'ok', primaryKey: 0, memberKeys: Array.from({ length: batch.length }, (_, i) => i) }] }))
+
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({
+      inputCount: 402,
+      outputCount: 402,
+      coverageComplete: true,
+      refinementTotal: 3,
+      refinementSucceeded: 1,
+      refinementFailed: 1,
+      refinementSkipped: 1,
+      refinementComplete: false,
+    })
+    expect(res.json().warnings).toEqual([
+      { unit: 0, code: 'partition_too_large', count: 1 },
+      { unit: 1, code: 'model_http_error', count: 1 },
+    ])
+  })
+
+  it('totally orders equal model clusters by their lowest source occurrence', async () => {
+    setBacklogReader(readerFor([
+      { time: 'a', kind: 'ka', id: 'a', estimated_wasted_tokens: 1 },
+      { time: 'b', kind: 'kb', id: 'b', estimated_wasted_tokens: 1 },
+    ]))
+    callClusterModelMock.mockResolvedValueOnce({ clusters: [
+      { label: 'equal', primaryKey: 1, memberKeys: [1] },
+      { label: 'equal', primaryKey: 0, memberKeys: [0] },
+    ] })
+
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().clusters.map((cluster: { primary: { id: string } }) => cluster.primary.id)).toEqual(['a', 'b'])
   })
 
   it('clusters, ranks, and returns the 200 shape on success', async () => {
@@ -430,30 +464,70 @@ describe('POST /api/agent-waste/clusters', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.model).toBe('deepseek.v3.2')
-    // Ranked desc by aggregate tokens: singleton c (999) outranks a+b (15).
-    expect(body.clusters.map((c: { label: string }) => c.label)).toEqual(['reread canon', 'rg -r flag'])
-    expect(body.clusters[1].members.map((m: { id: string }) => m.id)).toEqual(['a', 'b'])
+    expect(body.clusters.flatMap((c: { members: Array<{ id: string }> }) => c.members.map((m) => m.id)).sort()).toEqual(['a', 'b', 'c'])
     expect(body.unclustered).toEqual([])
+    expect(body).toMatchObject({ inputCount: 3, outputCount: 3, coverageComplete: true, refinementSucceeded: 1, refinementFailed: 0 })
     expect(callClusterModelMock).toHaveBeenCalledOnce()
   })
 
-  it('maps a missing bearer token to 503 bedrock_unconfigured', async () => {
+  it('returns the complete baseline with a warning when the model is unconfigured', async () => {
     setBacklogReader(readerFor([{ time: 't', kind: 'k', id: 'a' }]))
     callClusterModelMock.mockRejectedValueOnce(
       new ClusterModelError('bedrock_unconfigured', 'no token'),
     )
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
-    expect(res.statusCode).toBe(503)
-    expect(res.json().error).toBe('bedrock_unconfigured')
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ inputCount: 1, outputCount: 1, refinementFailed: 1, coverageComplete: true })
+    expect(res.json().warnings).toEqual([{ unit: 0, code: 'model_unconfigured', count: 1 }])
   })
 
-  it('maps a gateway failure to 502', async () => {
+  it('returns the complete baseline with a warning on gateway failure', async () => {
     setBacklogReader(readerFor([{ time: 't', kind: 'k', id: 'a' }]))
     callClusterModelMock.mockRejectedValueOnce(
       new ClusterModelError('bedrock_http_error', 'HTTP 500'),
     )
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
-    expect(res.statusCode).toBe(502)
-    expect(res.json().error).toBe('bedrock_http_error')
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ inputCount: 1, outputCount: 1, refinementFailed: 1, coverageComplete: true })
+    expect(res.json().warnings).toEqual([{ unit: 0, code: 'model_http_error', count: 1 }])
+  })
+
+  it('uses a nullable model and preserves baseline output when model lookup fails', async () => {
+    setBacklogReader(readerFor([{ time: 't', kind: 'k', id: 'a' }]))
+    resolveBedrockModelMock.mockRejectedValueOnce(new Error('lookup unavailable'))
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ model: null, inputCount: 1, outputCount: 1, refinementFailed: 1, coverageComplete: true })
+    expect(res.json().warnings).toEqual([{ unit: 0, code: 'model_lookup_failed', count: 1 }])
+    expect(callClusterModelMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects incomplete model coverage and retains the whole baseline unit', async () => {
+    setBacklogReader(readerFor([
+      { time: 't', kind: 'same', id: 'x' },
+      { time: 't', kind: 'same', id: 'x' },
+    ]))
+    callClusterModelMock.mockResolvedValueOnce({ clusters: [{ label: 'partial', primaryKey: 0, memberKeys: [0] }] })
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ inputCount: 2, outputCount: 2, refinementFailed: 1, coverageComplete: true })
+    expect(res.json().clusters[0]).toMatchObject({ count: 2, provenance: 'deterministic' })
+    expect(res.json().warnings).toEqual([{ unit: 0, code: 'coverage_invalid', count: 1 }])
+  })
+})
+
+describe('cluster warning compaction', () => {
+  it('orders warnings deterministically and summarizes rows beyond the 50-row cap', () => {
+    const warnings = Array.from({ length: 52 }, (_, unit) => ({
+      unit,
+      code: 'model_http_error' as const,
+      count: 1,
+    })).reverse()
+
+    const compacted = compactWarnings(warnings)
+
+    expect(compacted).toHaveLength(50)
+    expect(compacted.slice(0, 49).map((warning) => warning.unit)).toEqual(Array.from({ length: 49 }, (_, index) => index))
+    expect(compacted[49]).toEqual({ unit: null, code: 'warnings_truncated', count: 3 })
   })
 })

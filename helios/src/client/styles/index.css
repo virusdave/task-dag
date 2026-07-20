@@ -611,6 +611,17 @@ pre {
   flex-wrap: wrap;
 }
 
+.agent-waste-cluster-card .history-card-topline {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.agent-waste-cluster-card .history-card-topline > div,
+.agent-waste-cluster-card strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .agent-waste-observation-actions {
   justify-content: flex-end;
 }

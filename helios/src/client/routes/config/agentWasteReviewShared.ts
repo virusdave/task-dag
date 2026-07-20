@@ -333,7 +333,7 @@ export function sortClustersByWaste(clusters: readonly AgentWasteCluster[]): Age
     if (a.count !== b.count) {
       return b.count - a.count
     }
-    return a.label.localeCompare(b.label)
+    return a.label < b.label ? -1 : a.label > b.label ? 1 : 0
   })
 }
 
