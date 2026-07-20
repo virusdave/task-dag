@@ -7,6 +7,7 @@ import {
   type BudtenderTotals,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+import { getStaffDirectoryFetchedAt } from '../db/queries/staffQueries.js'
 import { nonCancelledOrderSql } from '../db/sweedOrderStatus.js'
 import { bucketLocalExpr, bucketSelectExpr } from '../metrics/bucketSelectSql.js'
 
@@ -40,7 +41,36 @@ import { bucketLocalExpr, bucketSelectExpr } from '../metrics/bucketSelectSql.js
 // ============================================================================
 
 export const BUDTENDER_ANALYTICS_DEFAULT_WINDOW_DAYS = 90
+export const BUDTENDER_STAFF_CACHE_MAX_AGE_MS = 15 * 60 * 1000
 const DAY_MS = 86_400_000
+
+export type BudtenderStaffRefreshTrigger =
+  | 'budtender_cache_stale'
+  | 'budtender_cashier_missing'
+
+interface CashierStaffCacheProjection {
+  cashierName: string | null
+}
+
+export function assessBudtenderStaffCache(
+  cashiers: readonly CashierStaffCacheProjection[],
+  fetchedAt: string | null,
+  nowMs = Date.now(),
+): BudtenderStaffRefreshTrigger | null {
+  if (cashiers.length === 0) return null
+  const fetchedAtMs = fetchedAt === null ? Number.NaN : Date.parse(fetchedAt)
+  const cacheIsFresh =
+    Number.isFinite(fetchedAtMs) && nowMs - fetchedAtMs < BUDTENDER_STAFF_CACHE_MAX_AGE_MS
+  if (cacheIsFresh) return null
+  return cashiers.some((cashier) => cashier.cashierName === null)
+    ? 'budtender_cashier_missing'
+    : 'budtender_cache_stale'
+}
+
+export interface BudtenderAnalyticsWithStaffCacheState {
+  analytics: BudtenderAnalyticsResponse
+  staffRefreshTrigger: BudtenderStaffRefreshTrigger | null
+}
 
 function resolveDealerIds(sites: readonly string[]): number[] {
   if (sites.length === 0) {
@@ -79,17 +109,26 @@ interface QueryArgs {
 export async function getBudtenderAnalytics(
   args: QueryArgs,
 ): Promise<BudtenderAnalyticsResponse> {
+  return (await getBudtenderAnalyticsWithStaffCacheState(args)).analytics
+}
+
+export async function getBudtenderAnalyticsWithStaffCacheState(
+  args: QueryArgs,
+): Promise<BudtenderAnalyticsWithStaffCacheState> {
   const dealerIds = resolveDealerIds(args.sites)
   const generatedAt = new Date().toISOString()
   if (dealerIds.length === 0) {
     return {
-      range: { from: args.from.toISOString(), to: args.to.toISOString() },
-      generatedAt,
-      sites: [...args.sites],
-      totals: emptyTotals(),
-      daily: [],
-      cashiers: [],
-      missingDataCards: [...MISSING_DATA_CARDS],
+      analytics: {
+        range: { from: args.from.toISOString(), to: args.to.toISOString() },
+        generatedAt,
+        sites: [...args.sites],
+        totals: emptyTotals(),
+        daily: [],
+        cashiers: [],
+        missingDataCards: [...MISSING_DATA_CARDS],
+      },
+      staffRefreshTrigger: null,
     }
   }
   const pool = getPool()
@@ -377,6 +416,7 @@ export async function getBudtenderAnalytics(
       pm.peer_median_txn_per_hr,
       pm.peer_median_same_lift,
       sd.full_name        as cashier_full_name,
+      sd.blocked          as cashier_blocked,
       sd.user_status      as cashier_user_status
     from ranked r
     cross join peer_medians pm
@@ -404,6 +444,7 @@ export async function getBudtenderAnalytics(
     return {
       cashierId: String(row.cashier_user_id),
       cashierName: (row.cashier_full_name as string | null) ?? null,
+      blocked: typeof row.cashier_blocked === 'boolean' ? row.cashier_blocked : null,
       userStatus: asInt(row.cashier_user_status),
       transactions,
       sales: asReqNum(row.sales),
@@ -458,14 +499,18 @@ export async function getBudtenderAnalytics(
     }
   })
 
+  const staffDirectoryFetchedAt = await getStaffDirectoryFetchedAt(pool)
   return {
-    range: { from: args.from.toISOString(), to: args.to.toISOString() },
-    generatedAt,
-    sites: [...args.sites],
-    totals,
-    daily,
-    cashiers,
-    missingDataCards: [...MISSING_DATA_CARDS],
+    analytics: {
+      range: { from: args.from.toISOString(), to: args.to.toISOString() },
+      generatedAt,
+      sites: [...args.sites],
+      totals,
+      daily,
+      cashiers,
+      missingDataCards: [...MISSING_DATA_CARDS],
+    },
+    staffRefreshTrigger: assessBudtenderStaffCache(cashiers, staffDirectoryFetchedAt),
   }
 }
 

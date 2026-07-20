@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import {
+  budtenderCashierBlockedStatus,
   BudtenderAnalyticsResponseSchema,
+  isBudtenderCashierDisabled,
   type BudtenderAnalyticsResponse,
   type BudtenderCashierRow,
   type BudtenderMissingDataCard,
@@ -577,9 +579,9 @@ function LeaderboardCard({ data }: { data: BudtenderAnalyticsResponse }) {
               <tr key={c.cashierId} className={lowSample ? 'is-low-sample' : ''}>
                 <td>
                   {c.cashierName || `Cashier ${c.cashierId}`}{' '}
-                  {c.userStatus != null && c.userStatus !== 0 ? (
-                    <span className="budtender-disabled-pill" title="user_status != 0 in staff_directory_cache">
-                      DISABLED
+                  {isBudtenderCashierDisabled(c) ? (
+                    <span className="budtender-disabled-pill" title="Blocked in Sweed">
+                      BLOCKED
                     </span>
                   ) : null}
                 </td>
@@ -1175,9 +1177,9 @@ function buildCashierMatcher(
 // the obvious filter dims (sites / date range) at the page level via
 // the standard preset chip strip.
 //
-// Status:  Sweed staff_directory_cache.user_status. 0 / null = active,
-//          any non-zero = disabled/terminated (org-wide convention).
-//          Useful for hiding ex-employees from a productivity scatter.
+// Status:  Sweed user.compliance.list `blocked`. The numeric userStatus
+//          classification is informational and does not indicate whether
+//          an employee is active. A missing cache row remains unknown.
 // Drawer:  hasDrawerMatch. Cashiers without drawer-shift sessions in
 //          the window have null transactionsPerDrawerHour / etc;
 //          operators frequently want to highlight just the matched
@@ -1189,18 +1191,23 @@ const CASHIER_HIGHLIGHT_DIMS: ReadonlyArray<HighlightDimensionSpec<BudtenderCash
     id: 'status',
     label: 'Status',
     getOptions: (rows) => {
-      let active = 0
-      let disabled = 0
+      let notBlocked = 0
+      let blocked = 0
+      let unknown = 0
       for (const r of rows) {
-        if (r.userStatus == null || r.userStatus === 0) active += 1
-        else disabled += 1
+        const status = budtenderCashierBlockedStatus(r)
+        if (status === 'blocked') blocked += 1
+        else if (status === 'not_blocked') notBlocked += 1
+        else unknown += 1
       }
       const out: Array<{ id: string; label: string; itemCount: number }> = []
-      if (active > 0) out.push({ id: 'active', label: 'Active', itemCount: active })
-      if (disabled > 0) out.push({ id: 'disabled', label: 'Disabled', itemCount: disabled })
+      if (notBlocked > 0)
+        out.push({ id: 'not_blocked', label: 'Not blocked', itemCount: notBlocked })
+      if (blocked > 0) out.push({ id: 'blocked', label: 'Blocked', itemCount: blocked })
+      if (unknown > 0) out.push({ id: 'unknown', label: 'Unknown', itemCount: unknown })
       return out
     },
-    pointKey: (c) => [c.userStatus == null || c.userStatus === 0 ? 'active' : 'disabled'],
+    pointKey: (c) => [budtenderCashierBlockedStatus(c)],
   },
   {
     id: 'drawer',

@@ -7,6 +7,9 @@ import {
   type StaffRow,
 } from '../../../shared/contracts/index.js'
 import type { Queryable } from '../pool.js'
+import { getAppSetting, upsertAppSetting } from './appSettingsQueries.js'
+
+export const STAFF_DIRECTORY_REFRESH_HIGHWATER_KEY = 'staff_directory_refresh_highwater'
 
 const StaffDirectoryRowSchema = z.object({
   staff_id: z.string(),
@@ -88,9 +91,25 @@ export async function listStaffRowsWithInclusion(db: Queryable): Promise<StaffRo
 }
 
 export async function getStaffDirectoryFetchedAt(db: Queryable): Promise<string | null> {
+  const highwater = await getAppSetting(db, STAFF_DIRECTORY_REFRESH_HIGHWATER_KEY)
+  if (highwater !== null) return highwater.updatedAt
+
+  // Backward-compatible bootstrap before the first worker-backed refresh.
   const res = await db.query<{ max: Date | null }>(`select max(fetched_at) as max from staff_directory_cache`)
   const max = res.rows[0]?.max
   return max ? new Date(max).toISOString() : null
+}
+
+export async function markStaffDirectoryRefreshSucceeded(
+  db: Queryable,
+  refreshedBy: string,
+): Promise<void> {
+  await upsertAppSetting(
+    db,
+    STAFF_DIRECTORY_REFRESH_HIGHWATER_KEY,
+    { source: 'user.compliance.list' },
+    refreshedBy,
+  )
 }
 
 export async function updateStaffInclusionStatus(
@@ -147,56 +166,92 @@ export async function upsertStaffDirectoryCache(
   db: Queryable,
   rows: readonly UpstreamStaffDirectoryRow[],
 ): Promise<UpsertStaffDirectoryResult> {
-  let newlySeededInclusions = 0
+  if (rows.length === 0) return { totalUpserted: 0, newlySeededInclusions: 0 }
 
-  for (const row of rows) {
-    await db.query(
-      `insert into staff_directory_cache (
-         staff_id, raw, full_name, first_name, last_name, email,
-         photo_url, current_dealer_id, current_dealer_name,
-         blocked, user_status, fetched_at
-       ) values ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-       on conflict (staff_id) do update set
-         raw = excluded.raw,
-         full_name = excluded.full_name,
-         first_name = excluded.first_name,
-         last_name = excluded.last_name,
-         email = excluded.email,
-         photo_url = excluded.photo_url,
-         current_dealer_id = excluded.current_dealer_id,
-         current_dealer_name = excluded.current_dealer_name,
-         blocked = excluded.blocked,
-         user_status = excluded.user_status,
-         fetched_at = excluded.fetched_at`,
-      [
-        row.staffId,
-        JSON.stringify(row.raw),
-        row.fullName,
-        row.firstName,
-        row.lastName,
-        row.email,
-        row.photoUrl,
-        row.currentDealerId,
-        row.currentDealerName,
-        row.blocked,
-        row.userStatus,
-      ],
-    )
+  const input = rows.map((row) => ({
+    staff_id: row.staffId,
+    raw: row.raw,
+    full_name: row.fullName,
+    first_name: row.firstName,
+    last_name: row.lastName,
+    email: row.email,
+    photo_url: row.photoUrl,
+    current_dealer_id: row.currentDealerId,
+    current_dealer_name: row.currentDealerName,
+    blocked: row.blocked,
+    user_status: row.userStatus,
+  }))
 
-    // Seed inclusion ONLY if absent. Existing decisions are preserved.
-    const defaultStatus: StaffInclusionStatus =
-      row.photoUrl && row.photoUrl.trim().length > 0 ? 'unapproved' : 'rejected'
-    const seedRes = await db.query<{ inserted: boolean }>(
-      `insert into staff_inclusion (staff_id, status, decided_at, decided_by, notes)
-       values ($1, $2, now(), $3, $4)
-       on conflict (staff_id) do nothing
-       returning true as inserted`,
-      [row.staffId, defaultStatus, 'system:refresh-seed', null],
-    )
-    if (seedRes.rows.length > 0) newlySeededInclusions += 1
-  }
+  await db.query(
+    `with input as (
+       select *
+         from jsonb_to_recordset($1::jsonb) as row(
+           staff_id text, raw jsonb, full_name text, first_name text,
+           last_name text, email text, photo_url text,
+           current_dealer_id integer, current_dealer_name text,
+           blocked boolean, user_status integer
+         )
+     )
+     insert into staff_directory_cache (
+       staff_id, raw, full_name, first_name, last_name, email,
+       photo_url, current_dealer_id, current_dealer_name,
+       blocked, user_status, fetched_at
+     )
+     select staff_id, raw, full_name, first_name, last_name, email,
+            photo_url, current_dealer_id, current_dealer_name,
+            blocked, user_status, now()
+       from input
+     on conflict (staff_id) do update set
+       raw = excluded.raw,
+       full_name = excluded.full_name,
+       first_name = excluded.first_name,
+       last_name = excluded.last_name,
+       email = excluded.email,
+       photo_url = excluded.photo_url,
+       current_dealer_id = excluded.current_dealer_id,
+       current_dealer_name = excluded.current_dealer_name,
+       blocked = excluded.blocked,
+       user_status = excluded.user_status,
+       fetched_at = excluded.fetched_at
+     where (
+       staff_directory_cache.raw,
+       staff_directory_cache.full_name,
+       staff_directory_cache.first_name,
+       staff_directory_cache.last_name,
+       staff_directory_cache.email,
+       staff_directory_cache.photo_url,
+       staff_directory_cache.current_dealer_id,
+       staff_directory_cache.current_dealer_name,
+       staff_directory_cache.blocked,
+       staff_directory_cache.user_status
+     ) is distinct from (
+       excluded.raw,
+       excluded.full_name,
+       excluded.first_name,
+       excluded.last_name,
+       excluded.email,
+       excluded.photo_url,
+       excluded.current_dealer_id,
+       excluded.current_dealer_name,
+       excluded.blocked,
+       excluded.user_status
+     )`,
+    [JSON.stringify(input)],
+  )
 
-  return { totalUpserted: rows.length, newlySeededInclusions }
+  const seedRes = await db.query(
+    `insert into staff_inclusion (staff_id, status, decided_at, decided_by, notes)
+     select sd.staff_id,
+            case when sd.photo_url is not null and length(trim(sd.photo_url)) > 0
+                 then 'unapproved' else 'rejected' end,
+            now(), 'system:refresh-seed', null
+       from staff_directory_cache sd
+      where sd.staff_id = any($1::text[])
+     on conflict (staff_id) do nothing`,
+    [rows.map((row) => row.staffId)],
+  )
+
+  return { totalUpserted: rows.length, newlySeededInclusions: seedRes.rowCount ?? 0 }
 }
 
 export interface ApprovedTeamMemberRow {

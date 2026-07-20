@@ -62,6 +62,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
   'config.workers.refresh_sweed_segment_members',
+  'config.workers.refresh_staff_directory',
   'config.workers.geo_segment_rule_eval',
   'config.workers.sweed_orders_raw_json_drain',
   'config.workers.litalerts_products_raw_json_drain',
@@ -917,6 +918,13 @@ export const ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema = z.object(
 })
 export type ConfigWorkersRefreshSweedSegmentMembersJobPayload = z.infer<
   typeof ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema
+>
+
+export const ConfigWorkersRefreshStaffDirectoryJobPayloadSchema = z.object({
+  trigger: z.enum(['budtender_cache_stale', 'budtender_cashier_missing']),
+})
+export type ConfigWorkersRefreshStaffDirectoryJobPayload = z.infer<
+  typeof ConfigWorkersRefreshStaffDirectoryJobPayloadSchema
 >
 
 /**

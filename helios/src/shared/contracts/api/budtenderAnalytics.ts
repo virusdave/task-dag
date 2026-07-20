@@ -45,10 +45,12 @@ export type BudtenderAnalyticsRequest = z.infer<typeof BudtenderAnalyticsRequest
 export const BudtenderCashierRowSchema = z.object({
   cashierId: z.string(),
   cashierName: z.string().nullable(),
-  /** Sweed staff_directory_cache.user_status (raw int). Surface a
-   *  "DISABLED" badge when non-zero (per the org-wide DEAD-record
-   *  convention) so terminated cashiers don't get blamed for low
-   *  recent throughput. */
+  /** Sweed user.compliance.list `blocked`. This, rather than the
+   *  numeric userStatus classification, determines whether the user
+   *  is blocked. Null means the cashier is absent from the cache. */
+  blocked: z.boolean().nullable(),
+  /** Raw Sweed userStatus classification. Active users currently
+   *  carry non-zero values, so this is informational only. */
   userStatus: z.number().int().nullable(),
 
   // -------- Volume / sales --------
@@ -127,6 +129,22 @@ export const BudtenderCashierRowSchema = z.object({
   }),
 })
 export type BudtenderCashierRow = z.infer<typeof BudtenderCashierRowSchema>
+
+export type BudtenderCashierBlockedStatus = 'blocked' | 'not_blocked' | 'unknown'
+
+export function budtenderCashierBlockedStatus(
+  cashier: Pick<BudtenderCashierRow, 'blocked'>,
+): BudtenderCashierBlockedStatus {
+  if (cashier.blocked === null) return 'unknown'
+  return cashier.blocked ? 'blocked' : 'not_blocked'
+}
+
+/** Sweed's explicit blocked flag owns disabled-badge semantics. */
+export function isBudtenderCashierDisabled(
+  cashier: Pick<BudtenderCashierRow, 'blocked'>,
+): boolean {
+  return budtenderCashierBlockedStatus(cashier) === 'blocked'
+}
 
 // ============================ Daily roll-up ================================
 

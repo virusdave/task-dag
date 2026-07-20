@@ -7,8 +7,10 @@ import {
 import { requireMetricsGrant } from '../auth/requireSession.js'
 import {
   BUDTENDER_ANALYTICS_DEFAULT_WINDOW_DAYS,
-  getBudtenderAnalytics,
+  getBudtenderAnalyticsWithStaffCacheState,
 } from '../budtenderAnalytics/budtenderAnalyticsQueries.js'
+import { getPool } from '../db/pool.js'
+import { enqueueJob, JOB_PRIORITY_BEST_EFFORT } from '../jobs/enqueueJob.js'
 
 const DAY_MS = 86_400_000
 
@@ -31,11 +33,28 @@ export async function registerBudtenderAnalyticsRoutes(
     const from = parsed.from
       ? new Date(parsed.from)
       : new Date(to.getTime() - BUDTENDER_ANALYTICS_DEFAULT_WINDOW_DAYS * DAY_MS)
-    const result = await getBudtenderAnalytics({
+    const result = await getBudtenderAnalyticsWithStaffCacheState({
       from,
       to,
       sites: parsed.sites,
     })
-    return reply.send(BudtenderAnalyticsResponseSchema.parse(result))
+    if (result.staffRefreshTrigger !== null) {
+      try {
+        await enqueueJob(getPool(), {
+          jobType: 'config.workers.refresh_staff_directory',
+          module: 'utilities',
+          payload: { trigger: result.staffRefreshTrigger },
+          priority: JOB_PRIORITY_BEST_EFFORT,
+          dedupeKey: 'config.workers.refresh_staff_directory',
+          concurrencyKey: null,
+          requestedByUserId: user.id,
+          scope: null,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[budtender-analytics] could not queue staff-directory refresh: ${message}`)
+      }
+    }
+    return reply.send(BudtenderAnalyticsResponseSchema.parse(result.analytics))
   })
 }

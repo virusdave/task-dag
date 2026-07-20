@@ -12,7 +12,7 @@ const SweedDealerAssignmentSchema = z
   })
   .passthrough()
 
-const SweedComplianceUserSchema = z
+export const SweedComplianceUserSchema = z
   .object({
     id: z.string().min(1),
     name: z.string().optional(),
@@ -22,7 +22,7 @@ const SweedComplianceUserSchema = z
     photoUrl: z.string().nullable().optional(),
     currentDealerId: z.coerce.number().int().nullable().optional(),
     currentDealerName: z.string().nullable().optional(),
-    blocked: z.boolean().optional(),
+    blocked: z.boolean(),
     userStatus: z.coerce.number().int().nullable().optional(),
     dealers: z.array(SweedDealerAssignmentSchema).optional(),
   })
@@ -70,6 +70,7 @@ function deriveFullName(parsed: z.infer<typeof SweedComplianceUserSchema>): stri
 export async function fetchStateStaffDirectory(): Promise<UpstreamStaffDirectoryRow[]> {
   const stateDealerId = getServerEnv().sweedStateDealerId
   const collected: UpstreamStaffDirectoryRow[] = []
+  const seenStaffIds = new Set<string>()
 
   await withSweedSession(async () => {
     const dealerSet = await callSweedRpcRaw<{ user?: { currentDealerId?: unknown } }>(
@@ -91,8 +92,22 @@ export async function fetchStateStaffDirectory(): Promise<UpstreamStaffDirectory
         enabled: true,
       })
       const parsed = SweedComplianceListResultSchema.parse(raw)
+      if (parsed.page !== page) {
+        throw new Error(
+          `[fetchStateStaffDirectory] page mismatch: requested ${page}, received ${parsed.page}`,
+        )
+      }
       if (totalCount === null) totalCount = parsed.totalCount
+      else if (parsed.totalCount !== totalCount) {
+        throw new Error(
+          `[fetchStateStaffDirectory] totalCount changed during pagination: expected ${totalCount}, received ${parsed.totalCount}`,
+        )
+      }
       for (const user of parsed.data) {
+        if (seenStaffIds.has(user.id)) {
+          throw new Error(`[fetchStateStaffDirectory] duplicate staff id across pages: ${user.id}`)
+        }
+        seenStaffIds.add(user.id)
         collected.push({
           staffId: user.id,
           fullName: deriveFullName(user),
@@ -102,17 +117,31 @@ export async function fetchStateStaffDirectory(): Promise<UpstreamStaffDirectory
           photoUrl: nonEmpty(user.photoUrl ?? null),
           currentDealerId: user.currentDealerId ?? null,
           currentDealerName: nonEmpty(user.currentDealerName ?? null),
-          blocked: user.blocked ?? false,
+          blocked: user.blocked,
           userStatus: user.userStatus ?? null,
           raw: user,
         })
       }
-      if (collected.length >= (totalCount ?? 0)) break
-      if (parsed.data.length === 0) break
+      if (collected.length > (totalCount ?? 0)) {
+        throw new Error(
+          `[fetchStateStaffDirectory] received ${collected.length} rows for totalCount ${totalCount}`,
+        )
+      }
+      if (collected.length === (totalCount ?? 0)) break
+      if (parsed.data.length === 0) {
+        throw new Error(
+          `[fetchStateStaffDirectory] incomplete pagination: received ${collected.length} of ${totalCount}`,
+        )
+      }
       page += 1
       if (page > 100) {
         throw new Error('[fetchStateStaffDirectory] pagination safeguard exceeded (>100 pages)')
       }
+    }
+    if (collected.length !== totalCount) {
+      throw new Error(
+        `[fetchStateStaffDirectory] incomplete snapshot: received ${collected.length} of ${totalCount}`,
+      )
     }
   })
 

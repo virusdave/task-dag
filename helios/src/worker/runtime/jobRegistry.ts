@@ -33,6 +33,7 @@ import {
   ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema,
   ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema,
   ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema,
+  ConfigWorkersRefreshStaffDirectoryJobPayloadSchema,
   ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   DbMigrationApplyJobPayloadSchema,
@@ -92,6 +93,12 @@ import { runConfigWorkersRefreshSweedSegmentMembersJob } from '../jobs/refreshSw
 import { runConfigWorkersGeoSegmentRuleEvalJob } from '../jobs/geoSegmentRuleEvalJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
+import {
+  markStaffDirectoryRefreshSucceeded,
+  upsertStaffDirectoryCache,
+} from '../../server/db/queries/staffQueries.js'
+import { withTransaction } from '../../server/db/tx.js'
+import { fetchStateStaffDirectory } from '../../server/staff/fetchStateStaff.js'
 import { runLlmDebugRerunJob } from '../jobs/llmDebugRerunJob.js'
 import { runReconcileGroupJob } from '../jobs/reconcileGroupJob.js'
 import { runScreensBannerBulkToggleJob } from '../jobs/screensBannerBulkToggleJob.js'
@@ -369,6 +376,17 @@ const handlers: Record<JobType, JobHandler> = {
       ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema.parse(context.payload),
     )
   },
+  'config.workers.refresh_staff_directory': async (context) => {
+    const payload = ConfigWorkersRefreshStaffDirectoryJobPayloadSchema.parse(context.payload)
+    const rows = await fetchStateStaffDirectory()
+    await withTransaction(async (db) => {
+      await upsertStaffDirectoryCache(db, rows)
+      await markStaffDirectoryRefreshSucceeded(db, `job:${context.id}`)
+    })
+    console.log(
+      `[refresh-staff-directory] job=${context.id} cached ${rows.length} staff (trigger=${payload.trigger})`,
+    )
+  },
   'config.workers.geo_segment_rule_eval': async (context) => {
     await runConfigWorkersGeoSegmentRuleEvalJob(
       context,
@@ -415,6 +433,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
   'config.workers.refresh_sweed_segment_members',
+  'config.workers.refresh_staff_directory',
   'reconcile.group',
   'screens.banner_bulk_toggle',
   'screens.banner_refresh',

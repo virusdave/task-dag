@@ -12,9 +12,11 @@ import {
   getStaffDirectoryFetchedAt,
   listApprovedTeamMembers,
   listStaffRowsWithInclusion,
+  markStaffDirectoryRefreshSucceeded,
   updateStaffInclusionStatus,
   upsertStaffDirectoryCache,
 } from '../db/queries/staffQueries.js'
+import { withTransaction } from '../db/tx.js'
 import { fetchStateStaffDirectory } from '../staff/fetchStateStaff.js'
 import { buildStaffPhotoProxyToken } from '../staff/staffPhotoProxyToken.js'
 
@@ -57,7 +59,10 @@ export async function registerStaffRoutes(server: FastifyInstance): Promise<void
     if (!user) return
     try {
       const upstream = await fetchStateStaffDirectory()
-      await upsertStaffDirectoryCache(getPool(), upstream)
+      await withTransaction(async (db) => {
+        await upsertStaffDirectoryCache(db, upstream)
+        await markStaffDirectoryRefreshSucceeded(db, user.email)
+      })
       const payload = await buildStaffListPayload()
       return reply.send(
         StaffRefreshResponseSchema.parse({
