@@ -266,11 +266,43 @@ function CoreSubTab({ data }: { data: BudtenderAnalyticsResponse }) {
       <TotalsStrip data={data} />
       <DailyTrendCard data={data} />
       <LeaderboardCard data={data} />
+      <ReviewRatingsCard data={data} />
       <UpsellLiftCard data={data} />
       <MixCard data={data} />
       <ShiftProductivityCard data={data} />
       <MissingDataSection cards={data.missingDataCards} />
     </div>
+  )
+}
+
+function ReviewRatingsCard({ data }: { data: BudtenderAnalyticsResponse }) {
+  return (
+    <article className="metric-chart-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title metric-chart-title--keep-mobile">
+            Customer ratings by cashier (inferred){' '}
+            <HelpIcon text="Dubious data quality: cashier attribution is inferred from the nearest non-cancelled order at the same store, from 30 minutes before to 4 minutes after each review. It is not verified and may be wrong. Only reviews matched when submitted are included; unmatched and fraud-marked reviews are excluded. Matches are never recomputed." />
+          </h3>
+        </div>
+      </header>
+      {data.reviewCashiers.length === 0 ? (
+        <p className="subtle-copy">No reviews were matched to cashiers in this range.</p>
+      ) : (
+        <table className="budtender-lift-table">
+          <thead><tr><th>Cashier</th><th className="num">Average rating</th><th className="num">Lukewarm / negative</th></tr></thead>
+          <tbody>
+            {data.reviewCashiers.map((row) => (
+              <tr key={row.cashierId}>
+                <td>{row.cashierName || `Cashier ${row.cashierId}`}</td>
+                <td className="num">{row.averageStarRating === null ? 'n/a' : `${row.averageStarRating.toFixed(2)} (n=${row.reviewCount})`}</td>
+                <td className="num">{row.lukewarmOrNegativeRate === null ? `n/a (n=${row.classifiedReviewCount})` : `${(row.lukewarmOrNegativeRate * 100).toFixed(1)}% (n=${row.classifiedReviewCount})`}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </article>
   )
 }
 

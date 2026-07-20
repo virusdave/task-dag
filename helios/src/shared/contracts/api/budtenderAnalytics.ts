@@ -146,6 +146,17 @@ export function isBudtenderCashierDisabled(
   return budtenderCashierBlockedStatus(cashier) === 'blocked'
 }
 
+export const BudtenderReviewCashierRowSchema = z.object({
+  cashierId: z.string(),
+  cashierName: z.string().nullable(),
+  reviewCount: z.number().int().nonnegative(),
+  averageStarRating: z.number().nullable(),
+  classifiedReviewCount: z.number().int().nonnegative(),
+  lukewarmOrNegativeCount: z.number().int().nonnegative(),
+  lukewarmOrNegativeRate: z.number().nullable(),
+})
+export type BudtenderReviewCashierRow = z.infer<typeof BudtenderReviewCashierRowSchema>
+
 // ============================ Daily roll-up ================================
 
 export const BudtenderDailyRowSchema = z.object({
@@ -192,6 +203,7 @@ export const BudtenderAnalyticsResponseSchema = z.object({
   totals: BudtenderTotalsSchema,
   daily: z.array(BudtenderDailyRowSchema),
   cashiers: z.array(BudtenderCashierRowSchema),
+  reviewCashiers: z.array(BudtenderReviewCashierRowSchema),
   missingDataCards: z.array(BudtenderMissingDataCardSchema),
 })
 export type BudtenderAnalyticsResponse = z.infer<typeof BudtenderAnalyticsResponseSchema>

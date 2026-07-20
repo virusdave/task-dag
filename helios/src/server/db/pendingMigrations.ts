@@ -1754,6 +1754,24 @@ const SENTINELS: MigrationSentinel[] = [
     },
     check: vendorBrandAssociationsSchemaApplied,
   },
+  {
+    migrationId: '105_review_transaction_attribution',
+    label:
+      'Capture-time inferred review-to-transaction attribution columns. ' +
+      'Until applied, review submissions cannot snapshot an originating ' +
+      'invoice/cashier and budtender rating metrics remain unavailable.',
+    check: async (db) => {
+      const checks = await Promise.all([
+        columnExists(db, 'review_submissions', 'invoice_match_status'),
+        columnExists(db, 'review_submissions', 'matched_invoice_id'),
+        columnExists(db, 'review_submissions', 'matched_cashier_user_id'),
+        columnExists(db, 'review_submissions', 'matched_at'),
+        constraintExists(db, 'review_submissions', 'review_submissions_invoice_match_status_check'),
+        constraintExists(db, 'review_submissions', 'review_submissions_invoice_match_state_check'),
+      ])
+      return checks.every(Boolean)
+    },
+  },
   // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and
   // 101_migration_flow_smoketest_drop were a throwaway create+drop PAIR used to
   // exercise the admin "Apply Now" psql apply flow end-to-end for the first

@@ -101,14 +101,14 @@ function isMissingReviewTableError(error: unknown): boolean {
     // drawing_segment_id / free_preroll_segment_id / fraudulent in
     // migration 024. Surface the same migration-banner-friendly 503
     // when the operator hasn't applied either yet.
-    /column .*(llm_verdict|degraded_pass|llm_raw|llm_model_ref|llm_at|review_provider_url|accepted_paste_offer|sweed_customer_id|drawing_segment_id|free_preroll_segment_id|fraudulent|fraudulent_marked_at|fraudulent_marked_by).* does not exist/i.test(
+    /column .*(llm_verdict|degraded_pass|llm_raw|llm_model_ref|llm_at|review_provider_url|accepted_paste_offer|sweed_customer_id|drawing_segment_id|free_preroll_segment_id|fraudulent|fraudulent_marked_at|fraudulent_marked_by|invoice_match_status|matched_invoice_id|matched_cashier_user_id|matched_at).* does not exist/i.test(
       error.message,
     )
   )
 }
 
 const MIGRATION_HINT =
-  'Customer-review tables / columns are missing. Apply migrations 022_customer_reviews_capture.sql, 023_customer_reviews_llm_gate.sql, and 024_customer_reviews_sweed_integration.sql.'
+  'Customer-review tables / columns are missing. Apply migrations 022_customer_reviews_capture.sql, 023_customer_reviews_llm_gate.sql, 024_customer_reviews_sweed_integration.sql, and 105_review_transaction_attribution.sql.'
 
 function getRequestSourceIp(request: FastifyRequest): string | null {
   // Fastify's request.ip already handles proxy-trust (we don't enable

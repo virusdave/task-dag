@@ -19,8 +19,8 @@
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
           default = pkgs.mkShell {
-            # nodejs_22 bundles the matching npm — pins both with one dep.
-            packages = [ pkgs.nodejs_22 ];
+            # PostgreSQL backs the isolated migration/query integration tests.
+            packages = [ pkgs.nodejs_22 pkgs.postgresql_17 ];
 
             shellHook = ''
               echo "helios devShell — node $(node --version), npm $(npm --version)"

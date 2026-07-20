@@ -4464,6 +4464,11 @@ a.tree-nav-branch-label.is-link,
     color: #1f4e7a;
     margin-left: 0;
   }
+  .metric-chart-title--keep-mobile {
+    font-size: 1rem;
+    line-height: 1.25;
+    color: inherit;
+  }
 }
 
 /* Free-text "highlight subset" input on the catalog analytics page.

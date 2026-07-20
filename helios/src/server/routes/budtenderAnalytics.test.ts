@@ -41,6 +41,7 @@ const analytics = {
   },
   daily: [],
   cashiers: [],
+  reviewCashiers: [],
   missingDataCards: [],
 }
 

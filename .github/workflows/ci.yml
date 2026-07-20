@@ -25,6 +25,7 @@
       "steps": [
         { "uses": "actions/checkout@v4" },
         { "uses": "actions/setup-node@v4", "with": { "node-version": "22" } },
+        { "name": "Expose PostgreSQL test binaries", "run": "echo \"$(pg_config --bindir)\" >> \"$GITHUB_PATH\"" },
         { "name": "typecheck (server), typecheck (client), test", "run": "npm run check" },
         {
           "name": "build (server + client)",

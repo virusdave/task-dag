@@ -191,3 +191,28 @@ insert into site_review_settings (
   8669,     -- per issue #13: drawing segment, always added
   8666      -- per issue #13: free-preroll segment, strong-with-text only
 ) on conflict (dealer_id) do nothing;
+
+-- Transaction attribution (migration 105). New submissions snapshot the
+-- nearest same-site transaction once; historical rows are never guessed.
+alter table review_submissions
+  add column if not exists invoice_match_status text not null default 'not_attempted',
+  add column if not exists matched_invoice_id text,
+  add column if not exists matched_cashier_user_id bigint,
+  add column if not exists matched_at timestamptz;
+
+do $$ begin
+  alter table review_submissions add constraint review_submissions_invoice_match_status_check
+    check (invoice_match_status in ('not_attempted', 'matched', 'unmatched'));
+exception when duplicate_object then null;
+end $$;
+
+do $$ begin
+  alter table review_submissions add constraint review_submissions_invoice_match_state_check check (
+    (invoice_match_status in ('not_attempted', 'unmatched')
+      and matched_invoice_id is null and matched_cashier_user_id is null and matched_at is null)
+    or
+    (invoice_match_status = 'matched' and matched_invoice_id is not null
+      and matched_cashier_user_id is not null and matched_at is not null)
+  );
+exception when duplicate_object then null;
+end $$;

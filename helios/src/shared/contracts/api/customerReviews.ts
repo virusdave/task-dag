@@ -164,6 +164,10 @@ export const CustomerReviewListItemSchema = z.object({
   llmModelRef: z.string().nullable(),
   llmAt: z.string().nullable(),
   reviewProviderUrl: z.string().nullable(),
+  invoiceMatchStatus: z.enum(['not_attempted', 'matched', 'unmatched']),
+  matchedInvoiceId: z.string().nullable(),
+  matchedCashierUserId: z.string().nullable(),
+  matchedAt: z.string().nullable(),
   contacts: z.array(CustomerReviewContactInfoRowSchema),
   drawingEntry: CustomerReviewDrawingEntryRowSchema.nullable(),
   // A3: email send attempts (zero or more rows). Ordered oldest-first.

@@ -3,10 +3,12 @@ import {
   type BudtenderAnalyticsResponse,
   type BudtenderCashierRow,
   type BudtenderDailyRow,
+  type BudtenderReviewCashierRow,
   type BudtenderMissingDataCard,
   type BudtenderTotals,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+import type { Queryable } from '../db/pool.js'
 import { getStaffDirectoryFetchedAt } from '../db/queries/staffQueries.js'
 import { nonCancelledOrderSql } from '../db/sweedOrderStatus.js'
 import { bucketLocalExpr, bucketSelectExpr } from '../metrics/bucketSelectSql.js'
@@ -106,6 +108,47 @@ interface QueryArgs {
   sites: readonly string[]
 }
 
+export async function queryBudtenderReviewCashiers(
+  db: Queryable,
+  dealerIds: readonly number[],
+  from: Date,
+  to: Date,
+): Promise<BudtenderReviewCashierRow[]> {
+  const reviewResult = await db.query(
+    `select
+       rs.matched_cashier_user_id as cashier_user_id,
+       sd.full_name as cashier_full_name,
+       count(*) as review_count,
+       avg(rs.star_rating)::float8 as average_star_rating,
+       count(rs.llm_verdict) as classified_review_count,
+       count(*) filter (where rs.llm_verdict in ('lukewarm', 'negative')) as lukewarm_negative_count
+     from review_submissions rs
+     left join staff_directory_cache sd
+       on sd.staff_id = rs.matched_cashier_user_id::text
+     where rs.dealer_id = any($1::bigint[])
+       and rs.created_at >= $2
+       and rs.created_at < $3
+       and rs.invoice_match_status = 'matched'
+       and rs.fraud_marked = false
+     group by rs.matched_cashier_user_id, sd.full_name
+     order by review_count desc, rs.matched_cashier_user_id`,
+    [dealerIds, from, to],
+  )
+  return reviewResult.rows.map((row) => {
+    const classified = asReqInt(row.classified_review_count)
+    const lukewarmNegative = asReqInt(row.lukewarm_negative_count)
+    return {
+      cashierId: String(row.cashier_user_id),
+      cashierName: (row.cashier_full_name as string | null) ?? null,
+      reviewCount: asReqInt(row.review_count),
+      averageStarRating: asNum(row.average_star_rating),
+      classifiedReviewCount: classified,
+      lukewarmOrNegativeCount: lukewarmNegative,
+      lukewarmOrNegativeRate: classified > 0 ? lukewarmNegative / classified : null,
+    }
+  })
+}
+
 export async function getBudtenderAnalytics(
   args: QueryArgs,
 ): Promise<BudtenderAnalyticsResponse> {
@@ -126,6 +169,7 @@ export async function getBudtenderAnalyticsWithStaffCacheState(
         totals: emptyTotals(),
         daily: [],
         cashiers: [],
+        reviewCashiers: [],
         missingDataCards: [...MISSING_DATA_CARDS],
       },
       staffRefreshTrigger: null,
@@ -499,6 +543,7 @@ export async function getBudtenderAnalyticsWithStaffCacheState(
     }
   })
 
+  const reviewCashiers = await queryBudtenderReviewCashiers(pool, dealerIds, args.from, args.to)
   const staffDirectoryFetchedAt = await getStaffDirectoryFetchedAt(pool)
   return {
     analytics: {
@@ -508,6 +553,7 @@ export async function getBudtenderAnalyticsWithStaffCacheState(
       totals,
       daily,
       cashiers,
+      reviewCashiers,
       missingDataCards: [...MISSING_DATA_CARDS],
     },
     staffRefreshTrigger: assessBudtenderStaffCache(cashiers, staffDirectoryFetchedAt),
@@ -575,20 +621,6 @@ export const MISSING_DATA_CARDS: ReadonlyArray<BudtenderMissingDataCard> = [
       'Cash over / short per cashier',
       'Over/short frequency vs peers',
       'Trend of over/short over time',
-    ],
-    blockedByUrl: ISSUE_URL,
-  },
-  {
-    id: 'transaction-reviews',
-    title: 'Customer feedback rating per budtender',
-    whyMissing:
-      'review_submissions are site-level — no invoice_id or cashier_user_id linkage. We cannot attribute a review to the specific transaction (and therefore cashier) it covers.',
-    neededSource:
-      'Capture-flow extension that records the sale invoice / cashier with each review submission',
-    unlockedMetrics: [
-      'Avg star rating per cashier',
-      'Verdict distribution per cashier',
-      'Lukewarm/negative rate vs peers',
     ],
     blockedByUrl: ISSUE_URL,
   },

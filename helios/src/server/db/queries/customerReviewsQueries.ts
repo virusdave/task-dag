@@ -8,6 +8,7 @@ import type {
   CustomerReviewListItem,
 } from '../../../shared/contracts/index.js'
 import type { Queryable } from '../pool.js'
+import { nonCancelledOrderSql } from '../sweedOrderStatus.js'
 
 // =====================================================================
 // Customer-Sentiment Capture (issue #13, A1 phase) — db queries.
@@ -85,16 +86,43 @@ export async function insertReviewSubmission(
   db: Queryable,
   input: InsertReviewSubmissionInput,
 ): Promise<InsertReviewSubmissionResult> {
+  return insertReviewSubmissionAt(db, input, new Date())
+}
+
+export async function insertReviewSubmissionAt(
+  db: Queryable,
+  input: InsertReviewSubmissionInput,
+  submittedAt: Date,
+): Promise<InsertReviewSubmissionResult> {
+  const candidateResult = await db.query<{ invoice_id: string; cashier_user_id: string | null; pay_time: Date }>(
+    `select invoice_id, cashier_user_id, pay_time
+     from sweed_orders
+     where dealer_id = $1
+       and pay_time >= $2::timestamptz - interval '30 minutes'
+       and pay_time <= $2::timestamptz + interval '4 minutes'
+       ${nonCancelledOrderSql('')}
+     order by abs(extract(epoch from (pay_time - $2::timestamptz))), pay_time, invoice_id
+     limit 1`,
+    [input.dealerId, submittedAt],
+  )
+  const candidate = candidateResult.rows[0]
+  const nearestOrder = candidate ? {
+    invoiceId: candidate.invoice_id,
+    cashierUserId: candidate.cashier_user_id === null ? null : String(candidate.cashier_user_id),
+  } : null
+  const matchedOrder = nearestOrder?.cashierUserId ? nearestOrder : null
   const result = await db.query<{ id: string; created_at: Date }>(
     `insert into review_submissions (
        dealer_id, star_rating, review_text, submission_kind,
        source_ip, user_agent, referrer, raw_payload,
        llm_verdict, degraded_pass, llm_raw, llm_model_ref, llm_at,
-       review_provider_url
+       review_provider_url, created_at, invoice_match_status,
+       matched_invoice_id, matched_cashier_user_id, matched_at
      ) values (
        $1, $2, $3, $4, $5, $6, $7, $8::jsonb,
        $9, $10, $11::jsonb, $12, $13,
-       $14
+       $14, $15,
+       $16, $17, $18, $19
      )
      returning id, created_at`,
     [
@@ -112,6 +140,11 @@ export async function insertReviewSubmission(
       input.llmModelRef,
       input.llmAt,
       input.reviewProviderUrl,
+      submittedAt,
+      matchedOrder ? 'matched' : 'unmatched',
+      matchedOrder?.invoiceId ?? null,
+      matchedOrder?.cashierUserId ?? null,
+      matchedOrder ? submittedAt : null,
     ],
   )
   const row = result.rows[0]
@@ -521,6 +554,10 @@ const ListItemRowSchema = z.object({
   llm_model_ref: z.string().nullable(),
   llm_at: z.coerce.date().nullable(),
   review_provider_url: z.string().nullable(),
+  invoice_match_status: z.enum(['not_attempted', 'matched', 'unmatched']),
+  matched_invoice_id: z.string().nullable(),
+  matched_cashier_user_id: z.coerce.string().nullable(),
+  matched_at: z.coerce.date().nullable(),
   created_at: z.coerce.date(),
 })
 
@@ -574,6 +611,10 @@ export async function listCustomerReviews(
        rs.llm_model_ref,
        rs.llm_at,
        rs.review_provider_url,
+       rs.invoice_match_status,
+       rs.matched_invoice_id,
+       rs.matched_cashier_user_id,
+       rs.matched_at,
        rs.created_at
      from review_submissions rs
      left join site_review_settings srs on srs.dealer_id = rs.dealer_id
@@ -689,6 +730,10 @@ export async function listCustomerReviews(
     llmModelRef: s.llm_model_ref,
     llmAt: s.llm_at ? s.llm_at.toISOString() : null,
     reviewProviderUrl: s.review_provider_url,
+    invoiceMatchStatus: s.invoice_match_status,
+    matchedInvoiceId: s.matched_invoice_id,
+    matchedCashierUserId: s.matched_cashier_user_id,
+    matchedAt: s.matched_at ? s.matched_at.toISOString() : null,
     contacts: contactsBySubmission.get(s.submission_id) ?? [],
     drawingEntry: drawingBySubmission.get(s.submission_id) ?? null,
     emails: emailsBySubmission.get(s.submission_id) ?? [],
