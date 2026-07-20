@@ -30,9 +30,9 @@ wrong, because operators act on lifetime value.
 
 Status lives in two places, **spelled differently** (this trips people up):
 
-| Grain | JSONB path | Cancelled value |
+| Grain | Status source | Cancelled value |
 | --- | --- | --- |
-| Order (header) | `sweed_orders.raw_json -> 'invoiceStatus' ->> 'name'` | `'Cancelled'` (British, double-L) |
+| Order (header) | `sweed_orders.invoice_status_name` | `'Cancelled'` (British, double-L) |
 | Line (item) | `raw_item -> 'invoiceItemStatus' ->> 'name'` | `'Canceled'` (American, single-L) |
 
 - An order can be **fully cancelled** (header `Cancelled`) or have some
@@ -70,9 +70,9 @@ Status lives in two places, **spelled differently** (this trips people up):
 `helios/src/server/db/sweedOrderStatus.guard.test.ts` is a static test
 (part of `npm run check`) that fails the build if any server SQL template
 sums an order-header dollar column (`grand_total_dollars` /
-`subtotal_dollars`) over `sweed_orders` without the canonical helper, an
-inline `invoiceStatus` predicate, or the `sweed-cancelled-intentional:`
-opt-out marker. If you add a real-money rollup, the guard will remind you.
+`subtotal_dollars`) over `sweed_orders` without the canonical helper or the
+`sweed-cancelled-intentional:` opt-out marker. It also rejects any remaining
+server read of header status from `raw_json`.
 
 ## Known gaps / caveats
 
@@ -83,13 +83,8 @@ opt-out marker. If you add a real-money rollup, the guard will remind you.
   `helios/src/server/budtenderAnalytics/budtenderAnalyticsQueries.ts`), not
   something the cancelled-order predicate covers. When refund ingest lands,
   "net of refunds" becomes its own exclusion concern.
-- **`raw_json` drain durability.** The raw-json drain job
-  (`configWorkersSweedOrdersRawJsonDrainJob`) nulls `sweed_orders.raw_json`
-  for aged rows. After that, the status is unreadable and the row reads as
-  non-cancelled (via `coalesce('')`). For orders newer than the drain
-  horizon this is fine; for older drained orders the status is simply
-  unknown. The durable fix is a normalised `sweed_orders.invoice_status_*`
-  column populated at ingest and backfilled, with the helper preferring the
-  column and falling back to `raw_json`; the drain must then preserve the
-  column. This is a follow-up (needs a schema migration → operator
-  approval).
+- **Already-drained history remains unknown.** Migration 106 backfills
+  `invoice_status_name` from every envelope still present, and ingest persists
+  it before the raw-json drain runs. Orders whose envelope was drained before
+  migration 106 cannot be recovered and continue to read as non-cancelled via
+  `coalesce('')`; the canonical predicate never falls back to `raw_json`.

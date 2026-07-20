@@ -48,7 +48,7 @@ describe('customer-details summary/details load excludes cancelled orders', () =
     expect(sweedOrderReads.length).toBeGreaterThanOrEqual(3)
 
     const unguarded = sweedOrderReads.filter(
-      (sql) => !/invoiceStatus/.test(sql) && !/sweed-cancelled-intentional/.test(sql),
+      (sql) => !/invoice_status_name/.test(sql) && !/sweed-cancelled-intentional/.test(sql),
     )
     expect(unguarded, `unguarded sweed_orders reads:\n${unguarded.join('\n---\n')}`).toEqual([])
   })

@@ -89,7 +89,7 @@ The rule:
 - **Default to EXCLUDING cancelled** from every total, count, average,
   "Nth purchase" ordinal, first-vs-returning split, and fulfillment /
   payment / category split. Order-header status is at
-  `raw_json->'invoiceStatus'->>'name'` = `'Cancelled'`; line status is the
+  `sweed_orders.invoice_status_name` = `'Cancelled'`; line status is the
   differently-spelled `raw_item->'invoiceItemStatus'->>'name'` =
   `'Canceled'`.
 - **Never hand-write the predicate.** Import the canonical helper from

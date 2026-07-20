@@ -27,6 +27,7 @@
 
 import type { Pool } from 'pg'
 import type { GeoGender, GeoPredicate, GeoPredicateAst } from '../../shared/contracts/index.js'
+import { nonCancelledOrderSql } from '../../server/db/sweedOrderStatus.js'
 
 export const FEET_PER_METER = 0.3048
 
@@ -205,7 +206,7 @@ export async function loadPurchaseTriggerCandidates(
       select o.customer_id, o.dealer_id, o.pay_time
       from sweed_orders o
       where o.customer_id is not null
-        and lower(coalesce(o.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
+        ${nonCancelledOrderSql('o')}
     ),
     first_order as (
       select customer_id, min(pay_time) as first_pay_time

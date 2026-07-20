@@ -96,6 +96,10 @@ const NY_TZ = 'America/New_York'
 // docs/runbooks/helios-metrics.md.
 const NamedEntitySchema = z.object({ name: z.string().nullable().optional() }).passthrough()
 
+const InvoiceStatusEnvelopeSchema = z
+  .object({ invoiceStatus: NamedEntitySchema.nullable().optional() })
+  .passthrough()
+
 const InvoiceEnvelopeSchema = z
   .object({
     // Cash side. Sweed uses lowercase-T `subtotalAmount` /
@@ -174,6 +178,7 @@ interface NormalisedInvoice {
   discount: number | null
   fulfillmentType: string | null
   paymentMethod: string | null
+  invoiceStatusName: string | null
   deliveryZip: string | null
   cashierUserId: number | null
   raw: unknown
@@ -239,6 +244,13 @@ function pickPaymentMethod(env: z.infer<typeof InvoiceEnvelopeSchema>): string |
   return bestName
 }
 
+export function invoiceStatusNameForIngest(raw: unknown): string | null {
+  const parsed = InvoiceStatusEnvelopeSchema.safeParse(raw)
+  if (!parsed.success) return null
+  const name = parsed.data.invoiceStatus?.name?.trim()
+  return name !== undefined && name.length > 0 ? name : null
+}
+
 function pickDeliveryZip(_env: z.infer<typeof InvoiceEnvelopeSchema>): string | null {
   // `store.sale.invoice.list` does not include the delivery address;
   // that field is only surfaced by `store.sale.invoice.get`. Until
@@ -264,6 +276,9 @@ function normaliseForIngest(row: SweedInvoiceRow): NormalisedInvoice | null {
     discount: env.grandTotalDiscountAmount ?? null,
     fulfillmentType: pickFulfillment(env),
     paymentMethod: pickPaymentMethod(env),
+    // Parse status independently: malformed unrelated optional fields must not
+    // erase the cancellation signal and silently include the order.
+    invoiceStatusName: invoiceStatusNameForIngest(row.raw),
     deliveryZip: pickDeliveryZip(env),
     cashierUserId: pickCashierUserId(env),
     raw: row.raw,
@@ -574,6 +589,11 @@ interface FetchAndInsertResult {
   insertedCount: number
 }
 
+export const SWEED_ORDERS_UPSERT_CHANGE_PREDICATE_SQL = `
+  sweed_orders.raw_json is distinct from excluded.raw_json
+  or sweed_orders.invoice_status_name is distinct from excluded.invoice_status_name
+`
+
 async function fetchAndInsert(
   dealerId: number,
   fromDate: Date,
@@ -642,6 +662,7 @@ async function fetchAndInsert(
         discount: n.discount,
         fulfillment_type: n.fulfillmentType,
         payment_method: n.paymentMethod,
+        invoice_status_name: n.invoiceStatusName,
         delivery_zip: n.deliveryZip,
         cashier_user_id: n.cashierUserId,
         raw: n.raw,
@@ -660,6 +681,7 @@ async function fetchAndInsert(
               discount         numeric,
               fulfillment_type text,
               payment_method   text,
+              invoice_status_name text,
               delivery_zip     text,
               cashier_user_id  bigint,
               raw              jsonb
@@ -690,7 +712,7 @@ async function fetchAndInsert(
               dealer_id, invoice_id, pay_time, customer_id, is_guest,
               first_time_for_customer, grand_total_dollars, subtotal_dollars,
               tax_dollars, discount_dollars, fulfillment_type, payment_method,
-              delivery_zip, cashier_user_id, raw_json
+              invoice_status_name, delivery_zip, cashier_user_id, raw_json
             )
             select
               $1::bigint,
@@ -705,6 +727,7 @@ async function fetchAndInsert(
               discount,
               fulfillment_type,
               payment_method,
+              invoice_status_name,
               delivery_zip,
               cashier_user_id,
               raw
@@ -727,13 +750,15 @@ async function fetchAndInsert(
               discount_dollars    = excluded.discount_dollars,
               fulfillment_type    = excluded.fulfillment_type,
               payment_method      = excluded.payment_method,
+              invoice_status_name = excluded.invoice_status_name,
               cashier_user_id     = excluded.cashier_user_id,
               raw_json            = excluded.raw_json
             -- Only actually write (and therefore RETURN, and therefore
-            -- re-flatten) when the raw envelope changed. Keeps the 48h
-            -- settlement-refresh window from churning unchanged rows
-            -- every tick.
-            where sweed_orders.raw_json is distinct from excluded.raw_json
+            -- re-flatten) when the raw envelope changed or the typed status
+            -- projection needs repair. Keeps the 48h settlement-refresh
+            -- window from churning unchanged rows every tick while closing
+            -- the migration-apply/deploy gap for status.
+            where ${SWEED_ORDERS_UPSERT_CHANGE_PREDICATE_SQL}
             returning invoice_id
           )
           select invoice_id from inserted

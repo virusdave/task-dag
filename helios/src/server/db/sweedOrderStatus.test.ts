@@ -8,15 +8,15 @@ import {
 } from './sweedOrderStatus.js'
 
 describe('sweedOrderStatus canonical predicates', () => {
-  it('order predicate uses the header invoiceStatus path and excludes cancelled', () => {
+  it('order predicate uses the typed header status and excludes cancelled', () => {
     expect(nonCancelledOrderPredicateSql('so')).toBe(
-      `lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`,
+      `lower(coalesce(so.invoice_status_name, '')) <> 'cancelled'`,
     )
   })
 
   it('order predicate omits the dot prefix when unaliased', () => {
     expect(nonCancelledOrderPredicateSql('')).toBe(
-      `lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`,
+      `lower(coalesce(invoice_status_name, '')) <> 'cancelled'`,
     )
     // default arg behaves like ''
     expect(nonCancelledOrderPredicateSql()).toBe(nonCancelledOrderPredicateSql(''))

@@ -835,34 +835,6 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) => columnExists(db, 'sweed_order_items_flat', 'product_id'),
   },
   {
-    // Phase F5 prerequisite of the Helios DB-cost epic
-    // (virusdave/top-level#11). Migration 061 backfills
-    // sweed_orders.cashier_user_id from raw_json->>'creatorId' so the
-    // budtender analytics queries can stop reading
-    // sweed_orders.raw_json->>'creatorId' as a fallback — the last
-    // server callsite that touches sweed_orders.raw_json. The sentinel
-    // is true once no order still has a NULL cashier_user_id that could
-    // be recovered from a (still-present) raw_json creatorId. New rows
-    // never trip this (ingest writes the column) and the later F5 drain
-    // nulls raw_json, so it stays true once 061 has run.
-    migrationId: '061_sweed_orders_cashier_user_id_backfill',
-    label:
-      'sweed_orders.cashier_user_id backfilled from raw_json ' +
-      '(DB-cost epic phase F5 prerequisite) — budtender analytics ' +
-      'reads the column directly, no raw_json fallback.',
-    check: async (db) => {
-      const result = await db.query<{ pending: boolean }>(
-        `select exists (
-           select 1 from sweed_orders
-            where cashier_user_id is null
-              and (raw_json->>'creatorType') = '1'
-              and nullif(raw_json->>'creatorId', '') ~ '^\\d+$'
-         ) as pending`,
-      )
-      return result.rows[0]?.pending === false
-    },
-  },
-  {
     // Phase F5 of the Helios DB-cost epic (virusdave/top-level#11).
     // Migration 062 drops the NOT NULL constraint on
     // sweed_orders.raw_json so the drain worker
@@ -1770,6 +1742,29 @@ const SENTINELS: MigrationSentinel[] = [
         constraintExists(db, 'review_submissions', 'review_submissions_invoice_match_state_check'),
       ])
       return checks.every(Boolean)
+    },
+  },
+  {
+    migrationId: '106_sweed_orders_invoice_status',
+    label:
+      'sweed_orders.invoice_status_name typed projection and v2 dealer/time ' +
+      'covering index — removes recurring cancellation filters from the large ' +
+      'raw_json envelope while preserving status after the envelope drain.',
+    check: async (db) => {
+      const [hasColumn, hasValidCoveringIndex, oldIndex] = await Promise.all([
+        columnExists(db, 'sweed_orders', 'invoice_status_name'),
+        validIndexExists(db, 'sweed_orders_budtender_range_cover_v2_idx'),
+        db.query<{ exists: boolean }>(
+          `select exists (
+             select 1
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'public'
+                and c.relname = 'sweed_orders_budtender_range_cover_idx'
+           ) as exists`,
+        ),
+      ])
+      return hasColumn && hasValidCoveringIndex && oldIndex.rows[0]?.exists === false
     },
   },
   // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and

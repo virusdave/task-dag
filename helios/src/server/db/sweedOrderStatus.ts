@@ -23,22 +23,16 @@
 //   `sweedOrderStatus.guard.test.ts`).
 //
 // STATUS LIVES IN TWO PLACES, SPELLED DIFFERENTLY
-//   * ORDER (header) grain:  raw_json->'invoiceStatus'->>'name'      == 'Cancelled'
+//   * ORDER (header) grain:  invoice_status_name                    == 'Cancelled'
 //   * LINE (item)  grain:    raw_item->'invoiceItemStatus'->>'name'  == 'Canceled'
 //   (Yes, the header uses the British double-L and the line uses the American
 //   single-L. Both are matched case-insensitively here against taxonomy drift.)
 //
-// PRE-STATUS / DRAINED ROWS
-//   `coalesce(..., '')` keeps rows that carry NO status (pre-2026-05 orders
-//   predate the field) INCLUDED — that is intentional: we cannot prove they
-//   were cancelled, so we treat them as real. CAVEAT: the raw_json drain job
-//   (configWorkersSweedOrdersRawJsonDrainJob) nulls `raw_json` for aged rows,
-//   after which their status is unreadable and they too read as non-cancelled.
-//   For orders newer than the drain horizon this is correct; for older drained
-//   orders the status is simply unknown. The durable fix is a normalised
-//   `sweed_orders.invoice_status_*` column populated at ingest (tracked as a
-//   follow-up — see docs/sweed/order-status-semantics.md); when it lands,
-//   prefer that column here and fall back to raw_json.
+// PRE-STATUS / ALREADY-DRAINED ROWS
+//   `coalesce(..., '')` keeps rows that carry NO status (pre-2026-05 orders or
+//   rows whose envelope was drained before migration 106) INCLUDED. That is
+//   intentional: we cannot prove they were cancelled, so we treat them as real.
+//   New status values are persisted at ingest and survive raw_json draining.
 //
 // API
 //   *PredicateSql() returns a bare boolean ("<expr> <> 'cancelled'") for use
@@ -54,7 +48,7 @@ function aliasPrefix(alias: string): string {
  *  `sweed_orders` table alias ('' for an unaliased `from sweed_orders`). */
 export function nonCancelledOrderPredicateSql(alias = ''): string {
   const p = aliasPrefix(alias)
-  return `lower(coalesce(${p}raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
+  return `lower(coalesce(${p}invoice_status_name, '')) <> 'cancelled'`
 }
 
 /** WHERE-clause form (leading `and `) of {@link nonCancelledOrderPredicateSql}. */

@@ -57,6 +57,11 @@ create table if not exists sweed_orders (
   fulfillment_type   text,
   payment_method     text,
 
+  -- Header lifecycle status from invoiceStatus.name (for example Paid or
+  -- Cancelled). Kept out of raw_json so cancellation filtering remains narrow
+  -- and durable after the raw-envelope drain.
+  invoice_status_name text,
+
   -- For the customer-origin map (P6 of #21). Coalesces the
   -- delivery_address.zip field on the invoice envelope; null when
   -- there is no delivery address (kiosk / pickup / in-store).

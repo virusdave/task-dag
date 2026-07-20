@@ -106,7 +106,7 @@ describe('cancelled-order guard: header dollar sums over sweed_orders must exclu
     expect(offenders, offenders.join('\n')).toEqual([])
   })
 
-  it('no raw header-status literal (raw_json invoiceStatus) outside the canonical module', () => {
+  it('no raw header-status read remains outside the canonical module', () => {
     // Header status must be expressed via the canonical helper so the
     // predicate cannot drift. (Line-grain `raw_item->invoiceItemStatus`
     // jsonb-element reads have a different shape and are out of scope here.)
@@ -119,7 +119,7 @@ describe('cancelled-order guard: header dollar sums over sweed_orders must exclu
     }
     expect(
       offenders,
-      `raw_json->'invoiceStatus' must only appear in sweedOrderStatus.ts; found in:\n${offenders.join('\n')}`,
+      `raw_json->'invoiceStatus' must not appear in server code; found in:\n${offenders.join('\n')}`,
     ).toEqual([])
   })
 })
