@@ -260,4 +260,81 @@ set -e
 jq -e '.status == "failed" and .failures == 1 and
        .failure_items == [{stage:"snapshot",issue:10,comment_id:97,message:"malformed comment receipt"}]' \
   <<<"$bad_out" >/dev/null
+
+# Activated delegated-close reconciliation must prepare the canonical
+# consumer before its fenced scheduling write. Exercise the real preparation,
+# activation guard, atomic push, and readback with a legacy delegation.
+integration="$tmp/activated-delegated-close"
+mkdir -p "$integration"
+repo_root=$(cd "$(dirname "$TD")/.." && pwd)
+runtime=$(git -C "$repo_root" rev-parse HEAD)
+git init -q --bare "$integration/origin.git"
+git clone -q "$repo_root" "$integration/parent"
+git -C "$integration/parent" remote set-url origin "$integration/origin.git"
+git -C "$integration/parent" push -q origin HEAD:master
+git -C "$integration/parent" config taskdag.current-repo virusdave/task-dag
+git -C "$integration/parent" config taskdag.virusdave/task-dag.id parent-id
+
+git init -q --bare "$integration/peer-origin.git"
+git init -q "$integration/peer"
+git -C "$integration/peer" remote add origin "$integration/peer-origin.git"
+git -C "$integration/peer" config user.name test
+git -C "$integration/peer" config user.email test@example.com
+printf peer >"$integration/peer/state"
+git -C "$integration/peer" add state
+git -C "$integration/peer" commit -qm 'Peer base'
+integration_empty=$(git -C "$integration/peer" mktree </dev/null)
+integration_root=$(git -C "$integration/peer" commit-tree "$integration_empty" -p HEAD \
+  -m $'Task: Historical peer epic\n\nIssue: #2\nStatus: pending\nType: epic')
+integration_base=$(git -C "$integration/peer" rev-parse HEAD)
+integration_close=$(git -C "$integration/peer" commit-tree "$(git -C "$integration/peer" rev-parse "$integration_base^{tree}")" \
+  -p "$integration_base" -p "$integration_root" -m $'Close historical peer epic\n\nCloses-Epic: #2')
+git -C "$integration/peer" update-ref refs/heads/master "$integration_close"
+git -C "$integration/peer" push -q origin master:master
+
+integration_delegation=$(printf '%s\n' 'kind: delegated' 'role: system' 'intent: delegated-child' '' \
+  'issue:' '  repo: virusdave/task-dag' '  number: 1' '' \
+  'delegated:' '  repo: peer/repo' '  number: 2' \
+  | git -C "$integration/parent" commit-tree "$integration_empty")
+git -C "$integration/parent" push -q origin \
+  "$integration_delegation:refs/heads/tasks/delegated/1/peer/repo/2"
+git -C "$integration/parent" config taskdag.peer-path.peer/repo.path "$integration/peer"
+
+registry_commit=1111111111111111111111111111111111111111
+registry_blob=2222222222222222222222222222222222222222
+jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" \
+  '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"parent-id",name:"task-dag",repairMode:"off",repairBranch:null}]}' \
+  >"$integration/registry"
+source "$(dirname "$TD")/task-dag.d/activation.sh"
+registry_id=$(_taskdag_activation_registry_id "$integration/registry")
+jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" \
+  --arg registry_blob "$registry_blob" --arg id "$registry_id" \
+  '{actor:"fixture",authoritativeTimestamp:"2026-07-20T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"parent-id",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"parent-id",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' \
+  >"$integration/activation"
+(cd "$integration/parent" && "$TD" activation apply --spec-file "$integration/activation" >/dev/null)
+activation_before=$(git --git-dir="$integration/origin.git" rev-parse refs/heads/tasks/v1/activation)
+
+(cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  _xrepo_watchdog_fence() { :; } && \
+  _xrepo_reconcile_delegated_close 1 peer/repo 2 "$integration_delegation")
+close_ref=refs/heads/tasks/delegated-close/v1/1/peer/repo/2
+integration_record=$(git --git-dir="$integration/origin.git" rev-parse "$close_ref")
+activation_after=$(git --git-dir="$integration/origin.git" rev-parse refs/heads/tasks/v1/activation)
+(cd "$integration/parent" && git fetch -q origin "$close_ref" && source "$TD" --help >/dev/null && \
+  _xrepo_validate_delegated_close_v1 "$integration_record" "$integration_delegation" \
+    virusdave/task-dag 1 peer/repo 2)
+git --git-dir="$integration/origin.git" show -s --format=%B "$activation_after" \
+  | grep -Fxq 'Writer-Class: scheduling'
+git --git-dir="$integration/origin.git" show -s --format=%B "$activation_after" \
+  | grep -Fxq 'Operation: reconcile-delegated-close'
+git --git-dir="$integration/origin.git" show -s --format=%B "$activation_after" \
+  | sed -n 's/^Target-Updates: //p' \
+  | jq -e --arg ref "$close_ref" --arg record "$integration_record" \
+      '. == [{ref:$ref,old:"",new:$record}]' >/dev/null
+[ "$activation_after" != "$activation_before" ]
+(cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  _xrepo_watchdog_fence() { :; } && \
+  _xrepo_reconcile_delegated_close 1 peer/repo 2 "$integration_delegation")
+[ "$integration_record" = "$(git --git-dir="$integration/origin.git" rev-parse "$close_ref")" ]
+[ "$activation_after" = "$(git --git-dir="$integration/origin.git" rev-parse refs/heads/tasks/v1/activation)" ]
 echo "reconcile-comments fixture: ok"

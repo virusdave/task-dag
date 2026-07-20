@@ -952,6 +952,7 @@ _xrepo_reconcile_delegated_close() { # parent-issue peer-repo peer-issue delegat
         _xrepo_validate_delegated_close_v1 "$existing" "$delegation" "$top_repo" "$top_issue" "$peer_repo" "$peer_issue"
         return
     fi
+    taskdag_consumer_prepare reconcile-delegated-close-pre-push || return 2
     _xrepo_watchdog_fence || return 2
     updates=$(jq -ncS --arg ref "$ref" --arg new "$candidate" '[{ref:$ref,old:"",new:$new}]') || return 2
     taskdag_consumer_fenced_scheduling_push reconcile-delegated-close "${TASK_DAG_CLAIMER:-comment-reconciler}" "$updates" || :
