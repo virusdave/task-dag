@@ -385,6 +385,11 @@ export async function vendorBrandAssociationsSchemaApplied(db: Queryable): Promi
       join pg_namespace n on n.oid = t.relnamespace
       where n.nspname = 'public'
         and t.relname in ('vendors', 'vendor_brand_associations')
+        -- PostgreSQL 18 exposes NOT NULL constraints in pg_constraint as
+        -- contype = 'n'. Column metadata above verifies each valid NOT NULL
+        -- property; retain every other kind (and invalid NOT NULL constraints)
+        -- so the exact-count check still rejects unexpected schema objects.
+        and not (c.contype = 'n' and c.convalidated)
     ), expected_indexes(name, definition, predicate) as (values
       ('vendors_name_lower_uidx', 'CREATE UNIQUE INDEX vendors_name_lower_uidx ON public.vendors USING btree (lower(name))', null),
       ('vendor_brand_associations_vendor_brand_lower_uidx', 'CREATE UNIQUE INDEX vendor_brand_associations_vendor_brand_lower_uidx ON public.vendor_brand_associations USING btree (vendor_id, lower(brand_name))', null),

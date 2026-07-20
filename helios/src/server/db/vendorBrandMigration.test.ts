@@ -170,6 +170,24 @@ describeRequiresTestDb('migration 104 exact schema sentinel', () => {
           await client.query(createSql)
           await expect(check()).resolves.toBe(true)
         }
+
+        await client.query(
+          'alter table vendors add constraint vendors_unexpected_unique unique (name, created_at)',
+        )
+        await expect(check()).resolves.toBe(false)
+        await client.query('alter table vendors drop constraint vendors_unexpected_unique')
+        await expect(check()).resolves.toBe(true)
+
+        const version = await client.query<{ server_version_num: number }>(
+          `select current_setting('server_version_num')::integer as server_version_num`,
+        )
+        if ((version.rows[0]?.server_version_num ?? 0) >= 180000) {
+          await client.query('alter table vendors alter column is_mso drop not null')
+          await client.query(
+            'alter table vendors add constraint vendors_is_mso_not_null not null is_mso not valid',
+          )
+          await expect(check()).resolves.toBe(false)
+        }
       } finally {
         await client.query('rollback')
       }
