@@ -271,6 +271,8 @@ runtime=$(git -C "$repo_root" rev-parse HEAD)
 git init -q --bare "$integration/origin.git"
 git clone -q "$repo_root" "$integration/parent"
 git -C "$integration/parent" remote set-url origin "$integration/origin.git"
+git -C "$integration/parent" config user.name test
+git -C "$integration/parent" config user.email test@example.com
 git -C "$integration/parent" push -q origin HEAD:master
 git -C "$integration/parent" config taskdag.current-repo virusdave/task-dag
 git -C "$integration/parent" config taskdag.virusdave/task-dag.id parent-id
