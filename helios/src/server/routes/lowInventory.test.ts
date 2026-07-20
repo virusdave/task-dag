@@ -309,7 +309,7 @@ describe('low-inventory routes', () => {
     expect(stale.statusCode).toBe(409)
   })
 
-  it('lists bounded site audits and returns fail-closed transfer configuration defaults', async () => {
+  it('lists bounded site audits and enables confirmed transfers to the default destination', async () => {
     mockState.sessionRole = 'viewer'
     mockState.metricsGranted = true
     const audits = await server.inject({ method: 'GET', url: '/api/low-inventory/audits?dealerId=210705&limit=20' })
@@ -318,7 +318,7 @@ describe('low-inventory routes', () => {
 
     const config = await server.inject({ method: 'GET', url: '/api/low-inventory/transfer-config?dealerId=210705' })
     expect(config.json()).toMatchObject({
-      dealerId: 210705, destinationName: 'NOT FOR SALE - Quantity Audit', transferEnabled: false,
+      dealerId: 210705, destinationName: 'NOT FOR SALE - Quantity Audit', transferEnabled: true,
     })
     const unbounded = await server.inject({ method: 'GET', url: '/api/low-inventory/audits?dealerId=210705&limit=101' })
     expect(unbounded.statusCode).toBe(400)

@@ -35,8 +35,8 @@ const config = {
   dealerId: 210705,
   destinationName: 'NOT FOR SALE - Quantity Audit',
   transferEnabled: true,
-  updatedAt: null,
-  updatedBy: null,
+  updatedAt: '2026-07-10T15:00:00.000Z',
+  updatedBy: 'admin@example.com',
 }
 const count = {
   dealerId: 210705, productId: 123, inventoryItemId: 'pkg-1', metrcTag: 'TAG-1',
@@ -53,8 +53,12 @@ beforeEach(() => {
   }))
   getPendingMock.mockResolvedValue(count)
   getAppSettingMock.mockResolvedValue({
-    key: 'low_inventory_transfer_config:midtown', updatedAt: null,
-    updatedBy: 'admin@example.com', value: config,
+    key: 'low_inventory_transfer_config:midtown', updatedAt: config.updatedAt,
+    updatedBy: 'admin@example.com', value: {
+      dealerId: config.dealerId,
+      destinationName: config.destinationName,
+      transferEnabled: config.transferEnabled,
+    },
   })
   listLocationsMock.mockResolvedValue([
     { id: 8, name: 'NOT FOR SALE - Quantity Audit', enabled: true, stockTypeId: 80 },
@@ -80,6 +84,99 @@ describe('low-inventory transfer service', () => {
       db, dealerId: 210705, requestId: null,
     })).rejects.toBeInstanceOf(LowInventoryTransferConflictError)
     expect(listLocationsMock).not.toHaveBeenCalled()
+  })
+
+  it('accepts the reviewed enabled default when no site override exists', async () => {
+    getAppSettingMock.mockResolvedValue(null)
+    listLotsMock
+      .mockResolvedValueOnce([{
+        inventoryItemId: 'pkg-1', externalTrackCode: 'TAG-1', availableQty: 1, currentQty: 1,
+        stockLocationId: 7, stockLocationName: 'FOR SALE - Midtown', stockTypeId: 70,
+        isTradeSample: false,
+      }])
+      .mockResolvedValueOnce([{
+        inventoryItemId: 'pkg-1', externalTrackCode: 'TAG-1', availableQty: 1, currentQty: 1,
+        stockLocationId: 8, stockLocationName: 'NOT FOR SALE - Quantity Audit', stockTypeId: 80,
+        isTradeSample: false,
+      }])
+
+    await expect(confirmLowInventoryTransfer({
+      actorUserId: 2, config: { ...config, updatedAt: null, updatedBy: null }, countAuditId: 51,
+      db, dealerId: 210705, requestId: null,
+    })).resolves.toMatchObject({ countAuditId: 51, movedQty: 1 })
+    expect(transferLotMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    {
+      name: 'an admin override appears after reviewing the default',
+      reviewed: { ...config, updatedAt: null, updatedBy: null },
+      current: {
+        key: 'low_inventory_transfer_config:midtown',
+        updatedAt: '2026-07-10T16:00:00.000Z',
+        updatedBy: 'admin@example.com',
+        value: { dealerId: 210705, destinationName: config.destinationName, transferEnabled: false },
+      },
+    },
+    { name: 'the reviewed override is deleted', reviewed: config, current: null },
+    {
+      name: 'the persisted override is malformed', reviewed: config,
+      current: { key: 'low_inventory_transfer_config:midtown', updatedAt: config.updatedAt, updatedBy: 'admin@example.com', value: {} },
+    },
+    {
+      name: 'the destination changes', reviewed: config,
+      current: { key: 'low_inventory_transfer_config:midtown', updatedAt: config.updatedAt, updatedBy: 'admin@example.com', value: { dealerId: 210705, destinationName: 'NOT FOR SALE - Other', transferEnabled: true } },
+    },
+    {
+      name: 'the override timestamp changes', reviewed: config,
+      current: { key: 'low_inventory_transfer_config:midtown', updatedAt: '2026-07-10T16:00:00.000Z', updatedBy: 'admin@example.com', value: { dealerId: 210705, destinationName: config.destinationName, transferEnabled: true } },
+    },
+    {
+      name: 'the reviewed default destination is altered',
+      reviewed: { ...config, destinationName: 'NOT FOR SALE - Other', updatedAt: null, updatedBy: null },
+      current: null,
+    },
+    {
+      name: 'the reviewed default metadata is not empty',
+      reviewed: { ...config, updatedAt: null },
+      current: null,
+    },
+  ])('fails closed before Sweed when $name', async ({ reviewed, current }) => {
+    getAppSettingMock.mockResolvedValue(current)
+
+    await expect(confirmLowInventoryTransfer({
+      actorUserId: 2, config: reviewed, countAuditId: 51,
+      db, dealerId: 210705, requestId: null,
+    })).rejects.toThrow('Transfer settings changed after review')
+    expect(listLocationsMock).not.toHaveBeenCalled()
+    expect(transferLotMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { name: 'is absent', locations: [] },
+    {
+      name: 'is ambiguous',
+      locations: [
+        { id: 8, name: config.destinationName, enabled: true, stockTypeId: 80 },
+        { id: 9, name: config.destinationName, enabled: true, stockTypeId: 90 },
+      ],
+    },
+    {
+      name: 'is disabled',
+      locations: [{ id: 8, name: config.destinationName, enabled: false, stockTypeId: 80 }],
+    },
+    {
+      name: 'has no stock type',
+      locations: [{ id: 8, name: config.destinationName, enabled: true, stockTypeId: null }],
+    },
+  ])('fails closed when the exact destination $name', async ({ locations }) => {
+    listLocationsMock.mockResolvedValue(locations)
+
+    await expect(confirmLowInventoryTransfer({
+      actorUserId: 2, config, countAuditId: 51,
+      db, dealerId: 210705, requestId: null,
+    })).rejects.toThrow('does not resolve to exactly one enabled location')
+    expect(transferLotMock).not.toHaveBeenCalled()
   })
 
   it('validates one exact live lot, transfers it, and records reversible from/to data', async () => {

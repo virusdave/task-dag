@@ -2,7 +2,12 @@ import type {
   LowInventoryTransferConfigResponse,
   LowInventoryTransferResponse,
 } from '../../shared/contracts/index.js'
-import { getHeliosPendingPurchaseSiteDealer } from '../../shared/contracts/index.js'
+import {
+  getHeliosPendingPurchaseSiteDealer,
+  LOW_INVENTORY_DEFAULT_DESTINATION,
+  LOW_INVENTORY_TRANSFERS_ENABLED_BY_DEFAULT,
+  LowInventoryTransferConfigBodySchema,
+} from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import {
   isUsableLocation,
@@ -53,16 +58,24 @@ export async function confirmLowInventoryTransfer(args: {
     const configKey = transferConfigKey(site.siteKey)
     await db.query('select pg_advisory_xact_lock(hashtext($1))', [`low-inventory-config:${configKey}`])
     const currentConfig = await getAppSetting(db, configKey)
-    if (
-      currentConfig === null ||
-      currentConfig.updatedAt !== args.config.updatedAt ||
-      currentConfig.value === null ||
-      typeof currentConfig.value !== 'object' ||
-      !('transferEnabled' in currentConfig.value) ||
-      currentConfig.value.transferEnabled !== true ||
-      !('destinationName' in currentConfig.value) ||
-      currentConfig.value.destinationName !== args.config.destinationName
-    ) {
+    const persistedConfig = currentConfig === null
+      ? null
+      : LowInventoryTransferConfigBodySchema.safeParse(currentConfig.value)
+    const matchesDefault =
+      currentConfig === null &&
+      args.config.dealerId === args.dealerId &&
+      args.config.updatedAt === null &&
+      args.config.updatedBy === null &&
+      args.config.destinationName === LOW_INVENTORY_DEFAULT_DESTINATION &&
+      args.config.transferEnabled === LOW_INVENTORY_TRANSFERS_ENABLED_BY_DEFAULT
+    const matchesPersisted =
+      currentConfig !== null &&
+      persistedConfig?.success === true &&
+      currentConfig.updatedAt === args.config.updatedAt &&
+      persistedConfig.data.dealerId === args.dealerId &&
+      persistedConfig.data.transferEnabled === true &&
+      persistedConfig.data.destinationName === args.config.destinationName
+    if (!matchesDefault && !matchesPersisted) {
       throw new LowInventoryTransferConflictError('Transfer settings changed after review. Reload and confirm again.')
     }
     if (count.snapshotHoldQty !== 0) {

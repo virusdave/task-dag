@@ -9,6 +9,7 @@ import {
   LowInventoryRequestSchema,
   LowInventoryResponseSchema,
   LOW_INVENTORY_DEFAULT_DESTINATION,
+  LOW_INVENTORY_TRANSFERS_ENABLED_BY_DEFAULT,
   LowInventoryAuditListRequestSchema,
   LowInventoryAuditListResponseSchema,
   LowInventoryCountRequestSchema,
@@ -64,7 +65,7 @@ async function getTransferConfig(dealerId: number): Promise<LowInventoryTransfer
     return {
       dealerId,
       destinationName: LOW_INVENTORY_DEFAULT_DESTINATION,
-      transferEnabled: false,
+      transferEnabled: LOW_INVENTORY_TRANSFERS_ENABLED_BY_DEFAULT,
       updatedAt: null,
       updatedBy: null,
     }
