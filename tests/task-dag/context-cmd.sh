@@ -77,10 +77,10 @@ fi
 # `context` (fetch → verify → resolve) makes it work.
 out=$("$TD" context "$LEAF2" 2>&1); rc=$?
 if [ $rc -eq 0 ]; then ok "context: exit 0 in prepared clone"; else bad "context: failed (rc=$rc): $out"; fi
-echo "$out" | grep -q "Second leaf depends on first" && ok "context: prints task title" || bad "context: missing title"
-echo "$out" | grep -q "First leaf" && ok "context: prints dependency (leaf1) title" || bad "context: missing dependency"
-echo "$out" | grep -q "Suggested next commands" && ok "context: prints suggested commands" || bad "context: missing suggestions"
-echo "$out" | grep -q "task-dag complete" && ok "context: suggests complete" || bad "context: missing complete suggestion"
+grep -q "Second leaf depends on first" <<<"$out" && ok "context: prints task title" || bad "context: missing title"
+grep -q "First leaf" <<<"$out" && ok "context: prints dependency (leaf1) title" || bad "context: missing dependency"
+grep -q "Suggested next commands" <<<"$out" && ok "context: prints suggested commands" || bad "context: missing suggestions"
+grep -q "task-dag complete" <<<"$out" && ok "context: suggests complete" || bad "context: missing complete suggestion"
 # After context, the object must be resolvable (prefetched into local).
 if git cat-file -e "${LEAF2_FULL}^{commit}" 2>/dev/null; then
   ok "context: task object present locally afterwards"
@@ -112,7 +112,7 @@ rm -rf "$ROOT/p_ref"
 git clone -q --no-local --single-branch --branch master "$ROOT/origin.git" "$ROOT/p_ref"
 cd "$ROOT/p_ref"
 out=$("$TD" context "$LEAF2" --ref "$FRONTIER_REF" 2>&1); rc=$?
-if [ $rc -eq 0 ] && echo "$out" | grep -q "Second leaf depends on first"; then
+if [ $rc -eq 0 ] && grep -q "Second leaf depends on first" <<<"$out"; then
   ok "context --ref: exact-ref fetch resolves the task"
 else
   bad "context --ref: failed (rc=$rc): $out"
@@ -120,13 +120,13 @@ fi
 
 # ── invalid --ref rejected before any fetch (no injection) ──
 out=$("$TD" context "$LEAF2" --ref "tasks/foo:evil" 2>&1); rc=$?
-if [ $rc -ne 0 ] && echo "$out" | grep -qi "invalid --ref"; then
+if [ $rc -ne 0 ] && grep -qi "invalid --ref" <<<"$out"; then
   ok "context --ref: rejects a refspec-injection payload"
 else
   bad "context --ref: did NOT reject an injection payload (rc=$rc): $out"
 fi
 out=$("$TD" context "$LEAF2" --ref "master" 2>&1); rc=$?
-if [ $rc -ne 0 ] && echo "$out" | grep -qi "invalid --ref"; then
+if [ $rc -ne 0 ] && grep -qi "invalid --ref" <<<"$out"; then
   ok "context --ref: rejects a non-tasks/* ref"
 else
   bad "context --ref: accepted a non-tasks/* ref (rc=$rc): $out"
@@ -135,7 +135,7 @@ fi
 # ── missing object after fetch => clear error (fetch → verify ordering) ──
 cd "$ROOT/prepared"
 out=$("$TD" context "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" 2>&1); rc=$?
-if [ $rc -ne 0 ] && echo "$out" | grep -qi "not present after fetch"; then
+if [ $rc -ne 0 ] && grep -qi "not present after fetch" <<<"$out"; then
   ok "context: clear error when the object cannot be resolved after fetch"
 else
   bad "context: unclear behavior on unresolvable object (rc=$rc): $out"
