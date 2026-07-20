@@ -5,11 +5,19 @@ import { normalizeReturnTo } from '../../shared/config/returnTo.js'
 import { getServerEnv, isGoogleOAuthReady, type ServerEnv } from '../config/env.js'
 import {
   createAgentReadonlyVerifier,
+  AGENT_READONLY_HEADER_NAMES,
   isSignedAgentReadonlyRequest,
   type AgentReadonlyConfig,
   type AgentReadonlyVerificationResult,
 } from './agentReadonly.js'
 import { readSessionUserId } from './sessionCookie.js'
+import {
+  AGENT_CAPABILITY_HEADERS,
+  CapabilityError,
+  createCapabilityService,
+  sha256,
+  type AgentCapabilityConfig,
+} from './agentCapability.js'
 
 // Paths that are always reachable without a session. These are the
 // endpoints that participate in *establishing* a session (Google OAuth
@@ -81,12 +89,36 @@ const LOGIN_FLOW_PREFIXES: ReadonlyArray<{ method: 'GET' | 'POST'; prefix: strin
 
 let cachedAgentReadonlyConfig: AgentReadonlyConfig | null = null
 let cachedAgentReadonlyVerifier: ReturnType<typeof createAgentReadonlyVerifier> | null = null
+let cachedCapabilityConfig: AgentCapabilityConfig | null = null
+let cachedCapabilityService: ReturnType<typeof createCapabilityService> | null = null
 
 export function registerAuthGate(server: FastifyInstance): void {
   server.addHook('onRequest', async (request, reply) => {
     const env = getServerEnv()
     const pathOnly = stripQuery(request.url)
     const appPath = stripAppBasePath(pathOnly, env.appBasePath)
+
+    const rawHeaderNames = request.raw.rawHeaders.filter((_value, index) => index % 2 === 0).map((name) => name.toLowerCase())
+    const hasCapability = Object.values(AGENT_CAPABILITY_HEADERS).some((name) => rawHeaderNames.includes(name))
+    if (hasCapability) {
+      try {
+        classifyCapabilityHeaders(rawHeaderNames)
+        const principal = getCapabilityService(env.agentCapability).verifyRequest(request, appPath)
+        request.agentCapabilityPrincipal = principal
+        request.agentCapabilityAudit = {
+          outcome: 'pending', keyId: principal.keyId, grantId: principal.grantId, actionId: principal.actionId,
+          shapeSha256: principal.shapeSha256, specSha256: principal.shape.actions[0]?.spec_sha256,
+          timestamp: principal.timestamp, nonceHash: sha256(principal.nonce), idempotencyKey: principal.idempotencyKey,
+          method: request.method, path: appPath, bodySha256: principal.bodySha256,
+          approvedBy: principal.shape.approved_by, issuedAt: principal.shape.issued_at, expiresAt: principal.shape.expires_at,
+        }
+        return
+      } catch (error) {
+        const denied = error instanceof CapabilityError ? error : new CapabilityError('grant_invalid', 403)
+        request.agentCapabilityAudit = { outcome: 'denied', reason: denied.reason, method: request.method, path: appPath, statusCode: denied.status }
+        return reply.status(denied.status).send({ error: 'Agent capability access denied.' })
+      }
+    }
 
     if (isSignedAgentReadonlyRequest(request.headers)) {
       const verification = getAgentReadonlyVerifier(env.agentReadonly).verify({
@@ -198,6 +230,16 @@ export function registerAuthGate(server: FastifyInstance): void {
   })
 
   server.addHook('onResponse', async (request, reply) => {
+    const capabilityAudit = request.agentCapabilityAudit
+    if (capabilityAudit) {
+      const completed = capabilityAudit.outcome === 'pending'
+        ? { ...capabilityAudit, outcome: 'denied' as const, reason: 'guard_not_completed' as const, statusCode: reply.statusCode }
+        : capabilityAudit
+      request.agentCapabilityAudit = completed
+      const fields = { ...completed, statusCode: completed.statusCode ?? reply.statusCode, remoteAddress: request.ip }
+      if (completed.outcome === 'denied') request.log.warn(fields, 'signed-agent capability authorization audit')
+      else request.log.info(fields, 'signed-agent capability authorization audit')
+    }
     const audit = request.agentReadonlyAudit
     if (!audit) {
       return
@@ -226,6 +268,23 @@ export function registerAuthGate(server: FastifyInstance): void {
       request.log.warn(logFields, message)
     }
   })
+}
+
+function classifyCapabilityHeaders(names: string[]): void {
+  const capability = Object.values(AGENT_CAPABILITY_HEADERS)
+  const readonly = Object.values(AGENT_READONLY_HEADER_NAMES)
+  for (const name of [...capability, ...readonly, 'host', 'content-type', 'cookie', 'authorization']) {
+    if (names.filter((candidate) => candidate === name).length > 1) throw new CapabilityError('duplicate_header', 401)
+  }
+  if ([...readonly, 'cookie', 'authorization'].some((name) => names.includes(name))) throw new CapabilityError('mixed_credentials', 403)
+}
+
+export function getCapabilityService(config: AgentCapabilityConfig): ReturnType<typeof createCapabilityService> {
+  if (cachedCapabilityConfig !== config || cachedCapabilityService === null) {
+    cachedCapabilityConfig = config
+    cachedCapabilityService = createCapabilityService(config)
+  }
+  return cachedCapabilityService
 }
 
 function getAgentReadonlyVerifier(config: AgentReadonlyConfig): ReturnType<typeof createAgentReadonlyVerifier> {

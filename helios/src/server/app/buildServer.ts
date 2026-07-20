@@ -84,6 +84,7 @@ import { registerAgentWasteRoutes } from '../routes/agentWaste.js'
 import { registerUsersRoutes } from '../routes/users.js'
 import { registerGeoSegmentRulesRoutes } from '../routes/geoSegmentRules.js'
 import { registerMarketingSegmentsRoutes } from '../routes/marketingSegments.js'
+import { registerAgentCapabilityOverlayRoutes } from '../routes/agentCapabilityOverlays.js'
 import {
   registerVisitorScansAdminRoutes,
   registerVisitorScansWebhookRoutes,
@@ -190,6 +191,9 @@ export async function buildServer() {
     }
 
     const origin = request.headers.origin
+    if (request.agentCapabilityPrincipal) {
+      return
+    }
     if (!origin || !env.allowedOrigins.includes(origin)) {
       return reply.status(403).send({ error: 'Origin validation failed.' })
     }
@@ -271,6 +275,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerCommentsRoutes(server)
   await registerCommunicationsRoutes(server)
   await registerConfigRoutes(server)
+  await registerAgentCapabilityOverlayRoutes(server)
   await registerConfigLitalertsParsingRoutes(server)
   await registerConfigParsingRoutes(server)
   await registerCustomerReviewsRoutes(server)

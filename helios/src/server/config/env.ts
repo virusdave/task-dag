@@ -7,6 +7,7 @@ import {
 } from '../../shared/config/runtimeEnv.js'
 import { deriveBasePathFromAppBaseUrl, joinBasePath } from '../../shared/config/appBasePath.js'
 import { parseAgentReadonlyConfigFromEnv, type AgentReadonlyConfig } from '../auth/agentReadonly.js'
+import { parseAgentCapabilityConfig, type AgentCapabilityConfig } from '../auth/agentCapability.js'
 
 const GOOGLE_OAUTH_CLIENT_ID_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
   'google-oauth/catalog-curation.env',
@@ -133,6 +134,7 @@ export interface ServerEnv {
   // adding a page/API route to the allowlist; private signing keys
   // never belong in Helios config.
   agentReadonly: AgentReadonlyConfig
+  agentCapability: AgentCapabilityConfig
 }
 
 let cachedEnv: ServerEnv | null = null
@@ -194,6 +196,7 @@ export function getServerEnv(): ServerEnv {
     reviewsSmtpPort: readNumberEnv('REVIEWS_SMTP_PORT', 25),
     reviewsSmtpTimeoutMs: readNumberEnv('REVIEWS_SMTP_TIMEOUT_MS', 10000),
     agentReadonly: parseAgentReadonlyConfigFromEnv(),
+    agentCapability: parseAgentCapabilityConfig(),
   }
 
   return cachedEnv
