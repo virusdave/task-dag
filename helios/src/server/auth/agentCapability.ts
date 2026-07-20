@@ -136,6 +136,19 @@ export interface CapabilityAudit {
   issuedAt?: string
   expiresAt?: string
   executionDisposition?: 'recomputed'
+  actionStartedAtMs?: number
+  actionOutcome?: 'success' | 'partial' | 'handler_error'
+  actionSummary?: {
+    inputCount: number
+    outputCount: number
+    clusterCount: number
+    deterministicClusterCount: number
+    coverageComplete: boolean
+    refinementComplete: boolean
+    refinementSucceeded: number
+    refinementFailed: number
+    refinementSkipped: number
+  }
 }
 
 declare module 'fastify' {

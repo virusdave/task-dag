@@ -10,6 +10,11 @@
 // by the auth-gate suite); here we assert the ROUTE enforces the gate
 // server-side and degrades correctly.
 
+import { createPrivateKey, createPublicKey, randomBytes, sign } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import Fastify, { type FastifyInstance } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -34,7 +39,15 @@ vi.mock('../auth/requireSession.js', () => ({
 // resolveBedrockModel returns a fixed id, and callClusterModel is a spy we
 // drive per-test. ClusterModelError is kept REAL so the route's
 // `instanceof ClusterModelError` branch still works.
-const clusterMockState = vi.hoisted(() => ({ model: 'deepseek.v3.2' }))
+const clusterMockState = vi.hoisted(() => ({
+  model: 'deepseek.v3.2',
+  agentCapability: { enabled: false, requestKeys: new Map(), nonceCacheSize: 100 } as import('../auth/agentCapability.js').AgentCapabilityConfig,
+  agentReadonly: {
+    enabled: false, configurationIssue: 'test disabled', timestampSkewMs: 90_000,
+    nonceTtlMs: 180_000, nonceCacheSize: 100, defaultMaxResponseBytes: 1_048_576,
+    maxResponseBytes: 10_485_760,
+  } as import('../auth/agentReadonly.js').AgentReadonlyConfig,
+}))
 
 vi.mock('../db/pool.js', () => ({ getPool: () => ({}) }))
 vi.mock('../config/env.js', () => ({
@@ -42,6 +55,8 @@ vi.mock('../config/env.js', () => ({
     bedrockMantleBaseUrl: 'https://gateway.test/v1',
     bedrockMantleBearerToken: 'test-token',
     llmRequestTimeoutMs: 1000,
+    agentCapability: clusterMockState.agentCapability,
+    agentReadonly: clusterMockState.agentReadonly,
   }),
 }))
 vi.mock('../llm/bedrockModelConfig.js', () => ({
@@ -66,6 +81,19 @@ import { callClusterModel, ClusterModelError } from '../agentWaste/clusterModel.
 import type { RawClusterModelOutput } from '../agentWaste/clusterBacklog.js'
 import { callTicketDraftModel, TicketDraftModelError } from '../agentWaste/ticketDraftModel.js'
 import { resolveBedrockModel } from '../llm/bedrockModelConfig.js'
+import { registerAuthGate } from '../auth/authGate.js'
+import {
+  AGENT_CAPABILITY_HEADERS,
+  buildCapabilityCanonicalPayload,
+  createOverlay,
+  parseAgentCapabilityConfig,
+  sha256,
+} from '../auth/agentCapability.js'
+import {
+  AGENT_READONLY_HEADER_NAMES,
+  buildAgentReadonlyCanonicalPayload,
+  parseAgentReadonlyConfigFromEnv,
+} from '../auth/agentReadonly.js'
 
 const callClusterModelMock = vi.mocked(callClusterModel)
 const callTicketDraftModelMock = vi.mocked(callTicketDraftModel)
@@ -121,6 +149,27 @@ describe('GET /api/agent-waste/backlog', () => {
     const res = await server.inject({ method: 'GET', url: '/api/agent-waste/backlog' })
     expect(res.statusCode).toBe(403)
     expect(readBacklog).not.toHaveBeenCalled()
+  })
+
+  it('explicitly admits a previously verified readonly principal', async () => {
+    const readonlyServer = Fastify()
+    readonlyServer.addHook('preHandler', async (request) => {
+      request.agentReadonlyPrincipal = {
+        kind: 'agent_readonly', keyId: 'test', ruleId: 'reviewed', method: 'GET',
+        pathAndQuery: '/api/agent-waste/backlog', pathKind: 'api', pathMatch: 'exact',
+        pathRule: '/api/agent-waste/backlog', safeReadNote: 'Test verifier principal.', maxResponseBytes: 1024,
+      }
+    })
+    await registerAgentWasteRoutes(readonlyServer)
+    await readonlyServer.ready()
+    mockState.allow = false
+    setBacklogReader({ status: () => ({ available: true, detail: 'x' }), readBacklog: async () => [] })
+    try {
+      const res = await readonlyServer.inject({ method: 'GET', url: '/api/agent-waste/backlog' })
+      expect(res.statusCode).toBe(200)
+    } finally {
+      await readonlyServer.close()
+    }
   })
 })
 
@@ -317,6 +366,138 @@ describe('POST /api/agent-waste/clusters', () => {
     const res = await server.inject({ method: 'POST', url: '/api/agent-waste/clusters', payload: {} })
     expect(res.statusCode).toBe(403)
     expect(callClusterModelMock).not.toHaveBeenCalled()
+  })
+
+  it('accepts a real signed capability through the auth gate and route guard', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agent-waste-route-capability-'))
+    const pkcs8Prefix = Buffer.from('302e020100300506032b657004220420', 'hex')
+    const requestSeed = Buffer.alloc(32, 31)
+    const attestationSeed = Buffer.alloc(32, 32)
+    const privateKey = (seed: Buffer) => createPrivateKey({
+      key: Buffer.concat([pkcs8Prefix, seed]), format: 'der', type: 'pkcs8',
+    })
+    const publicKey = (seed: Buffer) => createPublicKey(privateKey(seed))
+      .export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64url')
+    const config = parseAgentCapabilityConfig({
+      HELIOS_AGENT_CAPABILITY_OVERLAY_DIR: directory,
+      HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON: JSON.stringify({ route_test_key: publicKey(requestSeed) }),
+      HELIOS_AGENT_CAPABILITY_ATTESTATION_KEY_ID: 'route_test_attestation',
+      HELIOS_AGENT_CAPABILITY_ATTESTATION_PUBLIC_KEY: publicKey(attestationSeed),
+      HELIOS_AGENT_CAPABILITY_ATTESTATION_PRIVATE_KEY: attestationSeed.toString('base64url'),
+    })
+    clusterMockState.agentCapability = config
+    const now = new Date()
+    clusterMockState.agentReadonly = parseAgentReadonlyConfigFromEnv({
+      HELIOS_AGENT_READONLY_PUBLIC_KEYS_JSON: JSON.stringify({ route_readonly_key: publicKey(requestSeed) }),
+      HELIOS_AGENT_READONLY_ALLOWLIST_JSON: JSON.stringify([{
+        id: 'agent-waste-readonly-test', owner: 'test', reason: 'integration test',
+        not_before: new Date(now.getTime() - 60_000).toISOString(),
+        not_after: new Date(now.getTime() + 300_000).toISOString(),
+        paths: [{ method: 'GET', kind: 'api', match: 'exact', path: '/api/agent-waste/backlog', safe_read_note: 'Bounded test backlog read.' }],
+      }]),
+    })
+    const grant = createOverlay(config, {
+      actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['route_test_key'], ttlSeconds: 300,
+    }, { id: 1, email: 'admin@example.com' }, 'route-test-request', now)
+    const timestamp = new Date().toISOString()
+    const nonce = randomBytes(16).toString('base64url')
+    const bodySha256 = sha256('{}')
+    const canonical = buildCapabilityCanonicalPayload({
+      method: 'POST', host: 'helios.test', path: '/api/agent-waste/clusters', query: '',
+      contentType: 'application/json', bodySha256, keyId: 'route_test_key',
+      grantId: grant.shape.grant_id, actionId: 'agent-waste.cluster.v1', timestamp, nonce,
+      idempotencyKey: 'route-test-action',
+    })
+    const headers = {
+      host: 'helios.test', 'content-type': 'application/json',
+      [AGENT_CAPABILITY_HEADERS.keyId]: 'route_test_key',
+      [AGENT_CAPABILITY_HEADERS.grantId]: grant.shape.grant_id,
+      [AGENT_CAPABILITY_HEADERS.actionId]: 'agent-waste.cluster.v1',
+      [AGENT_CAPABILITY_HEADERS.timestamp]: timestamp,
+      [AGENT_CAPABILITY_HEADERS.nonce]: nonce,
+      [AGENT_CAPABILITY_HEADERS.idempotencyKey]: 'route-test-action',
+      [AGENT_CAPABILITY_HEADERS.bodySha256]: bodySha256,
+      [AGENT_CAPABILITY_HEADERS.signature]: sign(null, Buffer.from(canonical), privateKey(requestSeed)).toString('base64url'),
+    }
+    const authLogs: string[] = []
+    const integrated = Fastify({ logger: { level: 'info', stream: { write: (line: string) => authLogs.push(line) } } })
+    registerAuthGate(integrated)
+    await registerAgentWasteRoutes(integrated)
+    await integrated.ready()
+    const integratedReadBacklog = vi.fn(async () => [])
+    setBacklogReader({ status: () => ({ available: true, detail: 'test reader' }), readBacklog: integratedReadBacklog })
+    try {
+      const res = await integrated.inject({ method: 'POST', url: '/api/agent-waste/clusters', headers, payload: '{}' })
+      expect(res.statusCode, `${res.body}\n${authLogs.join('')}`).toBe(200)
+      expect(res.json()).toMatchObject({ inputCount: 0, outputCount: 0, refinementComplete: true })
+      const outcomeLog = authLogs.map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((line) => line.event === 'agent_capability.action_outcome')
+      expect(outcomeLog).toMatchObject({
+        requestId: expect.any(String), keyId: 'route_test_key', grantId: grant.shape.grant_id,
+        actionId: 'agent-waste.cluster.v1', outcome: 'success', statusCode: 200,
+        inputCount: 0, outputCount: 0, clusterCount: 0, deterministicClusterCount: 0,
+        coverageComplete: true, refinementComplete: true,
+        refinementSucceeded: 0, refinementFailed: 0, refinementSkipped: 0,
+      })
+      expect(outcomeLog?.durationMs).toEqual(expect.any(Number))
+
+      for (const [label, payload] of [
+        ['missing', undefined], ['null', 'null'], ['nonempty', '{"scope":"all"}'],
+        ['oversized', JSON.stringify({ padding: 'x'.repeat(5 * 1024) })],
+      ] as const) {
+        const body = payload ?? ''
+        const attemptedNonce = Buffer.alloc(16, label.length).toString('base64url')
+        const attemptedHeaders = { ...headers, [AGENT_CAPABILITY_HEADERS.nonce]: attemptedNonce, [AGENT_CAPABILITY_HEADERS.bodySha256]: sha256(body) }
+        const attemptedCanonical = buildCapabilityCanonicalPayload({
+          method: 'POST', host: 'helios.test', path: '/api/agent-waste/clusters', query: '',
+          contentType: 'application/json', bodySha256: sha256(body), keyId: 'route_test_key',
+          grantId: grant.shape.grant_id, actionId: 'agent-waste.cluster.v1', timestamp,
+          nonce: attemptedNonce, idempotencyKey: 'route-test-action',
+        })
+        attemptedHeaders[AGENT_CAPABILITY_HEADERS.signature] = sign(null, Buffer.from(attemptedCanonical), privateKey(requestSeed)).toString('base64url')
+        const attempted = await integrated.inject({ method: 'POST', url: '/api/agent-waste/clusters', headers: attemptedHeaders, payload })
+        expect(attempted.statusCode, label).toBeGreaterThanOrEqual(400)
+      }
+      expect(integratedReadBacklog).toHaveBeenCalledTimes(1)
+      expect(callClusterModelMock).not.toHaveBeenCalled()
+
+      const readonlyTimestamp = new Date().toISOString()
+      const readonlyNonce = randomBytes(16).toString('base64url')
+      const readonlyPayload = buildAgentReadonlyCanonicalPayload({
+        method: 'GET', host: 'helios.test', pathAndQuery: '/api/agent-waste/backlog',
+        keyId: 'route_readonly_key', ruleId: 'agent-waste-readonly-test',
+        timestamp: readonlyTimestamp, nonce: readonlyNonce,
+      })
+      const readonlyResponse = await integrated.inject({
+        method: 'GET', url: '/api/agent-waste/backlog', headers: {
+          host: 'helios.test',
+          [AGENT_READONLY_HEADER_NAMES.keyId]: 'route_readonly_key',
+          [AGENT_READONLY_HEADER_NAMES.ruleId]: 'agent-waste-readonly-test',
+          [AGENT_READONLY_HEADER_NAMES.timestamp]: readonlyTimestamp,
+          [AGENT_READONLY_HEADER_NAMES.nonce]: readonlyNonce,
+          [AGENT_READONLY_HEADER_NAMES.signature]: sign(null, Buffer.from(readonlyPayload), privateKey(requestSeed)).toString('base64url'),
+        },
+      })
+      expect(readonlyResponse.statusCode).toBe(200)
+      expect(integratedReadBacklog).toHaveBeenCalledTimes(2)
+
+      for (const path of ['/api/session', '/api/agent-waste/promote', '/api/agent-waste/ticket-draft', '/api/agent-waste/repositories', '/api/agent-waste/backlog', '/api/not-registered']) {
+        const blocked = await integrated.inject({ method: path.endsWith('backlog') || path.endsWith('repositories') || path.endsWith('session') || path.endsWith('registered') ? 'GET' : 'POST', url: path, headers })
+        expect(blocked.statusCode, path).toBe(403)
+      }
+      const rendered = `${res.body}\n${authLogs.join('')}`
+      expect(rendered).not.toContain(requestSeed.toString('base64url'))
+      expect(rendered).not.toContain(attestationSeed.toString('base64url'))
+    } finally {
+      await integrated.close()
+      rmSync(directory, { recursive: true, force: true })
+      clusterMockState.agentCapability = { enabled: false, requestKeys: new Map(), nonceCacheSize: 100 }
+      clusterMockState.agentReadonly = {
+        enabled: false, configurationIssue: 'test disabled', timestampSkewMs: 90_000,
+        nonceTtlMs: 180_000, nonceCacheSize: 100, defaultMaxResponseBytes: 1_048_576,
+        maxResponseBytes: 10_485_760,
+      }
+    }
   })
 
   it('degrades to a structured 503 when the backlog transport is unavailable', async () => {

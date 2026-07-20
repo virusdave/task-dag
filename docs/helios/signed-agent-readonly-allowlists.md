@@ -94,12 +94,14 @@ Weak notes such as `"readonly"`, `"needed by page"`, or `"GET route"` are not
 enough. The code already says the method is `GET`; the note must explain why
 this specific `GET` is safe.
 
-## Inactive example: `/config/agent-waste` review page
+## Reviewed dependency example: `/config/agent-waste` review page
 
 This is an example-only snippet for route authors. Do not paste it into
 production unchanged: the dates are intentionally expired, the public key is a
-placeholder, and the agent-waste backlog API currently remains admin-gated by
-`requireSessionUser(..., 'admin')`. The example shows the dependency inventory
+placeholder. The Agent Waste backlog route explicitly admits a principal only
+after this verifier has attached it; all Agent Waste mutations and repository
+catalog routes remain admin-session-only except the separately authenticated
+`agent-waste.cluster.v1` capability. The example shows the dependency inventory
 that must be reviewed if that page ever becomes signed-agent-readable:
 
 - the page shell (`/config/agent-waste`),
@@ -144,7 +146,7 @@ that must be reviewed if that page ever becomes signed-agent-readable:
           "kind": "api",
           "match": "exact",
           "path": "/api/agent-waste/backlog",
-          "safe_read_note": "EXAMPLE ONLY unless route-level auth is deliberately changed: reads the mirrored agent-waste backlog from the configured local repo path, validates rows, and returns the pending observations; no promote, cluster, model call, git write, or advisory injection. Review PII/free-text notes and expected backlog size before enabling."
+          "safe_read_note": "Reads the mirrored agent-waste backlog from the configured local repo path, validates rows, and returns the pending observations; no promote, cluster, model call, git write, or advisory injection. Review PII/free-text notes and expected backlog size before enabling."
         },
         {
           "method": "GET",

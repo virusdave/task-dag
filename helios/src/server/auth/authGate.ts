@@ -232,13 +232,37 @@ export function registerAuthGate(server: FastifyInstance): void {
   server.addHook('onResponse', async (request, reply) => {
     const capabilityAudit = request.agentCapabilityAudit
     if (capabilityAudit) {
+      if (capabilityAudit.outcome === 'accepted' && !capabilityAudit.actionOutcome && reply.statusCode >= 500) {
+        capabilityAudit.actionOutcome = 'handler_error'
+      }
       const completed = capabilityAudit.outcome === 'pending'
         ? { ...capabilityAudit, outcome: 'denied' as const, reason: 'guard_not_completed' as const, statusCode: reply.statusCode }
         : capabilityAudit
       request.agentCapabilityAudit = completed
-      const fields = { ...completed, statusCode: completed.statusCode ?? reply.statusCode, remoteAddress: request.ip }
+      const fields = {
+        ...completed,
+        requestId: request.id,
+        statusCode: completed.statusCode ?? reply.statusCode,
+        remoteAddress: request.ip,
+      }
       if (completed.outcome === 'denied') request.log.warn(fields, 'signed-agent capability authorization audit')
-      else request.log.info(fields, 'signed-agent capability authorization audit')
+      else {
+        request.log.info(fields, 'signed-agent capability authorization audit')
+        request.log.info({
+          event: 'agent_capability.action_outcome',
+          requestId: request.id,
+          keyId: completed.keyId,
+          grantId: completed.grantId,
+          actionId: completed.actionId,
+          outcome: completed.actionOutcome ?? 'handler_error',
+          statusCode: reply.statusCode,
+          durationMs: completed.actionStartedAtMs === undefined
+            ? undefined
+            : Math.max(0, Date.now() - completed.actionStartedAtMs),
+          executionDisposition: completed.executionDisposition,
+          ...completed.actionSummary,
+        }, 'signed-agent capability action outcome audit')
+      }
     }
     const audit = request.agentReadonlyAudit
     if (!audit) {

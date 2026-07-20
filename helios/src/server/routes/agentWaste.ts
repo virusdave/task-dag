@@ -15,6 +15,8 @@
 
 import type { FastifyInstance, FastifyReply } from 'fastify'
 
+import { getCapabilityService } from '../auth/authGate.js'
+import { AGENT_WASTE_CLUSTER_DESCRIPTOR, requireAgentCapability } from '../auth/agentCapability.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import {
   AgentWasteUnavailableError,
@@ -179,9 +181,12 @@ export function handleAgentWasteError(
 export async function registerAgentWasteRoutes(server: FastifyInstance): Promise<void> {
   // GET /api/agent-waste/backlog - observations awaiting human review.
   server.get('/api/agent-waste/backlog', async (request, reply) => {
-    const actor = await requireSessionUser(request, reply, 'admin')
-    if (!actor) {
-      return
+    // This route is the only Agent Waste dependency that admits the
+    // independently verified readonly principal. All mutations and the
+    // repositories catalog retain their existing admin-session guards.
+    if (!request.agentReadonlyPrincipal) {
+      const actor = await requireSessionUser(request, reply, 'admin')
+      if (!actor) return
     }
     try {
       const observations = await getBacklog()
@@ -368,14 +373,16 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
     '/api/agent-waste/clusters',
     { bodyLimit: CLUSTER_BODY_LIMIT_BYTES },
     async (request, reply) => {
-      const actor = await requireSessionUser(request, reply, 'admin')
-      if (!actor) {
-        return
+      if (!request.agentCapabilityPrincipal) {
+        const actor = await requireSessionUser(request, reply, 'admin')
+        if (!actor) return
       }
 
       // Empty, strict body: the server reads the live backlog itself, so no
       // client-supplied scope/rows can silently change what gets clustered.
-      const parsedBody = AgentWasteClustersRequestSchema.safeParse(request.body ?? {})
+      // Parse request.body literally: missing/null bodies are not normalized
+      // into an authorized empty action.
+      const parsedBody = AgentWasteClustersRequestSchema.safeParse(request.body)
       if (!parsedBody.success) {
         return reply.status(400).send({
           error: 'invalid_request',
@@ -385,10 +392,24 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
         })
       }
 
+      if (request.agentCapabilityPrincipal) {
+        if (!requireAgentCapability(
+          request,
+          reply,
+          AGENT_WASTE_CLUSTER_DESCRIPTOR.action_id,
+          parsedBody.data,
+          getCapabilityService(getServerEnv().agentCapability),
+        )) return
+        request.agentCapabilityAudit!.actionStartedAtMs = Date.now()
+      }
+
       let observations: AgentWasteObservation[]
       try {
         observations = await getBacklog()
       } catch (error) {
+        if (request.agentCapabilityAudit?.outcome === 'accepted') {
+          request.agentCapabilityAudit.actionOutcome = 'handler_error'
+        }
         return handleAgentWasteError(server, reply, error, 'Failed to fetch agent-waste backlog')
       }
 
@@ -474,6 +495,20 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
         refinementFailed: failed,
         refinementSkipped: skipped,
         warnings: compactWarnings(warnings),
+      }
+      if (request.agentCapabilityAudit?.outcome === 'accepted') {
+        request.agentCapabilityAudit.actionOutcome = body.refinementComplete ? 'success' : 'partial'
+        request.agentCapabilityAudit.actionSummary = {
+          inputCount: body.inputCount,
+          outputCount: body.outputCount,
+          clusterCount: body.clusters.length,
+          deterministicClusterCount: body.clusters.filter((cluster) => cluster.provenance === 'deterministic').length,
+          coverageComplete: body.coverageComplete,
+          refinementComplete: body.refinementComplete,
+          refinementSucceeded: body.refinementSucceeded,
+          refinementFailed: body.refinementFailed,
+          refinementSkipped: body.refinementSkipped,
+        }
       }
       return reply.send(body)
     },
