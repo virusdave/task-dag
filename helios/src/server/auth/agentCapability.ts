@@ -8,22 +8,14 @@ import {
   verify,
   type KeyObject,
 } from 'node:crypto'
-import {
-  closeSync,
-  constants,
-  existsSync,
-  fsyncSync,
-  linkSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs'
-import { basename, join } from 'node:path'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
+import {
+  CAPABILITY_ENVELOPE_MAX_BYTES,
+  PostgresCapabilityStateStore,
+  type CapabilityAdmissionState,
+  type CapabilityStateStore,
+} from './agentCapabilityState.js'
 
 const TOKEN = /^[A-Za-z0-9._:-]{1,128}$/
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -35,7 +27,6 @@ const MAX_TTL_SECONDS = 14 * 24 * 60 * 60
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const DEFAULT_TTL_SECONDS = 4 * 60 * 60
 const REQUEST_SKEW_MS = 90_000
-const NONCE_TTL_MS = 180_000
 
 export const AGENT_CAPABILITY_HEADERS = {
   keyId: 'x-helios-agent-capability-key-id',
@@ -88,12 +79,11 @@ export interface AgentCapabilityEnvelope {
 export interface AgentCapabilityConfig {
   enabled: boolean
   configurationIssue?: string
-  overlayDir?: string
   requestKeys: ReadonlyMap<string, KeyObject>
   attestationKeyId?: string
   attestationPublicKey?: KeyObject
   attestationPrivateKey?: KeyObject
-  nonceCacheSize: number
+  stateStore?: CapabilityStateStore
 }
 
 export type CapabilityDenyReason =
@@ -101,7 +91,7 @@ export type CapabilityDenyReason =
   | 'invalid_header' | 'invalid_signature' | 'request_mismatch' | 'timestamp_out_of_range'
   | 'grant_invalid' | 'grant_inactive' | 'grant_revoked' | 'emergency_disabled'
   | 'body_digest_mismatch' | 'nonce_replay' | 'nonce_capacity' | 'action_mismatch'
-  | 'guard_not_completed'
+  | 'guard_not_completed' | 'state_unavailable'
 
 export interface AgentCapabilityPrincipal {
   kind: 'agent_capability'
@@ -161,7 +151,7 @@ declare module 'fastify' {
 const ShapeSchema = z.object({
   version: z.literal(1), grant_id: z.string().regex(TOKEN), issued_at: z.string().regex(RFC3339),
   not_before: z.string().regex(RFC3339), expires_at: z.string().regex(RFC3339),
-  approved_by: z.object({ user_id: z.number().int().positive(), email: z.string().email() }).strict(),
+  approved_by: z.object({ user_id: z.number().int().positive(), email: z.string().email().max(320) }).strict(),
   approval_request_id: z.string().regex(TOKEN),
   actions: z.array(z.object({
     action_id: z.string().regex(TOKEN), spec_sha256: z.string().regex(HEX),
@@ -211,14 +201,12 @@ export function buildCapabilityCanonicalPayload(input: {
 
 export function parseAgentCapabilityConfig(env: NodeJS.ProcessEnv = process.env): AgentCapabilityConfig {
   try {
-    const overlayDir = env.HELIOS_AGENT_CAPABILITY_OVERLAY_DIR
     const requestKeysRaw = env.HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON
     const attestationKeyId = env.HELIOS_AGENT_CAPABILITY_ATTESTATION_KEY_ID
     const attestationPublicRaw = env.HELIOS_AGENT_CAPABILITY_ATTESTATION_PUBLIC_KEY
     const attestationPrivateRaw = env.HELIOS_AGENT_CAPABILITY_ATTESTATION_PRIVATE_KEY
-    const nonceCacheSize = readPositiveInteger(env.HELIOS_AGENT_CAPABILITY_NONCE_CACHE_SIZE ?? '10000')
-    if (!overlayDir || !requestKeysRaw || !attestationKeyId || !attestationPublicRaw) {
-      return { enabled: false, configurationIssue: 'Signed-agent capability configuration is incomplete.', requestKeys: new Map(), nonceCacheSize }
+    if (!requestKeysRaw || !attestationKeyId || !attestationPublicRaw) {
+      return { enabled: false, configurationIssue: 'Signed-agent capability configuration is incomplete.', requestKeys: new Map() }
     }
     if (!TOKEN.test(attestationKeyId)) throw new Error('Invalid attestation key id.')
     const parsed: unknown = JSON.parse(requestKeysRaw)
@@ -234,41 +222,37 @@ export function parseAgentCapabilityConfig(env: NodeJS.ProcessEnv = process.env)
     if (attestationPrivateKey && !createPublicKey(attestationPrivateKey).equals(attestationPublicKey)) {
       throw new Error('Attestation private and public keys do not match.')
     }
-    return { enabled: true, overlayDir, requestKeys, attestationKeyId, attestationPublicKey, attestationPrivateKey, nonceCacheSize }
+    return { enabled: true, requestKeys, attestationKeyId, attestationPublicKey, attestationPrivateKey }
   } catch (error) {
-    return { enabled: false, configurationIssue: error instanceof Error ? error.message : 'Invalid capability configuration.', requestKeys: new Map(), nonceCacheSize: 10_000 }
+    return { enabled: false, configurationIssue: error instanceof Error ? error.message : 'Invalid capability configuration.', requestKeys: new Map() }
   }
 }
 
 export function createCapabilityService(config: AgentCapabilityConfig, now: () => Date = () => new Date()) {
-  const nonceCache = new Map<string, number>()
-  const envelopeCache = new Map<string, { fingerprint: string; envelope: AgentCapabilityEnvelope }>()
+  const store = config.stateStore ?? productionStateStore
 
-  function load(grantId: string): AgentCapabilityEnvelope {
-    if (!config.enabled || !config.overlayDir || !config.attestationPublicKey || !config.attestationKeyId) throw new CapabilityError('not_configured', 403)
-    if (existsSync(join(config.overlayDir, '.disabled'))) throw new CapabilityError('emergency_disabled', 403)
-    const path = join(config.overlayDir, `${grantId}.json`)
-    let stat
-    try { stat = lstatSync(path) } catch { throw new CapabilityError('grant_revoked', 403) }
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new CapabilityError('grant_invalid', 403)
-    const fingerprint = `${stat.ino}:${stat.mtimeMs}:${stat.size}`
-    const cached = envelopeCache.get(grantId)
-    if (cached?.fingerprint === fingerprint) return cached.envelope
-    let envelope: AgentCapabilityEnvelope
+  function loadState(state: CapabilityAdmissionState, grantId: string): AgentCapabilityEnvelope {
+    if (state.emergencyDisabled) throw new CapabilityError('emergency_disabled', 403)
+    if (!state.grant.present) throw new CapabilityError('grant_revoked', 403)
+    if (state.grant.oversized) throw new CapabilityError('grant_invalid', 403)
     try {
-      envelope = EnvelopeSchema.parse(JSON.parse(readFileSync(path, 'utf8'))) as AgentCapabilityEnvelope
+      const envelope = EnvelopeSchema.parse(state.grant.value) as AgentCapabilityEnvelope
       validateEnvelope(envelope, config)
       if (envelope.shape.grant_id !== grantId) throw new CapabilityError('grant_invalid', 403)
+      return envelope
     } catch (error) {
       if (error instanceof CapabilityError) throw error
       throw new CapabilityError('grant_invalid', 403)
     }
-    envelopeCache.set(grantId, { fingerprint, envelope })
-    return envelope
   }
 
-  function verifyRequest(request: FastifyRequest, appPath: string): AgentCapabilityPrincipal {
+  async function verifyRequest(request: FastifyRequest, appPath: string): Promise<AgentCapabilityPrincipal> {
     const values = readHeaders(request)
+    request.agentCapabilityAudit = {
+      outcome: 'pending', keyId: values.keyId, grantId: values.grantId, actionId: values.actionId,
+      timestamp: values.timestamp, nonceHash: sha256(values.nonce), idempotencyKey: values.idempotencyKey,
+      method: request.method, path: appPath, bodySha256: values.bodySha256,
+    }
     if (!config.enabled) throw new CapabilityError('not_configured', 403)
     const timestamp = parseTime(values.timestamp)
     if (!timestamp || Math.abs(now().getTime() - timestamp.getTime()) > REQUEST_SKEW_MS) throw new CapabilityError('timestamp_out_of_range', 401)
@@ -288,51 +272,54 @@ export function createCapabilityService(config: AgentCapabilityConfig, now: () =
       actionId: values.actionId, timestamp: values.timestamp, nonce: values.nonce, idempotencyKey: values.idempotencyKey })
     const signature = decode(values.signature, 64)
     if (!signature || !verify(null, Buffer.from(payload), key, signature)) throw new CapabilityError('invalid_signature', 401)
-    const envelope = load(values.grantId)
+    const envelope = loadState(await store.readAdmissionState(values.grantId), values.grantId)
     validateMembership(envelope, values, now())
     return { kind: 'agent_capability', keyId: values.keyId, grantId: values.grantId, actionId: values.actionId,
       timestamp: values.timestamp, nonce: values.nonce, idempotencyKey: values.idempotencyKey,
       bodySha256: values.bodySha256, shapeSha256: envelope.shape_sha256, shape: envelope.shape, pending: true }
   }
 
-  function finalize(principal: AgentCapabilityPrincipal, parsedBody: unknown): void {
-    const envelope = load(principal.grantId)
-    validateMembership(envelope, { keyId: principal.keyId, actionId: principal.actionId }, now())
+  async function finalize(principal: AgentCapabilityPrincipal, parsedBody: unknown): Promise<void> {
     const actual = sha256(jcs(parsedBody))
     if (!constantHex(actual, principal.bodySha256)) throw new CapabilityError('body_digest_mismatch', 401)
-    const current = now().getTime()
-    for (const [key, expiry] of nonceCache) if (expiry <= current) nonceCache.delete(key)
-    const nonceKey = `${principal.keyId}\0${principal.nonce}`
-    if (nonceCache.has(nonceKey)) throw new CapabilityError('nonce_replay', 401)
-    if (nonceCache.size >= config.nonceCacheSize) throw new CapabilityError('nonce_capacity', 403)
-    nonceCache.set(nonceKey, current + NONCE_TTL_MS)
+    const result = await store.finalizeAndConsumeNonce({ grantId: principal.grantId,
+      nonceHash: sha256(`${principal.keyId}\0${principal.nonce}`), now: () => now().getTime(),
+      validate: (state, nowMs) => {
+        const timestamp = parseTime(principal.timestamp)
+        if (!timestamp || Math.abs(nowMs - timestamp.getTime()) > REQUEST_SKEW_MS) throw new CapabilityError('timestamp_out_of_range', 401)
+        const envelope = loadState(state, principal.grantId)
+        validateMembership(envelope, { keyId: principal.keyId, actionId: principal.actionId }, new Date(nowMs))
+      },
+    })
+    if (result === 'replay') throw new CapabilityError('nonce_replay', 401)
+    if (result === 'capacity') throw new CapabilityError('nonce_capacity', 403)
+    if (result === 'malformed') throw new CapabilityError('grant_invalid', 403)
   }
 
-  return { verifyRequest, finalize, load }
+  return { verifyRequest, finalize }
 }
 
 export type CapabilityService = ReturnType<typeof createCapabilityService>
 
-export function requireAgentCapability(request: FastifyRequest, reply: FastifyReply, actionId: string, parsedBody: unknown, service: CapabilityService): boolean {
+export async function requireAgentCapability(request: FastifyRequest, reply: FastifyReply, actionId: string, parsedBody: unknown, service: CapabilityService): Promise<boolean> {
   const principal = request.agentCapabilityPrincipal
   if (!principal || principal.actionId !== actionId) {
     request.agentCapabilityAudit = { ...(request.agentCapabilityAudit ?? { method: request.method, path: request.url }), outcome: 'denied', reason: 'action_mismatch', statusCode: 403 }
     reply.status(403).send({ error: 'Agent capability access denied.' }); return false
   }
   try {
-    service.finalize(principal, parsedBody)
+    await service.finalize(principal, parsedBody)
     request.agentCapabilityAudit = { ...request.agentCapabilityAudit!, outcome: 'accepted', executionDisposition: 'recomputed' }
     return true
   } catch (error) {
-    const denied = error instanceof CapabilityError ? error : new CapabilityError('grant_invalid', 403)
+    const denied = error instanceof CapabilityError ? error : new CapabilityError('state_unavailable', 503)
     request.agentCapabilityAudit = { ...request.agentCapabilityAudit!, outcome: 'denied', reason: denied.reason, statusCode: denied.status }
     reply.status(denied.status).send({ error: 'Agent capability access denied.' }); return false
   }
 }
 
-export function createOverlay(config: AgentCapabilityConfig, input: z.infer<typeof CreateCapabilityOverlaySchema>, actor: { id: number; email: string }, requestId: string, at = new Date()): AgentCapabilityEnvelope {
-  if (!config.enabled || !config.overlayDir || !config.attestationPrivateKey || !config.attestationKeyId) throw new Error('Capability overlay creation is not configured.')
-  if (existsSync(join(config.overlayDir, '.disabled'))) throw new Error('Capability overlays are emergency-disabled.')
+export async function createOverlay(config: AgentCapabilityConfig, input: z.infer<typeof CreateCapabilityOverlaySchema>, actor: { id: number; email: string }, requestId: string, at = new Date()): Promise<AgentCapabilityEnvelope> {
+  if (!config.enabled || !config.attestationPrivateKey || !config.attestationKeyId) throw new Error('Capability overlay creation is not configured.')
   const body = CreateCapabilityOverlaySchema.parse(input)
   if (body.actionIds.some((id) => id !== AGENT_WASTE_CLUSTER_DESCRIPTOR.action_id)) throw new Error('Unknown capability action.')
   if (body.agentKeyIds.some((id) => !config.requestKeys.has(id))) throw new Error('Unknown capability request key.')
@@ -346,37 +333,30 @@ export function createOverlay(config: AgentCapabilityConfig, input: z.infer<type
   const shape_sha256 = sha256(jcs(shape))
   const attestation = sign(null, Buffer.from(`helios-agent-capability-overlay-v1\n${shape_sha256}`), config.attestationPrivateKey).toString('base64url')
   const envelope = { shape, shape_sha256, attestation_key_id: config.attestationKeyId, attestation }
-  immutableWrite(config.overlayDir, `${shape.grant_id}.json`, JSON.stringify(envelope))
-  if (existsSync(join(config.overlayDir, '.disabled'))) {
-    revokeOverlay(config, shape.grant_id)
-    throw new Error('Capability overlays became emergency-disabled during publication.')
-  }
+  if (Buffer.byteLength(JSON.stringify(envelope), 'utf8') > CAPABILITY_ENVELOPE_MAX_BYTES) throw new Error('Capability envelope exceeds 16 KiB.')
+  await (config.stateStore ?? productionStateStore).createGrantUnlessEnabledStateAllows(shape.grant_id, envelope)
   return envelope
 }
 
-export function revokeOverlay(config: AgentCapabilityConfig, grantId: string): void {
-  if (!config.overlayDir || !UUID_V7.test(grantId)) throw new Error('Invalid grant.')
-  validateOverlayDirectory(config.overlayDir)
-  renameSync(join(config.overlayDir, `${grantId}.json`), join(config.overlayDir, `.revoked-${grantId}-${randomBytes(8).toString('hex')}`))
-  fsyncDirectory(config.overlayDir)
+export async function revokeOverlay(config: AgentCapabilityConfig, grantId: string): Promise<void> {
+  if (!UUID_V7.test(grantId)) throw new Error('Invalid grant.')
+  await (config.stateStore ?? productionStateStore).revokeGrant(grantId)
 }
 
-export function setEmergencyDisabled(config: AgentCapabilityConfig, disabled: boolean): void {
-  if (!config.enabled || !config.overlayDir) throw new Error('Capability overlays are not configured.')
-  const path = join(config.overlayDir, '.disabled')
-  if (disabled) immutableWrite(config.overlayDir, '.disabled', '')
-  else { unlinkSync(path); fsyncDirectory(config.overlayDir) }
+export async function setEmergencyDisabled(config: AgentCapabilityConfig, disabled: boolean): Promise<void> {
+  if (!config.enabled) throw new Error('Capability overlays are not configured.')
+  await (config.stateStore ?? productionStateStore).setEmergencyDisabled(disabled)
 }
 
 export class CapabilityError extends Error {
-  constructor(readonly reason: CapabilityDenyReason, readonly status: 401 | 403) { super(reason) }
+  constructor(readonly reason: CapabilityDenyReason, readonly status: 401 | 403 | 503) { super(reason) }
 }
 
 function validateEnvelope(envelope: AgentCapabilityEnvelope, config: AgentCapabilityConfig): void {
   if (envelope.attestation_key_id !== config.attestationKeyId || sha256(jcs(envelope.shape)) !== envelope.shape_sha256) throw new CapabilityError('grant_invalid', 403)
   const signature = decode(envelope.attestation, 64)
   if (!signature || !verify(null, Buffer.from(`helios-agent-capability-overlay-v1\n${envelope.shape_sha256}`), config.attestationPublicKey!, signature)) throw new CapabilityError('grant_invalid', 403)
-  if (!UUID_V7.test(envelope.shape.grant_id) || envelope.shape.grant_id !== basename(envelope.shape.grant_id)) throw new CapabilityError('grant_invalid', 403)
+  if (!UUID_V7.test(envelope.shape.grant_id)) throw new CapabilityError('grant_invalid', 403)
   const issued = parseTime(envelope.shape.issued_at)
   const notBefore = parseTime(envelope.shape.not_before)
   const expires = parseTime(envelope.shape.expires_at)
@@ -408,22 +388,6 @@ function readHeaders(request: FastifyRequest) {
   return result
 }
 
-function immutableWrite(dir: string, name: string, contents: string): void {
-  validateOverlayDirectory(dir)
-  const temp = join(dir, `.tmp-${process.pid}-${randomBytes(12).toString('hex')}`)
-  let fd: number | undefined
-  try {
-    fd = openSync(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o660)
-    writeFileSync(fd, contents); fsyncSync(fd); closeSync(fd); fd = undefined
-    linkSync(temp, join(dir, name)); unlinkSync(temp); fsyncDirectory(dir)
-  } catch (error) {
-    if (fd !== undefined) try { closeSync(fd) } catch { /* preserve original failure */ }
-    try { unlinkSync(temp) } catch { /* temp may not exist */ }
-    throw error
-  }
-}
-function validateOverlayDirectory(dir: string): void { const stat = lstatSync(dir); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Capability overlay directory is unsafe.') }
-function fsyncDirectory(dir: string): void { const fd = openSync(dir, constants.O_RDONLY); try { fsyncSync(fd) } finally { closeSync(fd) } }
 function publicKey(raw: string): KeyObject { const bytes = decode(raw, 32); if (!bytes) throw new Error('Public key must be raw 32-byte base64url.'); return createPublicKey({ key: Buffer.concat([SPKI_PREFIX, bytes]), format: 'der', type: 'spki' }) }
 function privateKey(raw: string): KeyObject { const bytes = decode(raw, 32); if (!bytes) throw new Error('Private key must be a raw 32-byte seed.'); return createPrivateKey({ key: Buffer.concat([PKCS8_PREFIX, bytes]), format: 'der', type: 'pkcs8' }) }
 function decode(raw: string, size?: number): Buffer | null { if (!BASE64URL.test(raw)) return null; const value = Buffer.from(raw, 'base64url'); return (!size || value.length === size) && value.toString('base64url') === raw ? value : null }
@@ -431,8 +395,9 @@ function parseTime(raw: string): Date | null { if (!RFC3339.test(raw)) return nu
 function unique(values: string[]): boolean { return new Set(values).size === values.length }
 function sortedUnique(values: string[]): boolean { return unique(values) && values.every((value, index) => index === 0 || values[index - 1]! < value) }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
-function readPositiveInteger(raw: string): number { const value = Number(raw); if (!Number.isSafeInteger(value) || value <= 0) throw new Error('Nonce cache size must be a positive integer.'); return value }
 function validHost(host: string): boolean { return host.length > 0 && !/[\s/\\]/.test(host) }
 function unambiguousPath(path: string): boolean { if (!path.startsWith('/') || /[?#\\\u0000-\u0020\u007f]/.test(path) || /%(?:2f|5c)/i.test(path) || /%(?![0-9a-f]{2})/i.test(path)) return false; try { return new URL(path, 'https://invalid').pathname === path } catch { return false } }
 function constantHex(left: string, right: string): boolean { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b) }
 function uuidV7(at: Date): string { const bytes = randomBytes(16); const ms = BigInt(at.getTime()); for (let index = 5; index >= 0; index--) bytes[index] = Number((ms >> BigInt((5 - index) * 8)) & 0xffn); bytes[6] = (bytes[6]! & 0x0f) | 0x70; bytes[8] = (bytes[8]! & 0x3f) | 0x80; const hex = bytes.toString('hex'); return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}` }
+
+const productionStateStore = new PostgresCapabilityStateStore()

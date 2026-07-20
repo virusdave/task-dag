@@ -103,9 +103,10 @@ export function registerAuthGate(server: FastifyInstance): void {
     if (hasCapability) {
       try {
         classifyCapabilityHeaders(rawHeaderNames)
-        const principal = getCapabilityService(env.agentCapability).verifyRequest(request, appPath)
+        const principal = await getCapabilityService(env.agentCapability).verifyRequest(request, appPath)
         request.agentCapabilityPrincipal = principal
         request.agentCapabilityAudit = {
+          ...request.agentCapabilityAudit,
           outcome: 'pending', keyId: principal.keyId, grantId: principal.grantId, actionId: principal.actionId,
           shapeSha256: principal.shapeSha256, specSha256: principal.shape.actions[0]?.spec_sha256,
           timestamp: principal.timestamp, nonceHash: sha256(principal.nonce), idempotencyKey: principal.idempotencyKey,
@@ -114,8 +115,8 @@ export function registerAuthGate(server: FastifyInstance): void {
         }
         return
       } catch (error) {
-        const denied = error instanceof CapabilityError ? error : new CapabilityError('grant_invalid', 403)
-        request.agentCapabilityAudit = { outcome: 'denied', reason: denied.reason, method: request.method, path: appPath, statusCode: denied.status }
+        const denied = error instanceof CapabilityError ? error : new CapabilityError('state_unavailable', 503)
+        request.agentCapabilityAudit = { ...request.agentCapabilityAudit, outcome: 'denied', reason: denied.reason, method: request.method, path: appPath, statusCode: denied.status }
         return reply.status(denied.status).send({ error: 'Agent capability access denied.' })
       }
     }

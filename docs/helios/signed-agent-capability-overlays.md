@@ -99,7 +99,7 @@ possibly-wrong serializer.
 Future actions that write durable state must declare a route-owned durable
 idempotency strategy before entering the registry (for example a unique DB key
 or immutable git operation ID). The generic capability layer does not pretend
-an in-memory nonce cache provides cross-process exactly-once delivery.
+nonce replay prevention makes an action's side effects exactly-once.
 
 ## Immutable overlay and approval binding
 
@@ -177,13 +177,11 @@ The immutable envelope is:
 ```
 
 The signature input is the UTF-8 string
-`helios-agent-capability-overlay-v1\n<shape_sha256>`. The server writes the
-envelope once using a create-exclusive same-directory temporary file, file
-fsync, `link(temp, <grant_id>.json)` as the atomic no-replace publication
-(`EEXIST` fails), temp unlink, and directory fsync. `rename` is not used because
-it could overwrite. Thus the artifact binds immutable approval provenance to
-the exact endpoint/action/key/TTL shape. The create response may return the
-public envelope and digest but never either private key.
+`helios-agent-capability-overlay-v1\n<shape_sha256>`. The server inserts the
+envelope once under its exact reserved grant key; a primary-key conflict fails
+rather than updating approval state. Thus the artifact binds immutable approval
+provenance to the exact endpoint/action/key/TTL shape. The create response may
+return the public envelope and digest but never either private key.
 
 For the displayed example with grant ID
 `019f7f00-0000-7000-8000-000000000001`, request ID `req-golden-1`, and the
@@ -292,11 +290,12 @@ durable side effect:
    its existing guard, so a route that only calls `requireSessionUser` rejects
    capability requests.
 
-Nonce cache keys are `(agent key ID, nonce)` with a three-minute TTL and
-bounded capacity per server process. The final guard atomically
-`consumeIfAbsent`s a nonce only after signature and semantic body validation,
-preventing both races and unauthenticated cache poisoning. At capacity it
-prunes expired entries and then fails closed; it never evicts a live nonce.
+Nonce registry keys are SHA-256 hashes of `(agent key ID, nonce)` with a
+three-minute TTL and one shared 128-entry capacity across both mirrors. The
+final guard atomically consumes a nonce only after signature and semantic body
+validation, preventing both races and unauthenticated registry poisoning. At
+capacity it prunes expired entries and then fails closed; it never evicts a
+live nonce.
 Immediately before consuming it, the guard rechecks server time, activation,
 expiry, emergency/individual revocation, current spec digest, and key/action
 membership. The idempotency key is signed and included in audit. For v1 a
@@ -308,27 +307,43 @@ registry entry supplies cross-process durable idempotency.
 
 ## Reload, expiry, and revocation
 
-`HELIOS_AGENT_CAPABILITY_OVERLAY_DIR` names a small, server-owned runtime
-directory shared by the active Helios mirror processes. Capability admission
-stats the requested grant file and emergency sentinel on every capability
-request, then reuses parsed content only while inode/mtime/size are unchanged.
-Creation and deletion are therefore visible to all processes on their next
-request without a restart, polling interval, or partially read file.
+Capability state is stored in the existing PostgreSQL `public.app_settings`
+table, so both hot mirrors observe the same grants, emergency state, and nonce
+registry. There is no host-local overlay directory. The reserved keys are
+`signed_agent_capability_grant:<UUID>`,
+`signed_agent_capability_emergency_disabled`, and
+`signed_agent_capability_nonce_registry`; other settings are never scanned.
+
+Each grant is one immutable, insert-only JSONB row and is deleted on revoke.
+The emergency row's presence disables admission even when its value is
+malformed. Every mutation and nonce finalization takes the same transaction
+advisory lock (`helios:signed-agent-capability-state:v1`), linearizing create,
+revoke, disable, and action start across mirrors. Admission performs two exact
+primary-key reads without caching, polling, or LISTEN.
+
+Signed envelopes are bounded to 16 KiB UTF-8 on both write and read; SQL uses
+`pg_column_size` plus `CASE` so oversized JSONB is never returned to the
+process. The shared registry stores SHA-256 hashes only, has a three-minute
+TTL, prunes expired entries during finalization, and fails closed at 128 live
+entries or if malformed. This adds two indexed reads per capability admission
+and, at finalization, one short serialized transaction with exact-key reads and
+one small JSONB write; ordinary OAuth and readonly-agent traffic does no such
+work. Rollback is code-only: deploy the prior version after first draining or
+revoking grants; the reserved rows may then be deleted administratively.
 
 Every request uses server time to enforce `not_before <= now < expires_at`;
-caller time cannot keep a grant alive. Revocation atomically renames the grant
-out of the active directory through the admin-only revoke route. Emergency
-revocation atomically creates `.disabled`, which denies every capability
-request and grant creation while leaving OAuth and readonly requests intact.
-Removing `.disabled` requires a fresh authenticated operator action; it does
+caller time cannot keep a grant alive. Revocation deletes the exact grant row
+through the admin-only revoke route. Emergency revocation creates the reserved
+emergency row, which denies every capability request and grant creation while
+leaving OAuth and readonly requests intact. Removing that row requires a fresh
+authenticated operator action; it does
 not resurrect expired or individually revoked grants.
 
-Malformed, unverifiable, stale-spec, unknown-key, inactive, or revoked files
-are denied. A bad file for one grant does not disable other valid grants.
-Directory unreadability or invalid global verifier configuration disables all
-capability requests, not ordinary sessions or readonly access. Cleanup may
-delete expired/revoked artifacts after audit retention; deleting them is never
-required for expiry correctness.
+Malformed, oversized, unverifiable, stale-spec, unknown-key, inactive, or
+revoked rows are denied. A bad grant row does not disable other valid grants.
+Store unavailability returns `state_unavailable` (HTTP 503) only for requests
+carrying capability headers; invalid global verifier configuration disables
+capabilities without affecting ordinary sessions or readonly access.
 
 ## Audit and failure behavior
 
@@ -438,14 +453,14 @@ until every stochastic dependency succeeds simultaneously.
 
 Implementation is not complete without focused tests for:
 
-1. no capability config, invalid attestation key/config, unreadable directory;
+1. no capability config, invalid attestation key/config, unavailable shared state;
 2. malformed/unsigned/tampered envelope, shape digest mismatch, signature
    mismatch, unknown fields/version/action/spec/key, duplicate/unsorted rows;
 3. missing/duplicate/mixed header families, cookie or bearer mixing, unknown
    request key, bad signature, bad host, wrong method/path/query/content type;
 4. dot segments, encoded separators, fragments, malformed percent encoding,
    app-base-path confusion, and bare `?`;
-5. timestamp outside skew, duplicate nonce, nonce-cache bounds, body digest
+5. timestamp outside skew, duplicate nonce, shared nonce-registry bounds, body digest
    mismatch, schema mismatch, body over 4 KiB, and idempotency retry behavior;
 6. before activation, exact activation boundary, just before expiry, exact
    expiry boundary, requested TTL over 14 days, default four-hour TTL;
@@ -465,11 +480,14 @@ Implementation is not complete without focused tests for:
 
 ## Rollback
 
-The immediate no-code rollback is authenticated emergency revocation, then
-individual artifact revocation. Removing the overlay-directory and
-attestation-key configuration in a normal Helios deploy disables only the new
-principal. The initial action writes no durable application state, so no data
-rollback is required. If code rollback is needed, canonically revert the
+The immediate no-code rollback is authenticated emergency disable, then
+individual grant revocation. After capabilities are drained or revoked,
+removing the capability request-key and attestation-key configuration in a
+normal Helios deploy disables only the new principal. Deleting reserved
+`app_settings` rows is a separate production DB mutation and requires its own
+operator authorization; expiry and revocation correctness do not require that
+cleanup. The initial action writes no durable application state beyond its
+bounded replay record. If code rollback is needed, canonically revert the
 capability integration and deploy with `self-deploy-helios`; do not restart
 serving units manually. Existing OAuth and signed-readonly paths remain the
 fallback throughout.

@@ -1,10 +1,7 @@
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 
 import type { FastifyRequest } from 'fastify'
-import { afterEach, expect, it } from 'vitest'
+import { expect, it } from 'vitest'
 
 import {
   AGENT_CAPABILITY_HEADERS,
@@ -20,9 +17,11 @@ import {
   sha256,
   type AgentCapabilityEnvelope,
 } from './agentCapability.js'
-
-const directories: string[] = []
-afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
+import {
+  CAPABILITY_GRANT_KEY_PREFIX,
+  CAPABILITY_NONCE_LIMIT,
+  InMemoryCapabilityStateStore,
+} from './agentCapabilityState.js'
 
 const ATTESTATION_SEED = Buffer.alloc(32, 1)
 const AGENT_SEED = Buffer.alloc(32, 2)
@@ -30,19 +29,20 @@ const PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex')
 function key(seed: Buffer) { return createPrivateKey({ key: Buffer.concat([PKCS8_PREFIX, seed]), format: 'der', type: 'pkcs8' }) }
 function rawPublic(seed: Buffer): string { return createPublicKey(key(seed)).export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64url') }
 
-function config(directory: string) {
-  return parseAgentCapabilityConfig({
-    HELIOS_AGENT_CAPABILITY_OVERLAY_DIR: directory,
+function config(store = new InMemoryCapabilityStateStore()) {
+  const parsed = parseAgentCapabilityConfig({
     HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON: JSON.stringify({ 'local-worker-2026q3': rawPublic(AGENT_SEED) }),
     HELIOS_AGENT_CAPABILITY_ATTESTATION_KEY_ID: 'helios-overlay-approval-2026q3',
     HELIOS_AGENT_CAPABILITY_ATTESTATION_PUBLIC_KEY: rawPublic(ATTESTATION_SEED),
     HELIOS_AGENT_CAPABILITY_ATTESTATION_PRIVATE_KEY: ATTESTATION_SEED.toString('base64url'),
   })
+  parsed.stateStore = store
+  return parsed
 }
 
-function createGrant(directory: string, at: Date) {
-  const parsed = config(directory)
-  const envelope = createOverlay(
+async function createGrant(at: Date, store = new InMemoryCapabilityStateStore()) {
+  const parsed = config(store)
+  const envelope = await createOverlay(
     parsed,
     { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] },
     { id: 123, email: 'operator@example.com' },
@@ -128,34 +128,37 @@ it('pins the registry, semantic body, shape and request golden vectors', () => {
   expect(sign(null, Buffer.from(payload), key(AGENT_SEED)).toString('base64url')).toBe('4dfRK1tRkR4yX8qXSW934N20UqkU9QLyDkVo_mGx69JfWKlSh2z_EGbMYYa3Y0ChpKo2GRGBdydYxlQicAuhDQ')
 })
 
-it('writes immutable grants with default four-hour TTL and reloads revocation across verifier instances', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
-  const parsed = config(directory)
+it('writes immutable grants with default four-hour TTL and shares revocation across verifier instances', async () => {
+  const store = new InMemoryCapabilityStateStore()
+  const parsed = config(store)
   const now = new Date('2026-07-20T12:00:00.000Z')
-  const envelope = createOverlay(parsed, { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] }, { id: 123, email: 'operator@example.com' }, 'req-1', now)
+  const envelope = await createOverlay(parsed, { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] }, { id: 123, email: 'operator@example.com' }, 'req-1', now)
   expect(envelope.shape.expires_at).toBe('2026-07-20T16:00:00.000Z')
-  expect(JSON.parse(readFileSync(join(directory, `${envelope.shape.grant_id}.json`), 'utf8'))).toEqual(envelope)
+  expect((await store.readAdmissionState(envelope.shape.grant_id)).grant.value).toEqual(envelope)
   const first = createCapabilityService(parsed, () => now)
   const second = createCapabilityService(parsed, () => now)
-  expect(first.load(envelope.shape.grant_id)).toEqual(envelope)
-  expect(second.load(envelope.shape.grant_id)).toEqual(envelope)
-  revokeOverlay(parsed, envelope.shape.grant_id)
-  expect(() => first.load(envelope.shape.grant_id)).toThrow('grant_revoked')
-  expect(() => second.load(envelope.shape.grant_id)).toThrow('grant_revoked')
+  await revokeOverlay(parsed, envelope.shape.grant_id)
+  await expect(first.verifyRequest(signedRequest(envelope, now), '/api/agent-waste/clusters')).rejects.toThrow('grant_revoked')
+  await expect(second.verifyRequest(signedRequest(envelope, now), '/api/agent-waste/clusters')).rejects.toThrow('grant_revoked')
 })
 
-it('fails closed for absent or invalid config and emergency state is shared immediately', () => {
+it('fails closed for absent, incomplete, or invalid config and shares emergency state immediately', async () => {
   expect(parseAgentCapabilityConfig({}).enabled).toBe(false)
-  expect(parseAgentCapabilityConfig({ HELIOS_AGENT_CAPABILITY_OVERLAY_DIR: '/tmp/x' }).enabled).toBe(false)
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
-  const parsed = config(directory)
+  expect(parseAgentCapabilityConfig({ HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON: '{}' }).enabled).toBe(false)
+  expect(parseAgentCapabilityConfig({
+    HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON: '{invalid',
+    HELIOS_AGENT_CAPABILITY_ATTESTATION_KEY_ID: 'attestation',
+    HELIOS_AGENT_CAPABILITY_ATTESTATION_PUBLIC_KEY: rawPublic(ATTESTATION_SEED),
+  }).enabled).toBe(false)
+  const store = new InMemoryCapabilityStateStore()
+  const parsed = config(store)
   const now = new Date('2026-07-20T12:00:00.000Z')
-  const envelope = createOverlay(parsed, { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] }, { id: 123, email: 'operator@example.com' }, 'req-2', now)
+  const envelope = await createOverlay(parsed, { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] }, { id: 123, email: 'operator@example.com' }, 'req-2', now)
   const services = [createCapabilityService(parsed, () => now), createCapabilityService(parsed, () => now)]
-  setEmergencyDisabled(parsed, true)
-  for (const service of services) expect(() => service.load(envelope.shape.grant_id)).toThrow('emergency_disabled')
-  setEmergencyDisabled(parsed, false)
-  for (const service of services) expect(service.load(envelope.shape.grant_id)).toEqual(envelope)
+  await setEmergencyDisabled(parsed, true)
+  for (const service of services) await expect(service.verifyRequest(signedRequest(envelope, now), '/api/agent-waste/clusters')).rejects.toThrow('emergency_disabled')
+  await setEmergencyDisabled(parsed, false)
+  for (const service of services) await expect(service.verifyRequest(signedRequest(envelope, now), '/api/agent-waste/clusters')).resolves.toMatchObject({ grantId: envelope.shape.grant_id })
 })
 
 it('keeps request and attestation keys cryptographically separate', () => {
@@ -163,9 +166,7 @@ it('keeps request and attestation keys cryptographically separate', () => {
   const signature = sign(null, input, key(AGENT_SEED))
   expect(verify(null, input, createPublicKey(key(AGENT_SEED)), signature)).toBe(true)
   expect(verify(null, input, createPublicKey(key(ATTESTATION_SEED)), signature)).toBe(false)
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
   const parsed = parseAgentCapabilityConfig({
-    HELIOS_AGENT_CAPABILITY_OVERLAY_DIR: directory,
     HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON: JSON.stringify({ request: rawPublic(ATTESTATION_SEED) }),
     HELIOS_AGENT_CAPABILITY_ATTESTATION_KEY_ID: 'attestation',
     HELIOS_AGENT_CAPABILITY_ATTESTATION_PUBLIC_KEY: rawPublic(ATTESTATION_SEED),
@@ -183,40 +184,83 @@ it.each([
   ['non-v7 grant id', (value: AgentCapabilityEnvelope) => { value.shape.grant_id = '019f7f00-0000-4000-8000-000000000001' }],
   ['unknown request key', (value: AgentCapabilityEnvelope) => { value.shape.actions[0]!.agent_key_ids = ['retired-worker'] }],
   ['unsorted request keys', (value: AgentCapabilityEnvelope) => { value.shape.actions[0]!.agent_key_ids = ['z-worker', 'local-worker-2026q3'] }],
-] as const)('rejects a correctly re-attested envelope with %s', (_name, mutate) => {
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
-  const parsed = config(directory)
+] as const)('rejects a correctly re-attested envelope with %s', async (_name, mutate) => {
+  const store = new InMemoryCapabilityStateStore()
+  const parsed = config(store)
   const at = new Date('2026-07-20T12:00:00.000Z')
-  const envelope = createOverlay(parsed, { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] }, { id: 1, email: 'operator@example.com' }, 'req-malformed', at)
+  const envelope = await createOverlay(parsed, { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] }, { id: 1, email: 'operator@example.com' }, 'req-malformed', at)
   mutate(envelope)
   envelope.shape_sha256 = sha256(jcs(envelope.shape))
   envelope.attestation = sign(null, Buffer.from(`helios-agent-capability-overlay-v1\n${envelope.shape_sha256}`), key(ATTESTATION_SEED)).toString('base64url')
-  writeFileSync(join(directory, `${envelope.shape.grant_id}.json`), JSON.stringify(envelope))
-  expect(() => createCapabilityService(parsed, () => at).load(envelope.shape.grant_id)).toThrow('grant_invalid')
+  store.seed(`${CAPABILITY_GRANT_KEY_PREFIX}${envelope.shape.grant_id}`, envelope)
+  await expect(createCapabilityService(parsed, () => at).verifyRequest(signedRequest(envelope, at), '/api/agent-waste/clusters')).rejects.toThrow('grant_invalid')
 })
 
-it('revokes malformed artifacts while emergency-disabled without loading admission state', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
-  const parsed = config(directory)
+it('revokes malformed state while emergency-disabled without loading admission state', async () => {
+  const store = new InMemoryCapabilityStateStore()
+  const parsed = config(store)
   const grantId = '019f7f00-0000-7000-8000-000000000001'
-  writeFileSync(join(directory, `${grantId}.json`), '{malformed')
-  setEmergencyDisabled(parsed, true)
-  revokeOverlay(parsed, grantId)
-  expect(existsSync(join(directory, `${grantId}.json`))).toBe(false)
+  store.seed(`${CAPABILITY_GRANT_KEY_PREFIX}${grantId}`, '{malformed')
+  await setEmergencyDisabled(parsed, true)
+  await revokeOverlay(parsed, grantId)
+  expect((await store.readAdmissionState(grantId)).grant.present).toBe(false)
 })
 
-it('verifies the exact signed request and consumes its nonce only after body binding', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
+it('verifies the exact signed request and consumes its nonce only after body binding', async () => {
   const at = new Date('2026-07-20T12:01:00.000Z')
-  const { parsed, envelope } = createGrant(directory, new Date('2026-07-20T12:00:00.000Z'))
+  const { parsed, envelope } = await createGrant(new Date('2026-07-20T12:00:00.000Z'))
   const service = createCapabilityService(parsed, () => at)
   const request = signedRequest(envelope, at)
-  const principal = service.verifyRequest(request, '/api/agent-waste/clusters')
+  const principal = await service.verifyRequest(request, '/api/agent-waste/clusters')
 
   expect(principal.kind).toBe('agent_capability')
-  expect(() => service.finalize(principal, { unexpected: true })).toThrow('body_digest_mismatch')
-  expect(() => service.finalize(principal, {})).not.toThrow()
-  expect(() => service.finalize(principal, {})).toThrow('nonce_replay')
+  await expect(service.finalize(principal, { unexpected: true })).rejects.toThrow('body_digest_mismatch')
+  await expect(service.finalize(principal, {})).resolves.toBeUndefined()
+  await expect(service.finalize(principal, {})).rejects.toThrow('nonce_replay')
+})
+
+it('rechecks timestamp freshness after acquiring finalization state without consuming a stale nonce', async () => {
+  const signedAt = new Date('2026-07-20T12:01:00.000Z')
+  let current = signedAt
+  const { parsed, envelope } = await createGrant(new Date('2026-07-20T12:00:00.000Z'))
+  const service = createCapabilityService(parsed, () => current)
+  const principal = await service.verifyRequest(signedRequest(envelope, signedAt), '/api/agent-waste/clusters')
+
+  current = new Date('2026-07-20T12:02:30.001Z')
+  await expect(service.finalize(principal, {})).rejects.toThrow('timestamp_out_of_range')
+  current = signedAt
+  await expect(service.finalize(principal, {})).resolves.toBeUndefined()
+})
+
+it('retains safe attributable audit fields for signature and shared-state failures', async () => {
+  const at = new Date('2026-07-20T12:01:00.000Z')
+  const { parsed, envelope } = await createGrant(new Date('2026-07-20T12:00:00.000Z'))
+  const invalidSignatureRequest = signedRequest(envelope, at, { signature: 'A'.repeat(86) })
+  await expect(createCapabilityService(parsed, () => at).verifyRequest(
+    invalidSignatureRequest,
+    '/api/agent-waste/clusters',
+  )).rejects.toThrow('invalid_signature')
+  expect(invalidSignatureRequest.agentCapabilityAudit).toMatchObject({
+    keyId: 'local-worker-2026q3',
+    grantId: envelope.shape.grant_id,
+    actionId: 'agent-waste.cluster.v1',
+    nonceHash: sha256('AAAAAAAAAAAAAAAAAAAAAA'),
+    idempotencyKey: 'cluster-test-1',
+    bodySha256: sha256('{}'),
+  })
+  expect(JSON.stringify(invalidSignatureRequest.agentCapabilityAudit)).not.toContain('AAAAAAAAAAAAAAAAAAAAAA')
+
+  const unavailableRequest = signedRequest(envelope, at)
+  parsed.stateStore!.readAdmissionState = async () => { throw new Error('store unavailable') }
+  await expect(createCapabilityService(parsed, () => at).verifyRequest(
+    unavailableRequest,
+    '/api/agent-waste/clusters',
+  )).rejects.toThrow('store unavailable')
+  expect(unavailableRequest.agentCapabilityAudit).toMatchObject({
+    keyId: 'local-worker-2026q3',
+    grantId: envelope.shape.grant_id,
+    nonceHash: sha256('AAAAAAAAAAAAAAAAAAAAAA'),
+  })
 })
 
 it.each([
@@ -227,32 +271,26 @@ it.each([
   ['host', { host: 'helios.freshlybaked.us/path' }],
   ['timestamp', { timestamp: '2026-07-20T12:01:00Z' }],
   ['signature', { signature: 'A'.repeat(86) }],
-] as const)('rejects a signed request with mismatched %s', (_name, override) => {
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
+] as const)('rejects a signed request with mismatched %s', async (_name, override) => {
   const at = new Date('2026-07-20T12:01:00.000Z')
-  const { parsed, envelope } = createGrant(directory, new Date('2026-07-20T12:00:00.000Z'))
+  const { parsed, envelope } = await createGrant(new Date('2026-07-20T12:00:00.000Z'))
   const request = signedRequest(envelope, at, override)
-  expect(() => createCapabilityService(parsed, () => at).verifyRequest(request, override.path ?? '/api/agent-waste/clusters')).toThrow()
+  await expect(createCapabilityService(parsed, () => at).verifyRequest(request, override.path ?? '/api/agent-waste/clusters')).rejects.toThrow()
 })
 
-it('fails closed instead of evicting a live nonce when the cache is full', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'helios-capability-')); directories.push(directory)
+it('shares replay state across services and fails closed at the fixed 128-entry capacity', async () => {
   const at = new Date('2026-07-20T12:01:00.000Z')
-  const parsed = parseAgentCapabilityConfig({
-    HELIOS_AGENT_CAPABILITY_OVERLAY_DIR: directory,
-    HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON: JSON.stringify({ 'local-worker-2026q3': rawPublic(AGENT_SEED) }),
-    HELIOS_AGENT_CAPABILITY_ATTESTATION_KEY_ID: 'helios-overlay-approval-2026q3',
-    HELIOS_AGENT_CAPABILITY_ATTESTATION_PUBLIC_KEY: rawPublic(ATTESTATION_SEED),
-    HELIOS_AGENT_CAPABILITY_ATTESTATION_PRIVATE_KEY: ATTESTATION_SEED.toString('base64url'),
-    HELIOS_AGENT_CAPABILITY_NONCE_CACHE_SIZE: '1',
-  })
-  const envelope = createOverlay(parsed, { actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['local-worker-2026q3'] }, { id: 123, email: 'operator@example.com' }, 'req-capacity', new Date('2026-07-20T12:00:00.000Z'))
-  const service = createCapabilityService(parsed, () => at)
-  const first = service.verifyRequest(signedRequest(envelope, at), '/api/agent-waste/clusters')
-  service.finalize(first, {})
-  const second = service.verifyRequest(
-    signedRequest(envelope, at, { nonce: Buffer.alloc(16, 1).toString('base64url') }),
-    '/api/agent-waste/clusters',
-  )
-  expect(() => service.finalize(second, {})).toThrow('nonce_capacity')
+  const store = new InMemoryCapabilityStateStore()
+  const { parsed, envelope } = await createGrant(new Date('2026-07-20T12:00:00.000Z'), store)
+  const firstService = createCapabilityService(parsed, () => at)
+  const secondService = createCapabilityService(parsed, () => at)
+  const first = await firstService.verifyRequest(signedRequest(envelope, at), '/api/agent-waste/clusters')
+  await firstService.finalize(first, {})
+  await expect(secondService.finalize(first, {})).rejects.toThrow('nonce_replay')
+  for (let index = 1; index < CAPABILITY_NONCE_LIMIT; index++) {
+    const principal = await firstService.verifyRequest(signedRequest(envelope, at, { nonce: Buffer.alloc(16, index).toString('base64url') }), '/api/agent-waste/clusters')
+    await firstService.finalize(principal, {})
+  }
+  const overflow = await secondService.verifyRequest(signedRequest(envelope, at, { nonce: Buffer.alloc(16, 255).toString('base64url') }), '/api/agent-waste/clusters')
+  await expect(secondService.finalize(overflow, {})).rejects.toThrow('nonce_capacity')
 })

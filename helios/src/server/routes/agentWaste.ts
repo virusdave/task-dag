@@ -393,7 +393,7 @@ export async function registerAgentWasteRoutes(server: FastifyInstance): Promise
       }
 
       if (request.agentCapabilityPrincipal) {
-        if (!requireAgentCapability(
+        if (!await requireAgentCapability(
           request,
           reply,
           AGENT_WASTE_CLUSTER_DESCRIPTOR.action_id,

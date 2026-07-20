@@ -41,7 +41,7 @@ vi.mock('../auth/requireSession.js', () => ({
 // `instanceof ClusterModelError` branch still works.
 const clusterMockState = vi.hoisted(() => ({
   model: 'deepseek.v3.2',
-  agentCapability: { enabled: false, requestKeys: new Map(), nonceCacheSize: 100 } as import('../auth/agentCapability.js').AgentCapabilityConfig,
+  agentCapability: { enabled: false, requestKeys: new Map() } as import('../auth/agentCapability.js').AgentCapabilityConfig,
   agentReadonly: {
     enabled: false, configurationIssue: 'test disabled', timestampSkewMs: 90_000,
     nonceTtlMs: 180_000, nonceCacheSize: 100, defaultMaxResponseBytes: 1_048_576,
@@ -89,6 +89,7 @@ import {
   parseAgentCapabilityConfig,
   sha256,
 } from '../auth/agentCapability.js'
+import { InMemoryCapabilityStateStore } from '../auth/agentCapabilityState.js'
 import {
   AGENT_READONLY_HEADER_NAMES,
   buildAgentReadonlyCanonicalPayload,
@@ -369,7 +370,7 @@ describe('POST /api/agent-waste/clusters', () => {
   })
 
   it('accepts a real signed capability through the auth gate and route guard', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'agent-waste-route-capability-'))
+    const stateStore = new InMemoryCapabilityStateStore()
     const pkcs8Prefix = Buffer.from('302e020100300506032b657004220420', 'hex')
     const requestSeed = Buffer.alloc(32, 31)
     const attestationSeed = Buffer.alloc(32, 32)
@@ -379,12 +380,12 @@ describe('POST /api/agent-waste/clusters', () => {
     const publicKey = (seed: Buffer) => createPublicKey(privateKey(seed))
       .export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64url')
     const config = parseAgentCapabilityConfig({
-      HELIOS_AGENT_CAPABILITY_OVERLAY_DIR: directory,
       HELIOS_AGENT_CAPABILITY_PUBLIC_KEYS_JSON: JSON.stringify({ route_test_key: publicKey(requestSeed) }),
       HELIOS_AGENT_CAPABILITY_ATTESTATION_KEY_ID: 'route_test_attestation',
       HELIOS_AGENT_CAPABILITY_ATTESTATION_PUBLIC_KEY: publicKey(attestationSeed),
       HELIOS_AGENT_CAPABILITY_ATTESTATION_PRIVATE_KEY: attestationSeed.toString('base64url'),
     })
+    config.stateStore = stateStore
     clusterMockState.agentCapability = config
     const now = new Date()
     clusterMockState.agentReadonly = parseAgentReadonlyConfigFromEnv({
@@ -396,7 +397,7 @@ describe('POST /api/agent-waste/clusters', () => {
         paths: [{ method: 'GET', kind: 'api', match: 'exact', path: '/api/agent-waste/backlog', safe_read_note: 'Bounded test backlog read.' }],
       }]),
     })
-    const grant = createOverlay(config, {
+    const grant = await createOverlay(config, {
       actionIds: ['agent-waste.cluster.v1'], agentKeyIds: ['route_test_key'], ttlSeconds: 300,
     }, { id: 1, email: 'admin@example.com' }, 'route-test-request', now)
     const timestamp = new Date().toISOString()
@@ -490,8 +491,7 @@ describe('POST /api/agent-waste/clusters', () => {
       expect(rendered).not.toContain(attestationSeed.toString('base64url'))
     } finally {
       await integrated.close()
-      rmSync(directory, { recursive: true, force: true })
-      clusterMockState.agentCapability = { enabled: false, requestKeys: new Map(), nonceCacheSize: 100 }
+      clusterMockState.agentCapability = { enabled: false, requestKeys: new Map() }
       clusterMockState.agentReadonly = {
         enabled: false, configurationIssue: 'test disabled', timestampSkewMs: 90_000,
         nonceTtlMs: 180_000, nonceCacheSize: 100, defaultMaxResponseBytes: 1_048_576,
