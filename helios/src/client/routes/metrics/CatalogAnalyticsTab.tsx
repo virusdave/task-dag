@@ -23,6 +23,12 @@ import { buildCatalogCohortKey } from '../../../shared/domain/catalogCohort.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
 import { CatalogFilterBar, FilterDropdown } from './CatalogFilterBar.js'
+import {
+  ChartInteractionFrame,
+  svgPointAnchor,
+  TapGestureTracker,
+  useChartInteraction,
+} from './ChartInteractionFrame.js'
 import { ControlsSection } from './ControlsSection.js'
 import {
   buildStructuredHighlightMatcher,
@@ -3248,7 +3254,8 @@ function ScatterCard({
       {/* config.description used to render inline here; it's now
           surfaced via the title's `!` HelpIcon popover so the card's
           visible chrome stays compact. */}
-      <CatalogScatterSvg
+      <ChartInteractionFrame label={`${config.title} chart`} showFullscreenControl={false}>
+        <CatalogScatterSvg
        points={points}
        xDef={xDef}
        yDef={yDef}
@@ -3261,7 +3268,8 @@ function ScatterCard({
        highlightMatcher={highlightMatcher}
        selectedDotId={selectedDotId}
        onSelectDot={onSelectDot}
-      />
+        />
+      </ChartInteractionFrame>
     </article>
   )
 }
@@ -3336,6 +3344,8 @@ function CatalogScatterSvg({
 }: CatalogScatterSvgProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const touchGestureRef = useRef(new TapGestureTracker())
+  const { showTooltip, dismissTooltip } = useChartInteraction()
   const [renderedWidthPx, setRenderedWidthPx] = useState<number>(440)
   useLayoutEffect(() => {
     const el = wrapRef.current
@@ -3714,14 +3724,11 @@ function CatalogScatterSvg({
     (e: React.PointerEvent<SVGSVGElement>) => {
       // Forward to the zoom hook first so pinch/pan can run.
       zoom.handlers.onPointerMove(e)
+      if (e.pointerType !== 'mouse') return
       if (zoom.gestureActive) {
         if (hover) setHover(null)
         return
       }
-      // On touch we only update hover on initial tap / drag; once the
-      // finger lifts (pointerleave) we want the tooltip to stick.
-      // The pointerup handler keeps hover; pointermove on touch still
-      // updates which dot is targeted while the finger is down.
       const svg = svgRef.current
       if (!svg || plotted.length === 0) return
       const ctm = svg.getScreenCTM()
@@ -3730,13 +3737,10 @@ function CatalogScatterSvg({
       pt.x = e.clientX
       pt.y = e.clientY
       const local = pt.matrixTransform(ctm.inverse())
-      const hitRadius = e.pointerType === 'mouse' ? HOVER_PX : TOUCH_HOVER_PX
-      const bestIdx = findNearestIdx(local, hitRadius * hitRadius)
+      const bestIdx = findNearestIdx(local, HOVER_PX * HOVER_PX)
       if (bestIdx >= 0) {
         setHover({ idx: bestIdx, pointerType: e.pointerType })
-      } else if (e.pointerType === 'mouse') {
-        // Only clear on miss for mouse; touch keeps last selection
-        // until the user taps empty space or dismisses.
+      } else {
         setHover(null)
       }
     },
@@ -3753,16 +3757,27 @@ function CatalogScatterSvg({
     [],
   )
 
-  // On touch tap (pointerdown) on an empty region, dismiss any pinned
-  // tooltip. We do this in pointerdown so a tap that hits a dot still
-  // triggers the pointermove handler above (which sets a new hover).
   const onPointerDown = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       zoom.handlers.onPointerDown(e)
-      if (e.pointerType === 'mouse') return
-      // For a single-finger tap, immediately compute nearest dot so
-      // the tooltip appears on tap rather than waiting for a move.
-      if (plotted.length === 0) return
+      if (e.pointerType !== 'mouse') {
+        touchGestureRef.current.pointerDown(e.pointerId, {
+          x: e.clientX,
+          y: e.clientY,
+        })
+      }
+    },
+    [zoom],
+  )
+
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      zoom.handlers.onPointerUp(e)
+      if (
+        e.pointerType === 'mouse' ||
+        !touchGestureRef.current.pointerUp(e.pointerId, { x: e.clientX, y: e.clientY }) ||
+        plotted.length === 0
+      ) return
       const svg = svgRef.current
       if (!svg) return
       const ctm = svg.getScreenCTM()
@@ -3771,19 +3786,75 @@ function CatalogScatterSvg({
       pt.x = e.clientX
       pt.y = e.clientY
       const local = pt.matrixTransform(ctm.inverse())
-      const bestIdx = findNearestIdx(local, TOUCH_HOVER_PX * TOUCH_HOVER_PX)
+      const renderedWidth = svg.getBoundingClientRect().width
+      const touchRadius = renderedWidth > 0 ? 44 * (width / renderedWidth) : TOUCH_HOVER_PX
+      const bestIdx = findNearestIdx(local, touchRadius * touchRadius)
       if (bestIdx >= 0) {
         setHover({ idx: bestIdx, pointerType: e.pointerType })
       } else {
-        // tap on empty plot area — dismiss pinned tooltip
         setHover(null)
       }
     },
-    [plotted, zoom, findNearestIdx],
+    [plotted, width, zoom, findNearestIdx],
+  )
+
+  const onPointerCancel = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      touchGestureRef.current.pointerCancel(e.pointerId)
+      zoom.handlers.onPointerCancel(e)
+    },
+    [zoom],
   )
 
   const hovered = hover ? plotted[hover.idx] ?? null : null
-  const hoveredDotPx = hovered ? { x: xScale(hovered.x), y: yScale(hovered.y) } : null
+  const hoveredDotX = hovered ? xScale(hovered.x) : null
+  const hoveredDotY = hovered ? yScale(hovered.y) : null
+
+  useEffect(() => {
+    const svg = svgRef.current
+    if (hovered === null || hoveredDotX === null || hoveredDotY === null || svg === null) {
+      dismissTooltip(false)
+      return
+    }
+    const trigger = svg.querySelector<SVGCircleElement>(
+      `[data-chart-point-index="${hover?.idx ?? -1}"]`,
+    ) ?? svg
+    showTooltip({
+      anchor: svgPointAnchor(svg, { x: hoveredDotX, y: hoveredDotY }, trigger),
+      sticky: hover?.pointerType !== 'mouse',
+      label: `Product details for ${hovered.p.productName}`,
+      onDismiss: () => setHover(null),
+      content: (
+        <ScatterTooltipContent
+          point={hovered.p}
+          xDef={xDef}
+          yDef={yDef}
+          xValue={hovered.xRaw}
+          yValue={hovered.yRaw}
+          noWindowSales={hasNoWindowSales(hovered.p)}
+          colourLabel={
+            colourByDef.kind === 'categorical'
+              ? hovered.bucket
+              : hovered.colourValue != null
+                ? colourByDef.format(hovered.colourValue)
+                : '—'
+          }
+          colourByDef={colourByDef}
+        />
+      ),
+    })
+  }, [
+    colourByDef,
+    dismissTooltip,
+    hover?.idx,
+    hover?.pointerType,
+    hovered,
+    hoveredDotX,
+    hoveredDotY,
+    showTooltip,
+    xDef,
+    yDef,
+  ])
 
   return (
     <div className="metric-chart-svg-wrap catalog-analytics-svg-wrap" ref={wrapRef}>
@@ -3793,12 +3864,12 @@ function CatalogScatterSvg({
         width="100%"
         height={height}
         className="metric-chart-svg"
-        role="img"
+        role="group"
         aria-label={`Scatter: ${yDef.label} (y) vs ${xDef.label} (x)`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={zoom.handlers.onPointerUp}
-        onPointerCancel={zoom.handlers.onPointerCancel}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
         onPointerLeave={onPointerLeave}
         onDoubleClick={zoom.handlers.onDoubleClick}
         style={zoom.svgStyle}
@@ -3996,10 +4067,9 @@ function CatalogScatterSvg({
               const drillAttrs = drillable
                 ? {
                     role: 'button' as const,
-                    tabIndex: 0,
                     'aria-pressed': isSelected,
                     'aria-label': `Drill into ${pp.p.productName ?? pp.p.inventoryItemId}`,
-                    style: { cursor: 'pointer', outline: 'none' },
+                    style: { cursor: 'pointer' },
                     onClick: onActivate,
                     onKeyDown: (e: React.KeyboardEvent<SVGCircleElement>) => {
                       if (e.key === 'Enter' || e.key === ' ') {
@@ -4009,6 +4079,11 @@ function CatalogScatterSvg({
                     },
                   }
                 : {}
+              const interactionAttrs = {
+                'data-chart-point-index': idx,
+                tabIndex: drillable ? 0 : -1,
+                onFocus: () => setHover({ idx, pointerType: 'keyboard' }),
+              }
               if (hasHighlight && !isMatch) {
                 return (
                   <circle
@@ -4020,6 +4095,7 @@ function CatalogScatterSvg({
                     fillOpacity={Math.min(0.18, dotOpacity(pp.opacityValue))}
                     stroke={isSelected ? '#000' : 'none'}
                     strokeWidth={isSelected ? 2 : 0}
+                    {...interactionAttrs}
                     {...drillAttrs}
                   />
                 )
@@ -4035,6 +4111,7 @@ function CatalogScatterSvg({
                     fillOpacity={Math.max(0.9, dotOpacity(pp.opacityValue))}
                     stroke={isSelected ? '#000' : '#111'}
                     strokeWidth={isSelected ? 2 : 1.25}
+                    {...interactionAttrs}
                     {...drillAttrs}
                   />
                 )
@@ -4049,6 +4126,7 @@ function CatalogScatterSvg({
                   fillOpacity={dotOpacity(pp.opacityValue)}
                   stroke={isSelected ? '#000' : '#fff'}
                   strokeWidth={isSelected ? 2 : 0.5}
+                  {...interactionAttrs}
                   {...drillAttrs}
                 />
               )
@@ -4154,32 +4232,6 @@ function CatalogScatterSvg({
         hiddenOutlierCount={autoZoom.hiddenCount}
       />
 
-      {hovered && hoveredDotPx ? (
-        <ScatterTooltip
-          point={hovered.p}
-          xDef={xDef}
-          yDef={yDef}
-          xValue={hovered.xRaw}
-          yValue={hovered.yRaw}
-          noWindowSales={hasNoWindowSales(hovered.p)}
-          colourLabel={
-            colourByDef.kind === 'categorical'
-              ? hovered.bucket
-              : hovered.colourValue != null
-              ? colourByDef.format(hovered.colourValue)
-              : '—'
-          }
-          colourByDef={colourByDef}
-          /* Absolute position in chart-wrapper local pixel space —
-             follows the dot through page scroll, resize, pan/zoom. */
-          dotPx={hoveredDotPx}
-          wrapWidth={width}
-          wrapHeight={height}
-          dismissible={hover?.pointerType !== 'mouse'}
-          onDismiss={() => setHover(null)}
-        />
-      ) : null}
-
       {colourByDef.kind === 'categorical' && colourByDef.id !== 'none' && buckets.length > 1 ? (
         <div className="catalog-analytics-legend">
           {buckets.slice(0, 16).map((b) => (
@@ -4267,7 +4319,7 @@ function ContinuousLegend({ label, format, scale }: ContinuousLegendProps) {
   )
 }
 
-interface ScatterTooltipProps {
+interface ScatterTooltipContentProps {
   point: CatalogAnalyticsPoint
   xDef: PointAxisDef
   yDef: PointAxisDef
@@ -4278,74 +4330,22 @@ interface ScatterTooltipProps {
   noWindowSales: boolean
   colourLabel: string
   colourByDef: ColourByDef
-  /** Hovered dot position, in chart-wrapper-local pixel space. */
-  dotPx: { x: number; y: number }
-  /** Chart wrapper width/height in pixels (== SVG viewBox dimensions). */
-  wrapWidth: number
-  wrapHeight: number
-  /** True on touch — renders a close button so the operator can dismiss. */
-  dismissible: boolean
-  onDismiss: () => void
 }
 
-function ScatterTooltip(p: ScatterTooltipProps) {
-  // Plan width is the IDEAL tooltip width; CSS narrows it if the
-  // viewport (not just the wrapper) is smaller — on mobile the
-  // wrapper can extend beyond the visible viewport when the page is
-  // horizontally scrollable, so wrapWidth alone is not a safe clamp.
-  const viewportW =
-    typeof window !== 'undefined' && window.innerWidth > 0
-      ? window.innerWidth
-      : p.wrapWidth
-  const TOOLTIP_W = Math.min(280, Math.max(180, viewportW - 16))
-  const TOOLTIP_H_EST = 220
-  // Default: place to the right and below the dot. Flip sides if we'd
-  // overflow the chart wrapper. Clamp to wrap bounds so a tooltip
-  // near the top/left edge isn't pushed off-screen.
-  const wantRight = p.dotPx.x + 14 + TOOLTIP_W <= p.wrapWidth
-  const wantBelow = p.dotPx.y + 14 + TOOLTIP_H_EST <= p.wrapHeight
-  let left = wantRight ? p.dotPx.x + 14 : p.dotPx.x - 14 - TOOLTIP_W
-  let top = wantBelow ? p.dotPx.y + 14 : p.dotPx.y - 14 - TOOLTIP_H_EST
-  left = Math.max(4, Math.min(p.wrapWidth - TOOLTIP_W - 4, left))
-  top = Math.max(4, Math.min(p.wrapHeight - 40, top))
-  // Position is in the wrap's local coords (the wrap is the
-  // positioned containing block; the SVG fills it 100%). This means
-  // the tooltip stays attached to the dot through page scroll,
-  // window resize, pan, and zoom — no scroll listener required.
-  const style: React.CSSProperties = {
-    position: 'absolute',
-    left,
-    top,
-    width: TOOLTIP_W,
-    maxWidth: 'calc(100vw - 16px)',
-    pointerEvents: p.dismissible ? 'auto' : 'none',
-  }
+function ScatterTooltipContent(p: ScatterTooltipContentProps) {
   return (
-    <div className="catalog-analytics-tooltip" style={style} role="tooltip">
-      <div className="catalog-analytics-tooltip-title">
-        {p.point.productName}
-        {p.point.sizeLabel ? ` — ${p.point.sizeLabel}` : ''}
-        {p.dismissible ? (
-          <button
-            type="button"
-            className="catalog-analytics-tooltip-close"
-            onClick={(e) => {
-              e.stopPropagation()
-              p.onDismiss()
-            }}
-            aria-label="Dismiss tooltip"
-          >
-            ×
-          </button>
-        ) : null}
-      </div>
-      <div className="catalog-analytics-tooltip-sub subtle-copy">
-        {[p.point.brandName, p.point.distributorName, p.point.subcategoryName, p.point.categoryName]
-          .filter((s) => s)
-          .join(' • ') || '(no classification)'}
-      </div>
-      <table className="catalog-analytics-tooltip-table">
-        <tbody>
+    <>
+            <div className="catalog-analytics-tooltip-title">
+              {p.point.productName}
+              {p.point.sizeLabel ? ` · ${p.point.sizeLabel}` : ''}
+            </div>
+            <div className="catalog-analytics-tooltip-sub subtle-copy">
+              {[p.point.brandName, p.point.distributorName, p.point.subcategoryName, p.point.categoryName]
+                .filter((s) => s)
+                .join(' • ') || '(no classification)'}
+            </div>
+            <table className="catalog-analytics-tooltip-table">
+              <tbody>
           <tr>
             <th>{p.xDef.short}{p.noWindowSales ? '*' : ''}</th>
             <td>{p.xDef.format(p.xValue)}</td>
@@ -4412,14 +4412,14 @@ function ScatterTooltip(p: ScatterTooltipProps) {
               <td>{p.colourLabel}</td>
             </tr>
           ) : null}
-        </tbody>
-      </table>
-      {p.noWindowSales ? (
-        <div className="catalog-analytics-tooltip-note subtle-copy">
-          * no sales in window — axes show list-price / no-movement defaults
-        </div>
-      ) : null}
-    </div>
+              </tbody>
+            </table>
+            {p.noWindowSales ? (
+              <div className="catalog-analytics-tooltip-note subtle-copy">
+                * no sales in window; axes show list-price / no-movement defaults
+              </div>
+            ) : null}
+    </>
   )
 }
 

@@ -6818,6 +6818,101 @@ span.metric-chart-legend-item {
   display: block;
 }
 
+/* Canonical chart interaction surface. The wrapper, controls, tooltip,
+   and fullscreen control are one DOM subtree so browser fullscreen never
+   strands an overlay outside the element being presented. */
+.chart-interaction-frame {
+  position: relative;
+  background: var(--panel, #fffaf1);
+}
+
+.chart-interaction-frame > .metric-chart-header {
+  padding-right: 3rem;
+}
+
+.chart-fullscreen-button {
+  position: absolute;
+  z-index: 8;
+  top: max(0.35rem, env(safe-area-inset-top));
+  right: max(0.35rem, env(safe-area-inset-right));
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: rgba(255, 250, 241, 0.94);
+  color: var(--ink, #17130f);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chart-interaction-frame:fullscreen,
+.chart-interaction-frame.is-fallback-fullscreen {
+  width: 100vw;
+  height: 100vh;
+  padding: max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right))
+    max(0.75rem, env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left));
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.chart-interaction-frame.is-fallback-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+}
+
+.chart-interaction-frame:fullscreen .budtender-sparkline,
+.chart-interaction-frame:fullscreen .budtender-scatter-svg,
+.chart-interaction-frame.is-fallback-fullscreen .budtender-sparkline,
+.chart-interaction-frame.is-fallback-fullscreen .budtender-scatter-svg {
+  max-height: calc(100vh - 9rem);
+}
+
+.chart-interaction-frame:fullscreen .chart-fullscreen-button,
+.chart-interaction-frame.is-fallback-fullscreen .chart-fullscreen-button {
+  position: fixed;
+}
+
+.chart-tooltip-panel {
+  position: fixed;
+  z-index: 10001;
+  width: 280px;
+  overflow-y: auto;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.chart-tooltip-panel[role='region'] {
+  pointer-events: auto;
+}
+
+.budtender-scatter-svg circle[role='button']:focus-visible,
+.catalog-analytics-svg-wrap circle[role='button']:focus-visible {
+  outline: 3px solid #0e5aa7;
+  outline-offset: 3px;
+}
+
+.chart-tooltip-close {
+  float: right;
+  width: 44px;
+  height: 44px;
+  margin: -6px -6px 2px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 1.35rem;
+  cursor: pointer;
+}
+
+.chart-tooltip-summary {
+  display: flex;
+  min-width: 9rem;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 
 /* =========================================================================
    A4 phase-1.1 — operator feedback: compact table, brighter mini map

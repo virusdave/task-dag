@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   budtenderCashierBlockedStatus,
@@ -9,6 +9,12 @@ import {
   type BudtenderMissingDataCard,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import {
+  ChartInteractionFrame,
+  svgPointAnchor,
+  TapGestureTracker,
+  useChartInteraction,
+} from './ChartInteractionFrame.js'
 import { ControlsSection } from './ControlsSection.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
@@ -348,36 +354,38 @@ function DailyTrendCard({ data }: { data: BudtenderAnalyticsResponse }) {
   })
   return (
     <article className="metric-chart-card">
-      <header className="metric-chart-header">
-        <div className="metric-chart-titlewrap">
-          <h3 className="metric-chart-title">
-            Daily attributed activity{' '}
-            <HelpIcon text="Per-day rollup of all orders attributed to any cashier. Switch the metric selector to see sales, transaction count, average order value, or effective discount rate (sum(discount)/sum(subtotal)). Unassigned transactions are visible in the KPI strip above but excluded here." />
-          </h3>
-        </div>
-        <div className="metric-chart-controls">
-          <label>
-            metric{' '}
-            <select value={metric} onChange={(e) => setMetric(e.target.value as Metric)}>
-              <option value="sales">sales $</option>
-              <option value="transactions">transactions</option>
-              <option value="aov">avg order value</option>
-              <option value="discount">discount %</option>
-            </select>
-          </label>
-        </div>
-      </header>
-      <Sparkline
-        days={data.daily.map((d) => d.day)}
-        values={values}
-        format={
-          metric === 'sales' || metric === 'aov'
-            ? fmtMoney
-            : metric === 'discount'
-              ? (v) => `${v.toFixed(1)}%`
-              : fmtInt
-        }
-      />
+      <ChartInteractionFrame label="Daily attributed activity chart">
+        <header className="metric-chart-header">
+          <div className="metric-chart-titlewrap">
+            <h3 className="metric-chart-title">
+              Daily attributed activity{' '}
+              <HelpIcon text="Per-day rollup of all orders attributed to any cashier. Switch the metric selector to see sales, transaction count, average order value, or effective discount rate (sum(discount)/sum(subtotal)). Unassigned transactions are visible in the KPI strip above but excluded here." />
+            </h3>
+          </div>
+          <div className="metric-chart-controls">
+            <label>
+              metric{' '}
+              <select value={metric} onChange={(e) => setMetric(e.target.value as Metric)}>
+                <option value="sales">sales $</option>
+                <option value="transactions">transactions</option>
+                <option value="aov">avg order value</option>
+                <option value="discount">discount %</option>
+              </select>
+            </label>
+          </div>
+        </header>
+        <Sparkline
+          days={data.daily.map((d) => d.day)}
+          values={values}
+          format={
+            metric === 'sales' || metric === 'aov'
+              ? fmtMoney
+              : metric === 'discount'
+                ? (v) => `${v.toFixed(1)}%`
+                : fmtInt
+          }
+        />
+      </ChartInteractionFrame>
     </article>
   )
 }
@@ -387,7 +395,7 @@ function DailyTrendCard({ data }: { data: BudtenderAnalyticsResponse }) {
 // and a server query — neither of which we want for this tiny derived
 // series. It still honours the dashboard look-and-feel: gridlines at
 // human-friendly intervals, smooth curve, x markers on points.
-function Sparkline({
+export function Sparkline({
   days,
   values,
   format,
@@ -396,6 +404,10 @@ function Sparkline({
   values: number[]
   format: (v: number) => string
 }) {
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const touchGestureRef = useRef(new TapGestureTracker())
+  const [keyboardIndex, setKeyboardIndex] = useState(0)
+  const { tooltip, showTooltip, dismissTooltip } = useChartInteraction()
   const W = 700
   const H = 220
   const PAD_L = 56
@@ -430,8 +442,68 @@ function Sparkline({
       path += ` C ${cx.toFixed(2)} ${yp.toFixed(2)}, ${cx.toFixed(2)} ${y.toFixed(2)}, ${x.toFixed(2)} ${y.toFixed(2)}`
     }
   }
+  const showPoint = (index: number, sticky: boolean): void => {
+    const svg = svgRef.current
+    if (svg === null) return
+    setKeyboardIndex(index)
+    showTooltip({
+      anchor: svgPointAnchor(svg, { x: xScale(index), y: yScale(values[index]!) }),
+      sticky,
+      label: `Daily activity for ${shortDay(days[index]!)}`,
+      content: (
+        <div className="chart-tooltip-summary">
+          <strong>{shortDay(days[index]!)}</strong>
+          <span>{format(values[index]!)}</span>
+        </div>
+      ),
+    })
+  }
+  const nearestIndex = (clientX: number): number => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (rect === undefined || rect.width <= 0) return 0
+    const localX = ((clientX - rect.left) / rect.width) * W
+    return Math.max(0, Math.min(n - 1, Math.round(((localX - PAD_L) / plotW) * (n - 1))))
+  }
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Daily activity sparkline" className="budtender-sparkline">
+    <svg
+      ref={svgRef}
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label="Daily activity sparkline. Use arrow keys to inspect each day."
+      className="budtender-sparkline"
+      tabIndex={0}
+      onPointerDown={(event) => {
+        if (event.pointerType !== 'mouse') {
+          touchGestureRef.current.pointerDown(event.pointerId, { x: event.clientX, y: event.clientY })
+        }
+      }}
+      onPointerUp={(event) => {
+        if (touchGestureRef.current.pointerUp(event.pointerId, { x: event.clientX, y: event.clientY })) {
+          showPoint(nearestIndex(event.clientX), true)
+        }
+      }}
+      onPointerCancel={(event) => {
+        touchGestureRef.current.pointerCancel(event.pointerId)
+      }}
+      onPointerMove={(event) => {
+        if (event.pointerType === 'mouse') showPoint(nearestIndex(event.clientX), false)
+      }}
+      onPointerLeave={(event) => {
+        if (event.pointerType === 'mouse' && !tooltip?.sticky) dismissTooltip(false)
+      }}
+      onKeyDown={(event) => {
+        let next = keyboardIndex
+        if (event.key === 'ArrowLeft') next = Math.max(0, keyboardIndex - 1)
+        else if (event.key === 'ArrowRight') next = Math.min(n - 1, keyboardIndex + 1)
+        else if (event.key === 'Home') next = 0
+        else if (event.key === 'End') next = n - 1
+        else if (event.key === 'Enter' || event.key === ' ') next = keyboardIndex
+        else return
+        event.preventDefault()
+        showPoint(next, true)
+      }}
+      style={{ touchAction: 'pan-y pinch-zoom' }}
+    >
       {ticks.map((t, i) => (
         <g key={`hg-${i}`}>
           <line
@@ -1048,6 +1120,7 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
   )
   return (
     <article className="metric-chart-card">
+      <ChartInteractionFrame label="Cashier scatter chart">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">
@@ -1152,6 +1225,7 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
         selectedCashierId={selectedCashierId}
         onSelectCashier={onSelectCashier}
       />
+      </ChartInteractionFrame>
     </article>
   )
 }
@@ -1253,6 +1327,9 @@ interface ScatterSvgProps {
 }
 
 function CashierScatterSvg(p: ScatterSvgProps) {
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const touchGestureRef = useRef(new TapGestureTracker())
+  const { tooltip, showTooltip, dismissTooltip } = useChartInteraction()
   const W = 720
   const H = 360
   const PAD_L = 64
@@ -1352,7 +1429,6 @@ function CashierScatterSvg(p: ScatterSvgProps) {
     return interpRedGreen(t)
   }
 
-  const [hovered, setHovered] = useState<{ idx: number; xpx: number; ypx: number } | null>(null)
   const matched: number[] = []
   const dimmed: number[] = []
   plotted.forEach((d, i) => {
@@ -1361,13 +1437,88 @@ function CashierScatterSvg(p: ScatterSvgProps) {
     else matched.push(i)
   })
 
+  const showCashier = (
+    index: number,
+    sticky: boolean,
+    trigger?: HTMLElement | SVGElement,
+  ): void => {
+    const svg = svgRef.current
+    const datum = plotted[index]
+    if (svg === null || datum === undefined) return
+    const resolvedTrigger = trigger ??
+      svg.querySelector<SVGCircleElement>(`[data-chart-point-index="${index}"]`) ??
+      svg
+    showTooltip({
+      anchor: svgPointAnchor(svg, { x: xScale(datum.x), y: yScale(datum.y) }, resolvedTrigger),
+      sticky,
+      label: `Cashier details for ${datum.c.cashierName || datum.c.cashierId}`,
+      content: (
+        <ScatterTooltipContent
+          cashier={datum.c}
+          xDef={p.xDef}
+          yDef={p.yDef}
+          xValue={datum.x}
+          yValue={datum.y}
+        />
+      ),
+    })
+  }
+
+  const nearestCashier = (clientX: number, clientY: number): number | null => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (rect === undefined || rect.width <= 0 || rect.height <= 0) return null
+    let bestIndex = -1
+    let bestDistance = Number.POSITIVE_INFINITY
+    plotted.forEach((datum, index) => {
+      const x = rect.left + (xScale(datum.x) / W) * rect.width
+      const y = rect.top + (yScale(datum.y) / H) * rect.height
+      const distance = Math.hypot(clientX - x, clientY - y)
+      if (distance < bestDistance) {
+        bestIndex = index
+        bestDistance = distance
+      }
+    })
+    return bestDistance <= 44 ? bestIndex : null
+  }
+
   return (
     <div className="budtender-scatter-wrap" style={{ position: 'relative' }}>
       <svg
+        ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
-        role="img"
+        role="group"
         aria-label="Cashier scatter"
         className="budtender-scatter-svg"
+        onPointerDown={(event) => {
+          if (event.pointerType !== 'mouse') {
+            touchGestureRef.current.pointerDown(event.pointerId, {
+              x: event.clientX,
+              y: event.clientY,
+            })
+          }
+        }}
+        onPointerUp={(event) => {
+          if (!touchGestureRef.current.pointerUp(
+            event.pointerId,
+            { x: event.clientX, y: event.clientY },
+          )) return
+          const index = nearestCashier(event.clientX, event.clientY)
+          if (index === null) dismissTooltip(false)
+          else showCashier(index, true)
+        }}
+        onPointerCancel={(event) => {
+          touchGestureRef.current.pointerCancel(event.pointerId)
+        }}
+        onPointerMove={(event) => {
+          if (event.pointerType !== 'mouse') return
+          const index = nearestCashier(event.clientX, event.clientY)
+          if (index === null) dismissTooltip(false)
+          else showCashier(index, false, event.currentTarget)
+        }}
+        onPointerLeave={(event) => {
+          if (event.pointerType === 'mouse' && !tooltip?.sticky) dismissTooltip(false)
+        }}
+        style={{ touchAction: 'pan-y pinch-zoom' }}
       >
         {/* Light dashed gridlines + Y tick labels at nice values.
             Visual treatment (`#d8d8d8`, 0.8px, dashed) matches the
@@ -1425,6 +1576,8 @@ function CashierScatterSvg(p: ScatterSvgProps) {
           return (
             <circle
               key={`dim-${i}`}
+              data-chart-point-index={i}
+              tabIndex={-1}
               cx={xScale(d.x)}
               cy={yScale(d.y)}
               r={Math.max(2, dotR(d.size) - 1)}
@@ -1449,6 +1602,7 @@ function CashierScatterSvg(p: ScatterSvgProps) {
           return (
             <circle
               key={`pt-${i}`}
+              data-chart-point-index={i}
               cx={xScale(d.x)}
               cy={yScale(d.y)}
               r={r}
@@ -1460,7 +1614,7 @@ function CashierScatterSvg(p: ScatterSvgProps) {
               tabIndex={0}
               aria-label={`Drill into cashier ${d.c.cashierName || d.c.cashierId}`}
               aria-pressed={isSelected}
-              style={{ cursor: 'pointer', outline: 'none' }}
+              style={{ cursor: 'pointer' }}
               onClick={onActivate}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
@@ -1468,24 +1622,14 @@ function CashierScatterSvg(p: ScatterSvgProps) {
                   onActivate()
                 }
               }}
-              onMouseEnter={() => setHovered({ idx: i, xpx: xScale(d.x), ypx: yScale(d.y) })}
-              onMouseLeave={() => setHovered(null)}
+              onPointerEnter={(event) => {
+                if (event.pointerType === 'mouse') showCashier(i, false, event.currentTarget)
+              }}
+              onFocus={(event) => showCashier(i, true, event.currentTarget)}
             />
           )
         })}
       </svg>
-      {hovered ? (
-        <ScatterTooltip
-          cashier={plotted[hovered.idx]!.c}
-          xDef={p.xDef}
-          yDef={p.yDef}
-          xValue={plotted[hovered.idx]!.x}
-          yValue={plotted[hovered.idx]!.y}
-          dotPx={{ x: hovered.xpx, y: hovered.ypx }}
-          wrapW={W}
-          wrapH={H}
-        />
-      ) : null}
       {/* Compact-vs-full fit-mode chip. Mirrors the catalog scatter so
           every scatter on /metrics offers the same outlier-resistant
           default + one-click escape to the full extent. Hidden when
@@ -1515,34 +1659,16 @@ function CashierScatterSvg(p: ScatterSvgProps) {
   )
 }
 
-function ScatterTooltip(p: {
+function ScatterTooltipContent(p: {
   cashier: BudtenderCashierRow
   xDef: AxisDef
   yDef: AxisDef
   xValue: number
   yValue: number
-  dotPx: { x: number; y: number }
-  wrapW: number
-  wrapH: number
 }) {
-  const viewportW =
-    typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : p.wrapW
-  const W = Math.min(280, Math.max(180, viewportW - 16))
-  const right = p.dotPx.x + 14 + W <= p.wrapW
-  let left = right ? p.dotPx.x + 14 : p.dotPx.x - 14 - W
-  left = Math.max(4, Math.min(p.wrapW - W - 4, left))
-  const top = Math.max(4, Math.min(p.wrapH - 40, p.dotPx.y + 14))
-  const style: React.CSSProperties = {
-    position: 'absolute',
-    left,
-    top,
-    width: W,
-    maxWidth: 'calc(100vw - 16px)',
-    pointerEvents: 'none',
-  }
   const c = p.cashier
   return (
-    <div className="catalog-analytics-tooltip" style={style} role="tooltip">
+    <>
       <div className="catalog-analytics-tooltip-title">
         {c.cashierName || `Cashier ${c.cashierId}`}
       </div>
@@ -1576,7 +1702,7 @@ function ScatterTooltip(p: {
           </tr>
         </tbody>
       </table>
-    </div>
+    </>
   )
 }
 
