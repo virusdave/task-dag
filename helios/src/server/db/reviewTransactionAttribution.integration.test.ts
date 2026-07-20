@@ -80,7 +80,8 @@ describe('review transaction attribution PostgreSQL integration', () => {
       create table staff_directory_cache (staff_id text primary key, full_name text);
       create table sweed_orders (
         dealer_id bigint not null, invoice_id text not null, pay_time timestamptz not null,
-        cashier_user_id bigint, raw_json jsonb not null, primary key (dealer_id, invoice_id)
+        cashier_user_id bigint, raw_json jsonb not null, invoice_status_name text,
+        primary key (dealer_id, invoice_id)
       );
       create index sweed_orders_dealer_pay_time_idx on sweed_orders (dealer_id, pay_time);
     `)
@@ -91,10 +92,15 @@ describe('review transaction attribution PostgreSQL integration', () => {
       llmVerdict: null, degradedPass: null, llmRaw: null, llmModelRef: null,
       llmAt: null, reviewProviderUrl: null,
     }
-    const infer = async (rows: Array<[string, Date, number | null, string]>) => {
+    const infer = async (rows: Array<[string, Date, number | null, string, string?]>) => {
       await pool.query('truncate sweed_orders')
-      for (const [invoiceId, payTime, cashierId, rawJson] of rows) {
-        await pool.query('insert into sweed_orders values (210705, $1, $2, $3, $4::jsonb)', [invoiceId, payTime, cashierId, rawJson])
+      for (const [invoiceId, payTime, cashierId, rawJson, invoiceStatusName] of rows) {
+        await pool.query(
+          `insert into sweed_orders
+           (dealer_id, invoice_id, pay_time, cashier_user_id, raw_json, invoice_status_name)
+           values (210705, $1, $2, $3, $4::jsonb, $5)`,
+          [invoiceId, payTime, cashierId, rawJson, invoiceStatusName ?? null],
+        )
       }
       const inserted = await insertReviewSubmissionAt(pool, input, now)
       return (await pool.query('select invoice_match_status, matched_invoice_id from review_submissions where id = $1', [inserted.submissionId])).rows[0]
@@ -105,7 +111,7 @@ describe('review transaction attribution PostgreSQL integration', () => {
     expect(await infer([['b', new Date(now.getTime() - 120_000), 1, '{}'], ['a', new Date(now.getTime() - 120_000), 1, '{}']])).toEqual({ invoice_match_status: 'matched', matched_invoice_id: 'a' })
     expect(await infer([])).toEqual({ invoice_match_status: 'unmatched', matched_invoice_id: null })
     expect(await infer([
-      ['cancelled-nearest', new Date(now.getTime() - 10_000), 1, '{"invoiceStatus":{"name":"Cancelled"}}'],
+      ['cancelled-nearest', new Date(now.getTime() - 10_000), 1, '{"invoiceStatus":{"name":"Cancelled"}}', 'Cancelled'],
       ['nearest-null', new Date(now.getTime() - 20_000), null, '{}'],
       ['farther-cashier', new Date(now.getTime() - 30_000), 9, '{}'],
     ])).toEqual({ invoice_match_status: 'unmatched', matched_invoice_id: null })
