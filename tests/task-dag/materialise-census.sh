@@ -211,7 +211,7 @@ make_declaration create-in-flight-or-uncertain Rearm 'rearm body' rearm "$I/rear
 make_declaration issue-adopted Initial 'initial body' initial "$I/initial-declaration"
 jq '.adoptedIssue={issueNodeId:"PI_initial",repositoryId:"PR_peer",number:4}' "$I/initial-declaration" >"$I/initial-declaration.n"; mv "$I/initial-declaration.n" "$I/initial-declaration"
 jq -ncS --arg d "$delegation" --arg dd "$dd" --arg pt "$peer_close" --arg pc "$peer_close" --arg pe "$peer_root" --arg orphan "$orphan" --slurpfile adopt "$I/adopt-declaration" --slurpfile rearm "$I/rearm-declaration" --slurpfile initial "$I/initial-declaration" '{schema:1,issues:[{body:"parent\n",completionEvidence:[{disposition:"malformed-evidence",oid:$orphan,ref:"refs/heads/tasks/completions/1/peer/repo/2/deadbee"}],createdAt:"2026-07-17T00:00:00Z",creator:"fixture",declarations:[$adopt[0],$rearm[0],$initial[0]]|sort_by(.slotId),id:"PI_parent",liveDelegations:[{declarationDigest:$dd,delegationCommit:$d,disposition:"verified-child-close",materialisationOperationId:"operation-1",oid:$d,parentIssue:1,parentIssueNodeId:"PI_parent",parentRepo:"virusdave/task-dag",parentRepoNodeId:"PR_parent",peerClose:$pc,peerEpic:$pe,peerIssue:2,peerIssueNodeId:"PI_peer",peerRepo:"peer/repo",peerRepoNodeId:"PR_peer",peerTip:$pt,ref:"refs/heads/tasks/delegated/1/peer/repo/2"}],markers:[],number:1,repositoryId:"PR_parent",state:"OPEN",title:"Parent"}]}' >"$I/parent-page"
-jq -ncS '{schema:1,issues:[{body:"adoption target\n",completionEvidence:[],createdAt:"2026-07-17T00:00:00Z",creator:"fixture",declarations:[],id:"PI_adopted",liveDelegations:[],markers:[],number:3,repositoryId:"PR_peer",state:"OPEN",title:"Adopted issue"},{body:"initial adoption target\n",completionEvidence:[],createdAt:"2026-07-17T00:00:00Z",creator:"fixture",declarations:[],id:"PI_initial",liveDelegations:[],markers:[],number:4,repositoryId:"PR_peer",state:"OPEN",title:"Initial adopted issue"}]}' >"$I/peer-page"
+jq -ncS '{schema:1,issues:[{body:"adoption target\n",completionEvidence:[],createdAt:"2026-07-17T00:00:00Z",creator:"fixture",declarations:[],id:"PI_adopted[.]",liveDelegations:[],markers:[],number:3,repositoryId:"PR_peer",state:"OPEN",title:"Adopted issue"},{body:"initial adoption target\n",completionEvidence:[],createdAt:"2026-07-17T00:00:00Z",creator:"fixture",declarations:[],id:"PI_initial",liveDelegations:[],markers:[],number:4,repositoryId:"PR_peer",state:"OPEN",title:"Initial adopted issue"}]}' >"$I/peer-page"
 jq -ncS --arg a "$I/activation-record" --arg pp "$I/parent-page" --arg ep "$I/peer-page" --arg parent "$I/parent" --arg peer "$I/peer" --arg pt "$parent_tip" --arg pct "$peer_close" '{schema:1,activationRecord:$a,issuePages:[{file:$ep,hasNextPage:false,page:1,repository:"peer/repo"},{file:$pp,hasNextPage:false,page:1,repository:"virusdave/task-dag"}],repositories:[{path:$peer,repository:"peer/repo",tip:$pct},{path:$parent,repository:"virusdave/task-dag",tip:$pt}]}' >"$I/spec"
 jq --arg wrong "$peer_root" '.issues[0].liveDelegations[0].peerClose=$wrong' "$I/parent-page" >"$I/wrong-page"
 jq --arg page "$I/wrong-page" '(.issuePages[]|select(.repository=="virusdave/task-dag").file)=$page' "$I/spec" >"$I/wrong-spec"
@@ -277,6 +277,16 @@ before_material=$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materi
 
 census_digest=$(cat "$I/digest"); adopt_slot=$(jq -r .slotId "$I/adopt-declaration"); rearm_slot=$(jq -r .slotId "$I/rearm-declaration"); initial_slot=$(jq -r .slotId "$I/initial-declaration")
 jq -ncS --arg runtime "$(_taskdag_materialise_runtime_commit)" --arg census "$census_digest" '{actor:"fixture",appCreatorNodeId:"BOT_fixture",authoritativeTimestamp:"2026-07-18T00:00:00Z",censusDigest:$census,runtimeCommit:$runtime}' >"$I/producer-spec"
+if ! git --git-dir="$I/origin" show-ref --verify --quiet refs/heads/tasks/v1/materialisation-producer \
+  && (cd "$I/parent" && "$TD" materialise-producer-enable --spec-file "$I/producer-spec" >/dev/null) \
+  && git --git-dir="$I/origin" show-ref --verify --quiet refs/heads/tasks/v1/materialisation-producer; then
+  ok "public producer-enable command creates authority from absence"
+else
+  bad "public producer-enable command did not causally create authority"
+fi
+producer_tip=$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materialisation-producer)
+git --git-dir="$I/origin" update-ref -d refs/heads/tasks/v1/materialisation-producer "$producer_tip"
+git -C "$I/parent" update-ref -d refs/heads/tasks/v1/materialisation-producer "$producer_tip" 2>/dev/null || true
 eval "$(declare -f taskdag_activation_fenced_multi_push | sed '1s/taskdag_activation_fenced_multi_push/_fixture_real_fenced_multi_push/')"
 taskdag_activation_fenced_multi_push() {
   _fixture_real_fenced_multi_push "$@" || return
@@ -290,6 +300,14 @@ else
 fi
 unset -f taskdag_activation_fenced_multi_push
 eval "$(declare -f _fixture_real_fenced_multi_push | sed '1s/_fixture_real_fenced_multi_push/taskdag_activation_fenced_multi_push/')"
+retry_producer_tip=$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materialisation-producer)
+if (cd "$I/parent" && "$TD" materialise-producer-enable --spec-file "$I/producer-spec" >/dev/null) \
+  && [ "$retry_producer_tip" = "$(git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materialisation-producer)" ]; then
+  ok "public producer-enable retry converges on exact authority"
+else
+  bad "public producer-enable retry did not accept exact authority"
+fi
+
 material_tip() { git --git-dir="$I/origin" rev-parse refs/heads/tasks/v1/materialisation; }
 state_json() { git --git-dir="$I/origin" show "$(material_tip):slots/$1/states/$(printf '%016d' "$2").json"; }
 tree_clean() { local violations; violations=$(cd "$I/parent" && taskdag_materialisation_tree_violations "$(material_tip)" "$authority"); [ -z "$violations" ] || { printf '%s\n' "$violations" >&2; return 1; }; }
@@ -298,20 +316,20 @@ jq -e '.state=="issue-adopted" and .adoptedIssue=={issueNodeId:"PI_initial",numb
   && ! git --git-dir="$I/origin" show "$(material_tip):declarations/$(jq -r .declarationDigest "$I/initial-declaration").json" | jq -e 'has("adoptedIssue")' >/dev/null \
   && ok "initial adopted import keeps issue identity only in state" || bad "initial adopted import invalid"
 prior_adopt=$(state_json "$adopt_slot" 0); prior_adopt_digest=$(printf '%s\n' "$prior_adopt" | sha256sum | awk '{print $1}')
-jq -ncS --arg censusDigest "$census_digest" --arg slotId "$adopt_slot" --arg priorStateDigest "$prior_adopt_digest" '{schema:1,mode:"adopt",slotId:$slotId,generation:1,censusDigest:$censusDigest,priorStateDigest:$priorStateDigest,adoptedIssue:{issueNodeId:"PI_adopted",repositoryId:"PR_peer",number:3},approval:"fixture approval",evidence:["audit://fixture/adopt"],actor:"fixture",timestamp:"2026-07-17T00:01:00Z"}' >"$I/adopt-spec"
+jq -ncS --arg censusDigest "$census_digest" --arg slotId "$adopt_slot" --arg priorStateDigest "$prior_adopt_digest" '{schema:1,mode:"adopt",slotId:$slotId,generation:1,censusDigest:$censusDigest,priorStateDigest:$priorStateDigest,adoptedIssue:{issueNodeId:"PI_adopted[.]",repositoryId:"PR_peer",number:3},approval:"fixture approval",evidence:["audit://fixture/adopt"],actor:"fixture",timestamp:"2026-07-17T00:01:00Z"}' >"$I/adopt-spec"
 for mutation in '.adoptedIssue.issueNodeId="stale"' '.adoptedIssue.number=999' '.adoptedIssue.repositoryId="PR_parent"' '.priorStateDigest="0000000000000000000000000000000000000000000000000000000000000000"' '.censusDigest="0000000000000000000000000000000000000000000000000000000000000000"'; do
   before=$(material_tip); jq "$mutation" "$I/adopt-spec" >"$I/rejected-spec"
   if (cd "$I/parent" && "$TD" materialise-adopt --spec-file "$I/rejected-spec" >/dev/null 2>&1) || [ "$before" != "$(material_tip)" ]; then bad "invalid adoption moved authority ($mutation)"; else ok "invalid adoption fails without movement ($mutation)"; fi
 done
 (cd "$I/parent" && "$TD" materialise-adopt --spec-file "$I/adopt-spec") || bad "valid adoption"
 adopted_tip=$(material_tip); adopted=$(state_json "$adopt_slot" 1)
-jq -e '.state=="issue-adopted" and .adoptedIssue.issueNodeId=="PI_adopted" and .adoptedIssue.repositoryId=="PR_peer" and .adoptedIssue.number==3' <<<"$adopted" >/dev/null && tree_clean && ok "adoption binds exact census issue and leaves valid successor" || bad "adoption successor invalid"
+jq -e '.state=="issue-adopted" and .adoptedIssue.issueNodeId=="PI_adopted[.]" and .adoptedIssue.repositoryId=="PR_peer" and .adoptedIssue.number==3' <<<"$adopted" >/dev/null && tree_clean && ok "adoption binds exact metacharacter-bearing census issue and leaves valid successor" || bad "adoption successor invalid"
 (cd "$I/parent" && "$TD" materialise-adopt --spec-file "$I/adopt-spec" >/dev/null) && [ "$adopted_tip" = "$(material_tip)" ] && ok "exact adoption retry converges" || bad "adoption retry moved authority"
 jq '.mode="rearm" | del(.adoptedIssue) | .approval="late rearm"' "$I/adopt-spec" >"$I/late-rearm"; before=$(material_tip)
 if (cd "$I/parent" && "$TD" materialise-rearm --spec-file "$I/late-rearm" >/dev/null 2>&1) || [ "$before" != "$(material_tip)" ]; then bad "rearm appended beside adopted generation"; else ok "rearm cannot be appended after same-generation adoption"; fi
 
 prior_rearm=$(state_json "$rearm_slot" 0); prior_rearm_digest=$(printf '%s\n' "$prior_rearm" | sha256sum | awk '{print $1}')
-jq -ncS --arg censusDigest "$census_digest" --arg slotId "$rearm_slot" --arg priorStateDigest "$prior_rearm_digest" '{schema:1,mode:"adopt",slotId:$slotId,generation:1,censusDigest:$censusDigest,priorStateDigest:$priorStateDigest,adoptedIssue:{issueNodeId:"PI_adopted",repositoryId:"PR_peer",number:3},approval:"collision",evidence:["audit://fixture/collision"],actor:"fixture",timestamp:"2026-07-17T00:01:30Z"}' >"$I/collision-spec"; before=$(material_tip)
+jq -ncS --arg censusDigest "$census_digest" --arg slotId "$rearm_slot" --arg priorStateDigest "$prior_rearm_digest" '{schema:1,mode:"adopt",slotId:$slotId,generation:1,censusDigest:$censusDigest,priorStateDigest:$priorStateDigest,adoptedIssue:{issueNodeId:"PI_adopted[.]",repositoryId:"PR_peer",number:3},approval:"collision",evidence:["audit://fixture/collision"],actor:"fixture",timestamp:"2026-07-17T00:01:30Z"}' >"$I/collision-spec"; before=$(material_tip)
 if (cd "$I/parent" && "$TD" materialise-adopt --spec-file "$I/collision-spec" >/dev/null 2>&1) || [ "$before" != "$(material_tip)" ]; then bad "adopted issue collision accepted"; else ok "adopted issue is globally unique across slots"; fi
 jq -ncS --arg censusDigest "$census_digest" --arg slotId "$rearm_slot" --arg priorStateDigest "$prior_rearm_digest" '{schema:1,mode:"rearm",slotId:$slotId,generation:1,censusDigest:$censusDigest,priorStateDigest:$priorStateDigest,approval:"fixture approval",evidence:["audit://fixture/rearm"],actor:"fixture",timestamp:"2026-07-17T00:02:00Z"}' >"$I/rearm-spec"
 (cd "$I/parent" && "$TD" materialise-rearm --spec-file "$I/rearm-spec") || bad "valid rearm"
@@ -365,4 +383,137 @@ idx="$I/forged-index"; GIT_INDEX_FILE="$idx" git -C "$I/parent" read-tree "$(git
 git -C "$I/parent" update-ref refs/heads/tasks/v1/materialisation "$forged" "$consume_tip"
 if (cd "$I/parent" && "$TD" validate --strict >/dev/null 2>&1); then bad "public strict audit accepted unknown census activation digest"; else ok "public strict audit binds census to enabled activation record"; fi
 git -C "$I/parent" update-ref refs/heads/tasks/v1/materialisation "$consume_tip" "$forged"
+
+printf 'public path body\n' >"$I/parent/public-body"
+jq -ncS '{schema:1,actor:"fixture",authoritativeTimestamp:"2026-07-18T00:00:01Z",provenance:["public-path-fixture"],declarations:[{sourceRepo:{id:"PR_parent",name:"virusdave/task-dag"},parentIssue:{id:"PI_parent",number:1},peerRepo:{id:"PR_peer",name:"peer/repo"},title:"Public path child",bodyFile:"public-body",slug:"public-path",provenance:"public-path-fixture"}]}' >"$I/parent/public-child-spec"
+public_prepared=$(cd "$I/parent" && taskdag_materialise_prepare "$I/parent/public-child-spec")
+public_slot=$(jq -r '.declarations[0].slotId' <<<"$public_prepared")
+before_public_child=$(material_tip)
+if ! git --git-dir="$I/origin" cat-file -e "$before_public_child:slots/$public_slot" 2>/dev/null \
+  && (cd "$I/parent" && "$TD" materialise-child --spec-file "$I/parent/public-child-spec" >/dev/null) \
+  && [ "$(state_json "$public_slot" 0 | jq -r .state)" = batch-reserved-before-create ]; then
+  ok "public child command creates a fresh reserved slot"
+else
+  bad "public child command did not causally reserve a fresh slot"
+fi
+parent_root=$(printf '%s\n' $'Task: Parent epic\n\nIssue: #1\nType: epic' | git -C "$I/parent" commit-tree "$parent_empty" -p "$parent_tip")
+git -C "$I/parent" update-ref refs/heads/tasks/pending/1 "$parent_root"
+git -C "$I/parent" push -q origin refs/heads/tasks/pending/1
+git -C "$I/parent" config taskdag.peer-path.peer/repo.path "$I/peer"
+mkdir "$I/public-bin"
+cat >"$I/public-bin/openssl" <<'EOF'
+#!/usr/bin/env bash
+printf signature
+EOF
+cat >"$I/public-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *access_tokens*) printf '%s\n%s\n' '{"token":"fixture-token"}' 201 ;;
+  *) printf '%s\n%s\n' '{"id":1}' 200 ;;
+esac
+EOF
+cat >"$I/public-bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = issue ] && [ "${2:-}" = view ]; then
+  [ ! -e "$PUBLIC_GH_FAIL_VIEW" ] || exit 1
+  cat "$PUBLIC_PARENT_BODY"
+  exit 0
+fi
+if [ "${1:-}" = issue ] && [ "${2:-}" = edit ]; then
+  [ ! -e "$PUBLIC_GH_FAIL_EDIT" ] || exit 1
+  while [ "$#" -gt 0 ]; do
+    [ "$1" != --body-file ] || { cp "$2" "$PUBLIC_PARENT_BODY"; exit 0; }
+    shift
+  done
+  exit 2
+fi
+case "$*" in
+  *' -X POST '*)
+    while [ "$#" -gt 0 ]; do [ "$1" != --input ] || { cp "$2" "$PUBLIC_POST_PAYLOAD"; break; }; shift; done
+    jq '. + {node_id:"PI_public",number:5,created_at:"2026-07-18T00:00:02Z",user:{node_id:"BOT_fixture"}}' "$PUBLIC_POST_PAYLOAD" >"$PUBLIC_ISSUE"
+    cat "$PUBLIC_ISSUE" ;;
+  *' --paginate --slurp '*) jq -nc --slurpfile issue "$PUBLIC_ISSUE" '[$issue]' ;;
+  *' -i repos/peer/repo'*) printf 'Date: Sat, 18 Jul 2026 00:00:01 GMT\r\n\r\n%s\n' '{"id":2,"node_id":"PR_peer"}' ;;
+  *'repos/virusdave/task-dag'*'--jq .id'*) printf '%s\n' 1271015780 ;;
+  *'repos/virusdave/task-dag'*) printf '%s\n' '{"id":1271015780,"node_id":"PR_parent"}' ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$I/public-bin/openssl" "$I/public-bin/curl" "$I/public-bin/gh"
+printf '%s\n' 'Public parent body.' >"$I/public-parent-body"
+export PUBLIC_POST_PAYLOAD="$I/public-post-payload" PUBLIC_ISSUE="$I/public-issue" PUBLIC_PARENT_BODY="$I/public-parent-body"
+export PUBLIC_GH_FAIL_VIEW="$I/public-fail-view" PUBLIC_GH_FAIL_EDIT="$I/public-fail-edit"
+public_env=(env PATH="$I/public-bin:$PATH" TASKDAG_APP_ID=1 TASKDAG_APP_PRIVATE_KEY=fixture)
+set +e
+(cd "$I/parent" && "${public_env[@]}" "$TD" materialise-reconcile --slot "$public_slot" >"$I/public-reconcile.out" 2>&1)
+first_reconcile_rc=$?
+set -e
+if [ "$first_reconcile_rc" -eq 3 ] && [ "$(state_json "$public_slot" 2 | jq -r .state)" = issue-adopted ]; then
+  ok "public reconcile persists provider adoption before peer epic ingestion"
+else
+  cat "$I/public-reconcile.out" >&2
+  bad "public reconcile did not stop at the expected asynchronous peer-root boundary"
+fi
+peer_five=$(printf '%s\n' $'Task: Public path child\n\nIssue: #5\nType: epic' | git -C "$I/peer" commit-tree "$empty" -p "$peer_close")
+git -C "$I/peer" update-ref refs/heads/gh/issues/5 "$peer_five"
+git -C "$I/peer" push -q origin refs/heads/gh/issues/5
+# The first pass projected the body before stopping at the asynchronous peer
+# root boundary. Simulate a later external body replacement so retries must
+# perform the projection again and exercise both provider failure boundaries.
+printf '%s\n' 'Public parent body.' >"$PUBLIC_PARENT_BODY"
+touch "$PUBLIC_GH_FAIL_VIEW"
+set +e
+(cd "$I/parent" && "${public_env[@]}" "$TD" materialise-reconcile --slot "$public_slot" >>"$I/public-reconcile.out" 2>&1)
+second_reconcile_rc=$?
+set -e
+rm -f "$PUBLIC_GH_FAIL_VIEW"
+if [ "$second_reconcile_rc" -eq 3 ] \
+  && [ "$(state_json "$public_slot" 3 | jq -r .state)" = marker-durable-delegation-pending ] \
+  && ! git --git-dir="$I/origin" cat-file -e "$(material_tip):slots/$public_slot/states/0000000000000004.json" 2>/dev/null; then
+  ok "failed parent issue read cannot finalize materialisation"
+else
+  cat "$I/public-reconcile.out" >&2
+  bad "failed parent issue read did not remain durably retryable"
+fi
+touch "$PUBLIC_GH_FAIL_EDIT"
+set +e
+(cd "$I/parent" && "${public_env[@]}" "$TD" materialise-reconcile --slot "$public_slot" >>"$I/public-reconcile.out" 2>&1)
+edit_failure_rc=$?
+set -e
+rm -f "$PUBLIC_GH_FAIL_EDIT"
+if [ "$edit_failure_rc" -eq 3 ] \
+  && [ "$(state_json "$public_slot" 3 | jq -r .state)" = marker-durable-delegation-pending ] \
+  && ! git --git-dir="$I/origin" cat-file -e "$(material_tip):slots/$public_slot/states/0000000000000004.json" 2>/dev/null; then
+  ok "failed parent issue edit cannot finalize materialisation"
+else
+  cat "$I/public-reconcile.out" >&2
+  bad "failed parent issue edit did not remain durably retryable"
+fi
+set +e
+(cd "$I/parent" && "${public_env[@]}" "$TD" materialise-reconcile --slot "$public_slot" >>"$I/public-reconcile.out" 2>&1)
+final_reconcile_rc=$?
+set -e
+final_reconcile_state=$(state_json "$public_slot" 4 2>/dev/null | jq -r .state 2>/dev/null || true)
+if [ "$final_reconcile_rc" -eq 0 ] \
+  && [ "$final_reconcile_state" = final ] \
+  && grep -Fq '"repo": "peer/repo"' "$PUBLIC_PARENT_BODY" \
+  && grep -Fq '"issue": 5' "$PUBLIC_PARENT_BODY"; then
+  public_reconcile_final=true
+else
+  echo "public final retry: rc=$final_reconcile_rc state=${final_reconcile_state:-missing} body=$(cat "$PUBLIC_PARENT_BODY")" >&2
+  public_reconcile_final=false
+fi
+if [ "$public_reconcile_final" = true ]; then
+  final_tip=$(material_tip)
+  (cd "$I/parent" && "${public_env[@]}" "$TD" materialise-reconcile --slot "$public_slot" >>"$I/public-reconcile.out" 2>&1)
+  if [ "$final_tip" = "$(material_tip)" ]; then
+    ok "public reconcile retries reach one durable final state and become idempotent"
+  else
+    bad "public reconcile retry moved an already-final authority"
+  fi
+else
+  cat "$I/public-reconcile.out" >&2
+  bad "public reconcile did not follow the expected durable retry stages"
+fi
 echo "PASS=$pass FAIL=$fail"; [ "$fail" -eq 0 ]

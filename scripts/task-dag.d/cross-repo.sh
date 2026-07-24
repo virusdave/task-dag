@@ -558,11 +558,15 @@ _taskdag_materialise_delegate_projection() {
 
     # Read current issue body, update or insert delegated_to block.
     local body_file
-    body_file="$(mktemp)"
-    gh issue view "$top_issue" --repo "$top_repo" --json body -q .body > "$body_file"
+    body_file="$(mktemp)" || return 3
+    if ! gh issue view "$top_issue" --repo "$top_repo" --json body -q .body > "$body_file"; then
+        rm -f "$body_file"
+        _xrepo_log "ERROR: failed to read issue body for ${top_repo}#${top_issue}"
+        return 3
+    fi
 
     local updated_body_file
-    updated_body_file="$(mktemp)"
+    updated_body_file="$(mktemp)" || { rm -f "$body_file"; return 3; }
 
     _xrepo_upsert_delegated_block \
         "$body_file" \
@@ -577,7 +581,11 @@ _taskdag_materialise_delegate_projection() {
     if cmp -s "$body_file" "$updated_body_file"; then
         _xrepo_log "delegate: issue body already lists ${XREPO_OWNER}/${XREPO_REPO}#${XREPO_ISSUE}"
     else
-        gh issue edit "$top_issue" --repo "$top_repo" --body-file "$updated_body_file" >/dev/null
+        if ! gh issue edit "$top_issue" --repo "$top_repo" --body-file "$updated_body_file" >/dev/null; then
+            rm -f "$body_file" "$updated_body_file"
+            _xrepo_log "ERROR: failed to update issue body for ${top_repo}#${top_issue}"
+            return 3
+        fi
         _xrepo_log "updated issue body for ${top_repo}#${top_issue}"
     fi
     rm -f "$body_file" "$updated_body_file"

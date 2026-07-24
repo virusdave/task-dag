@@ -53,7 +53,8 @@ _taskdag_materialise_append_state() { # old token slot record
 _taskdag_materialise_b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
 
 _taskdag_materialise_peer_token() { # owner/repository
-    local peer=$1 owner=${peer%%/*} repo=${peer#*/} key now header payload signature jwt response code body install
+    local peer owner repo key now header payload signature jwt response code body install
+    peer=$1; owner=${peer%%/*}; repo=${peer#*/}
     [ -n "${TASKDAG_APP_ID:-}" ] && [ -n "${TASKDAG_APP_PRIVATE_KEY:-}" ] || {
         echo "Error: TASKDAG_APP_ID and TASKDAG_APP_PRIVATE_KEY are required by materialise-reconcile" >&2
         return 1
@@ -201,7 +202,7 @@ _taskdag_materialise_reconcile_slot() { # slot
         elif [ "$rc" -ne 10 ]; then rm -rf "$tmp"; return 3
         fi
         authority=$(_taskdag_materialise_fetch_authority) || { rm -rf "$tmp"; return $?; }; IFS=$'\t' read -r tip token producer <<<"$authority"; state=$(_taskdag_materialise_latest_state "$tip" "$slot") || { rm -rf "$tmp"; return 3; }
-        ;;&
+        ;&
       create-in-flight-or-uncertain)
         if [ "$(jq -r .state <<<"$state")" = create-in-flight-or-uncertain ]; then
             generation=$(( $(jq -r .generation <<<"$state") + 1 ))
@@ -231,7 +232,7 @@ _taskdag_materialise_reconcile_slot() { # slot
             [ "$rc" -eq 0 ] || { rm -rf "$tmp"; return "$rc"; }
             authority=$(_taskdag_materialise_fetch_authority) || { rm -rf "$tmp"; return $?; }; IFS=$'\t' read -r tip token producer <<<"$authority"; state=$(_taskdag_materialise_latest_state "$tip" "$slot") || { rm -rf "$tmp"; return 3; }
         fi
-        ;;&
+        ;&
       issue-adopted)
         if [ "$(jq -r .state <<<"$state")" = issue-adopted ]; then _taskdag_materialise_finalize "$tip" "$token" "$slot" "$state" "$declaration"; rc=$?; rm -rf "$tmp"; return "$rc"; fi
         ;;

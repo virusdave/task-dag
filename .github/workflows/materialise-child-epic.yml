@@ -67,7 +67,10 @@ jobs:
     if: ${{ inputs.ref != '' }}
     runs-on: ubuntu-latest
     concurrency:
-      group: materialise-child-epic-${{ github.repository }}-${{ inputs.base_sha }}-${{ inputs.head_sha }}
+      # Parent-issue projection is a whole-body read/modify/write. Serialize
+      # every repository invocation so two slots cannot overwrite each
+      # other's successfully projected delegation block.
+      group: materialise-child-epic-${{ github.repository }}
       cancel-in-progress: false
 
     steps:
@@ -82,7 +85,8 @@ jobs:
           repository: virusdave/task-dag
           ref: ${{ inputs.ref }}
           path: .task-dag-runtime
-          fetch-depth: 1
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify pinned canonical task-dag runtime
         env:
@@ -94,6 +98,11 @@ jobs:
             exit 2
           }
           test "$(git -C .task-dag-runtime rev-parse HEAD)" = "$TASK_DAG_REF"
+          source .task-dag-runtime/scripts/task-dag.d/activation.sh
+          taskdag_full_history_checkout .task-dag-runtime || {
+            echo "::error ::task-dag reconciler runtime must be a readable full-history, non-partial, non-promisor checkout"
+            exit 2
+          }
           chmod 0755 .task-dag-runtime/scripts/task-dag
 
       - name: Reconcile immutable materialisation intents

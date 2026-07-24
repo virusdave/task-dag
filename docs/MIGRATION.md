@@ -269,7 +269,12 @@ materialised **in**.
    before the sole POST, and all later recovery exhaustively adopts by exact
    sentinel identity without retrying POST. Final state follows canonical
    marker, delegation, and graph-edge readback; stale or ambiguous authority
-   fails closed.
+   fails closed. The reusable workflow serializes reconciliation per source
+   repository because GitHub's issue-body API has no compare-and-swap: two
+   concurrent whole-body projections could otherwise each succeed while the
+   later write drops the earlier delegation block. This workflow is the
+   canonical production actuator; do not run concurrent direct reconciler
+   invocations against the same source repository.
 
 ## Ordering hazards
 
@@ -424,13 +429,15 @@ Rollback uses a separately reviewed disabled spec through the same canonical
 fleet machinery (`fleet-plan --state disabled`, then `fleet-apply`); never
 delete activation history or restore legacy readers.
 
-The private canonical-v1 materialisation reservation core requires an enabled,
+The canonical-v1 materialisation reservation core requires an enabled,
 runtime-compatible activation snapshot. It persists activation provenance in
 batch and slot records and advances the materialisation authority together
-with an activation guard in one leased atomic push. This is infrastructure for
-the later migration and census stages only: public `materialise-batch` and
-`materialise-child` still validate then exit 75 under the unchanged committed
-policy. Activation alone never enables producers. Rollback first advances to a
+with an activation guard in one leased atomic push. Public
+`materialise-batch` and `materialise-child` additionally require the exact
+producer-enable record created after the complete census/import; absent,
+stale, or mismatched producer authority fails closed. The committed migration
+policy continues to drain only the retired legacy materialisation entry point.
+Activation alone never enables producers. Rollback first advances to a
 disabled epoch; records, guards and materialisation provenance are never
 deleted. A task-dag runtime repin must follow this exact order: apply a
 disabled epoch, confirm `activation status --json` reports that disabled

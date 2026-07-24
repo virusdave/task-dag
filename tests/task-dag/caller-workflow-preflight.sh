@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VALIDATE="$ROOT/scripts/validate-caller-workflow.sh"
 SELF_CALLER="$ROOT/.github/workflows/task-dag.yml"
 REUSABLE="$ROOT/.github/workflows/sync-comment-to-task.yml"
+MATERIALISE_REUSABLE="$ROOT/.github/workflows/materialise-child-epic.yml"
 COMMENT_SHIM="$ROOT/scripts/sync-comment-to-tasks.sh"
 DOCS="$ROOT/docs/MIGRATION.md"
 
@@ -126,6 +127,80 @@ then
 else
     bad "7: reusable workflow runtime checkout contract failed"
 fi
+
+if ruby -ryaml - "$MATERIALISE_REUSABLE" <<'RUBY'
+path = ARGV.fetch(0)
+workflow = YAML.load_file(path)
+job = workflow.fetch('jobs').fetch('materialise')
+steps = job.fetch('steps')
+named = steps.to_h { |step| [step['name'], step] }
+
+expected_concurrency = {
+  'group' => 'materialise-child-epic-${{ github.repository }}',
+  'cancel-in-progress' => false
+}
+raise 'materialisation workflow is not serialized per source repository' unless job['concurrency'] == expected_concurrency
+
+runtime = named.fetch('Check out pinned canonical task-dag runtime')
+expected_runtime = {
+  'repository' => 'virusdave/task-dag',
+  'ref' => '${{ inputs.ref }}',
+  'path' => '.task-dag-runtime',
+  'fetch-depth' => 0,
+  'persist-credentials' => false
+}
+raise 'materialisation runtime checkout is not full and non-credentialed' unless runtime['with'] == expected_runtime
+
+verify = named.fetch('Verify pinned canonical task-dag runtime')['run'].to_s
+raise 'materialisation runtime does not use the canonical full-history validator' unless verify.include?('taskdag_full_history_checkout .task-dag-runtime')
+
+reconcile = named.fetch('Reconcile immutable materialisation intents')['run'].to_s
+raise 'materialisation workflow does not use the pinned public reconciler' unless reconcile.include?('.task-dag-runtime/scripts/task-dag" materialise-reconcile')
+RUBY
+then
+    ok "8: materialisation workflow requires one full pinned public runtime"
+else
+    bad "8: materialisation workflow runtime contract failed"
+fi
+
+mkdir -p "$TMP/full-history"
+git -C "$TMP/full-history" init -q
+git -C "$TMP/full-history" config user.name fixture
+git -C "$TMP/full-history" config user.email fixture@example.test
+printf 'fixture\n' >"$TMP/full-history/file"
+git -C "$TMP/full-history" add file
+git -C "$TMP/full-history" commit -qm fixture
+source "$ROOT/scripts/task-dag.d/activation.sh"
+full_history_matrix=true
+taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false
+git -C "$TMP/full-history" config extensions.partialClone ''
+! taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false
+git -C "$TMP/full-history" config --unset extensions.partialClone
+git -C "$TMP/full-history" config remote.origin.promisor false
+! taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false
+git -C "$TMP/full-history" config --unset remote.origin.promisor
+git -C "$TMP/full-history" config remote.origin.partialCloneFilter blob:none
+! taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false
+git -C "$TMP/full-history" config --unset remote.origin.partialCloneFilter
+git -C "$TMP/full-history" config extensions.worktreeConfig true
+git -C "$TMP/full-history" config --worktree remote.origin.promisor true
+! taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false
+git -C "$TMP/full-history" config --worktree --unset remote.origin.promisor
+git -C "$TMP/full-history" config --unset extensions.worktreeConfig
+common=$(git -C "$TMP/full-history" rev-parse --path-format=absolute --git-common-dir)
+: >"$common/objects/pack/fixture.promisor"
+! taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false
+rm "$common/objects/pack/fixture.promisor"
+mkdir "$TMP/shallow-origin"
+git -C "$TMP/full-history" clone -q --bare . "$TMP/shallow-origin/repo.git"
+git clone -q --depth 1 "file://$TMP/shallow-origin/repo.git" "$TMP/shallow"
+! taskdag_full_history_checkout "$TMP/shallow" || full_history_matrix=false
+cp "$TMP/full-history/.git/config" "$TMP/full-history/.git/config.good"
+printf '[malformed\n' >>"$TMP/full-history/.git/config"
+! taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false
+mv "$TMP/full-history/.git/config.good" "$TMP/full-history/.git/config"
+[ "$full_history_matrix" = true ] && ok "9: canonical runtime validator rejects shallow, partial, promisor, and unreadable state" \
+    || bad "9: canonical runtime full-history validation matrix failed"
 
 mkdir -p "$TMP/identity-home" "$TMP/identity-env" "$TMP/identity-partial"
 git -C "$TMP/identity-env" init -q

@@ -45,6 +45,29 @@ _taskdag_materialise_no_duplicate_keys() {
 
 _taskdag_materialise_sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 _taskdag_materialise_sha256_text() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+taskdag_materialisation_adopted_issue_slot_count() { # tip issue-node-id [excluded-slot]
+    local tip=$1 issue_node_id=$2 excluded=${3:-} encoded matches match path slot json rc
+    local -A slots=()
+    encoded=$(jq -Rrn --arg id "$issue_node_id" '$id|@json') || return 2
+    if matches=$(git grep -F -l "\"issueNodeId\":$encoded" "$tip" -- 'slots/*/states/*.json' 2>/dev/null); then
+        :
+    else
+        rc=$?; [ "$rc" -eq 1 ] || return 2
+        matches=""
+    fi
+    while IFS= read -r match; do
+        [ -n "$match" ] || continue
+        path=${match#*:}
+        json=$(git show "$tip:$path") || return 2
+        if jq -e --arg id "$issue_node_id" '.adoptedIssue.issueNodeId? == $id' >/dev/null <<<"$json"; then
+            slot=${path#slots/}; slot=${slot%%/*}
+            [ "$slot" = "$excluded" ] || slots["$slot"]=1
+        else
+            rc=$?; [ "$rc" -eq 1 ] || return 2
+        fi
+    done <<<"$matches"
+    printf '%s\n' "${#slots[@]}"
+}
 
 _taskdag_materialise_reservation_violations() { # tip path state activation-authority
     local tip=$1 path=$2 state=$3 activation_authority=$4 sid dd op batch timestamp expected
@@ -427,7 +450,7 @@ _taskdag_materialisation_snapshot_violations() {
                   (.slots[]|select(.slotId==$sid)) as $d | $issue.repositoryId==$d.peerRepo.id and
                   any(.issues[];.repository==$d.peerRepo.name and .id==$issue.issueNodeId and .repositoryId==$issue.repositoryId and .number==$issue.number)' >/dev/null \
                   || echo "✗ imported adopted state $path does not bind its exact peer issue"
-                [ "$(git grep -l "\"issueNodeId\":\"$adopted_id\"" "$tip" -- 'slots/*/states/*.json' 2>/dev/null | wc -l)" -eq 1 ] \
+                [ "$(taskdag_materialisation_adopted_issue_slot_count "$tip" "$adopted_id")" -eq 1 ] \
                   || echo "✗ adopted issue $adopted_id is bound by multiple slots"
               fi
             else
@@ -445,7 +468,7 @@ _taskdag_materialisation_snapshot_violations() {
                   (.slots[]|select(.slotId==$sid)) as $d | $issue.repositoryId==$d.peerRepo.id and
                   any(.issues[];.repository==$d.peerRepo.name and .id==$issue.issueNodeId and .repositoryId==$issue.repositoryId and .number==$issue.number)' >/dev/null \
                   || echo "✗ adopt transition $path does not bind its exact peer issue"
-                [ "$(git grep -l "\"issueNodeId\":\"$adopted_id\"" "$tip" -- 'slots/*/states/*.json' 2>/dev/null | wc -l)" -eq 1 ] \
+                [ "$(taskdag_materialisation_adopted_issue_slot_count "$tip" "$adopted_id")" -eq 1 ] \
                   || echo "✗ adopted issue $adopted_id is bound by multiple slots"
               else
                 jq -e 'keys==["actor","authorizationDigest","censusDigest","evidence","generation","mode","predecessorStateDigest","schema","slotId","state","timestamp"] and
@@ -1238,8 +1261,7 @@ _taskdag_materialise_transition() { # strict authorization spec, mode
           $issue.repositoryId==$declaration.peerRepo.id and
           any(.issues[];.repository==$declaration.peerRepo.name and .id==$issue.issueNodeId and
             .repositoryId==$issue.repositoryId and .number==$issue.number)' >/dev/null || return 3
-      git grep -n "\"issueNodeId\":\"$(jq -r .adoptedIssue.issueNodeId "$spec")\"" "$old" -- 'slots/*/states/*.json' 2>/dev/null \
-        | grep -v "^$old:slots/$slot/" | grep -q . && return 3
+      [ "$(taskdag_materialisation_adopted_issue_slot_count "$old" "$(jq -r .adoptedIssue.issueNodeId "$spec")" "$slot")" -eq 0 ] || return 3
     fi
     case "$mode" in rearm) path="slots/$slot/authorizations/$(printf '%016d' "$generation").json";; *) path="slots/$slot/states/$(printf '%016d' "$generation").json";; esac
     prior="slots/$slot/states/$(printf '%016d' "$((generation-1))").json"
