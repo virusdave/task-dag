@@ -2186,8 +2186,8 @@ EOF
             # may parent the isolated shallow tip without importing its
             # indefinitely growing ancestry.
             local -x GIT_ALTERNATE_OBJECT_DIRECTORIES="$index_git/objects"
-            local -x GIT_SHALLOW_FILE="$index_git/shallow"
-            GIT_DIR="$index_git" _xrepo_reconcile_index_read "$index_old" "$index_dir" "$repo" "" \
+            GIT_DIR="$index_git" GIT_SHALLOW_FILE="$index_git/shallow" \
+                _xrepo_reconcile_index_read "$index_old" "$index_dir" "$repo" "" \
                 && _xrepo_reconcile_index_validate_activation "$index_dir" "$activation_binding" \
                 || { _rc_fail snapshot "" "" "reconciliation index current/direct-parent structure or activation binding is invalid"; fatal=true; }
         fi

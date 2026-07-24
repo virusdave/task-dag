@@ -214,7 +214,7 @@ taskdag_consumer_prepare() { :; }
 taskdag_activation_snapshot_token() {
   jq -ncS --arg commit "$FIXTURE_COMMIT" --arg runtime "$FIXTURE_RUNTIME" '{activationCommit:$commit,authorityTip:$commit,digest:"3333333333333333333333333333333333333333333333333333333333333333",epoch:1,guardVersion:1,minimumCompatibleTaskDagCommit:$runtime,origin:"fixture",runtimeCommit:$runtime,state:"enabled"}'
 }
-taskdag_activation_validate_provenance() { :; }
+taskdag_activation_validate_provenance() { [ -z "${GIT_SHALLOW_FILE:-}" ]; }
 _taskdag_activation_runtime_commit() { printf '%s\n' "$FIXTURE_RUNTIME"; }
 taskdag_consumer_fenced_scheduling_push() {
   local updates=$3 ref old new
