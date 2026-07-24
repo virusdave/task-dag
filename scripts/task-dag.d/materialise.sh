@@ -181,6 +181,36 @@ _taskdag_materialise_id() {
     } | sha256sum | awk '{print $1}'
 }
 
+# A v1 declaration always retains its declared slot and operation identity.
+# Schema-3 imports use a second, collision-scoped identity only for authority
+# storage.  Keeping this in one helper prevents live producers from silently
+# rotating their IDs while allowing frozen declarations that reused a slot to
+# coexist.
+_taskdag_materialise_authority_slot_id() { # declared-slot declaration-digest collision(true|false)
+    if [ "$3" = true ]; then
+        _taskdag_materialise_id legacy-collision-slot-v1 "$1" "$2"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+_taskdag_materialise_slot_state_path() { printf 'slots/%s/states/%016d.json\n' "$1" "$2"; }
+_taskdag_materialise_slot_authorization_path() { printf 'slots/%s/authorizations/%016d.json\n' "$1" "$2"; }
+_taskdag_materialise_terminal_guard_path() { printf 'replay-guards/%s/%s.json\n' "$1" "$2"; }
+
+# Extract identities only through these helpers.  A schema-1 record has one
+# identity; schema 3 deliberately retains the v1 declaration identity while
+# placing mutable authority below the collision-scoped identity.
+_taskdag_materialise_declared_slot() { jq -er 'if has("declaredSlotId") then .declaredSlotId else .slotId end' <<<"$1"; }
+_taskdag_materialise_authority_slot() { jq -er 'if has("authoritySlotId") then .authoritySlotId else .slotId end' <<<"$1"; }
+_taskdag_materialise_resolve_cli_slot() { # authority-tip requested-id
+    local tip=$1 requested=$2 matches
+    git cat-file -e "$tip:slots/$requested" 2>/dev/null && { printf '%s\n' "$requested"; return 0; }
+    matches=$(git grep -l "\"declaredSlotId\":\"$requested\"" "$tip" -- 'declarations/*.json' 2>/dev/null || :)
+    [ "$(grep -c . <<<"$matches")" -eq 1 ] || return 3
+    git show "$tip:${matches#*:}" | _taskdag_materialise_authority_slot
+}
+
 _taskdag_materialise_validate_spec() {
     local spec=$1 size
     command -v jq >/dev/null 2>&1 || { _taskdag_materialise_error "jq is required"; return 2; }
@@ -282,7 +312,7 @@ taskdag_materialise_prepare() {
 
 _taskdag_materialise_batch_json() {
     local prepared=$1 activation=$2 members provenance batch activation_provenance
-    members=$(jq -cS '[.declarations[]|{slotId,declarationDigest,operationId,provenance:.memberProvenance}]|sort_by(.slotId)' <<<"$prepared") || return 2
+    members=$(jq -cS '[.declarations[]|{slotId:(.authoritySlotId//.slotId),declarationDigest,operationId,provenance:.memberProvenance}]|sort_by(.slotId)' <<<"$prepared") || return 2
     provenance=$(jq -c '.batchProvenance' <<<"$prepared") || return 2
     activation_provenance=$(jq -cS '{epoch,digest,guardVersion}' <<<"$activation") || return 2
     batch=$(_taskdag_materialise_id batch "$(jq -c . <<<"$members")" "$(jq -c . <<<"$provenance")" "$activation_provenance")
@@ -290,6 +320,36 @@ _taskdag_materialise_batch_json() {
 }
 
 _taskdag_validate_census_artifact() { # canonical census artifact file
+    local normalized mapping declared authority digest collision expected rc
+    if [ "$(jq -r '.schema // 0' "$1" 2>/dev/null)" = 3 ]; then
+      jq -e '
+        . as $census |
+        keys==["activationRecordDigest","historicalOccurrences","issues","legacyCompletionRefs","liveDelegations","repositoryAliases","schema","slotMappings","slots","terminalDeclarations"] and
+        (.slotMappings|type=="array" and .==sort_by(.authoritySlotId) and length==(unique_by(.authoritySlotId)|length) and all(.[];
+          keys==["authoritySlotId","declarationDigest","declaredSlotId"] and all(.authoritySlotId,.declarationDigest,.declaredSlotId;test("^[0-9a-f]{64}$")))) and
+        ([.slots[]|{declaredSlotId,authoritySlotId,declarationDigest}]|sort_by(.authoritySlotId))==.slotMappings and
+        all(.slots[]; .slotId==.declaredSlotId) and
+        all(.issues[].declarations[]; . as $d | $d.slotId==$d.declaredSlotId and
+          any($census.slotMappings[];.declaredSlotId==$d.declaredSlotId and .authoritySlotId==$d.authoritySlotId and .declarationDigest==$d.declarationDigest)) and
+        all(.historicalOccurrences[]; . as $o | $o.slotId==$o.declaredSlotId and
+          any($census.slotMappings[];.declaredSlotId==$o.declaredSlotId and .authoritySlotId==$o.authoritySlotId and .declarationDigest==$o.declarationDigest))' "$1" >/dev/null || return 3
+      mapping=$(mktemp) || return 2
+      jq -r '.slotMappings as $m|.slotMappings[] as $s|[$s.declaredSlotId,$s.authoritySlotId,$s.declarationDigest,(([ $m[]|select(.declaredSlotId==$s.declaredSlotId)]|length)>1)]|@tsv' "$1" >"$mapping" \
+        || { rm -f "$mapping"; return 3; }
+      rc=0
+      while IFS=$'\t' read -r declared authority digest collision; do
+        expected=$(_taskdag_materialise_authority_slot_id "$declared" "$digest" "$collision") || { rc=2; break; }
+        [ "$authority" = "$expected" ] || { rc=3; break; }
+      done <"$mapping"
+      rm -f "$mapping"
+      [ "$rc" -eq 0 ] || return "$rc"
+      normalized=$(mktemp) || return 2
+      jq 'del(.slotMappings)|.schema=2|
+        (.issues[].declarations[])|=(.slotId=.authoritySlotId|del(.declaredSlotId,.authoritySlotId))|
+        (.slots[])|=(.slotId=.authoritySlotId|del(.declaredSlotId,.authoritySlotId))|
+        (.historicalOccurrences[])|=(.slotId=.authoritySlotId|del(.declaredSlotId,.authoritySlotId))' "$1" >"$normalized" || { rm -f "$normalized"; return 2; }
+      _taskdag_validate_census_artifact "$normalized"; rc=$?; rm -f "$normalized"; return "$rc"
+    fi
     jq -e '
       type=="object" and
       ((.schema==1 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","schema","slots"]) or
@@ -357,7 +417,7 @@ _taskdag_validate_census_artifact() { # canonical census artifact file
 _taskdag_validate_terminal_declarations() { # spec activation
     local spec=$1 activation=$2
     jq -e --argjson registry "$(jq -c '.registrySnapshot.repositories' "$activation")" '
-      .schema==2 and (.terminalDeclarations|type=="array" and .==sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal) and
+      (.schema==2 or .schema==3) and (.terminalDeclarations|type=="array" and .==sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal) and
       (map([.sourceRepo.name,.declarationCommit,.groupOrdinal])|length==(unique|length)) and all(.[];
         type=="object" and keys==["body","bodyFile","bodyLength","bodySha256","declarationCommit","delegationNote","disposition","evidence","groupOrdinal","parentIssue","peerRepo","schema","slug","sourceRepo","title"] and
         .schema==1 and .disposition=="superseded-no-effect" and (.declarationCommit|test("^[0-9a-f]{40}$")) and (.groupOrdinal|type=="number" and floor==. and .>=0) and
@@ -373,7 +433,7 @@ _taskdag_validate_terminal_declarations() { # spec activation
 }
 
 _taskdag_materialisation_snapshot_violations() {
-    local tip=$1 work=$2 activation_authority=$3 expected_repository=${4:-} parent="" count path mode type prepared state sid dd op batch body_sha body_len expected declaration_path timestamp generation prior prior_path census_digest census_path repository adopted_id activation_path activation_matches
+    local tip=$1 work=$2 activation_authority=$3 expected_repository=${4:-} parent="" count path mode type prepared state sid dd op batch body_sha body_len expected declaration_path timestamp generation prior prior_path census_digest census_path repository adopted_id activation_path activation_matches guard authority declared
     git rev-list --parents -1 "$tip" >"$work/snapshot-parents" 2>/dev/null \
       || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot read snapshot parents"; return 0; }
     count=$(awk '{print NF-1}' "$work/snapshot-parents")
@@ -383,15 +443,34 @@ _taskdag_materialisation_snapshot_violations() {
       || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot read snapshot tree"; return 0; }
     while read -r mode type _ path; do
         [ "$mode" = 100644 ] && [ "$type" = blob ] || { echo "✗ $TASKDAG_MATERIALISATION_REF has non-regular path $path"; continue; }
-        [[ "$path" =~ ^(bodies/[0-9a-f]{64}\.body|declarations/[0-9a-f]{64}\.json|batches/[0-9a-f]{64}\.json|censuses/[0-9a-f]{64}\.json|import-batches/[0-9a-f]{64}\.json|slots/[0-9a-f]{64}/(states/[0-9]{16}\.json|authorizations/[0-9]{16}\.json))$ ]] || echo "✗ $TASKDAG_MATERIALISATION_REF has unexpected path $path"
+        [[ "$path" =~ ^(bodies/[0-9a-f]{64}\.body|declarations/[0-9a-f]{64}\.json|batches/[0-9a-f]{64}\.json|censuses/[0-9a-f]{64}\.json|import-batches/[0-9a-f]{64}\.json|replay-guards/[0-9a-f]{64}/[0-9a-f]{64}\.json|slots/[0-9a-f]{64}/(states/[0-9]{16}\.json|authorizations/[0-9]{16}\.json))$ ]] || echo "✗ $TASKDAG_MATERIALISATION_REF has unexpected path $path"
     done <"$work/snapshot-tree"
     cut -f2 "$work/snapshot-tree" >"$work/snapshot-paths" \
       || { echo "✗ $TASKDAG_MATERIALISATION_REF validator cannot enumerate snapshot paths"; return 0; }
-    grep -E '^(declarations|batches|censuses|import-batches|slots)/' "$work/snapshot-paths" >"$work/snapshot-json-paths" || :
+    grep -E '^(declarations|batches|censuses|import-batches|replay-guards|slots)/' "$work/snapshot-paths" >"$work/snapshot-json-paths" || :
     while IFS= read -r path; do
         prepared=$(git show "$tip:$path" 2>/dev/null) || { echo "✗ unreadable $path"; continue; }
         jq -e . >/dev/null 2>&1 <<<"$prepared" || { echo "✗ invalid JSON at $path"; continue; }
         case "$path" in
+          replay-guards/*)
+            sid=${path#replay-guards/}; dd=${sid#*/}; sid=${sid%%/*}; dd=${dd%.json}
+            jq -e --arg sid "$sid" --arg dd "$dd" '
+              keys==["authoritySlotId","censusDigest","declarationDigest","declaredSlotId","disposition","schema"] and
+              .schema==3 and .declaredSlotId==$sid and .declarationDigest==$dd and
+              (.authoritySlotId|test("^[0-9a-f]{64}$")) and (.censusDigest|test("^[0-9a-f]{64}$")) and
+              .disposition=="actionable"' >/dev/null <<<"$prepared" || echo "✗ invalid replay guard $path"
+            expected=$(_taskdag_materialise_authority_slot_id "$sid" "$dd" true)
+            [ "$(jq -r .authoritySlotId <<<"$prepared")" = "$expected" ] || echo "✗ replay guard authority mismatch $path"
+            census_digest=$(jq -r .censusDigest <<<"$prepared"); authority=$(jq -r .authoritySlotId <<<"$prepared")
+            git show "$tip:censuses/$census_digest.json" 2>/dev/null | jq -e --arg declared "$sid" --arg authority "$authority" --arg dd "$dd" \
+              'any(.slotMappings[]?;.declaredSlotId==$declared and .authoritySlotId==$authority and .declarationDigest==$dd)' >/dev/null \
+              || echo "✗ replay guard $path lacks exact census mapping"
+            git show "$tip:declarations/$dd.json" 2>/dev/null | jq -e --arg declared "$sid" --arg authority "$authority" \
+              '.declaredSlotId==$declared and .authoritySlotId==$authority' >/dev/null || echo "✗ replay guard $path lacks exact declaration"
+            git show "$tip:slots/$authority/states/0000000000000000.json" 2>/dev/null | jq -e --arg dd "$dd" '.declarationDigest==$dd' >/dev/null \
+              || echo "✗ replay guard $path lacks exact authority state"
+            [ "$(git grep -l "\"$authority\"" "$tip" -- "import-batches/$census_digest.json" 2>/dev/null | wc -l)" -eq 1 ] \
+              || echo "✗ replay guard $path lacks unique import batch" ;;
           censuses/*)
             printf '%s\n' "$prepared" >"$work/census-artifact"
             _taskdag_validate_census_artifact "$work/census-artifact" || echo "✗ invalid census/import $path"
@@ -407,18 +486,32 @@ _taskdag_materialisation_snapshot_violations() {
             done < <(git ls-tree -r --name-only "$activation_authority" records 2>/dev/null)
             [ "$activation_matches" -eq 1 ] || echo "✗ census $path does not bind exactly one enabled activation record" ;;
           import-batches/*)
-            jq -e 'keys==["censusDigest","repository","schema","slots"] and .schema==1 and (.repository|type=="string" and length>0) and (.censusDigest|test("^[0-9a-f]{64}$")) and (.slots|type=="array" and .==sort and length==(unique|length) and all(.[];test("^[0-9a-f]{64}$")))' >/dev/null <<<"$prepared" || echo "✗ invalid import batch $path"
+            jq -e '. as $batch |
+              keys==["censusDigest","repository","schema","slots"] and (.schema==1 or .schema==3) and (.repository|type=="string" and length>0) and (.censusDigest|test("^[0-9a-f]{64}$")) and
+              (.slots|type=="array" and length==(unique|length)) and
+              (if $batch.schema==1 then $batch.slots==($batch.slots|sort) and all($batch.slots[];test("^[0-9a-f]{64}$"))
+               else $batch.slots==($batch.slots|sort_by(.authoritySlotId)) and all($batch.slots[];keys==["authoritySlotId","declarationDigest","declaredSlotId"] and all(.[];test("^[0-9a-f]{64}$"))) end)' >/dev/null <<<"$prepared" || echo "✗ invalid import batch $path"
             census_digest=${path#import-batches/}; census_digest=${census_digest%.json}; repository=$(jq -r .repository <<<"$prepared")
             [ -z "$expected_repository" ] || [ "$repository" = "$expected_repository" ] || echo "✗ import batch $path belongs to foreign repository $repository"
             [ "$(jq -r .censusDigest <<<"$prepared")" = "$census_digest" ] || echo "✗ import batch filename/census mismatch $path"
             census_path="censuses/$census_digest.json"; git cat-file -e "$tip:$census_path" 2>/dev/null || echo "✗ import batch lacks census $path"
-            [ "$(jq -c '.slots' <<<"$prepared")" = "$(git show "$tip:$census_path" 2>/dev/null | jq -c --arg repo "$repository" '[.slots[]|select(.repository==$repo)|.slotId]|sort')" ] \
+            [ "$(jq -cS '.slots' <<<"$prepared")" = "$(git show "$tip:$census_path" 2>/dev/null | jq -cS --arg repo "$repository" --argjson schema "$(jq -r .schema <<<"$prepared")" '[.slots[]|select(.repository==$repo)|if $schema==3 then {authoritySlotId,declaredSlotId,declarationDigest} else .slotId end]|sort_by(if type=="object" then .authoritySlotId else . end)')" ] \
               || echo "✗ import batch $path does not equal its complete census partition"
             while IFS= read -r sid; do
               git cat-file -e "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null || { echo "✗ import batch $path lacks slot $sid"; continue; }
-              git show "$tip:$census_path" 2>/dev/null | jq -e --arg sid "$sid" --arg repo "$repository" 'any(.slots[];.slotId==$sid and .repository==$repo)' >/dev/null \
+              git show "$tip:$census_path" 2>/dev/null | jq -e --arg sid "$sid" --arg repo "$repository" 'any(.slots[];(.authoritySlotId//.slotId)==$sid and .repository==$repo)' >/dev/null \
                 || echo "✗ import batch $path has foreign or absent census slot $sid"
-            done < <(jq -r '.slots[]' <<<"$prepared") ;;
+            done < <(jq -r '.slots[]|if type=="object" then .authoritySlotId else . end' <<<"$prepared")
+            if [ "$(jq -r .schema <<<"$prepared")" = 3 ]; then
+              while IFS=$'\t' read -r declared authority dd; do
+                guard=$(_taskdag_materialise_terminal_guard_path "$declared" "$dd")
+                if [ "$authority" = "$declared" ]; then
+                  git cat-file -e "$tip:$guard" 2>/dev/null && echo "✗ uncollided import member has replay guard $guard"
+                else
+                  git cat-file -e "$tip:$guard" 2>/dev/null || echo "✗ collision import member lacks replay guard $guard"
+                fi
+              done < <(jq -r '.slots[]|[.declaredSlotId,.authoritySlotId,.declarationDigest]|@tsv' <<<"$prepared")
+            fi ;;
           slots/*/states/*)
             if [ "$(jq -r '.state // ""' <<<"$prepared")" = batch-reserved-before-create ]; then
               _taskdag_materialise_reservation_violations "$tip" "$path" "$prepared" "$activation_authority"
@@ -439,15 +532,15 @@ _taskdag_materialisation_snapshot_violations() {
                 ((.state=="issue-adopted" and (.adoptedIssue|keys==["issueNodeId","number","repositoryId"])) or (.state!="issue-adopted" and (has("adoptedIssue")|not)))' >/dev/null <<<"$prepared" \
                 || echo "✗ invalid imported initial state $path"
               census_digest=$(jq -r .censusDigest <<<"$prepared"); census_path="censuses/$census_digest.json"; dd=$(jq -r .declarationDigest <<<"$prepared"); op=$(jq -r .operationId <<<"$prepared")
-              git show "$tip:$census_path" 2>/dev/null | jq -e --arg sid "$sid" --arg dd "$dd" --arg op "$op" 'any(.slots[];.slotId==$sid and .declarationDigest==$dd and .operationId==$op)' >/dev/null \
+              git show "$tip:$census_path" 2>/dev/null | jq -e --arg sid "$sid" --arg dd "$dd" --arg op "$op" 'any(.slots[];(.authoritySlotId//.slotId)==$sid and .declarationDigest==$dd and .operationId==$op)' >/dev/null \
                 || echo "✗ imported state $path is absent or different in census"
               git show "$tip:declarations/$dd.json" 2>/dev/null | jq -e --arg sid "$sid" --arg dd "$dd" --arg op "$op" \
-                '.slotId==$sid and .declarationDigest==$dd and .operationId==$op' >/dev/null || echo "✗ imported state $path lacks matching declaration"
+                '(.authoritySlotId//.slotId)==$sid and .declarationDigest==$dd and .operationId==$op' >/dev/null || echo "✗ imported state $path lacks matching declaration"
               [ "$(git grep -l "\"$sid\"" "$tip" -- "import-batches/$census_digest.json" 2>/dev/null | wc -l)" -eq 1 ] || echo "✗ imported state $path lacks unique import batch"
               if [ "$(jq -r .state <<<"$prepared")" = issue-adopted ]; then
                 adopted_id=$(jq -r .adoptedIssue.issueNodeId <<<"$prepared")
                 git show "$tip:$census_path" 2>/dev/null | jq -e --arg sid "$sid" --argjson issue "$(jq -c .adoptedIssue <<<"$prepared")" '
-                  (.slots[]|select(.slotId==$sid)) as $d | $issue.repositoryId==$d.peerRepo.id and
+                  (.slots[]|select((.authoritySlotId//.slotId)==$sid)) as $d | $issue.repositoryId==$d.peerRepo.id and
                   any(.issues[];.repository==$d.peerRepo.name and .id==$issue.issueNodeId and .repositoryId==$issue.repositoryId and .number==$issue.number)' >/dev/null \
                   || echo "✗ imported adopted state $path does not bind its exact peer issue"
                 [ "$(taskdag_materialisation_adopted_issue_slot_count "$tip" "$adopted_id")" -eq 1 ] \
@@ -460,12 +553,15 @@ _taskdag_materialisation_snapshot_violations() {
                 || echo "✗ transition $path predecessor digest mismatch"
               [ "$(jq -r .censusDigest <<<"$prepared")" = "$(jq -r .censusDigest <<<"$prior")" ] || echo "✗ transition $path changed census"
               if [ "$(jq -r .state <<<"$prepared")" = issue-adopted ]; then
-                jq -e 'keys==["actor","adoptedIssue","approval","censusDigest","evidence","generation","mode","predecessorStateDigest","schema","slotId","state","timestamp"] and .mode=="adopt"' >/dev/null <<<"$prepared" \
+                jq -e 'keys==["actor","adoptedIssue","approval","censusDigest","declarationDigest","evidence","generation","mode","operationId","predecessorStateDigest","schema","slotId","state","timestamp"] and
+                  .mode=="adopt" and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$"))' >/dev/null <<<"$prepared" \
                   || echo "✗ invalid adopt transition $path"
+                [ "$(jq -r .declarationDigest <<<"$prepared")" = "$(jq -r .declarationDigest <<<"$prior")" ] || echo "✗ adopt transition $path changed declaration"
+                [ "$(jq -r .operationId <<<"$prepared")" = "$(jq -r .operationId <<<"$prior")" ] || echo "✗ adopt transition $path changed operation"
                 [[ "$(jq -r .state <<<"$prior")" =~ ^(blocked-repair|create-in-flight-or-uncertain)$ ]] || echo "✗ adopt transition $path has invalid predecessor state"
                 census_digest=$(jq -r .censusDigest <<<"$prepared"); adopted_id=$(jq -r .adoptedIssue.issueNodeId <<<"$prepared")
                 git show "$tip:censuses/$census_digest.json" 2>/dev/null | jq -e --arg sid "$sid" --argjson issue "$(jq -c .adoptedIssue <<<"$prepared")" '
-                  (.slots[]|select(.slotId==$sid)) as $d | $issue.repositoryId==$d.peerRepo.id and
+                  (.slots[]|select((.authoritySlotId//.slotId)==$sid)) as $d | $issue.repositoryId==$d.peerRepo.id and
                   any(.issues[];.repository==$d.peerRepo.name and .id==$issue.issueNodeId and .repositoryId==$issue.repositoryId and .number==$issue.number)' >/dev/null \
                   || echo "✗ adopt transition $path does not bind its exact peer issue"
                 [ "$(taskdag_materialisation_adopted_issue_slot_count "$tip" "$adopted_id")" -eq 1 ] \
@@ -510,8 +606,8 @@ _taskdag_materialisation_snapshot_violations() {
               def bounded($n): type=="string" and length>0 and length<=$n;
               def safe: type=="string" and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not);
               .schema==1 and
-              (keys-["delegationNote","slug"])==["bodyLength","bodySha256","declarationDigest","operationId","parentIssue","peerRepo","schema","slotId","sourceRepo","title"] and
-              ((keys|length)==10 or (keys|length)==11 or (keys|length)==12) and
+              ((has("authoritySlotId") and (keys-["delegationNote","slug"])==["authoritySlotId","bodyLength","bodySha256","declarationDigest","declaredSlotId","operationId","parentIssue","peerRepo","schema","slotId","sourceRepo","title"] and .slotId==.declaredSlotId) or
+               ((has("authoritySlotId")|not) and (keys-["delegationNote","slug"])==["bodyLength","bodySha256","declarationDigest","operationId","parentIssue","peerRepo","schema","slotId","sourceRepo","title"])) and
               (.sourceRepo|type=="object" and keys==["id","name"] and (.id|bounded(256) and safe) and (.name|bounded(256) and safe)) and
               (.peerRepo|type=="object" and keys==["id","name"] and (.id|bounded(256) and safe) and (.name|bounded(256) and safe)) and
               (.parentIssue|type=="object" and keys==["id","number"] and (.id|bounded(256) and safe) and (.number|type=="number" and .>0 and floor==. and .<=9007199254740991)) and
@@ -527,14 +623,14 @@ _taskdag_materialisation_snapshot_violations() {
             jq -r '[.sourceRepo.id,.parentIssue.id,(.parentIssue.number|tostring),.peerRepo.id,(if has("slug") then "present" else "absent" end),(.slug//"")][]' <<<"$prepared" >"$work/snapshot-fields" 2>/dev/null \
               || { echo "✗ validator cannot frame stored slot identity $path"; continue; }
             mapfile -t _m_fields <"$work/snapshot-fields"
-            [ "$(_taskdag_materialise_id slot "${_m_fields[@]}")" = "$(jq -r .slotId <<<"$prepared")" ] || echo "✗ declaration $dd slot ID mismatch"
+            [ "$(_taskdag_materialise_id slot "${_m_fields[@]}")" = "$(_taskdag_materialise_declared_slot "$prepared")" ] || echo "✗ declaration $dd slot ID mismatch"
             jq -r '[.sourceRepo.id,.sourceRepo.name,.parentIssue.id,(.parentIssue.number|tostring),.peerRepo.id,.peerRepo.name,.title,.bodySha256,(.bodyLength|tostring),(if has("slug") then "present" else "absent" end),(.slug//""),(if has("delegationNote") then "present" else "absent" end),(.delegationNote//"")][]' <<<"$prepared" >"$work/snapshot-fields" 2>/dev/null \
               || { echo "✗ validator cannot frame stored declaration identity $path"; continue; }
             mapfile -t _m_fields <"$work/snapshot-fields"
             [ "$(_taskdag_materialise_id declaration "${_m_fields[@]}")" = "$dd" ] && [ "$(jq -r .declarationDigest <<<"$prepared")" = "$dd" ] || echo "✗ declaration $dd digest mismatch"
-            expected=$(_taskdag_materialise_id operation "$(jq -r .slotId <<<"$prepared")" "$dd")
+            expected=$(_taskdag_materialise_id operation "$(_taskdag_materialise_declared_slot "$prepared")" "$dd")
             [ "$(jq -r .operationId <<<"$prepared")" = "$expected" ] || echo "✗ declaration $dd operation ID mismatch"
-            sid=$(jq -r .slotId <<<"$prepared")
+            sid=$(_taskdag_materialise_authority_slot "$prepared")
             if git cat-file -e "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null; then
               initial_state=$(git show "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null)
               [ "$(jq -r .declarationDigest <<<"$initial_state")" = "$dd" ] || echo "✗ declaration $dd lacks matching initial slot"
@@ -568,9 +664,10 @@ _taskdag_materialisation_snapshot_violations() {
             while IFS= read -r declaration_path; do
               sid=$(jq -r .slotId <<<"$declaration_path"); op=$(jq -r .operationId <<<"$declaration_path"); declaration_path=$(jq -r .declarationDigest <<<"$declaration_path")
               git cat-file -e "$tip:declarations/$declaration_path.json" 2>/dev/null || echo "✗ batch $dd lacks declaration $declaration_path"
-              [ "$(git show "$tip:declarations/$declaration_path.json" 2>/dev/null | jq -r .slotId)" = "$sid" ] || echo "✗ batch $dd member slot/declaration mismatch"
+              declaration=$(git show "$tip:declarations/$declaration_path.json" 2>/dev/null)
+              [ "$(_taskdag_materialise_authority_slot "$declaration")" = "$sid" ] || echo "✗ batch $dd member slot/declaration mismatch"
               [ "$(git show "$tip:slots/$sid/states/0000000000000000.json" 2>/dev/null | jq -r .declarationDigest)" = "$declaration_path" ] || echo "✗ batch $dd declaration $declaration_path lacks matching slot state"
-              [ "$(_taskdag_materialise_id operation "$sid" "$declaration_path")" = "$op" ] || echo "✗ batch $dd member operation mismatch"
+              [ "$(_taskdag_materialise_id operation "$(_taskdag_materialise_declared_slot "$declaration")" "$declaration_path")" = "$op" ] || echo "✗ batch $dd member operation mismatch"
             done <"$work/snapshot-members" ;;
         esac
     done <"$work/snapshot-json-paths"
@@ -637,7 +734,7 @@ taskdag_materialisation_tree_violations() {
         if grep -qE '^(censuses|import-batches)/' "$added"; then
             [ "$(grep -cE '^censuses/[0-9a-f]{64}\.json$' "$added")" -eq 1 ] \
               && [ "$(grep -cE '^import-batches/[0-9a-f]{64}\.json$' "$added")" -eq 1 ] \
-              && ! grep -qEv '^(censuses/[0-9a-f]{64}\.json|import-batches/[0-9a-f]{64}\.json|bodies/[0-9a-f]{64}\.body|declarations/[0-9a-f]{64}\.json|slots/[0-9a-f]{64}/states/0000000000000000\.json)$' "$added" \
+              && ! grep -qEv '^(censuses/[0-9a-f]{64}\.json|import-batches/[0-9a-f]{64}\.json|bodies/[0-9a-f]{64}\.body|declarations/[0-9a-f]{64}\.json|replay-guards/[0-9a-f]{64}/[0-9a-f]{64}\.json|slots/[0-9a-f]{64}/states/0000000000000000\.json)$' "$added" \
               || echo "✗ import generation $commit has an invalid delta"
         elif grep -qE '^slots/.+/(states/[0-9]{16}|authorizations/[0-9]{16})\.json$' "$added" \
           && ! grep -q '^batches/' "$added"; then
@@ -736,26 +833,44 @@ taskdag_materialisation_online_tree_violations() { # tip activation-authority ex
 # Private seam: tests source this module and call the core.  No CLI path tests
 # an environment variable, so exported state cannot bypass migration drain.
 taskdag_materialise_reserve_core() {
-    local spec=$1 activation=${2:-} prepared batch_json batch_id actor timestamp old="" tmp index tree commit remote now slot dd op body_sha declaration state activation_provenance expected_repository
+    local spec=$1 activation=${2:-} prepared prepared_base batch_json batch_id actor timestamp old="" tmp index tree commit remote now slot declared_slot authority_slot dd op body_sha declaration state activation_provenance expected_repository guard guard_listing disposition stored_projection expected_projection
     [ -n "$activation" ] || activation=$(taskdag_activation_snapshot_token) || return 3
     expected_repository=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 3
     [ -n "$expected_repository" ] || return 3
-    prepared=$(taskdag_materialise_prepare "$spec") || return $?
-    batch_json=$(_taskdag_materialise_batch_json "$prepared" "$activation") || return 2; batch_id=$(jq -r .batchId <<<"$batch_json")
+    prepared_base=$(taskdag_materialise_prepare "$spec") || return $?
     activation_provenance=$(jq -c '{epoch,digest,guardVersion}' <<<"$activation") || return 2
-    actor=$(jq -r .actor <<<"$prepared"); timestamp=$(jq -r .authoritativeTimestamp <<<"$prepared")
+    actor=$(jq -r .actor <<<"$prepared_base"); timestamp=$(jq -r .authoritativeTimestamp <<<"$prepared_base")
     for _ in 1 2 3 4 5; do
       remote=$(git ls-remote --refs origin "$TASKDAG_MATERIALISATION_REF") || return 2; old=${remote%%[[:space:]]*}; [ "$remote" != "$old" ] || old=""
       [ -z "$old" ] || { git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2; old=$(git rev-parse FETCH_HEAD); [ -z "$(taskdag_materialisation_online_tree_violations "$old" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3; }
+      prepared=$prepared_base
+      if [ -n "$old" ]; then
+        while IFS= read -r declaration; do
+          declared_slot=$(jq -r .slotId <<<"$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration")
+          guard=$(_taskdag_materialise_terminal_guard_path "$declared_slot" "$dd")
+          guard_listing=$(git ls-tree -r --name-only "$old" "replay-guards/$declared_slot" 2>/dev/null) || return 3
+          if git cat-file -e "$old:$guard" 2>/dev/null; then
+            disposition=$(git show "$old:$guard" | jq -r .disposition) || return 3
+            [ "$disposition" = actionable ] || return 3
+            authority_slot=$(git show "$old:$guard" | jq -r .authoritySlotId) || return 3
+            prepared=$(jq -cS --arg declared "$declared_slot" --arg dd "$dd" --arg authority "$authority_slot" '
+              (.declarations[]|select(.slotId==$declared and .declarationDigest==$dd)) |= (.declaredSlotId=.slotId|.authoritySlotId=$authority)
+              | .declarations|=sort_by(.authoritySlotId//.slotId)' <<<"$prepared") || return 3
+          elif [ -n "$guard_listing" ]; then
+            return 3
+          fi
+        done < <(jq -c '.declarations[]' <<<"$prepared_base")
+      fi
+      batch_json=$(_taskdag_materialise_batch_json "$prepared" "$activation") || return 2; batch_id=$(jq -r .batchId <<<"$batch_json")
       while IFS= read -r slot; do
-        dd=$(jq -r --arg s "$slot" '.declarations[]|select(.slotId==$s)|.declarationDigest' <<<"$prepared")
+        dd=$(jq -r --arg s "$slot" '.declarations[]|select((.authoritySlotId//.slotId)==$s)|.declarationDigest' <<<"$prepared")
         if [ -n "$old" ] && git cat-file -e "$old:slots/$slot/states/0000000000000000.json" 2>/dev/null; then
           [ "$(git show "$old:slots/$slot/states/0000000000000000.json" | jq -r .declarationDigest)" = "$dd" ] || return 3
         fi
-      done < <(jq -r '.declarations[].slotId' <<<"$prepared")
+      done < <(jq -r '.declarations[]|.authoritySlotId//.slotId' <<<"$prepared")
       tmp=$(mktemp -d); index="$tmp/index"; GIT_INDEX_FILE="$index" git read-tree "${old:-$(git mktree </dev/null)}"
       while IFS= read -r declaration; do
-        slot=$(jq -r .slotId <<<"$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); op=$(jq -r .operationId <<<"$declaration"); body_sha=$(jq -r .bodySha256 <<<"$declaration")
+        slot=$(_taskdag_materialise_authority_slot "$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); op=$(jq -r .operationId <<<"$declaration"); body_sha=$(jq -r .bodySha256 <<<"$declaration")
         [ -n "$old" ] && git cat-file -e "$old:slots/$slot/states/0000000000000000.json" 2>/dev/null && continue
         mkdir -p "$tmp/bodies" "$tmp/declarations" "$tmp/slots/$slot/states"
         jq -rj .body <<<"$declaration" >"$tmp/bodies/$body_sha.body"
@@ -785,9 +900,11 @@ taskdag_materialise_reserve_core() {
         [ -z "$(taskdag_materialisation_online_tree_violations "$now" "$(jq -r .authorityTip <<<"$activation")" "$expected_repository")" ] || return 3
         [ "$(git show "$now:batches/$batch_id.json" 2>/dev/null)" = "$batch_json" ] || return 3
         while IFS= read -r declaration; do
-          slot=$(jq -r .slotId <<<"$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); body_sha=$(jq -r .bodySha256 <<<"$declaration")
+          slot=$(_taskdag_materialise_authority_slot "$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); body_sha=$(jq -r .bodySha256 <<<"$declaration")
           [ "$(git show "$now:slots/$slot/states/0000000000000000.json" | jq -r .declarationDigest)" = "$dd" ] || return 3
-          git show "$now:declarations/$dd.json" | cmp - <(jq -cS 'del(.body,.memberProvenance)' <<<"$declaration") || return 3
+          stored_projection=$(git show "$now:declarations/$dd.json" | jq -cS 'del(.declaredSlotId,.authoritySlotId)') || return 3
+          expected_projection=$(jq -cS 'del(.body,.memberProvenance,.declaredSlotId,.authoritySlotId)' <<<"$declaration") || return 3
+          [ "$stored_projection" = "$expected_projection" ] || return 3
           [ "$(git show "$now:bodies/$body_sha.body" | sha256sum | awk '{print $1}')" = "$body_sha" ] || return 3
         done < <(jq -c '.declarations[]' <<<"$prepared")
         printf '%s\n' "$batch_json"; return 0
@@ -910,6 +1027,7 @@ _taskdag_census_snapshot() { # source-spec workspace; prints snapped spec path
     cat <&$fd >"$work/activation.json" || { exec {fd}<&-; return 2; }; exec {fd}<&-
     jq --arg p "$work/activation.json" '.activationRecord=$p' "$snap" >"$work/spec.1" || return 2
     mv "$work/spec.1" "$snap"
+    jq -r '.repositories[]|[.repository,.path]|@tsv' "$snap" >"$work/repositories.scan" || return 2
     while IFS=$'\t' read -r repo path; do
       [[ "$path" = /* ]] || path="$base/$path"
       [ -d "$path" ] && [ ! -L "$path" ] || return 3
@@ -924,8 +1042,9 @@ _taskdag_census_snapshot() { # source-spec workspace; prints snapped spec path
       [ "$(git -C "$clone" rev-parse "$source_ref^{commit}" 2>/dev/null)" = "$expected" ] || return 3
       jq --arg r "$repo" --arg p "$clone" '(.repositories[]|select(.repository==$r).path)=$p' "$snap" >"$work/spec.1" || return 2
       mv "$work/spec.1" "$snap"; n=$((n+1))
-    done < <(jq -r '.repositories[]|[.repository,.path]|@tsv' "$snap")
+    done <"$work/repositories.scan"
     n=0
+    jq -r '.issuePages[]|[.repository,(.page|tostring),.file]|@tsv' "$snap" >"$work/pages.scan" || return 2
     while IFS=$'\t' read -r repo page file; do
       [[ "$file" = /* ]] || file="$base/$file"
       [ -f "$file" ] && [ ! -L "$file" ] || return 3
@@ -934,7 +1053,7 @@ _taskdag_census_snapshot() { # source-spec workspace; prints snapped spec path
       cat <&$fd >"$work/page.$n.json" || { exec {fd}<&-; return 3; }; exec {fd}<&-
       jq --arg r "$repo" --argjson pg "$page" --arg p "$work/page.$n.json" '(.issuePages[]|select(.repository==$r and .page==$pg).file)=$p' "$snap" >"$work/spec.1" || return 2
       mv "$work/spec.1" "$snap"; n=$((n+1))
-    done < <(jq -r '.issuePages[]|[.repository,(.page|tostring),.file]|@tsv' "$snap")
+    done <"$work/pages.scan"
     printf '%s\n' "$snap"
 }
 
@@ -943,7 +1062,7 @@ _taskdag_census_build() { # spec output
     _taskdag_materialise_no_duplicate_keys "$spec" || return 2
     jq -e 'type=="object" and
       ((.schema==1 and keys==["activationRecord","issuePages","repositories","schema"]) or
-       (.schema==2 and keys==["activationRecord","issuePages","repositories","repositoryAliases","schema","terminalDeclarations"] and
+       ((.schema==2 or .schema==3) and keys==["activationRecord","issuePages","repositories","repositoryAliases","schema","terminalDeclarations"] and
         (.repositoryAliases|type=="array" and .==sort_by(.declaredName) and (map(.declaredName|ascii_downcase)|length==(unique|length)) and all(.[];
           keys==["canonicalName","declaredName","repositoryId","resolution"] and (.declaredName|test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
           (.canonicalName|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and (.repositoryId|type=="string" and length>0) and (.resolution=="github-node-id" or .resolution=="registry-unique-name"))))) and
@@ -952,19 +1071,22 @@ _taskdag_census_build() { # spec output
       (.issuePages|type=="array" and .==sort_by(.repository,.page) and all(.[];type=="object" and keys==["file","hasNextPage","page","repository"] and (.page|type=="number" and floor==. and .>=1) and (.hasNextPage|type=="boolean") and (.file|type=="string" and length>0)))' "$spec" >/dev/null || return 2
     activation=$(jq -r .activationRecord "$spec"); [ -f "$activation" ] && _taskdag_materialise_no_duplicate_keys "$activation" || return 2
     jq -e '.schema==1 and (.sourceTips|type=="array") and (.registrySnapshot.repositories|type=="array")' "$activation" >/dev/null || return 2
-    if [ "$(jq -r .schema "$spec")" = 2 ]; then _taskdag_validate_terminal_declarations "$spec" "$activation" || return 2; fi
+    if [ "$(jq -r .schema "$spec")" != 1 ]; then _taskdag_validate_terminal_declarations "$spec" "$activation" || return 2; fi
     repos=$(jq -c '.repositories|map({repository,tip})' "$spec"); [ "$repos" = "$(jq -c '.sourceTips|map({repository,tip:.commit})' "$activation")" ] || return 3
     [ "$(jq -c '.repositories|map(.repository)' "$spec")" = "$(jq -c '.registrySnapshot.repositories|map(.repository)' "$activation")" ] || return 3
     jq -e --argjson registry "$(jq -c '.registrySnapshot.repositories' "$activation")" 'all(.repositoryAliases[]?; . as $alias | any($registry[];.repository==$alias.canonicalName and .repositoryId==$alias.repositoryId))' "$spec" >/dev/null || return 3
     tmp=$(mktemp -d) || return 2
     : >"$tmp/refs"; : >"$tmp/issues"; : >"$tmp/historical-declarations"; : >"$tmp/terminal-declarations"; : >"$tmp/terminal-used"
+    jq -r '.repositories[]|[.repository,.path,.tip]|@tsv' "$spec" >"$tmp/repositories.scan" || return 2
     while IFS=$'\t' read -r repo path expected; do
       [ -d "$path" ] && _taskdag_activation_full_checkout "$path" || return 3
       actual=$(git -C "$path" rev-parse HEAD 2>/dev/null) || return 3; [ "$actual" = "$expected" ] || return 3
       git -C "$path" for-each-ref --format='%(refname)%09%(objectname)' refs/heads/tasks refs/heads/gh | jq -Rn --arg repo "$repo" '[inputs|split("\t")|{repository:$repo,ref:.[0],oid:.[1]}][]' >>"$tmp/refs" || return 3
+      git -C "$path" rev-list --reverse "$expected" >"$tmp/commits.scan" || return 3
       while IFS= read -r commit; do
         [ -n "$commit" ] || continue
         groups=$(git -C "$path" log -1 --format='%B' "$commit" | taskdag_materialise_groups_json_from_message) || return 3
+        jq -c 'to_entries[]' <<<"$groups" >"$tmp/groups.scan" || return 3
         while IFS= read -r group_entry; do
           [ -n "$group_entry" ] || continue
           group_ordinal=$(jq -r .key <<<"$group_entry"); group=$(jq -c .value <<<"$group_entry")
@@ -989,12 +1111,13 @@ _taskdag_census_build() { # spec output
               --argjson delegationNote "$([ "$note_present" = true ] && jq -nc --arg v "$note" '$v' || echo null)" --argjson evidence "$(jq -c .evidence <<<"$review")" \
               '{schema:1,disposition:"superseded-no-effect",sourceRepo:{id:$sourceId,name:$repo},declarationCommit:$commit,groupOrdinal:$ordinal,parentIssue:{id:$parentId,number:$parentNumber},peerRepo:$peerRepo,title:$title,bodyFile:$bodyFile,body:$body,bodyLength:$bodyLength,bodySha256:$bodySha256,slug:$slug,delegationNote:$delegationNote,evidence:$evidence}' >"$tmp/terminal-candidate" || return 2
             cmp -s "$tmp/terminal-candidate" <(printf '%s\n' "$review") || return 3
+            jq -r '.evidence[]|[.repository.name,.commit,.path,.blobOid]|@tsv' <<<"$review" >"$tmp/evidence.scan" || return 3
             while IFS=$'\t' read -r evidence_repo evidence_commit evidence_path evidence_oid; do
               evidence_repo_path=$(jq -r --arg r "$evidence_repo" '.repositories[]|select(.repository==$r)|.path' "$spec"); evidence_tip=$(jq -r --arg r "$evidence_repo" '.repositories[]|select(.repository==$r)|.tip' "$spec")
               [ -n "$evidence_repo_path" ] && git -C "$evidence_repo_path" merge-base --is-ancestor "$evidence_commit" "$evidence_tip" 2>/dev/null \
                 && [ "$(git -C "$evidence_repo_path" cat-file -t "$evidence_commit:$evidence_path" 2>/dev/null)" = blob ] \
                 && [ "$(git -C "$evidence_repo_path" rev-parse "$evidence_commit:$evidence_path" 2>/dev/null)" = "$evidence_oid" ] || return 3
-            done < <(jq -r '.evidence[]|[.repository.name,.commit,.path,.blobOid]|@tsv' <<<"$review")
+            done <"$tmp/evidence.scan"
             cat "$tmp/terminal-candidate" >>"$tmp/terminal-declarations"; printf '%s\t%s\t%s\n' "$repo" "$commit" "$group_ordinal" >>"$tmp/terminal-used"
             rm -f "$body_path"; continue
           fi
@@ -1004,9 +1127,10 @@ _taskdag_census_build() { # spec output
              + (if $slugPresent then {slug:$slug} else {} end)
              + (if $notePresent then {delegationNote:$note} else {} end)' >>"$tmp/historical-declarations" || return 3
           rm -f "$body_path"
-        done < <(jq -c 'to_entries[]' <<<"$groups")
-      done < <(git -C "$path" rev-list --reverse "$expected")
-    done < <(jq -r '.repositories[]|[.repository,.path,.tip]|@tsv' "$spec")
+        done <"$tmp/groups.scan"
+      done <"$tmp/commits.scan"
+    done <"$tmp/repositories.scan"
+    jq -r '.issuePages[]|[.repository,(.page|tostring),(.hasNextPage|tostring),.file]|@tsv' "$spec" >"$tmp/issue-pages.scan" || return 2
     while IFS=$'\t' read -r repo page has file; do
       [ -f "$file" ] && _taskdag_materialise_no_duplicate_keys "$file" || return 3
       jq -e --arg repo "$repo" 'type=="object" and keys==["issues","schema"] and .schema==1 and (.issues|type=="array" and all(.[];
@@ -1030,8 +1154,9 @@ _taskdag_census_build() { # spec output
           if .disposition=="verified-child-close" then keys==["delegationRef","disposition","oid","ref"] and (.delegationRef|type=="string" and length>0)
           else keys==["disposition","oid","ref"] and (.disposition=="partial-implementation" or .disposition=="malformed-evidence") end and
           (.oid|test("^[0-9a-f]{40}$")))) and
-        (.declarations|type=="array" and .==sort_by(.slotId) and all(.[];
-          (keys-["adoptedIssue","delegationNote","slug"])==["body","bodyLength","bodySha256","declarationDigest","disposition","operationId","parentIssue","peerRepo","schema","slotId","sourceRepo","title"] and
+        (.declarations|type=="array" and .==sort_by(.authoritySlotId//.slotId) and all(.[];
+          (if has("authoritySlotId") then (keys-["adoptedIssue","delegationNote","slug"])==["authoritySlotId","body","bodyLength","bodySha256","declarationDigest","declaredSlotId","disposition","operationId","parentIssue","peerRepo","schema","slotId","sourceRepo","title"] else
+            (keys-["adoptedIssue","delegationNote","slug"])==["body","bodyLength","bodySha256","declarationDigest","disposition","operationId","parentIssue","peerRepo","schema","slotId","sourceRepo","title"] end) and
           .schema==1 and (.body|type=="string") and (.bodySha256|test("^[0-9a-f]{64}$")) and (.bodyLength|type=="number" and floor==. and .>=0) and
           (.slotId|test("^[0-9a-f]{64}$")) and (.declarationDigest|test("^[0-9a-f]{64}$")) and (.operationId|test("^[0-9a-f]{64}$")) and
           (.sourceRepo|keys==["id","name"]) and (.peerRepo|keys==["id","name"]) and (.parentIssue|keys==["id","number"]) and
@@ -1040,10 +1165,11 @@ _taskdag_census_build() { # spec output
            else (.disposition=="create-in-flight-or-uncertain" or .disposition=="blocked-repair") and (has("adoptedIssue")|not) end)))))' "$file" >/dev/null || return 3
       jq -c --arg repo "$repo" '.issues[]+{repository:$repo}' "$file" >>"$tmp/issues"
       if [ "$has" = false ]; then [ "$(jq --arg r "$repo" '[.issuePages[]|select(.repository==$r)]|length' "$spec")" = "$page" ] || return 3; else [ "$(jq --arg r "$repo" --argjson p "$((page+1))" '[.issuePages[]|select(.repository==$r and .page==$p)]|length' "$spec")" = 1 ] || return 3; fi
-    done < <(jq -r '.issuePages[]|[.repository,(.page|tostring),(.hasNextPage|tostring),.file]|@tsv' "$spec")
+    done <"$tmp/issue-pages.scan"
     pages=$(jq -c '[.issuePages[].repository]|sort|unique' "$spec"); [ "$pages" = "$(jq -c '[.repositories[].repository]|sort|unique' "$spec")" ] || return 3
     [ "$(wc -l <"$tmp/terminal-used")" -eq "$(jq '.terminalDeclarations // []|length' "$spec")" ] || return 3
     jq -se --slurpfile terminals "$tmp/terminal-declarations" '. as $issues | all($terminals[]; . as $terminal | any($issues[];.repository==$terminal.sourceRepo.name and .id==$terminal.parentIssue.id and .number==$terminal.parentIssue.number and .repositoryId==$terminal.sourceRepo.id))' "$tmp/issues" >/dev/null || return 3
+    jq -r '.registrySnapshot.repositories[]|[.repository,.repositoryId]|@tsv' "$activation" >"$tmp/registry.scan" || return 2
     while IFS=$'\t' read -r repo registry_id; do
       jq -e --arg repo "$repo" --arg id "$registry_id" '
         all(.[] | select(.repository==$repo); . as $issue |
@@ -1051,7 +1177,7 @@ _taskdag_census_build() { # spec output
           all($issue.declarations[]?;.sourceRepo.id==$id and .sourceRepo.name==$repo and .parentIssue.id==$issue.id and .parentIssue.number==$issue.number) and
           all($issue.liveDelegations[]?;.parentRepo==$repo and .parentIssue==$issue.number and
             (if .disposition=="verified-child-close" then .parentRepoNodeId==$id and .parentIssueNodeId==$issue.id else true end)))' --slurp "$tmp/issues" >/dev/null || return 3
-    done < <(jq -r '.registrySnapshot.repositories[]|[.repository,.repositoryId]|@tsv' "$activation")
+    done <"$tmp/registry.scan"
     # Every parsed peer, including a non-verified obligation, is registry-known.
     jq -se --argjson registry "$(jq -c '.registrySnapshot.repositories' "$activation")" --argjson aliases "$(jq -c '.repositoryAliases // []' "$spec")" '
       all(.[];
@@ -1061,7 +1187,7 @@ _taskdag_census_build() { # spec output
         all(.liveDelegations[]?; . as $delegation | $delegation.peerRepo as $peer | any($registry[];.repository==($peer|ascii_downcase) and
           (if $delegation.disposition=="verified-child-close" then .repositoryId==$delegation.peerRepoNodeId else true end))))' "$tmp/issues" >/dev/null || return 3
     jq -se '(group_by(.id)|all(.[];length==1)) and (group_by([.repository,.number])|all(.[];length==1)) and
-      ([.[].declarations[]?.slotId]|length==(unique|length)) and
+      ([.[].declarations[]?|(.authoritySlotId//.slotId)]|length==(unique|length)) and
       ([.[].declarations[]?|select(.disposition=="issue-adopted")|.adoptedIssue.issueNodeId]|length==(unique|length))' "$tmp/issues" >/dev/null || return 3
     # Caller classification may add disposition/adoption evidence, but it may
     # neither omit nor invent a legacy declaration. Reconstruct every trailer
@@ -1071,7 +1197,7 @@ _taskdag_census_build() { # spec output
       + (if has("slug") then {slug} else {} end)
       + (if has("delegationNote") then {delegationNote} else {} end)]
       | sort_by(.repository,.parentIssue,.peerRepo,(.slug//""),.title,.bodySha256,.bodyLength,(.delegationNote//""))' "$tmp/issues" >"$tmp/classified-declarations" || return 3
-    if [ "$(jq -r .schema "$spec")" = 2 ]; then
+    if [ "$(jq -r .schema "$spec")" != 1 ]; then
       jq -sS 'map(del(.declarationCommit,.groupOrdinal))|unique|sort_by(.repository,.parentIssue,.peerRepo,(.slug//""),.title,.bodySha256,.bodyLength,(.delegationNote//""))' "$tmp/historical-declarations" >"$tmp/reconstructed-declarations" || return 3
     else
       jq -sS 'map(del(.declarationCommit,.groupOrdinal))|sort_by(.repository,.parentIssue,.peerRepo,(.slug//""),.title,.bodySha256,.bodyLength,(.delegationNote//""))' "$tmp/historical-declarations" >"$tmp/reconstructed-declarations" || return 3
@@ -1088,8 +1214,9 @@ _taskdag_census_build() { # spec output
             .bodySha256==$historical.bodySha256 and .bodyLength==$historical.bodyLength and
             ((.slug//null)==($historical.slug//null)) and ((.delegationNote//null)==($historical.delegationNote//null)))] as $matches |
         if ($matches|length)!=1 then error("historical occurrence does not map to exactly one declaration") else
-          {sourceRepo:$matches[0].sourceRepo,declarationCommit:$historical.declarationCommit,groupOrdinal:$historical.groupOrdinal,
-           slotId:$matches[0].slotId,declarationDigest:$matches[0].declarationDigest} end)
+          ({sourceRepo:$matches[0].sourceRepo,declarationCommit:$historical.declarationCommit,groupOrdinal:$historical.groupOrdinal,
+           slotId:$matches[0].slotId,declarationDigest:$matches[0].declarationDigest}
+           + if ($matches[0]|has("authoritySlotId")) then {declaredSlotId:$matches[0].declaredSlotId,authoritySlotId:$matches[0].authoritySlotId} else {} end) end)
       | sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal)' "$tmp/historical-declarations" >"$tmp/historical-occurrences" || return 3
     # Adopted issues must be exact members of the fully paginated peer issue set.
     jq -se '. as $issues | all(.[];.declarations[]? as $d |
@@ -1097,32 +1224,37 @@ _taskdag_census_build() { # spec output
       else true end)' "$tmp/issues" >/dev/null || return 3
     # Ref paths are semantic identity, not opaque evidence labels. Bind every
     # path to its containing parent issue and registry-known peer.
+    jq -r '. as $issue|.liveDelegations[]?|[$issue.repository,($issue.number|tostring),(.|tojson)]|@tsv' "$tmp/issues" >"$tmp/delegations.scan" || return 3
     while IFS=$'\t' read -r parent_repo parent_issue evidence; do
       ref=$(jq -r .ref <<<"$evidence"); peer_repo=$(jq -r .peerRepo <<<"$evidence"); peer_issue=$(jq -r .peerIssue <<<"$evidence")
       [ "$ref" = "refs/heads/tasks/delegated/$parent_issue/$peer_repo/$peer_issue" ] \
         && [ "$(jq -r .parentRepo <<<"$evidence")" = "$parent_repo" ] || return 3
-    done < <(jq -r '. as $issue|.liveDelegations[]?|[$issue.repository,($issue.number|tostring),(.|tojson)]|@tsv' "$tmp/issues")
+    done <"$tmp/delegations.scan"
+    jq -r '. as $issue|.completionEvidence[]?|[($issue.number|tostring),.ref]|@tsv' "$tmp/issues" >"$tmp/completions.scan" || return 3
     while IFS=$'\t' read -r parent_issue ref; do
       [[ "$ref" =~ ^refs/heads/tasks/completions/${parent_issue}/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*/[A-Za-z0-9._-]+$ ]] || return 3
       peer_repo=${ref#refs/heads/tasks/completions/$parent_issue/}; peer_repo=${peer_repo%/*/*}
       jq -e --arg peer "$peer_repo" 'any(.registrySnapshot.repositories[];.repository==($peer|ascii_downcase))' "$activation" >/dev/null || return 3
-    done < <(jq -r '. as $issue|.completionEvidence[]?|[($issue.number|tostring),.ref]|@tsv' "$tmp/issues")
+    done <"$tmp/completions.scan"
+    jq -r '.completionEvidence[]?|select(.disposition=="verified-child-close")|[.ref,.delegationRef]|@tsv' "$tmp/issues" >"$tmp/completion-links.scan" || return 3
     while IFS=$'\t' read -r ref delegation_ref; do
       completion_identity=${ref#refs/heads/tasks/completions/}; completion_identity=${completion_identity%/*}
       delegation_identity=${delegation_ref#refs/heads/tasks/delegated/}
       [ "$completion_identity" = "$delegation_identity" ] || return 3
-    done < <(jq -r '.completionEvidence[]?|select(.disposition=="verified-child-close")|[.ref,.delegationRef]|@tsv' "$tmp/issues")
+    done <"$tmp/completion-links.scan"
+    jq -r '. as $issue|.markers[]?|[($issue.number|tostring),.ref]|@tsv' "$tmp/issues" >"$tmp/markers.scan" || return 3
     while IFS=$'\t' read -r parent_issue ref; do
       [[ "$ref" =~ ^refs/heads/gh/child-epics/${parent_issue}/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ \
          || "$ref" =~ ^refs/heads/gh/child-epic-slots/${parent_issue}/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 3
       peer_repo=${ref#refs/heads/gh/child-epics/$parent_issue/}
       [ "$peer_repo" != "$ref" ] || { peer_repo=${ref#refs/heads/gh/child-epic-slots/$parent_issue/}; peer_repo=${peer_repo%/*}; }
       jq -e --arg peer "$peer_repo" 'any(.registrySnapshot.repositories[];.repository==($peer|ascii_downcase))' "$activation" >/dev/null || return 3
-    done < <(jq -r '. as $issue|.markers[]?|[($issue.number|tostring),.ref]|@tsv' "$tmp/issues")
+    done <"$tmp/markers.scan"
+    jq -c 'select(.liveDelegations) | . as $i | .liveDelegations[] | select(.disposition=="verified-child-close") | .+{repository:$i.repository}' "$tmp/issues" >"$tmp/verified-delegations.scan" || return 3
     while IFS= read -r evidence; do
       [ "$(jq -r .parentRepo <<<"$evidence")" = "$(jq -r .repository <<<"$evidence")" ] || return 3
       _taskdag_verify_delegated_close_evidence "$spec" "$evidence" >/dev/null || return 3
-    done < <(jq -c 'select(.liveDelegations) | . as $i | .liveDelegations[] | select(.disposition=="verified-child-close") | .+{repository:$i.repository}' "$tmp/issues")
+    done <"$tmp/verified-delegations.scan"
     # Every verified legacy completion must map to exactly one fully verified
     # live delegation in the same parent repository.
     jq -se 'all(.[]; . as $issue | all($issue.completionEvidence[]?; . as $completion |
@@ -1135,14 +1267,15 @@ _taskdag_census_build() { # spec output
     jq -s '[.[] as $i|$i.markers[]?,$i.completionEvidence[]?,$i.liveDelegations[]?|{repository:$i.repository,ref,oid}]|sort_by(.repository,.ref,.oid)' "$tmp/issues" >"$tmp/evidence-refs"
     jq -s '[.[]|select(.ref|test("^refs/heads/(gh/child-epic(s|\u002dslots)?/|tasks/(completions|delegated)/)"))|{repository,ref,oid}]|sort_by(.repository,.ref,.oid)' "$tmp/refs" >"$tmp/frozen-evidence-refs"
     cmp -s "$tmp/evidence-refs" "$tmp/frozen-evidence-refs" || return 3
-    jq -e --argjson issues "$(jq -s '.' "$tmp/issues")" 'all(.repositoryAliases[]?; . as $alias | any($issues[].declarations[]?; .peerRepo.id==$alias.repositoryId and (.peerRepo.name|ascii_downcase)==($alias.declaredName|ascii_downcase)))' "$spec" >/dev/null || return 3
+    jq -e --slurpfile issues "$tmp/issues" 'all(.repositoryAliases[]?; . as $alias | any($issues[].declarations[]?; .peerRepo.id==$alias.repositoryId and (.peerRepo.name|ascii_downcase)==($alias.declaredName|ascii_downcase)))' "$spec" >/dev/null || return 3
     jq -ncS --argjson schema "$(jq -r .schema "$spec")" --arg activationDigest "$(_taskdag_materialise_sha256_file "$activation")" --argjson aliases "$(jq -c '.repositoryAliases // []' "$spec")" --argjson occurrences "$(cat "$tmp/historical-occurrences")" --slurpfile issues "$tmp/issues" --slurpfile refs "$tmp/refs" --slurpfile terminals "$tmp/terminal-declarations" '
       def r($p): [$refs[]|select(.ref|test($p))];
       {schema:$schema,activationRecordDigest:$activationDigest,issues:($issues|sort_by(.repository,.number)),
-       slots:([$issues[] as $i|$i.declarations[]|.+{issueNodeId:$i.id,repository:$i.repository,issueNumber:$i.number}]|sort_by(.slotId)),
+       slots:([$issues[] as $i|$i.declarations[]|.+{issueNodeId:$i.id,repository:$i.repository,issueNumber:$i.number}]|sort_by(.authoritySlotId//.slotId)),
        legacyCompletionRefs:(r("^refs/heads/tasks/completions/")|map(. as $r|$r+([ $issues[]|select(.repository==$r.repository)|.completionEvidence[]|select(.ref==$r.ref and .oid==$r.oid) ][0]))|sort_by(.repository,.ref)),
        liveDelegations:(r("^refs/heads/tasks/delegated/")|map(. as $r|$r+([ $issues[]|select(.repository==$r.repository)|.liveDelegations[]|select(.ref==$r.ref and .oid==$r.oid) ][0]))|sort_by(.repository,.ref))}
-       + if $schema==2 then {historicalOccurrences:$occurrences,repositoryAliases:$aliases,terminalDeclarations:($terminals|sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal))} else {} end' >"$out"
+       + if $schema==2 then {historicalOccurrences:$occurrences,repositoryAliases:$aliases,terminalDeclarations:($terminals|sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal))}
+         elif $schema==3 then {historicalOccurrences:$occurrences,repositoryAliases:$aliases,terminalDeclarations:($terminals|sort_by(.sourceRepo.name,.declarationCommit,.groupOrdinal)),slotMappings:([$issues[].declarations[]|{declaredSlotId:(.declaredSlotId//.slotId),authoritySlotId:(.authoritySlotId//.slotId),declarationDigest}]|unique|sort_by(.authoritySlotId))} else {} end' >"$out"
     local rc=$?; if [ "$rc" -eq 0 ]; then _taskdag_validate_census_artifact "$out"; rc=$?; fi; rm -rf "$tmp"; return "$rc"
 }
 
@@ -1157,7 +1290,7 @@ cmd_materialise_census() {
 }
 
 cmd_materialise_import() {
-    local spec artifact digest tmp token old tree commit index updates actor timestamp slot dd op body_sha state path evidence close_ref close_commit readback expected snapped current_repo current_repo_id declaration rc requested_refs=()
+    local spec artifact digest tmp token old tree commit index updates actor timestamp slot declared_slot dd op body_sha state path guard evidence close_ref close_commit readback expected snapped current_repo current_repo_id declaration artifact_schema rc requested_refs=()
     case "${1:-}" in -h|--help) echo 'Usage: task-dag materialise-import --spec-file FILE --artifact FILE --digest-file FILE'; return 0;; esac
     [ "$#" -eq 6 ] && [ "$1" = --spec-file ] && [ "$3" = --artifact ] && [ "$5" = --digest-file ] || return 2; spec=$2; artifact=$4; digest=$6
     tmp=$(mktemp -d) || return 2
@@ -1169,7 +1302,8 @@ cmd_materialise_import() {
     [ "$(cat "$digest" 2>/dev/null)" = "$(_taskdag_materialise_sha256_file "$artifact")" ] || { rm -rf "$tmp"; return 3; }
     _taskdag_census_build "$spec" "$tmp/census" || { rc=$?; rm -rf "$tmp"; return "$rc"; }; cmp -s "$artifact" "$tmp/census" || { rm -rf "$tmp"; return 3; }
     jq -e '((.schema==1 and keys==["activationRecordDigest","issues","legacyCompletionRefs","liveDelegations","schema","slots"]) or
-      (.schema==2 and keys==["activationRecordDigest","historicalOccurrences","issues","legacyCompletionRefs","liveDelegations","repositoryAliases","schema","slots","terminalDeclarations"])) and
+      (.schema==2 and keys==["activationRecordDigest","historicalOccurrences","issues","legacyCompletionRefs","liveDelegations","repositoryAliases","schema","slots","terminalDeclarations"]) or
+      (.schema==3 and keys==["activationRecordDigest","historicalOccurrences","issues","legacyCompletionRefs","liveDelegations","repositoryAliases","schema","slotMappings","slots","terminalDeclarations"])) and
       (all(.slots[];.disposition=="issue-adopted" or .disposition=="create-in-flight-or-uncertain" or .disposition=="blocked-repair")) and
       (all(.legacyCompletionRefs[];.disposition!="malformed-evidence"))' "$artifact" >/dev/null || { rm -rf "$tmp"; return 3; }
     current_repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || { rm -rf "$tmp"; return 3; }
@@ -1196,18 +1330,24 @@ cmd_materialise_import() {
         rm -rf "$tmp"; return 0
       fi
     fi
+    artifact_schema=$(jq -r .schema "$artifact")
     index="$tmp/index"; GIT_INDEX_FILE="$index" git read-tree "${old:-$(git mktree </dev/null)}"; mkdir -p "$tmp/censuses"; cp "$artifact" "$tmp/censuses/$(cat "$digest").json"
     GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(git hash-object -w "$tmp/censuses/$(cat "$digest").json"),censuses/$(cat "$digest").json"
     while IFS= read -r declaration; do
-      slot=$(jq -r .slotId <<<"$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); op=$(jq -r .operationId <<<"$declaration"); body_sha=$(jq -rj .body <<<"$declaration" | sha256sum | awk '{print $1}')
-      git cat-file -e "$old:slots/$slot/state.json" 2>/dev/null && { rm -rf "$tmp"; return 3; }
+      slot=$(_taskdag_materialise_authority_slot "$declaration"); declared_slot=$(_taskdag_materialise_declared_slot "$declaration"); dd=$(jq -r .declarationDigest <<<"$declaration"); op=$(jq -r .operationId <<<"$declaration"); body_sha=$(jq -rj .body <<<"$declaration" | sha256sum | awk '{print $1}')
+      git cat-file -e "$old:slots/$slot/states/0000000000000000.json" 2>/dev/null && { rm -rf "$tmp"; return 3; }
       GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(jq -rj .body <<<"$declaration"|git hash-object -w --stdin),bodies/$body_sha.body"
       [ "$body_sha" = "$(jq -r .bodySha256 <<<"$declaration")" ] && [ "$(jq -rj .body <<<"$declaration" | wc -c)" = "$(jq -r .bodyLength <<<"$declaration")" ] || { rm -rf "$tmp"; return 3; }
       GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(jq -cS 'del(.body,.disposition,.adoptedIssue,.issueNodeId,.repository,.issueNumber)' <<<"$declaration"|git hash-object -w --stdin),declarations/$dd.json"
       state=$(jq -ncS --arg slotId "$slot" --arg declarationDigest "$dd" --arg operationId "$op" --arg state "$(jq -r .disposition <<<"$declaration")" --arg censusDigest "$(cat "$digest")" --argjson adoptedIssue "$(jq -c '.adoptedIssue // null' <<<"$declaration")" '{schema:1,state:$state,slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,generation:0,predecessorStateDigest:null,censusDigest:$censusDigest} + if $state=="issue-adopted" then {adoptedIssue:$adoptedIssue} else {} end')
       GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(printf '%s\n' "$state"|git hash-object -w --stdin),slots/$slot/states/0000000000000000.json"
+      if [ "$artifact_schema" = 3 ] && [ "$slot" != "$declared_slot" ]; then
+        guard=$(jq -ncS --arg declaredSlotId "$declared_slot" --arg authoritySlotId "$slot" --arg declarationDigest "$dd" --arg censusDigest "$(cat "$digest")" '{schema:3,declaredSlotId:$declaredSlotId,authoritySlotId:$authoritySlotId,declarationDigest:$declarationDigest,censusDigest:$censusDigest,disposition:"actionable"}')
+        path=$(_taskdag_materialise_terminal_guard_path "$declared_slot" "$dd")
+        GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(printf '%s\n' "$guard"|git hash-object -w --stdin),$path"
+      fi
     done < <(jq -c --arg repo "$current_repo" '.slots[]|select(.repository==$repo)' "$artifact")
-    GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(jq -ncS --arg censusDigest "$(cat "$digest")" --arg repository "$current_repo" --argjson slots "$(jq -c --arg repo "$current_repo" '[.slots[]|select(.repository==$repo)|.slotId]|sort' "$artifact")" '{schema:1,censusDigest:$censusDigest,repository:$repository,slots:$slots}'|git hash-object -w --stdin),import-batches/$(cat "$digest").json"
+    GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$(jq -ncS --arg censusDigest "$(cat "$digest")" --arg repository "$current_repo" --argjson schema "$([ "$artifact_schema" = 3 ] && echo 3 || echo 1)" --argjson slots "$(jq -c --arg repo "$current_repo" --argjson schema "$artifact_schema" '[.slots[]|select(.repository==$repo)|if $schema==3 then {authoritySlotId,declaredSlotId,declarationDigest} else .slotId end]|sort_by(if type=="object" then .authoritySlotId else . end)' "$artifact")" '{schema:$schema,censusDigest:$censusDigest,repository:$repository,slots:$slots}'|git hash-object -w --stdin),import-batches/$(cat "$digest").json"
     tree=$(GIT_INDEX_FILE="$index" git write-tree)
     [ -z "$old" ] && commit=$(printf 'Import reviewed materialisation census\n' | _taskdag_import_commit_tree "$tree") || commit=$(printf 'Import reviewed materialisation census\n' | _taskdag_import_commit_tree "$tree" -p "$old")
     updates=$(jq -ncS --arg ref "$TASKDAG_MATERIALISATION_REF" --arg old "$old" --arg new "$commit" '[{ref:$ref,old:$old,new:$new}]')
@@ -1229,7 +1369,7 @@ cmd_materialise_import() {
 }
 
 _taskdag_materialise_transition() { # strict authorization spec, mode
-    local spec=$1 mode=$2 old token slot generation prior prior_digest prior_state record path tmp index tree commit updates authorization authorization_digest census_digest census_path readback current_repo rc
+    local spec=$1 mode=$2 old token slot generation prior prior_record prior_digest prior_state record path tmp index tree commit updates authorization authorization_digest census_digest census_path readback current_repo rc
     _taskdag_materialise_no_duplicate_keys "$spec" || return 2
     jq -e --arg mode "$mode" '
       def common: .schema==1 and .mode==$mode and (.slotId|test("^[0-9a-f]{64}$")) and (.priorStateDigest|test("^[0-9a-f]{64}$")) and
@@ -1252,12 +1392,12 @@ _taskdag_materialise_transition() { # strict authorization spec, mode
       census_path="censuses/$census_digest.json"
       git cat-file -e "$old:$census_path" 2>/dev/null || return 3
       [ "$(git show "$old:$census_path" | jq -r .activationRecordDigest)" = "$(jq -r .digest <<<"$token")" ] || return 3
-      git show "$old:$census_path" | jq -e --arg slot "$slot" 'any(.slots[];.slotId==$slot)' >/dev/null || return 3
+      git show "$old:$census_path" | jq -e --arg slot "$slot" 'any(.slots[];(.authoritySlotId//.slotId)==$slot)' >/dev/null || return 3
     fi
     if [ "$mode" = adopt ]; then
       git show "$old:$census_path" | jq -e --argjson issue "$(jq -c .adoptedIssue "$spec")" \
         --arg slot "$slot" '
-          (.slots[]|select(.slotId==$slot)) as $declaration |
+          (.slots[]|select((.authoritySlotId//.slotId)==$slot)) as $declaration |
           $issue.repositoryId==$declaration.peerRepo.id and
           any(.issues[];.repository==$declaration.peerRepo.name and .id==$issue.issueNodeId and
             .repositoryId==$issue.repositoryId and .number==$issue.number)' >/dev/null || return 3
@@ -1265,8 +1405,9 @@ _taskdag_materialise_transition() { # strict authorization spec, mode
     fi
     case "$mode" in rearm) path="slots/$slot/authorizations/$(printf '%016d' "$generation").json";; *) path="slots/$slot/states/$(printf '%016d' "$generation").json";; esac
     prior="slots/$slot/states/$(printf '%016d' "$((generation-1))").json"
-    prior_digest=$(git show "$old:$prior" | sha256sum | awk '{print $1}') || return 3; [ "$prior_digest" = "$(jq -r .priorStateDigest "$spec")" ] || return 3
-    prior_state=$(git show "$old:$prior" | jq -r .state) || return 3
+    prior_record=$(git show "$old:$prior") || return 3
+    prior_digest=$(printf '%s\n' "$prior_record" | sha256sum | awk '{print $1}') || return 3; [ "$prior_digest" = "$(jq -r .priorStateDigest "$spec")" ] || return 3
+    prior_state=$(jq -r .state <<<"$prior_record") || return 3
     if [ -n "$census_digest" ]; then
       [ "$(git show "$old:$prior" | jq -r .censusDigest)" = "$census_digest" ] || return 3
     else
@@ -1275,7 +1416,7 @@ _taskdag_materialise_transition() { # strict authorization spec, mode
       [ "$(git show "$old:$prior" | jq -r .operationId)" = "$(jq -r .operationId "$spec")" ] || return 3
     fi
     case "$mode" in
-      adopt) [ "$prior_state" = blocked-repair ] || [ "$prior_state" = create-in-flight-or-uncertain ] || return 3; record=$(jq -cS '.+{state:"issue-adopted",predecessorStateDigest:.priorStateDigest}|del(.priorStateDigest)' "$spec");;
+      adopt) [ "$prior_state" = blocked-repair ] || [ "$prior_state" = create-in-flight-or-uncertain ] || return 3; record=$(jq -cS --arg declarationDigest "$(jq -r .declarationDigest <<<"$prior_record")" --arg operationId "$(jq -r .operationId <<<"$prior_record")" '.+{state:"issue-adopted",predecessorStateDigest:.priorStateDigest,declarationDigest:$declarationDigest,operationId:$operationId}|del(.priorStateDigest)' "$spec");;
       rearm) [ "$prior_state" = create-in-flight-or-uncertain ] || return 3; authorization=$(jq -cS '.+{state:"rearm-authorized",predecessorStateDigest:.priorStateDigest}|del(.priorStateDigest)' "$spec"); authorization_digest=$(_taskdag_materialise_sha256_text "$authorization"); record=$(jq -cS --arg authorizationDigest "$authorization_digest" '.+{authorizationDigest:$authorizationDigest}' <<<"$authorization");;
       consume) [ "$prior_state" = create-in-flight-or-uncertain ] || return 3; authorization_digest=$(jq -r .authorizationDigest "$spec"); authorization="slots/$slot/authorizations/$(printf '%016d' "$generation").json"; [ "$(git show "$old:$authorization" | jq -r .authorizationDigest)" = "$authorization_digest" ] || return 3; record=$(jq -cS '.+{state:"create-in-flight-or-uncertain",predecessorStateDigest:.priorStateDigest}|del(.priorStateDigest)' "$spec");;
       *) return 2;;

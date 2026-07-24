@@ -87,6 +87,7 @@ cmd_materialise_census_capture() {
     [ "$(jq -c '[.repositories[].repository]' "$input")" = "$(jq -c '[.registrySnapshot.repositories[].repository]' "$activation")" ] || return 3
     mkdir "$stage/pages" "$stage/manifests" "$stage/repos"
     : >"$stage/repositories.ndjson"; : >"$stage/pages.ndjson"
+    jq -r '.repositories[]|[.repository,.path]|@tsv' "$input" >"$stage/input-repositories.scan" || return 2
     while IFS=$'\t' read -r repo path; do
         [[ "$path" = /* ]] || path="$base/$path"; path=$(realpath -e "$path") || return 3
         ref=$(jq -r --arg r "$repo" '.sourceTips[]|select(.repository==$r)|.ref' "$activation")
@@ -121,11 +122,14 @@ cmd_materialise_census_capture() {
               '{file:$file,hasNextPage:$hasNextPage,page:$page,repository:$repository}' >>"$stage/pages.ndjson"
         done
         jq -ncS --arg path "$clone_rel" --arg repository "$repo" --arg tip "$tip" '{path:$path,repository:$repository,tip:$tip}' >>"$stage/repositories.ndjson"
-    done < <(jq -r '.repositories[]|[.repository,.path]|@tsv' "$input")
+    done <"$stage/input-repositories.scan"
 
-    : >"$stage/markers.ndjson"; : >"$stage/completions.ndjson"; : >"$stage/delegations.ndjson"; : >"$stage/declarations.ndjson"; : >"$stage/aliases.ndjson"
+    : >"$stage/markers.ndjson"; : >"$stage/completions.ndjson"; : >"$stage/delegations.ndjson"; : >"$stage/declarations.ndjson"; : >"$stage/declaration-occurrences.ndjson"; : >"$stage/aliases.ndjson"
+    jq -sr 'sort_by(.repository)[]|[.repository,.path]|@tsv' "$stage/repositories.ndjson" >"$stage/repositories.scan" || return 2
     while IFS=$'\t' read -r repo path; do
         path="$stage/$path"
+        git -C "$path" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/gh/child-epics refs/heads/gh/child-epic-slots refs/heads/tasks/completions refs/heads/tasks/delegated >"$stage/refs.scan" \
+          || return 3
         while IFS=$'\t' read -r oid refname; do
             case "$refname" in
               refs/heads/gh/child-epics/*|refs/heads/gh/child-epic-slots/*)
@@ -141,10 +145,13 @@ cmd_materialise_census_capture() {
                 jq -ncS --arg repo "$repo" --argjson issue "$issue" --arg peerRepo "$owner/$name" --argjson peerIssue "$peer" --arg oid "$oid" --arg ref "$refname" \
                   '{repository:$repo,issue:$issue,disposition:"live-obligation",oid:$oid,parentIssue:$issue,parentRepo:$repo,peerIssue:$peerIssue,peerRepo:$peerRepo,ref:$ref}' >>"$stage/delegations.ndjson" ;;
             esac
-        done < <(git -C "$path" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/gh/child-epics refs/heads/gh/child-epic-slots refs/heads/tasks/completions refs/heads/tasks/delegated)
+        done <"$stage/refs.scan"
         source_id=$(jq -r --arg r "$repo" '.registrySnapshot.repositories[]|select(.repository==$r)|.repositoryId' "$activation")
         tip=$(jq -r --arg r "$repo" '.sourceTips[]|select(.repository==$r)|.commit' "$activation")
+        git -C "$path" rev-list --reverse "$tip" >"$stage/commits.scan" || return 3
         while IFS= read -r commit; do
+            git -C "$path" log -1 --format='%B' "$commit" | taskdag_materialise_groups_json_from_message | jq -c 'to_entries[]' >"$stage/groups.scan" \
+              || return 3
             while IFS= read -r group_entry; do
                 [ -n "$group_entry" ] || continue
                 group_ordinal=$(jq -r .key <<<"$group_entry"); group=$(jq -c .value <<<"$group_entry")
@@ -166,12 +173,39 @@ cmd_materialise_census_capture() {
                 jq -ncS --rawfile body "$stage/body.tmp" --arg repo "$repo" --arg sourceId "$source_id" --arg peerRepo "$peer" --arg peerId "$peer_id" --arg parentId "$parent_id" --argjson issue "$issue" \
                   --arg title "$(jq -r .title <<<"$group")" --argjson bodyLength "$body_len" --arg bodySha256 "$body_sha" --arg slotId "$slot" --arg declarationDigest "$declaration" --arg operationId "$operation" --arg slug "$slug" --arg note "$note" --argjson slugPresent "$slug_present" --argjson notePresent "$note_present" \
                   '{repository:$repo,issue:$issue,declaration:({schema:1,sourceRepo:{id:$sourceId,name:$repo},parentIssue:{id:$parentId,number:$issue},peerRepo:{id:$peerId,name:$peerRepo},title:$title,body:$body,bodyLength:$bodyLength,bodySha256:$bodySha256,slotId:$slotId,declarationDigest:$declarationDigest,operationId:$operationId,disposition:"create-in-flight-or-uncertain"} + (if $slugPresent then {slug:$slug} else {} end) + (if $notePresent then {delegationNote:$note} else {} end))}' >>"$stage/declarations.ndjson"
-            done < <(git -C "$path" log -1 --format='%B' "$commit" | taskdag_materialise_groups_json_from_message | jq -c 'to_entries[]')
-        done < <(git -C "$path" rev-list --reverse "$tip")
-    done < <(jq -sr 'sort_by(.repository)[]|[.repository,.path]|@tsv' "$stage/repositories.ndjson")
+                jq -ncS --arg repository "$repo" --arg declarationCommit "$commit" --argjson groupOrdinal "$group_ordinal" --arg slotId "$slot" --arg declarationDigest "$declaration" \
+                  '{repository:$repository,declarationCommit:$declarationCommit,groupOrdinal:$groupOrdinal,slotId:$slotId,declarationDigest:$declarationDigest}' >>"$stage/declaration-occurrences.ndjson"
+            done <"$stage/groups.scan"
+        done <"$stage/commits.scan"
+    done <"$stage/repositories.scan"
 
-    jq -se 'group_by(.declaration.slotId)|all(.[];(map(.declaration.declarationDigest)|unique|length)==1)' "$stage/declarations.ndjson" >/dev/null \
-      || { echo 'Error: repeated historical slot has conflicting declarations' >&2; return 3; }
+    jq -cs 'group_by(.slotId)|map(select((map(.declarationDigest)|unique|length)>1)|.[0].slotId)|sort' \
+      "$stage/declaration-occurrences.ndjson" >"$stage/collision-slots.json" || return 2
+    if [ "$(jq length "$stage/collision-slots.json")" -gt 0 ]; then
+      jq -cs --argjson collisions "$(cat "$stage/collision-slots.json")" '
+        group_by(.slotId) | map(select(.[0].slotId as $slot | $collisions|index($slot)) |
+          {kind:"schema3-collision",slotId:.[0].slotId,occurrences:(map({repository,declarationCommit,groupOrdinal,declarationDigest})|sort_by(.repository,.declarationCommit,.groupOrdinal,.declarationDigest))}) |
+        sort_by(.slotId)[]' "$stage/declaration-occurrences.ndjson" \
+        | while IFS= read -r diagnostic; do printf 'census-capture: info: %s\n' "$diagnostic" >&2; done
+      while IFS= read -r occurrence; do
+        slot=$(jq -r .slotId <<<"$occurrence"); declaration=$(jq -r .declarationDigest <<<"$occurrence")
+        if jq -e --arg slot "$slot" 'index($slot)!=null' "$stage/collision-slots.json" >/dev/null; then
+          authority=$(_taskdag_materialise_authority_slot_id "$slot" "$declaration" true) || return 2
+        else authority=$slot
+        fi
+        jq -cS --arg declared "$slot" --arg authority "$authority" '.+{declaredSlotId:$declared,authoritySlotId:$authority}' <<<"$occurrence"
+      done <"$stage/declaration-occurrences.ndjson" >"$stage/declaration-occurrences.mapped.ndjson" || return 2
+      mv "$stage/declaration-occurrences.mapped.ndjson" "$stage/declaration-occurrences.ndjson"
+      while IFS= read -r row; do
+        slot=$(jq -r .declaration.slotId <<<"$row"); declaration=$(jq -r .declaration.declarationDigest <<<"$row")
+        if jq -e --arg slot "$slot" 'index($slot)!=null' "$stage/collision-slots.json" >/dev/null; then
+          authority=$(_taskdag_materialise_authority_slot_id "$slot" "$declaration" true) || return 2
+        else authority=$slot
+        fi
+        jq -cS --arg declared "$slot" --arg authority "$authority" '.declaration += {declaredSlotId:$declared,authoritySlotId:$authority}' <<<"$row"
+      done <"$stage/declarations.ndjson" >"$stage/declarations.mapped.ndjson" || return 2
+      mv "$stage/declarations.mapped.ndjson" "$stage/declarations.ndjson"
+    fi
     if [ "$(jq -s 'length-(unique_by(.declaration.slotId)|length)' "$stage/declarations.ndjson")" -gt 0 ]; then touch "$stage/repeated-declarations"; fi
 
     for page_file in "$stage"/pages/*.json; do
@@ -184,11 +218,14 @@ cmd_materialise_census_capture() {
             .markers=[$m[]|select(.repository==$repo and .issue==$i.number)|{oid,ref}]|.markers|=sort_by(.ref) |
             .completionEvidence=[$c[]|select(.repository==$repo and .issue==$i.number)|{disposition,oid,ref}]|.completionEvidence|=sort_by(.ref) |
             .liveDelegations=[$l[]|select(.repository==$repo and .issue==$i.number)|del(.repository,.issue)]|.liveDelegations|=sort_by(.ref) |
-            .declarations=([$d[]|select(.repository==$repo and .issue==$i.number)|.declaration]|unique_by(.slotId))|.declarations|=sort_by(.slotId))
+            .declarations=([$d[]|select(.repository==$repo and .issue==$i.number)|.declaration]|unique_by(.declarationDigest))|.declarations|=sort_by(.authoritySlotId//.slotId))
         ' "$page_file" >"$page_file.new" || return 3
         mv "$page_file.new" "$page_file"
     done
-    if [ "$input_schema" = 2 ] || [ -s "$stage/aliases.ndjson" ] || [ -e "$stage/repeated-declarations" ]; then
+    if [ "$(jq length "$stage/collision-slots.json")" -gt 0 ]; then
+      jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" --argjson terminalDeclarations "$([ "$input_schema" = 2 ] && cat "$stage/terminal-declarations.json" || echo '[]')" --slurpfile aliases "$stage/aliases.ndjson" \
+        '{schema:3,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories,repositoryAliases:($aliases|sort_by(.declaredName)),terminalDeclarations:$terminalDeclarations}' >"$stage/spec.json" || return 2
+    elif [ "$input_schema" = 2 ] || [ -s "$stage/aliases.ndjson" ] || [ -e "$stage/repeated-declarations" ]; then
       jq -ncS --arg activationRecord activation.json --slurpfile issuePages "$stage/pages.ndjson" --slurpfile repositories "$stage/repositories.ndjson" --argjson terminalDeclarations "$([ "$input_schema" = 2 ] && cat "$stage/terminal-declarations.json" || echo '[]')" --slurpfile aliases "$stage/aliases.ndjson" \
         '{schema:2,activationRecord:$activationRecord,issuePages:$issuePages,repositories:$repositories,repositoryAliases:($aliases|sort_by(.declaredName)),terminalDeclarations:$terminalDeclarations}' >"$stage/spec.json" || return 2
     else
@@ -197,7 +234,7 @@ cmd_materialise_census_capture() {
     fi
     echo 'census-capture: validating candidate with canonical census builder' >&2
     (cd "$stage" && _taskdag_census_build spec.json census.preview.json) || return 3
-    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage/body.tmp" "$stage/terminal-validation.json" "$stage/terminal-declarations.json" "$stage/aliases.ndjson" "$stage/repeated-declarations"
+    rm -rf "$stage/manifests" "$stage"/*.pass1 "$stage"/*.pass2 "$stage"/*.scan "$stage/body.tmp" "$stage/terminal-validation.json" "$stage/terminal-declarations.json" "$stage/aliases.ndjson" "$stage/declaration-occurrences.ndjson" "$stage/collision-slots.json" "$stage/repeated-declarations"
     [ ! -e "$destination" ] || return 3
     mv -T "$stage" "$destination" || return 2; stage=""
     jq -ncS --arg outputDir "$destination" --arg spec "$destination/spec.json" --arg preview "$destination/census.preview.json" \

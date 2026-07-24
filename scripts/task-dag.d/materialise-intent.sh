@@ -308,7 +308,7 @@ taskdag_materialisation_authority_durable() { # issue root-sha
         declaration=$(git show "$tip:$path") || return 2
         [ "$(jq -r .sourceRepo.name <<<"$declaration" | tr '[:upper:]' '[:lower:]')" = "$(tr '[:upper:]' '[:lower:]' <<<"$current")" ] || continue
         [ "$(jq -r .parentIssue.number <<<"$declaration")" = "$issue" ] || continue
-        slot=$(jq -r .slotId <<<"$declaration")
+        slot=$(jq -r '.authoritySlotId // .slotId' <<<"$declaration")
         state_path=$(git ls-tree -r --name-only "$tip" "slots/$slot/states" | sort | tail -1); [ -n "$state_path" ] || return 1
         state=$(git show "$tip:$state_path") || return 2
         [ "$(jq -r .state <<<"$state")" = final ] || return 1

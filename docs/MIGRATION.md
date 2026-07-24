@@ -554,8 +554,28 @@ zero-based group ordinal, declaration digest, and slot ID. Repeated occurrences
 of the exact same declaration converge on one issue declaration and one slot;
 the occurrence records preserve the complete history in the artifact and
 digest. Repeated slot requests with different declaration digests fail before
-publication. Schema 1 remains strict one-occurrence-per-slot and capture
+publication. Capture reports each conflicting slot as deterministic JSON with
+only its slot ID and the sorted repository, declaration commit, zero-based
+group ordinal, and declaration digest of every occurrence. It deliberately
+omits declaration content and delegation notes: these coordinates identify
+the immutable evidence to review without copying potentially sensitive issue
+text into logs. Schema 1 remains strict one-occurrence-per-slot and capture
 automatically emits schema 2 when frozen history contains an exact repeat.
+
+Schema 3 is the bounded compatibility format for frozen histories in which
+one declared v1 slot contains more than one declaration digest. It does not
+change v1 declaration or operation IDs. Every declaration and historical
+occurrence retains `declaredSlotId`; `authoritySlotId` is identical for an
+uncollided declaration and is
+`ID("legacy-collision-slot-v1", declaredSlotId, declarationDigest)` for every
+member of a collision group. `slotMappings` is the canonical, sorted mapping
+between those identities. Runtime state paths use the authority ID, while
+the declared ID remains the replay key. Imported actionable declarations are
+non-create-capable until an explicit adoption or rearm transition supplies
+strong authority; legacy refs alone never establish issue adoption. Schema 1
+and schema 2 artifacts remain compatible, and ordinary schema-1 reservation
+bytes are unchanged. Exact schema-3 replay selects the mapped authority slot
+without changing the declaration or operation identity.
 
 The census writes canonical artifact bytes and a separate lowercase SHA-256
 digest. `materialise-import` requires those exact files and the same input,
