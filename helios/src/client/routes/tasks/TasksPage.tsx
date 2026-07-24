@@ -6,7 +6,7 @@ import {
   SourceBanner,
   TaskUnavailable,
   githubIssueUrl,
-  type EpicSummary,
+  type EpicsView,
 } from './taskShared.js'
 
 interface Activity {
@@ -19,8 +19,8 @@ interface Activity {
 }
 
 export function TasksPage() {
-  const epicsQ = usePolledData<EpicSummary[]>(
-    () => fetchTaskJson<EpicSummary[]>('/api/tasks/epics'),
+  const epicsQ = usePolledData<EpicsView>(
+    () => fetchTaskJson<EpicsView>('/api/tasks/epics'),
     [],
     30_000,
   )
@@ -52,7 +52,7 @@ export function TasksPage() {
       </div>
 
       <SourceBanner
-        source={activityQ.data?.source}
+        source={activityQ.data?.source ?? epicsQ.data?.source}
         onRefresh={() => {
           epicsQ.refresh()
           activityQ.refresh()
@@ -71,13 +71,6 @@ export function TasksPage() {
 
       <div className="inline-row wrap-row module-card-links" style={{ marginBottom: '1.5rem' }}>
         <Link to="/tasks/frontier">Open the frontier</Link>
-        <a
-          href="https://github.com/FreshlyBakedNYC/automation/issues"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          GitHub issues
-        </a>
       </div>
 
       <div className="page-header">
@@ -91,21 +84,22 @@ export function TasksPage() {
         <p>Loading...</p>
       ) : fatal ? (
         <TaskUnavailable error={epicsQ.error} onRetry={epicsQ.refresh} />
-      ) : (epicsQ.data?.length ?? 0) === 0 ? (
+      ) : (epicsQ.data?.epics.length ?? 0) === 0 ? (
         <article className="mini-card">
           <p className="subtle-copy">No epics with active tasks. Open a GitHub issue to start one.</p>
         </article>
       ) : (
         <div className="review-grid">
-          {epicsQ.data!.map((epic) => (
-            <article className="mini-card" key={`${epic.issueNumber ?? epic.sha}`}>
+          {epicsQ.data!.epics.map((epic) => (
+            <article className="mini-card" key={`${epic.repository}:${epic.issueNumber ?? epic.sha}`}>
               <header>
                 <div>
                   <strong>{epic.title}</strong>
+                  <p className="subtle-copy">{epic.repository}</p>
                   {epic.issueNumber != null && (
                     <p className="subtle-copy" style={{ marginTop: '0.25rem' }}>
                       <a
-                        href={epic.githubUrl ?? githubIssueUrl(epic.issueNumber)}
+                        href={epic.githubUrl ?? githubIssueUrl(epic.issueNumber, epic.githubRepository)}
                         target="_blank"
                         rel="noopener noreferrer"
                         style={{ fontSize: '0.875rem' }}
@@ -131,9 +125,9 @@ export function TasksPage() {
                 className="inline-row wrap-row module-card-links"
                 style={{ marginTop: '1rem' }}
               >
-                {epic.issueNumber != null && <Link to={`/tasks/epic/${epic.issueNumber}`}>View DAG</Link>}
+                {epic.issueNumber != null && <Link to={`/tasks/${epic.repository}/epic/${epic.issueNumber}`}>View DAG</Link>}
                 {epic.issueNumber != null && (
-                  <Link to={`/tasks/frontier?issue=${epic.issueNumber}`}>Frontier tasks</Link>
+                  <Link to={`/tasks/frontier?repository=${epic.repository}&issue=${epic.issueNumber}`}>Frontier tasks</Link>
                 )}
               </div>
             </article>

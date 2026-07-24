@@ -22,7 +22,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import crypto from 'node:crypto'
 
-import { getTaskDagGitDir, getTaskDagSourceStatus } from './taskDagMirror.js'
+import { getTaskDagSources, getTaskDagSourceStatus } from './taskDagMirror.js'
 import type { TaskDagSourceStatus } from './taskDagMirror.js'
 
 const execFileAsync = promisify(execFile)
@@ -34,6 +34,8 @@ export type TaskStatus = 'pending' | 'in-progress' | 'blocked' | 'done'
 export type TaskType = 'epic' | 'task' | 'leaf'
 
 export interface TaskNode {
+  repository: string
+  githubRepository?: string
   sha: string
   shortSha: string
   title: string
@@ -70,6 +72,8 @@ export interface TaskEdge {
 }
 
 export interface EpicSummary {
+  repository: string
+  githubRepository?: string
   issueNumber?: number
   epicRef: string
   sha: string
@@ -85,9 +89,16 @@ export interface EpicSummary {
   totalTasks: number
 }
 
+export interface EpicsView {
+  source: TaskDagSourceStatus
+  epics: EpicSummary[]
+}
+
 export interface DagResult {
   source: TaskDagSourceStatus
   epic: {
+    repository: string
+    githubRepository?: string
     sha: string
     shortSha: string
     issueNumber?: number
@@ -104,6 +115,8 @@ export interface DagResult {
 
 export interface FrontierGroup {
   epic: {
+    repository: string
+    githubRepository?: string
     sha: string
     shortSha: string
     issueNumber?: number
@@ -161,21 +174,29 @@ export class TaskDagUnavailableError extends Error {
   }
 }
 
-let cachedIndex: TaskIndex | null = null
+export class TaskDagRepositoryNotFoundError extends Error {
+  constructor(repository: string) {
+    super(`Task repository not found: ${repository}`)
+    this.name = 'TaskDagRepositoryNotFoundError'
+  }
+}
+
+const cachedIndexes = new Map<string, TaskIndex>()
 
 /** Test-only: drop the cached index so a fresh repo is re-read. */
 export function __resetTaskIndexCacheForTests(): void {
-  cachedIndex = null
+  cachedIndexes.clear()
 }
 
 // --- git helpers -----------------------------------------------------------
 
-function requireGitDir(): string {
-  const dir = getTaskDagGitDir()
-  if (!dir) {
+function requireSource(repository: string) {
+  const source = getTaskDagSources().find((candidate) => candidate.repository === repository)
+  if (!source) throw new TaskDagRepositoryNotFoundError(repository)
+  if (!source.gitDir) {
     throw new TaskDagUnavailableError(getTaskDagSourceStatus())
   }
-  return dir
+  return { ...source, gitDir: source.gitDir }
 }
 
 async function git(dir: string, args: string[]): Promise<string> {
@@ -471,19 +492,19 @@ async function readRefs(dir: string): Promise<RefSets> {
   }
 }
 
-export async function loadTaskIndex(): Promise<TaskIndex> {
-  const dir = requireGitDir()
+export async function loadTaskIndex(repository = 'automation'): Promise<TaskIndex> {
+  const source = requireSource(repository)
+  const dir = source.gitDir
   const refs = await readRefs(dir)
   const masterRef = await resolveMasterRef(dir)
   const masterSha = masterRef ? await git(dir, ['rev-parse', masterRef]) : 'none'
   const fingerprint = `${refs.fingerprint}:${masterSha.slice(0, 12)}`
 
   if (
-    cachedIndex &&
-    cachedIndex.fingerprint === fingerprint &&
-    Date.now() - cachedIndex.builtAtMs < CACHE_TTL_MS
+    cachedIndexes.get(repository)?.fingerprint === fingerprint &&
+    Date.now() - (cachedIndexes.get(repository)?.builtAtMs ?? 0) < CACHE_TTL_MS
   ) {
-    return cachedIndex
+    return cachedIndexes.get(repository) as TaskIndex
   }
 
   const completion = masterRef ? await buildCompletionMap(dir, masterRef) : new Map<string, string[]>()
@@ -553,6 +574,8 @@ export async function loadTaskIndex(): Promise<TaskIndex> {
     }
 
     nodes.set(sha, {
+      repository,
+      githubRepository: source.githubRepository,
       sha,
       shortSha: sha.slice(0, 7),
       title: parseTitle(msg, isEpic),
@@ -628,7 +651,7 @@ export async function loadTaskIndex(): Promise<TaskIndex> {
     fingerprint,
     builtAtMs: Date.now(),
   }
-  cachedIndex = index
+  cachedIndexes.set(repository, index)
   return index
 }
 
@@ -653,11 +676,11 @@ export function getSourceStatus(): TaskDagSourceStatus {
   return getTaskDagSourceStatus()
 }
 
-export async function getFrontierView(filter?: {
+async function getFrontierViewForSource(repository: string, filter?: {
   issue?: number
   status?: string
 }): Promise<FrontierView> {
-  const index = await loadTaskIndex()
+  const index = await loadTaskIndex(repository)
   const source = getTaskDagSourceStatus()
 
   const frontier: TaskNode[] = []
@@ -729,9 +752,9 @@ type EpicRef = FrontierGroup['epic']
  * commits over time.
  */
 function groupKey(t: TaskNode): string {
-  if (t.epicIssueNumber != null) return `issue:${t.epicIssueNumber}`
-  if (t.epicSha) return `epic:${t.epicSha}`
-  return 'none'
+  if (t.epicIssueNumber != null) return `${t.repository}:issue:${t.epicIssueNumber}`
+  if (t.epicSha) return `${t.repository}:epic:${t.epicSha}`
+  return `${t.repository}:none`
 }
 
 function epicRefOf(index: TaskIndex, t: TaskNode): EpicRef {
@@ -739,6 +762,8 @@ function epicRefOf(index: TaskIndex, t: TaskNode): EpicRef {
     const sha = index.epicsByIssue.get(t.epicIssueNumber)
     const node = sha ? index.nodes.get(sha) : undefined
     return {
+      repository: t.repository,
+      githubRepository: t.githubRepository,
       sha: node?.sha ?? t.epicSha ?? '',
       shortSha: (node?.sha ?? t.epicSha ?? '').slice(0, 7),
       issueNumber: t.epicIssueNumber,
@@ -750,6 +775,8 @@ function epicRefOf(index: TaskIndex, t: TaskNode): EpicRef {
     const node = index.nodes.get(t.epicSha)
     if (node) {
       return {
+        repository: t.repository,
+        githubRepository: t.githubRepository,
         sha: node.sha,
         shortSha: node.shortSha,
         issueNumber: node.issueNumber,
@@ -761,16 +788,80 @@ function epicRefOf(index: TaskIndex, t: TaskNode): EpicRef {
   return null
 }
 
+function configuredRepositories(repository?: string): string[] {
+  const repositories = getTaskDagSources().map((source) => source.repository)
+  if (!repository) return repositories
+  if (!repositories.includes(repository)) throw new TaskDagRepositoryNotFoundError(repository)
+  return [repository]
+}
+
+function sourceStatusForQueryFailures(failedRepositories: string[]): TaskDagSourceStatus {
+  const base = getTaskDagSourceStatus()
+  if (failedRepositories.length === 0) return base
+  const failed = new Set(failedRepositories)
+  const repositories = base.repositories.map((repository) => failed.has(repository.repository)
+    ? { ...repository, available: false, lastError: 'Task data could not be read from this repository' }
+    : repository)
+  const availableCount = repositories.filter((repository) => repository.available).length
+  return {
+    ...base,
+    available: availableCount > 0,
+    coverage: availableCount === 0 ? 'unavailable' : availableCount === repositories.length ? 'complete' : 'partial',
+    repositories,
+    lastError: 'One or more repositories could not be read',
+  }
+}
+
+export async function getFrontierView(filter?: {
+  issue?: number
+  status?: string
+  repository?: string
+}): Promise<FrontierView> {
+  const results = await Promise.allSettled(
+    configuredRepositories(filter?.repository).map((repository) =>
+      getFrontierViewForSource(repository, filter),
+    ),
+  )
+  const repositories = configuredRepositories(filter?.repository)
+  const failedRepositories = results.flatMap((result, index) => {
+    if (result.status === 'fulfilled') return []
+    console.error(`task-dag read failed for ${repositories[index]}`, result.reason)
+    return [repositories[index]]
+  })
+  const source = sourceStatusForQueryFailures(failedRepositories)
+  const views = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
+  if (views.length === 0) throw new TaskDagUnavailableError(source)
+  const groups = views.flatMap((view) => view.groups).sort((a, b) =>
+    b.counts.ready - a.counts.ready ||
+    (a.epic?.repository ?? '').localeCompare(b.epic?.repository ?? '') ||
+    (a.epic?.issueNumber ?? 1e9) - (b.epic?.issueNumber ?? 1e9),
+  )
+  const tasks = groups.flatMap((group) => group.tasks)
+  return {
+    source,
+    summary: {
+      totalFrontier: tasks.length,
+      ready: tasks.filter((task) => task.isReady).length,
+      active: tasks.filter((task) => task.isActive).length,
+      blocked: tasks.filter((task) => task.isBlocked).length,
+      done: tasks.filter((task) => task.status === 'done').length,
+      epicCount: groups.filter((group) => group.epic).length,
+    },
+    groups,
+  }
+}
+
 export async function getFrontier(filter?: {
   issue?: number
   status?: string
+  repository?: string
 }): Promise<TaskNode[]> {
   const view = await getFrontierView(filter)
   return view.groups.flatMap((g) => g.tasks)
 }
 
-export async function getEpics(): Promise<EpicSummary[]> {
-  const index = await loadTaskIndex()
+async function getEpicsForSource(repository: string): Promise<EpicSummary[]> {
+  const index = await loadTaskIndex(repository)
 
   // Aggregate by GitHub issue (one issue may have many epic snapshot
   // commits). Members are the non-epic task nodes belonging to the issue.
@@ -807,6 +898,8 @@ export async function getEpics(): Promise<EpicSummary[]> {
     const totalTasks = members.length
     const doneTasks = statusCounts['done'] ?? 0
     epics.push({
+      repository,
+      githubRepository: epicNode?.githubRepository,
       issueNumber: issue,
       epicRef: epicNode?.refs.find((r) => r.startsWith('tasks/pending/')) ?? '',
       sha: epicSha,
@@ -831,8 +924,25 @@ export async function getEpics(): Promise<EpicSummary[]> {
   return epics
 }
 
-export async function getEpicDag(epicRefOrSha: string): Promise<DagResult> {
-  const index = await loadTaskIndex()
+export async function getEpics(): Promise<EpicsView> {
+  const repositories = configuredRepositories()
+  const results = await Promise.allSettled(repositories.map((repository) => getEpicsForSource(repository)))
+  const failedRepositories = results.flatMap((result, index) => {
+    if (result.status === 'fulfilled') return []
+    console.error(`task-dag read failed for ${repositories[index]}`, result.reason)
+    return [repositories[index]]
+  })
+  const source = sourceStatusForQueryFailures(failedRepositories)
+  const successful = results.filter((result) => result.status === 'fulfilled')
+  if (successful.length === 0) throw new TaskDagUnavailableError(source)
+  const epics = successful.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+    .sort((a, b) => b.readyCount - a.readyCount || a.repository.localeCompare(b.repository) ||
+      (a.issueNumber ?? 1e9) - (b.issueNumber ?? 1e9))
+  return { source, epics }
+}
+
+export async function getEpicDag(epicRefOrSha: string, repository = 'automation'): Promise<DagResult> {
+  const index = await loadTaskIndex(repository)
   const source = getTaskDagSourceStatus()
 
   // Resolve to an issue number when possible (the canonical epic identity),
@@ -844,7 +954,7 @@ export async function getEpicDag(epicRefOrSha: string): Promise<DagResult> {
     epicSha = index.epicsByIssue.get(issueNumber)
   }
   if (!epicSha) {
-    const dir = requireGitDir()
+    const dir = requireSource(repository).gitDir
     try {
       epicSha = await git(dir, ['rev-parse', epicRefOrSha])
     } catch {
@@ -901,6 +1011,8 @@ export async function getEpicDag(epicRefOrSha: string): Promise<DagResult> {
   return {
     source,
     epic: {
+      repository,
+      githubRepository: epicNode?.githubRepository,
       sha: epicNode?.sha ?? epicSha ?? '',
       shortSha: (epicNode?.sha ?? epicSha ?? '').slice(0, 7),
       issueNumber: epicNode?.issueNumber ?? issueNumber,
@@ -913,14 +1025,14 @@ export async function getEpicDag(epicRefOrSha: string): Promise<DagResult> {
   }
 }
 
-export async function getTaskDetail(shaOrRef: string): Promise<TaskDetail | null> {
-  const index = await loadTaskIndex()
+export async function getTaskDetail(shaOrRef: string, repository = 'automation'): Promise<TaskDetail | null> {
+  const index = await loadTaskIndex(repository)
   const source = getTaskDagSourceStatus()
 
   let task = index.nodes.get(shaOrRef)
   if (!task) {
     // Allow short-sha / ref lookups.
-    const dir = requireGitDir()
+    const dir = requireSource(repository).gitDir
     try {
       const full = await git(dir, ['rev-parse', shaOrRef])
       task = index.nodes.get(full)
@@ -951,9 +1063,14 @@ export async function getActivity(): Promise<{
 }> {
   const view = await getFrontierView()
   const epics = await getEpics()
+  const unavailableInEither = new Set([
+    ...view.source.repositories.filter((repository) => !repository.available).map((repository) => repository.repository),
+    ...epics.source.repositories.filter((repository) => !repository.available).map((repository) => repository.repository),
+  ])
+  const source = sourceStatusForQueryFailures([...unavailableInEither])
   return {
-    source: view.source,
-    totalEpics: epics.length,
+    source,
+    totalEpics: epics.epics.length,
     totalFrontier: view.summary.totalFrontier,
     readyTasks: view.summary.ready,
     activeTasks: view.summary.active,

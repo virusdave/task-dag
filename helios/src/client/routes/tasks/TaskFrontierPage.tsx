@@ -57,7 +57,8 @@ function matchesStatus(task: TaskNode, filter: StatusFilter): boolean {
 }
 
 function groupKeyOf(g: FrontierGroup): string {
-  return g.epic?.issueNumber != null ? `issue:${g.epic.issueNumber}` : g.epic?.sha ?? 'none'
+  const repository = g.epic?.repository ?? g.tasks[0]?.repository ?? 'unknown'
+  return g.epic?.issueNumber != null ? `${repository}:issue:${g.epic.issueNumber}` : `${repository}:${g.epic?.sha ?? 'none'}`
 }
 
 function visibleCounts(tasks: TaskNode[]): FrontierGroup['counts'] {
@@ -73,6 +74,7 @@ function visibleCounts(tasks: TaskNode[]): FrontierGroup['counts'] {
 export function TaskFrontierPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const issueFilter = searchParams.get('issue') ?? ''
+  const repositoryFilter = searchParams.get('repository') ?? ''
   const statusFilter = parseStatus(searchParams.get('status'))
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed())
@@ -81,9 +83,10 @@ export function TaskFrontierPage() {
     () => {
       const params = new URLSearchParams()
       if (issueFilter) params.set('issue', issueFilter)
+      if (repositoryFilter) params.set('repository', repositoryFilter)
       return fetchTaskJson<FrontierView>(`/api/tasks/frontier?${params.toString()}`)
     },
-    [issueFilter],
+    [issueFilter, repositoryFilter],
     30_000,
   )
 
@@ -95,12 +98,14 @@ export function TaskFrontierPage() {
         const groupMatches =
           !needle ||
           (g.epic?.title?.toLowerCase().includes(needle) ?? false) ||
+          (g.epic?.repository.toLowerCase().includes(needle) ?? false) ||
           (g.epic?.issueNumber != null && String(g.epic.issueNumber).includes(needle))
         const tasks = g.tasks.filter((t) => {
           if (statusFilter !== 'all' && !matchesStatus(t, statusFilter)) return false
           if (groupMatches) return true
           return (
             t.title.toLowerCase().includes(needle) ||
+            t.repository.toLowerCase().includes(needle) ||
             t.sha.startsWith(needle) ||
             (t.issueNumber != null && String(t.issueNumber).includes(needle))
           )
@@ -129,7 +134,7 @@ export function TaskFrontierPage() {
     setSearchParams(next, { replace: true })
   }
 
-  const hasActiveFilters = statusFilter !== 'all' || search.trim() !== '' || issueFilter !== ''
+  const hasActiveFilters = statusFilter !== 'all' || search.trim() !== '' || issueFilter !== '' || repositoryFilter !== ''
   const clearFilters = () => {
     setSearch('')
     setSearchParams(new URLSearchParams(), { replace: true })
@@ -189,7 +194,7 @@ export function TaskFrontierPage() {
         <input
           type="search"
           className="task-search"
-          placeholder="Search title, SHA, or issue #"
+          placeholder="Search repository, title, SHA, or issue #"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           aria-label="Search frontier tasks"
@@ -217,9 +222,9 @@ export function TaskFrontierPage() {
         </div>
       </div>
 
-      {issueFilter && (
+      {(issueFilter || repositoryFilter) && (
         <p className="subtle-copy" style={{ marginBottom: '1rem' }}>
-          Filtered to issue #{issueFilter}.{' '}
+          Filtered to {repositoryFilter || 'all repositories'}{issueFilter ? ` issue #${issueFilter}` : ''}.{' '}
           <Link to="/tasks/frontier">Clear</Link>
         </p>
       )}
@@ -260,6 +265,7 @@ export function TaskFrontierPage() {
               >
                 <summary className="task-group-summary">
                   <span className="task-group-title">
+                    <span className="task-group-issue">{group.epic?.repository ?? group.tasks[0]?.repository}</span>
                     {group.epic?.issueNumber != null ? (
                       <span className="task-group-issue">#{group.epic.issueNumber}</span>
                     ) : null}
@@ -281,7 +287,7 @@ export function TaskFrontierPage() {
                 <div className="task-group-body">
                   <div className="task-group-links">
                     {group.epic?.issueNumber != null && (
-                      <Link to={`/tasks/epic/${group.epic.issueNumber}`}>View DAG</Link>
+                      <Link to={`/tasks/${group.epic.repository}/epic/${group.epic.issueNumber}`}>View DAG</Link>
                     )}
                     {group.epic?.githubUrl ? (
                       <a href={group.epic.githubUrl} target="_blank" rel="noopener noreferrer">
@@ -290,7 +296,7 @@ export function TaskFrontierPage() {
                     ) : null}
                   </div>
                   {group.tasks.map((task) => (
-                    <TaskCard key={task.sha} task={task} />
+                    <TaskCard key={`${task.repository}:${task.sha}`} task={task} />
                   ))}
                 </div>
               </details>

@@ -8,6 +8,12 @@ export type TaskStatus = 'pending' | 'in-progress' | 'blocked' | 'done'
 
 export interface TaskDagSourceStatus {
   available: boolean
+  coverage: 'complete' | 'partial' | 'unavailable'
+  repositories: Array<{
+    repository: string
+    available: boolean
+    lastError: string | null
+  }>
   mode: 'mirror' | 'local-checkout' | 'none'
   lastAttemptAtMs: number | null
   lastSuccessAtMs: number | null
@@ -15,6 +21,8 @@ export interface TaskDagSourceStatus {
 }
 
 export interface TaskNode {
+  repository: string
+  githubRepository?: string
   sha: string
   shortSha: string
   title: string
@@ -40,6 +48,8 @@ export interface TaskNode {
 }
 
 export interface EpicMeta {
+  repository: string
+  githubRepository?: string
   sha: string
   shortSha: string
   issueNumber?: number
@@ -67,6 +77,8 @@ export interface FrontierView {
 }
 
 export interface EpicSummary {
+  repository: string
+  githubRepository?: string
   issueNumber?: number
   epicRef: string
   sha: string
@@ -80,6 +92,11 @@ export interface EpicSummary {
   blockedCount: number
   completionPct: number
   totalTasks: number
+}
+
+export interface EpicsView {
+  source: TaskDagSourceStatus
+  epics: EpicSummary[]
 }
 
 export interface TaskEdge {
@@ -106,8 +123,6 @@ export interface TaskDetail {
 }
 
 // --- data fetching ---------------------------------------------------------
-
-const GITHUB_REPO = 'FreshlyBakedNYC/automation'
 
 export class TaskDataUnavailableError extends Error {
   source?: TaskDagSourceStatus
@@ -211,12 +226,12 @@ export function formatAge(ms: number | null): string {
   return `${Math.round(hours / 24)}d ago`
 }
 
-export function githubIssueUrl(issueNumber: number): string {
-  return `https://github.com/${GITHUB_REPO}/issues/${issueNumber}`
+export function githubIssueUrl(issueNumber: number, repository?: string): string | undefined {
+  return repository ? `https://github.com/${repository}/issues/${issueNumber}` : undefined
 }
 
-export function githubCommitUrl(sha: string): string {
-  return `https://github.com/${GITHUB_REPO}/commit/${sha}`
+export function githubCommitUrl(sha: string, repository?: string): string | undefined {
+  return repository ? `https://github.com/${repository}/commit/${sha}` : undefined
 }
 
 // --- shared components -----------------------------------------------------
@@ -230,10 +245,13 @@ export function SourceBanner({
 }) {
   if (!source) return null
   const stale = source.lastError != null && source.available
+  const failed = source.repositories.filter((repository) => !repository.available)
   return (
     <div className={`task-source-banner${stale ? ' task-source-banner--stale' : ''}`}>
       <span>
-        {stale
+        {source.coverage === 'partial'
+          ? `Partial task coverage. Unavailable: ${failed.map((repository) => repository.repository).join(', ')}.`
+          : stale
           ? `Showing cached task DAG. Last refresh failed; last good refresh ${formatAge(
               source.lastSuccessAtMs,
             )}.`
@@ -364,10 +382,11 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
   return (
     <article className="task-card">
       <div className="task-card-main">
-        <Link to={`/tasks/task/${task.sha}`} className="task-card-title">
+        <Link to={`/tasks/${task.repository}/task/${task.sha}`} className="task-card-title">
           {task.title}
         </Link>
         <div className="task-card-badges">
+          <Pill tone="muted">{task.repository}</Pill>
           <StatusBadge task={task} />
           {task.isActive && <Pill tone="warning">claimed</Pill>}
           {task.dependencies.length > 0 && (
@@ -385,7 +404,7 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
       <div className="task-card-meta">
         <code className="task-card-sha">{task.shortSha}</code>
         {showEpic && task.epicIssueNumber != null && (
-          <Link to={`/tasks/epic/${task.epicIssueNumber}`} className="task-card-epic">
+          <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`} className="task-card-epic">
             {`#${task.epicIssueNumber} ${task.epicTitle ?? ''}`.trim()}
           </Link>
         )}
@@ -394,16 +413,16 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
         {nextCmd && (
           <CopyButton value={nextCmd.command} label={nextCmd.label} copiedLabel="Copied command" />
         )}
-        <Link to={`/tasks/task/${task.sha}`}>Inspect</Link>
+        <Link to={`/tasks/${task.repository}/task/${task.sha}`}>Inspect</Link>
         {task.epicIssueNumber != null && (
-          <Link to={`/tasks/epic/${task.epicIssueNumber}`}>DAG</Link>
+          <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>DAG</Link>
         )}
         {task.githubUrl ? (
           <a href={task.githubUrl} target="_blank" rel="noopener noreferrer">
             GitHub
           </a>
-        ) : task.issueNumber != null ? (
-          <a href={githubIssueUrl(task.issueNumber)} target="_blank" rel="noopener noreferrer">
+        ) : task.issueNumber != null && task.githubRepository ? (
+          <a href={githubIssueUrl(task.issueNumber, task.githubRepository)} target="_blank" rel="noopener noreferrer">
             GitHub
           </a>
         ) : null}

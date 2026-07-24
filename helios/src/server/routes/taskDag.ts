@@ -10,7 +10,7 @@
 
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import * as taskDagRepo from '../taskDagRepo.js'
-import { TaskDagUnavailableError } from '../taskDagRepo.js'
+import { TaskDagRepositoryNotFoundError, TaskDagUnavailableError } from '../taskDagRepo.js'
 
 function handleError(
   server: FastifyInstance,
@@ -24,6 +24,9 @@ function handleError(
       message: 'Task DAG data is temporarily unavailable.',
       source: error.status,
     })
+  }
+  if (error instanceof TaskDagRepositoryNotFoundError) {
+    return reply.status(404).send({ error: error.message })
   }
   server.log.error(error, context)
   return reply.status(500).send({ error: context })
@@ -54,17 +57,30 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
     }
   })
 
+  server.get<{ Params: { repository: string; id: string } }>(
+    '/api/tasks/repositories/:repository/epics/:id/dag',
+    async (request, reply) => {
+      try {
+        return reply.send(await taskDagRepo.getEpicDag(request.params.id, request.params.repository))
+      } catch (error) {
+        if (error instanceof Error && /not found/i.test(error.message)) return reply.status(404).send({ error: error.message })
+        return handleError(server, reply, error, 'Failed to fetch epic DAG')
+      }
+    },
+  )
+
   // GET /api/tasks/frontier - grouped frontier view
-  server.get<{ Querystring: { issue?: string; status?: string } }>(
+  server.get<{ Querystring: { issue?: string; status?: string; repository?: string } }>(
     '/api/tasks/frontier',
     async (request, reply) => {
       try {
-        const filter: { issue?: number; status?: string } = {}
+        const filter: { issue?: number; status?: string; repository?: string } = {}
         if (request.query.issue) {
           const n = parseInt(request.query.issue, 10)
           if (Number.isFinite(n)) filter.issue = n
         }
         if (request.query.status) filter.status = request.query.status
+        if (request.query.repository) filter.repository = request.query.repository
         return reply.send(await taskDagRepo.getFrontierView(filter))
       } catch (error) {
         return handleError(server, reply, error, 'Failed to fetch frontier tasks')
@@ -82,6 +98,19 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
       return handleError(server, reply, error, 'Failed to fetch task')
     }
   })
+
+  server.get<{ Params: { repository: string; sha: string } }>(
+    '/api/tasks/repositories/:repository/tasks/:sha',
+    async (request, reply) => {
+      try {
+        const detail = await taskDagRepo.getTaskDetail(request.params.sha, request.params.repository)
+        if (!detail) return reply.status(404).send({ error: 'Task not found' })
+        return reply.send(detail)
+      } catch (error) {
+        return handleError(server, reply, error, 'Failed to fetch task')
+      }
+    },
+  )
 
   // GET /api/tasks/validate - validate DAG structure
   server.get('/api/tasks/validate', async (_request, reply) => {

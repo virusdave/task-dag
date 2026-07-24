@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import {
   getEpicDag,
@@ -11,6 +11,11 @@ import {
   getTaskDetail,
   __resetTaskIndexCacheForTests,
 } from './taskDagRepo.js'
+import {
+  __resetTaskDagMirrorForTests,
+  initTaskDagMirror,
+  parseTaskDagReposConfig,
+} from './taskDagMirror.js'
 
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
@@ -179,10 +184,108 @@ describe('taskDagRepo indexer', () => {
 
   it('aggregates the epic in getEpics by issue', async () => {
     const epics = await getEpics()
-    const e = epics.find((e) => e.issueNumber === 100)
+    const e = epics.epics.find((e) => e.issueNumber === 100)
     expect(e).toBeTruthy()
     expect(e!.totalTasks).toBe(5)
     expect(e!.completionPct).toBeCloseTo(1 / 5)
+  })
+
+  it('keeps identical repository DAGs scoped and reports partial/all failure', async () => {
+    const second = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-second-'))
+    fs.rmSync(second, { recursive: true, force: true })
+    fs.cpSync(repoDir, second, { recursive: true })
+    const configFile = path.join(os.tmpdir(), `taskdag-repos-${process.pid}.conf`)
+    const pathsFile = `${configFile}.paths`
+    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-mirrors-'))
+    const corrupt = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-corrupt-'))
+    fs.writeFileSync(path.join(corrupt, 'HEAD'), 'ref: refs/heads/master\n')
+    fs.mkdirSync(path.join(corrupt, 'objects'))
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      fs.writeFileSync(configFile, 'automation git@github.com:Example/automation.git\nsecond git@github.com:Example/second.git\ncorrupt git@github.com:Example/corrupt.git\n')
+      fs.writeFileSync(pathsFile, `automation ${repoDir}\nsecond ${second}\ncorrupt ${corrupt}\n`)
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
+      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
+      __resetTaskDagMirrorForTests()
+      __resetTaskIndexCacheForTests()
+      const view = await getFrontierView()
+      expect(new Set(view.groups.flatMap((group) => group.tasks.map((task) => task.repository))))
+        .toEqual(new Set(['automation', 'second']))
+      expect(view.source.coverage).toBe('partial')
+      expect(view.source.repositories.find((source) => source.repository === 'corrupt')?.available).toBe(false)
+      expect((await getTaskDetail((await nodeByTitle('Ready to go')).sha, 'second'))?.task.repository).toBe('second')
+      await expect(getTaskDetail('abc', 'unknown')).rejects.toMatchObject({
+        name: 'TaskDagRepositoryNotFoundError',
+      })
+
+      fs.writeFileSync(configFile, 'one git@github.com:Example/one.git\ntwo git@github.com:Example/two.git\n')
+      fs.writeFileSync(pathsFile, 'one /no/one\ntwo /no/two\n')
+      __resetTaskDagMirrorForTests()
+      __resetTaskIndexCacheForTests()
+      await expect(getFrontierView()).rejects.toMatchObject({ name: 'TaskDagUnavailableError' })
+    } finally {
+      delete process.env.HELIOS_TASK_DAG_REPOS_FILE
+      delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
+      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
+      __resetTaskDagMirrorForTests()
+      __resetTaskIndexCacheForTests()
+      errorSpy.mockRestore()
+      fs.rmSync(second, { recursive: true, force: true })
+      fs.rmSync(configFile, { force: true })
+      fs.rmSync(pathsFile, { force: true })
+      fs.rmSync(mirrorRoot, { recursive: true, force: true })
+      fs.rmSync(corrupt, { recursive: true, force: true })
+    }
+  })
+
+  it('replaces persisted mirrors with a wrong or missing origin', async () => {
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-origin-target-'))
+    fs.rmSync(target, { recursive: true, force: true })
+    fs.cpSync(repoDir, target, { recursive: true })
+    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-origin-mirrors-'))
+    const mirror = path.join(mirrorRoot, 'repo.git')
+    const configFile = path.join(mirrorRoot, 'repos.conf')
+    execFileSync('git', ['clone', '--mirror', repoDir, mirror], { stdio: 'ignore' })
+    fs.writeFileSync(configFile, `repo ${target}\n`)
+    try {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
+      __resetTaskDagMirrorForTests()
+      await initTaskDagMirror()
+      expect(execFileSync('git', ['remote', 'get-url', 'origin'], {
+        cwd: mirror,
+        encoding: 'utf8',
+      }).trim()).toBe(target)
+
+      execFileSync('git', ['remote', 'remove', 'origin'], { cwd: mirror, stdio: 'ignore' })
+      __resetTaskDagMirrorForTests()
+      await initTaskDagMirror()
+      expect(execFileSync('git', ['remote', 'get-url', 'origin'], {
+        cwd: mirror,
+        encoding: 'utf8',
+      }).trim()).toBe(target)
+    } finally {
+      delete process.env.HELIOS_TASK_DAG_REPOS_FILE
+      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
+      __resetTaskDagMirrorForTests()
+      fs.rmSync(target, { recursive: true, force: true })
+      fs.rmSync(mirrorRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects malformed, duplicate, unsafe, and empty repository config', () => {
+    expect(parseTaskDagReposConfig('repo url enforce master\n')).toEqual([
+      { repository: 'repo', repoUrl: 'url' },
+    ])
+    expect(() => parseTaskDagReposConfig('# only comments\n')).toThrow()
+    expect(() => parseTaskDagReposConfig('repo url extra\n')).toThrow(/2 or 4 fields/)
+    expect(() => parseTaskDagReposConfig('repo one\nrepo two\n')).toThrow(/Duplicate/)
+    expect(() => parseTaskDagReposConfig('../repo url\n')).toThrow(/Invalid repository/)
+    expect(() => parseTaskDagReposConfig('repo url broken master\n')).toThrow(/repair mode/)
+    expect(() => parseTaskDagReposConfig('repo url enforce foo..bar\n')).toThrow(/repair branch/)
+    expect(() => parseTaskDagReposConfig('repo url enforce foo@{bar\n')).toThrow(/repair branch/)
+    expect(() => parseTaskDagReposConfig('repo url enforce foo.\n')).toThrow(/repair branch/)
   })
 })
 

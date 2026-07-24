@@ -35,13 +35,13 @@ const STATUS_FILL: Record<string, string> = {
 }
 
 export function EpicDagPage() {
-  const { id } = useParams<{ id: string }>()
+  const { id, repository = 'automation' } = useParams<{ id: string; repository?: string }>()
   const [view, setView] = useState<'list' | 'graph'>('list')
   const [selected, setSelected] = useState<TaskNode | null>(null)
 
   const { data, error, loading, refresh } = usePolledData<DagResult>(
-    () => fetchTaskJson<DagResult>(`/api/tasks/epics/${id}/dag`),
-    [id],
+    () => fetchTaskJson<DagResult>(`/api/tasks/repositories/${repository}/epics/${id}/dag`),
+    [id, repository],
     30_000,
   )
 
@@ -75,11 +75,12 @@ export function EpicDagPage() {
       <div className="page-header">
         <div>
           <p className="eyebrow">Operations · Epic</p>
+          <p className="subtle-copy">{data.epic.repository}</p>
           <h2>{data.epic.title}</h2>
           {data.epic.issueNumber != null && (
             <p className="subtle-copy">
               <a
-                href={data.epic.githubUrl ?? githubIssueUrl(data.epic.issueNumber)}
+                href={data.epic.githubUrl ?? githubIssueUrl(data.epic.issueNumber, data.epic.githubRepository)}
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -123,7 +124,7 @@ export function EpicDagPage() {
         </button>
         {data.epic.issueNumber != null ? (
           <Link
-            to={`/tasks/frontier?issue=${data.epic.issueNumber}`}
+            to={`/tasks/frontier?repository=${data.epic.repository}&issue=${data.epic.issueNumber}`}
             className="task-link-button"
           >
             Frontier for issue #{data.epic.issueNumber}
@@ -135,7 +136,7 @@ export function EpicDagPage() {
         )}
         {data.epic.issueNumber != null && (
           <a
-            href={data.epic.githubUrl ?? githubIssueUrl(data.epic.issueNumber)}
+            href={data.epic.githubUrl ?? githubIssueUrl(data.epic.issueNumber, data.epic.githubRepository)}
             target="_blank"
             rel="noopener noreferrer"
             className="task-link-button"
@@ -189,7 +190,7 @@ function DagListView({ data }: { data: DagResult }) {
     <div className="task-group-body">
       {ordered.map(({ node, depth }) => (
         <div
-          key={node.sha}
+          key={`${node.repository}:${node.sha}`}
           style={{ marginLeft: `${Math.min(depth, 4) * 1.25}rem` }}
         >
           <TaskCard task={node} />

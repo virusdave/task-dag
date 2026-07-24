@@ -17,10 +17,10 @@ import {
 } from './taskShared.js'
 
 export function TaskDetailPage() {
-  const { sha } = useParams<{ sha: string }>()
+  const { sha, repository = 'automation' } = useParams<{ sha: string; repository?: string }>()
   const { data, error, loading, refresh } = usePolledData<TaskDetail>(
-    () => fetchTaskJson<TaskDetail>(`/api/tasks/task/${sha}`),
-    [sha],
+    () => fetchTaskJson<TaskDetail>(`/api/tasks/repositories/${repository}/tasks/${sha}`),
+    [sha, repository],
     30_000,
   )
 
@@ -57,6 +57,7 @@ export function TaskDetailPage() {
       <div className="page-header">
         <div>
           <p className="eyebrow">Operations · Task</p>
+          <p className="subtle-copy">{task.repository}</p>
           <h2>{task.title}</h2>
           <div className="task-card-badges" style={{ marginTop: '0.5rem' }}>
             <StatusBadge task={task} />
@@ -76,15 +77,15 @@ export function TaskDetailPage() {
         <Link to="/tasks/frontier">All frontier</Link>
         {task.epicIssueNumber != null && (
           <>
-            <Link to={`/tasks/frontier?issue=${task.epicIssueNumber}`}>
+            <Link to={`/tasks/frontier?repository=${task.repository}&issue=${task.epicIssueNumber}`}>
               Frontier for issue #{task.epicIssueNumber}
             </Link>
-            <Link to={`/tasks/epic/${task.epicIssueNumber}`}>Epic DAG</Link>
+            <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>Epic DAG</Link>
           </>
         )}
         {task.issueNumber != null && (
           <a
-            href={task.githubUrl ?? githubIssueUrl(task.issueNumber)}
+            href={task.githubUrl ?? githubIssueUrl(task.issueNumber, task.githubRepository)}
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -110,7 +111,7 @@ export function TaskDetailPage() {
               <div className="mini-card-row">
                 <span>Issue</span>
                 <a
-                  href={task.githubUrl ?? githubIssueUrl(task.issueNumber)}
+                  href={task.githubUrl ?? githubIssueUrl(task.issueNumber, task.githubRepository)}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
@@ -135,14 +136,14 @@ export function TaskDetailPage() {
           </div>
           <div className="inline-row wrap-row module-card-links" style={{ marginTop: '1rem' }}>
             {task.epicIssueNumber != null && (
-              <Link to={`/tasks/epic/${task.epicIssueNumber}`}>View epic DAG</Link>
+              <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>View epic DAG</Link>
             )}
             {task.githubUrl ? (
               <a href={task.githubUrl} target="_blank" rel="noopener noreferrer">
                 Open on GitHub
               </a>
             ) : task.issueNumber != null ? (
-              <a href={githubIssueUrl(task.issueNumber)} target="_blank" rel="noopener noreferrer">
+              <a href={githubIssueUrl(task.issueNumber, task.githubRepository)} target="_blank" rel="noopener noreferrer">
                 Open issue on GitHub
               </a>
             ) : null}
@@ -174,7 +175,7 @@ export function TaskDetailPage() {
               <ul className="task-ref-list">
                 {task.completedBy.map((c) => (
                   <li key={c}>
-                    <a href={githubCommitUrl(c)} target="_blank" rel="noopener noreferrer">
+                    <a href={githubCommitUrl(c, task.githubRepository)} target="_blank" rel="noopener noreferrer">
                       <code>{c.slice(0, 10)}</code>
                     </a>
                   </li>
@@ -267,7 +268,7 @@ function RelatedSection({
       ) : (
         <div className="task-group-body">
           {tasks.map((t) => (
-            <div key={t.sha} className="task-related-row">
+            <div key={`${t.repository}:${t.sha}`} className="task-related-row">
               {showStatusEmoji && (
                 <span className="task-dep-marker" aria-hidden>
                   {t.status === 'done' ? '✓' : '○'}
