@@ -26,7 +26,16 @@ dep=$(git commit-tree "$EMPTY_TREE" -p HEAD -m 'Task: dependency')
 wait=$(git commit-tree "$EMPTY_TREE" -p HEAD -m 'Task: waiting leaf')
 short=$(git rev-parse --short "$wait")
 git update-ref "refs/heads/tasks/frontier/$short" "$wait"
-git push -q origin "refs/heads/tasks/frontier/$short"
+ready=$(git commit-tree "$EMPTY_TREE" -p HEAD -m 'Task: ready leaf')
+ready_short=$(git rev-parse --short "$ready")
+git update-ref "refs/heads/tasks/frontier/$ready_short" "$ready"
+offline_root=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: offline pickable root\nIssue: #76\nType: epic')
+git update-ref refs/heads/gh/issues/75 "$dep"
+git update-ref refs/heads/tasks/pending/76 "$offline_root"
+git update-ref refs/heads/gh/issues/76 "$offline_root"
+git push -q origin "refs/heads/tasks/frontier/$short" \
+  "refs/heads/tasks/frontier/$ready_short" refs/heads/gh/issues/75 \
+  refs/heads/tasks/pending/76 refs/heads/gh/issues/76
 "$TD" dep add --from "task:virusdave/task-dag@$wait" --to "task:virusdave/task-dag@$dep" \
   --relation requires --repo-id 1 --witness fixture >/dev/null
 
@@ -50,6 +59,31 @@ frontier=$($TD frontier --json)
 if ! jq -e --arg wait "$wait" 'any(.[]; .sha==$wait)' <<<"$frontier" >/dev/null && [ "$deps_rc" -eq 2 ]; then
   ok "activated frontier and deps share canonical unsatisfied requirements"
 else bad "activated consumers disagreed (deps=$deps_rc frontier=$frontier)"; fi
+
+offline_mirror="$ROOT/offline-mirror.git"
+git init -q --bare "$offline_mirror"
+git -C "$offline_mirror" remote add origin "$ROOT/origin"
+git -C "$offline_mirror" fetch -q --atomic --prune --no-tags origin \
+  '+refs/heads/tasks/*:refs/heads/tasks/*' \
+  '+refs/heads/gh/issues/*:refs/heads/gh/issues/*' \
+  '+HEAD:refs/heads/github-worker/default'
+git -C "$offline_mirror" symbolic-ref HEAD refs/heads/github-worker/default
+git -C "$offline_mirror" config taskdag.current-repo virusdave/task-dag
+git -C "$offline_mirror" config taskdag.virusdave/task-dag.id 1
+git -C "$offline_mirror" remote set-url origin /unreachable
+offline_refs_before=$(git -C "$offline_mirror" for-each-ref --format='%(refname) %(objectname)')
+offline_frontier=$(cd "$offline_mirror" && "$TD" frontier --json --no-fetch); offline_frontier_rc=$?
+offline_roots=$(cd "$offline_mirror" && "$TD" roots --pickable --json --no-fetch); offline_roots_rc=$?
+offline_refs_after=$(git -C "$offline_mirror" for-each-ref --format='%(refname) %(objectname)')
+if [ "$offline_frontier_rc" -eq 0 ] && [ "$offline_roots_rc" -eq 0 ] \
+   && jq -e --arg ready "$ready" 'any(.[]; .sha==$ready)' <<<"$offline_frontier" >/dev/null \
+   && ! jq -e --arg wait "$wait" 'any(.[]; .sha==$wait)' <<<"$offline_frontier" >/dev/null \
+   && jq -e --arg root "$offline_root" 'any(.[]; .issue==76 and .sha==$root and .state=="pickable")' <<<"$offline_roots" >/dev/null \
+   && [ "$offline_refs_before" = "$offline_refs_after" ]; then
+  ok "fresh bare refmirror performs network-free offline discovery with canonical readiness"
+else
+  bad "fresh bare refmirror lost offline authority or readiness (frontier=$offline_frontier roots=$offline_roots)"
+fi
 
 jq '.state="disabled" | .authoritativeTimestamp="2026-07-18T00:00:01Z"' "$ROOT/enabled" >"$ROOT/disabled"
 "$TD" activation apply --spec-file "$ROOT/disabled" >/dev/null
@@ -676,16 +710,21 @@ if (
   taskdag_resolve_facts_tip() { printf 'm\n'; }
   taskdag_cas_sleep() { return 0; }
   taskdag_sha256_hex() { sha256sum | awk '{print $1}'; }
+  fixture_master=m
+  fixture_refs='r refs/heads/tasks/pending/1'
+  taskdag_capture_child_map_refs() { printf '%s\n' "$fixture_refs"; }
   fixture_prepare_child_map() {
     TASKDAG_CHILD_MAP_READY=true
     TASKDAG_CHILD_MAP_MASTER=m
+    TASKDAG_CHILD_MAP_SOURCE=fixture-master
     TASKDAG_CHILD_MAP_REFS='r refs/heads/tasks/pending/1'
   }
   git() {
     case "$*" in
       *'merge-base --is-ancestor'*) return 0 ;;
       *'rev-parse --verify -q refs/heads/tasks/v1/graph'*) printf 'g\n' ;;
-      *'for-each-ref'*) printf 'r refs/heads/tasks/pending/1\n' ;;
+      *'rev-parse --verify -q fixture-master'*) printf '%s\n' "$fixture_master" ;;
+      *'for-each-ref'*) printf '%s\n' "$fixture_refs" ;;
       *) command git "$@" ;;
     esac
   }
@@ -697,6 +736,22 @@ if (
   taskdag_consumer_prepare unit-ready --no-fetch >/dev/null 2>&1 || exit 1
   jq -e '.status=="ready" and .reason==null' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
   [ "$TASKDAG_CONSUMER_READY" = true ] && [ "$TASKDAG_RECON_READY" = true ] || exit 1
+  fixture_prepare_child_map
+  taskdag_consumer_test_after_prepare_hook() { fixture_refs='s refs/heads/tasks/pending/1'; }
+  taskdag_consumer_prepare unit-ref-change --no-fetch >/dev/null 2>&1; ref_change_rc=$?
+  unset -f taskdag_consumer_test_after_prepare_hook
+  [ "$ref_change_rc" -eq 2 ] \
+    && jq -e '.status=="exhausted" and .reason=="task-refs"' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null \
+    && [ "$TASKDAG_CHILD_MAP_READY" = false ] && [ -z "$TASKDAG_CHILD_MAP_MASTER" ] \
+    && [ -z "$TASKDAG_CHILD_MAP_REFS" ] && [ -z "$TASKDAG_CHILD_MAP_SOURCE" ] || exit 1
+  fixture_refs='r refs/heads/tasks/pending/1'; fixture_prepare_child_map
+  taskdag_consumer_test_after_prepare_hook() { fixture_master=n; }
+  taskdag_consumer_prepare unit-master-change --no-fetch >/dev/null 2>&1; master_change_rc=$?
+  unset -f taskdag_consumer_test_after_prepare_hook
+  [ "$master_change_rc" -eq 2 ] \
+    && jq -e '.status=="exhausted" and .reason=="master-tip"' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null \
+    && [ "$TASKDAG_CHILD_MAP_READY" = false ] && [ -z "$TASKDAG_CHILD_MAP_SOURCE" ] || exit 1
+  fixture_master=m; fixture_prepare_child_map
   taskdag_sha256_hex() { return 91; }
   taskdag_consumer_prepare unit-digest-error --no-fetch >/dev/null 2>&1; digest_rc=$?
   [ "$digest_rc" -eq 2 ] || exit 1

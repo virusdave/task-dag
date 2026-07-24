@@ -76,6 +76,7 @@ declare -gA TASKDAG_RECON_NODE_STATE=()
 TASKDAG_CHILD_MAP_READY=false
 TASKDAG_CHILD_MAP_MASTER=""
 TASKDAG_CHILD_MAP_REFS=""
+TASKDAG_CHILD_MAP_SOURCE=""
 TASKDAG_RECON_CUR=""
 TASKDAG_RECON_READY=false   # set by prepare; guards use-before-prepare
 
@@ -264,8 +265,8 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
             else after=$(_taskdag_consumer_local_activation_authority) || return 2
             fi
             graph_tip=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
-            master_tip=$(taskdag_resolve_facts_tip) || return 2
-            observed_task_refs=$local_task_refs
+            master_tip=$(git rev-parse --verify -q "${TASKDAG_CHILD_MAP_SOURCE}^{commit}") || return 2
+            observed_task_refs=$(taskdag_capture_child_map_refs) || return 2
         else
             advertisement=$(_taskdag_consumer_remote_advertisement) || return 2
             after=$(_taskdag_consumer_advertised_oid "$advertisement" "$TASKDAG_ACTIVATION_REF")
@@ -328,6 +329,7 @@ taskdag_consumer_prepare() {
         TASKDAG_CHILD_MAP_READY=false
         TASKDAG_CHILD_MAP_MASTER=""
         TASKDAG_CHILD_MAP_REFS=""
+        TASKDAG_CHILD_MAP_SOURCE=""
         TASKDAG_CHILDREN_ANY=()
         TASKDAG_RECON_FP_CHILDREN=()
     fi
@@ -499,6 +501,7 @@ taskdag_recon_prepare() {
         TASKDAG_CHILD_MAP_READY=false
         TASKDAG_CHILD_MAP_MASTER=""
         TASKDAG_CHILD_MAP_REFS=""
+        TASKDAG_CHILD_MAP_SOURCE=""
         TASKDAG_CHILDREN_ANY=()
         TASKDAG_RECON_FP_CHILDREN=()
     fi

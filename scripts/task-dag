@@ -915,20 +915,34 @@ fetch_root_refs() {
 # semantic consumer. Arbitrary local branches, HEAD, delegated side metadata,
 # and unreferenced objects minted during breakdown cannot enter this map.
 taskdag_prepare_child_map() {
+    taskdag_prepare_child_map_from refs/remotes/origin/master
+}
+
+taskdag_capture_child_map_refs() {
+    git for-each-ref --format='%(objectname) %(refname)' \
+        refs/heads/tasks/frontier/ refs/heads/tasks/active/ \
+        refs/heads/tasks/blocked/ refs/heads/tasks/blocked-meta/ \
+        refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
+        refs/heads/gh/issues/ | LC_ALL=C sort
+}
+
+# Build the same process-local child map from a caller-selected authority.
+# Offline semantic consumers use HEAD only after their caller has synchronized
+# and locked the local repository; this helper performs no network access.
+taskdag_prepare_child_map_from() {
+    local authority_ref=$1
     TASKDAG_CHILD_MAP_READY=false
     TASKDAG_CHILD_MAP_MASTER=""
     TASKDAG_CHILD_MAP_REFS=""
+    TASKDAG_CHILD_MAP_SOURCE=""
     TASKDAG_CHILDREN_ANY=()
     TASKDAG_RECON_FP_CHILDREN=()
 
     local master us=$'\x1f' commit tree subject parents first parent map_file
-    master=$(git rev-parse --verify -q 'refs/remotes/origin/master^{commit}') || return 2
+    master=$(git rev-parse --verify -q "${authority_ref}^{commit}") || return 2
     TASKDAG_CHILD_MAP_MASTER=$master
-    TASKDAG_CHILD_MAP_REFS=$(git for-each-ref --format='%(objectname) %(refname)' \
-        refs/heads/tasks/frontier/ refs/heads/tasks/active/ \
-        refs/heads/tasks/blocked/ refs/heads/tasks/blocked-meta/ \
-        refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
-        refs/heads/gh/issues/ | LC_ALL=C sort) || return 2
+    TASKDAG_CHILD_MAP_SOURCE=$authority_ref
+    TASKDAG_CHILD_MAP_REFS=$(taskdag_capture_child_map_refs) || return 2
     map_file=$(mktemp) || return 2
     if ! {
         printf '%s\n' "$master"
@@ -1896,6 +1910,8 @@ cmd_frontier() {
 
     if [ "$do_fetch" = true ]; then
         fetch_task_refs
+    else
+        taskdag_prepare_child_map_from HEAD || return 2
     fi
     local consumer_args=()
     [ "$do_fetch" = false ] && consumer_args+=(--no-fetch --tip HEAD)
@@ -3183,6 +3199,8 @@ EOF
 
     if [ "$do_fetch" = true ]; then
         fetch_task_refs
+    else
+        taskdag_prepare_child_map_from HEAD || return 2
     fi
     local consumer_args=()
     [ "$do_fetch" = false ] && consumer_args+=(--no-fetch --tip HEAD)
