@@ -40,6 +40,25 @@ _xrepo_watchdog_token_valid_for() { # token-file max-seconds
 _XREPO_RECONCILE_INDEX_REF=refs/heads/tasks/v1/reconcile-comments-index
 _XREPO_RECONCILE_INDEX_CONTRACT=1
 
+_xrepo_reconcile_checkpoint_store_safe() {
+    local git_dir common_dir
+    [ -z "${GIT_SHALLOW_FILE:-}" ] && [ -z "${GIT_OBJECT_DIRECTORY:-}" ] \
+        && [ -z "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ] \
+        && [ -z "${GIT_GRAFT_FILE:-}" ] || return 1
+    [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = false ] || return 1
+    git_dir=$(git rev-parse --git-dir 2>/dev/null) || return 1
+    common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+    [ ! -f "$git_dir/shallow" ] && [ ! -f "$common_dir/shallow" ] \
+        && [ ! -f "$common_dir/info/grafts" ] \
+        && [ ! -f "$common_dir/objects/info/alternates" ] || return 1
+    ! compgen -G "$common_dir/objects/pack/*.promisor" >/dev/null || return 1
+    ! git config --get-regexp '^remote\..*\.promisor$' >/dev/null 2>&1 || return 1
+    ! git config --get-regexp '^remote\..*\.partialCloneFilter$' >/dev/null 2>&1 || return 1
+    [ -z "$(git config --get extensions.partialClone || true)" ] || return 1
+    ! git show-ref --quiet --verify refs/replace 2>/dev/null \
+        && [ -z "$(git for-each-ref --format='%(refname)' refs/replace/ 2>/dev/null)" ]
+}
+
 # The index is a cache of validation proofs, not an alternate authority.  Its
 # deliberately small v1 tree makes corruption and version skew fail closed.
 _xrepo_reconcile_index_read_one() { # commit output-directory expected-repository
@@ -2138,6 +2157,9 @@ EOF
     [ "$initialize" = false ] || [ "$dry" = false ] || { _xrepo_reconcile_argument_failure "$mode" "--initialize-index cannot be dry-run"; return 2; }
 
     local began now deadline convergence_reserve repo tmp listing rc=0 terminal_rc=0 fatal=false real_git snapshot_rc=0
+    local warning_file fetch_slow_threshold=${TASKDAG_CHECKPOINT_FETCH_SLOW_SECONDS:-60} repair_reason=""
+    local -x GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1
+    [[ "$fetch_slow_threshold" =~ ^[0-9]+$ ]] || { _xrepo_reconcile_argument_failure "$mode" "invalid checkpoint fetch warning threshold"; return 2; }
     began=$(date +%s); deadline=$((began + max_seconds)); repo=$(printf '%s' "$(_xrepo_current_repo_offline)" | tr '[:upper:]' '[:lower:]')
     # A close can prepare consumers, derive facts, reconcile delegated peers,
     # and publish. Do not begin that transaction in the tail of a sweep. The
@@ -2162,7 +2184,9 @@ EOF
     local requests=0 pages=0 returned=0 unique=0 eligible=0 prs=0 pre=0 receipted=0 missing=0 human=0 completion=0 machine=0 attempted=0 applied=0 deferred=0 failures=0 remaining=null reset=null
     local _XREPO_RECONCILE_CREATED_CLOSES=0
     local failure_file="$tmp/failures"; : >"$failure_file"
+    warning_file="$tmp/warnings"; : >"$warning_file"
     _rc_fail() { failures=$((failures+1)); if [ "$failures" -le 100 ]; then jq -nc --arg stage "$1" --arg issue "${2:-}" --arg comment_id "${3:-}" --arg message "$4" '{stage:$stage,issue:(if ($issue|test("^[1-9][0-9]*$")) then ($issue|tonumber) else null end),comment_id:(if ($comment_id|test("^[1-9][0-9]*$")) then ($comment_id|tonumber) else null end),message:$message}' >>"$failure_file"; fi; return 0; }
+    _rc_warning() { [ "$(wc -l <"$warning_file")" -ge 20 ] || jq -nc --arg type "$1" --argjson elapsed "$2" --argjson threshold "$3" '{type:$type,elapsed_seconds:$elapsed,threshold_seconds:$threshold}' >>"$warning_file"; }
     _rc_time() { [ "$(date +%s)" -lt "$deadline" ]; }
     _rc_timeout() { terminal_rc=124; fatal=true; _rc_fail "$1" "${2:-}" "${3:-}" "time ceiling reached"; }
     _rc_convergence_time() { [ $((deadline - $(date +%s))) -ge "$convergence_reserve" ]; }
@@ -2175,19 +2199,32 @@ EOF
     index_old=$(_xrepo_remote_sha "$_XREPO_RECONCILE_INDEX_REF") || snapshot_rc=$?
     [ "$snapshot_rc" -ne 3 ] || { _rc_fail snapshot "" "" "cannot read reconciliation index"; fatal=true; }
     if [ "$initialize" = true ] && [ -n "$index_old" ]; then _rc_fail snapshot "" "" "reconciliation index already exists"; fatal=true; fi
-    if [ "$initialize" = false ] && [ -z "$index_old" ]; then _rc_fail snapshot "" "" "reconciliation index is absent; run task-dag reconcile-comments --initialize-index with the same mode, boundary, and watchdog token"; fatal=true; fi
+    if [ "$initialize" = false ] && [ -z "$index_old" ]; then
+        if [ "$dry" = true ]; then _rc_fail snapshot "" "" "reconciliation checkpoint repair is required (reason: absent)"; fatal=true
+        else initialize=true; repair_reason=absent
+        fi
+    fi
     if [ -n "$index_old" ]; then
-        local index_git="$tmp/index.git"
-        git init -q --bare "$index_git" && git --git-dir="$index_git" remote add origin "$(git remote get-url origin)" \
-            && git --git-dir="$index_git" fetch -q --depth=2 --no-tags origin "$index_old" \
-            || { _rc_fail snapshot "" "" "cannot fetch reconciliation index tip and direct parent"; fatal=true; }
+        local fetch_began fetch_elapsed fetched
+        if ! _xrepo_reconcile_checkpoint_store_safe; then
+            _rc_fail snapshot "" "" "reconciliation checkpoint requires a non-shallow, non-partial, non-promisor repository"; fatal=true
+        fi
+        fetch_began=$(date +%s)
         if [ "$fatal" = false ]; then
-            # New checkpoint commits are written to the main object store, but
-            # may parent the isolated shallow tip without importing its
-            # indefinitely growing ancestry.
-            local -x GIT_ALTERNATE_OBJECT_DIRECTORIES="$index_git/objects"
-            GIT_DIR="$index_git" GIT_SHALLOW_FILE="$index_git/shallow" \
-                _xrepo_reconcile_index_read "$index_old" "$index_dir" "$repo" "" \
+            git fetch -q --no-tags origin "$index_old" || { _rc_fail snapshot "" "" "cannot fetch complete reconciliation index history"; fatal=true; }
+        fi
+        fetch_elapsed=$(( $(date +%s) - fetch_began ))
+        if [ "$fatal" = false ]; then
+            fetched=$(git rev-parse FETCH_HEAD 2>/dev/null || true)
+            [ "$fetched" = "$index_old" ] || { _rc_fail snapshot "" "" "checkpoint fetch did not resolve the advertised exact object"; fatal=true; }
+            _xrepo_reconcile_checkpoint_store_safe \
+              || { _rc_fail snapshot "" "" "checkpoint fetch did not preserve an ordinary-object-store history"; fatal=true; }
+            if [ "$fatal" = false ] && [ "$fetch_elapsed" -ge "$fetch_slow_threshold" ]; then
+                _rc_warning checkpoint-fetch-slow "$fetch_elapsed" "$fetch_slow_threshold"
+            fi
+        fi
+        if [ "$fatal" = false ]; then
+            _xrepo_reconcile_index_read "$index_old" "$index_dir" "$repo" "" \
                 && _xrepo_reconcile_index_validate_activation "$index_dir" "$activation_binding" \
                 || { _rc_fail snapshot "" "" "reconciliation index current/direct-parent structure or activation binding is invalid"; fatal=true; }
         fi
@@ -2282,6 +2319,7 @@ EOF
             elif [[ "$receipt_info" = completion* || "$receipt_info" = legacy-completion* ]]; then
                 printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"
             fi
+            if [ "$fatal" = false ] && [ -z "$index_old" ]; then printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"; fi
         elif [[ "$ref" =~ ^refs/heads/gh/comments/([1-9][0-9]*)/(manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$ ]]; then
             local legacy_issue="${BASH_REMATCH[1]}" legacy_id="${BASH_REMATCH[2]}" legacy_info
             rm -f "$parsed_receipt_dir/message" "$parsed_receipt_dir/subject" "$parsed_receipt_dir/trailers"
@@ -2361,7 +2399,7 @@ EOF
     if [ "$initialize" = true ]; then
         now=$(date +%s)
         if [ "$fatal" = false ]; then
-            jq -nc --arg mode "$mode" --argjson duration "$((now-began))" '{schema_version:1,mode:$mode,status:"success",dry_run:false,exhausted:true,requests:0,pages:0,returned:0,unique:0,eligible:0,pull_requests:0,pre_boundary:0,already_receipted:0,missing:0,dispositions:{human:0,completion:0,machine_skip:0},attempted:0,applied:0,delegated_closes_created:0,deferred:0,failures:0,failure_items:[],duration_seconds:$duration,rate_limit:{remaining:null,reset:null},recent_success_at:null,complete_success_at:null}'
+            jq -nc --arg mode "$mode" --arg reason "$repair_reason" --arg new "$index_old" --argjson duration "$((now-began))" '{schema_version:1,mode:$mode,status:"success",dry_run:false,exhausted:true,requests:0,pages:0,returned:0,unique:0,eligible:0,pull_requests:0,pre_boundary:0,already_receipted:0,missing:0,dispositions:{human:0,completion:0,machine_skip:0},attempted:0,applied:0,delegated_closes_created:0,deferred:0,failures:0,failure_items:[],warnings:(if $reason=="" then [] else [{type:"checkpoint-reconstructed",old:null,new:$new,reason:$reason}] end),duration_seconds:$duration,rate_limit:{remaining:null,reset:null},recent_success_at:null,complete_success_at:null}'
             rm -rf "$tmp"; return 0
         fi
         local init_failures='[]'; [ -s "$failure_file" ] && init_failures=$(jq -s . "$failure_file")
@@ -2417,6 +2455,7 @@ EOF
         advertised=$(git ls-remote --refs origin \
             "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*") || return $?
         _xrepo_write_sorted_listing "$advertised" "$manifest"
+        if [ ! -s "$manifest" ]; then printf '%s\n' none; return 0; fi
         git init -q --bare "$dir" && git --git-dir="$dir" remote add origin "$(git remote get-url origin)" || return $?
         if [ -s "$manifest" ]; then
             git --git-dir="$dir" fetch -q --no-tags origin \
@@ -2665,10 +2704,10 @@ EOF
     if [ "$fatal" = true ] || [ "$failures" -gt 0 ]; then status=failed; exhausted=false
     elif [ "$dry" = false ] && [ "$deferred" -gt 0 ]; then status=partial; exhausted=false
     fi
-    local failure_json='[]'; [ -s "$failure_file" ] && failure_json=$(jq -s . "$failure_file")
+    local failure_json='[]' warning_json='[]'; [ -s "$failure_file" ] && failure_json=$(jq -s . "$failure_file"); [ -s "$warning_file" ] && warning_json=$(jq -s . "$warning_file")
     local recent_at=null complete_at=null stamp
     if [ "$status" = success ] && [ "$dry" = false ] && [ "$exhausted" = true ]; then stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); [ "$mode" = recent ] && recent_at="\"$stamp\"" || complete_at="\"$stamp\""; fi
-    jq -nc --arg mode "$mode" --arg status "$status" --argjson dry_run "$dry" --argjson exhausted "$exhausted" --argjson requests "$requests" --argjson pages "$pages" --argjson returned "$returned" --argjson unique "$unique" --argjson eligible "$eligible" --argjson prs "$prs" --argjson pre "$pre" --argjson receipts "$receipted" --argjson missing "$missing" --argjson human "$human" --argjson completion "$completion" --argjson machine "$machine" --argjson attempted "$attempted" --argjson applied "$applied" --argjson delegated_closes_created "$_XREPO_RECONCILE_CREATED_CLOSES" --argjson deferred "$deferred" --argjson failures "$failures" --argjson items "$failure_json" --argjson duration "$((now-began))" --argjson remaining "$remaining" --argjson reset "$reset" --argjson recent "$recent_at" --argjson complete "$complete_at" '{schema_version:1,mode:$mode,status:$status,dry_run:$dry_run,exhausted:$exhausted,requests:$requests,pages:$pages,returned:$returned,unique:$unique,eligible:$eligible,pull_requests:$prs,pre_boundary:$pre,already_receipted:$receipts,missing:$missing,dispositions:{human:$human,completion:$completion,machine_skip:$machine},attempted:$attempted,applied:$applied,delegated_closes_created:$delegated_closes_created,deferred:$deferred,failures:$failures,failure_items:$items,duration_seconds:$duration,rate_limit:{remaining:$remaining,reset:$reset},recent_success_at:$recent,complete_success_at:$complete}'
+    jq -nc --arg mode "$mode" --arg status "$status" --argjson dry_run "$dry" --argjson exhausted "$exhausted" --argjson requests "$requests" --argjson pages "$pages" --argjson returned "$returned" --argjson unique "$unique" --argjson eligible "$eligible" --argjson prs "$prs" --argjson pre "$pre" --argjson receipts "$receipted" --argjson missing "$missing" --argjson human "$human" --argjson completion "$completion" --argjson machine "$machine" --argjson attempted "$attempted" --argjson applied "$applied" --argjson delegated_closes_created "$_XREPO_RECONCILE_CREATED_CLOSES" --argjson deferred "$deferred" --argjson failures "$failures" --argjson items "$failure_json" --argjson warnings "$warning_json" --argjson duration "$((now-began))" --argjson remaining "$remaining" --argjson reset "$reset" --argjson recent "$recent_at" --argjson complete "$complete_at" '{schema_version:1,mode:$mode,status:$status,dry_run:$dry_run,exhausted:$exhausted,requests:$requests,pages:$pages,returned:$returned,unique:$unique,eligible:$eligible,pull_requests:$prs,pre_boundary:$pre,already_receipted:$receipts,missing:$missing,dispositions:{human:$human,completion:$completion,machine_skip:$machine},attempted:$attempted,applied:$applied,delegated_closes_created:$delegated_closes_created,deferred:$deferred,failures:$failures,failure_items:$items,warnings:$warnings,duration_seconds:$duration,rate_limit:{remaining:$remaining,reset:$reset},recent_success_at:$recent,complete_success_at:$complete}'
     rm -rf "$tmp"
     [ "$terminal_rc" -eq 0 ] || return "$terminal_rc"
     [ "$status" = success ]

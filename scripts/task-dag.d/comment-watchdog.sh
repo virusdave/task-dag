@@ -5,6 +5,50 @@ TASKDAG_COMMENT_WATCHDOG_REF="refs/heads/tasks/v1/comment-watchdog"
 
 _taskdag_comment_watchdog_registry() { jq -cS '[.repositories[]|{repository,ingestionStartAt}]|sort_by(.repository)' "$1"; }
 _taskdag_comment_watchdog_registry_digest() { printf '%s' "$(_taskdag_comment_watchdog_registry "$1")" | sha256sum | awk '{print $1}'; }
+_taskdag_comment_watchdog_generation_tuple() {
+    jq -cS '{activation,runtimeCommit,registrySnapshotId,reviewedRegistryDigest}' <<<"$1"
+}
+_taskdag_comment_watchdog_validate_lease_transition() { # previous-lease-json-or-empty current-lease-json
+    local previous=$1 current=$2 same_lease previous_schema current_schema previous_tuple current_tuple
+    [ "$(jq -r .type <<<"$current")" = lease ] || return 1
+    current_schema=$(jq -r .schema <<<"$current")
+    if [ -z "$previous" ]; then
+        [ "$current_schema" -eq 1 ] && [ "$(jq -r .sequence <<<"$current")" -eq 0 ]
+        return
+    fi
+    previous_schema=$(jq -r .schema <<<"$previous")
+    [ "$(jq -r .coordinationRepository <<<"$current")" = "$(jq -r .coordinationRepository <<<"$previous")" ] || return 1
+    if [ "$(jq -r .holder <<<"$current")" = "$(jq -r .holder <<<"$previous")" ] \
+      && [ "$(jq -r .fence <<<"$current")" = "$(jq -r .fence <<<"$previous")" ]; then same_lease=true
+    else same_lease=false
+    fi
+    if [ "$same_lease" = true ]; then
+        [ "$current_schema" -eq "$previous_schema" ] \
+          && [ "$(jq -r .acquiredAt <<<"$current")" = "$(jq -r .acquiredAt <<<"$previous")" ] \
+          && [ "$(_taskdag_comment_watchdog_generation_tuple "$current")" = "$(_taskdag_comment_watchdog_generation_tuple "$previous")" ] \
+          && [ "$(jq -r '.activationGeneration // "none"' <<<"$current")" = "$(jq -r '.activationGeneration // "none"' <<<"$previous")" ]
+        return
+    fi
+    [ "$(jq -r .observedAt <<<"$current")" \> "$(jq -r .expiresAt <<<"$previous")" ] \
+      || [ "$(jq -r .observedAt <<<"$current")" = "$(jq -r .expiresAt <<<"$previous")" ] || return 1
+    [ "$(jq -r .acquiredAt <<<"$current")" = "$(jq -r .observedAt <<<"$current")" ] \
+      && [ "$(jq -r .fence <<<"$current")" -eq $(( $(jq -r .fence <<<"$previous") + 1 )) ] || return 1
+    if [ "$previous_schema" -eq 1 ]; then
+        if [ "$current_schema" -eq 1 ]; then
+            [ "$(jq -cS .activation <<<"$current")" = "$(jq -cS .activation <<<"$previous")" ] \
+              && [ "$(jq -r .registrySnapshotId <<<"$current")" = "$(jq -r .registrySnapshotId <<<"$previous")" ]
+        else [ "$current_schema" -eq 2 ] && [ "$(jq -r .activationGeneration <<<"$current")" -eq 1 ]; fi
+        return
+    fi
+    [ "$current_schema" -eq 2 ] || return 1
+    previous_tuple=$(_taskdag_comment_watchdog_generation_tuple "$previous") || return 1
+    current_tuple=$(_taskdag_comment_watchdog_generation_tuple "$current") || return 1
+    if [ "$current_tuple" = "$previous_tuple" ]; then
+        [ "$(jq -r .activationGeneration <<<"$current")" -eq "$(jq -r .activationGeneration <<<"$previous")" ]
+    else
+        [ "$(jq -r .activationGeneration <<<"$current")" -eq $(( $(jq -r .activationGeneration <<<"$previous") + 1 )) ]
+    fi
+}
 _taskdag_comment_watchdog_registry_allowed() { # activation-record registry-file coordination-repository
     local activation_record=$1 registry_file=$2 coordination=$3 reviewed
     reviewed=$(_taskdag_comment_watchdog_registry "$registry_file") || return 1
@@ -50,29 +94,36 @@ _taskdag_comment_watchdog_validate_record() { # file expected-sequence
       def oid: type=="string" and test("^[0-9a-f]{40}$");
       def digest: type=="string" and test("^[0-9a-f]{64}$");
       def timestamp: type=="string" and length==20 and ((fromdateiso8601|todateiso8601)==.);
-      type=="object" and .schema==1 and .sequence==$sequence and
+      type=="object" and (.schema==1 or .schema==2) and
+      (if .schema==2 then (.activationGeneration|type)=="number" and .activationGeneration>=0 and .activationGeneration==(.activationGeneration|floor) else has("activationGeneration")|not end) and
+      .sequence==$sequence and
       (.type=="lease" or .type=="attempt" or .type=="result" or .type=="fleet") and
       (.holder|type=="string" and length>0 and length<=256) and
       (.fence|type=="number" and floor==. and .>=1) and
       (.runtimeCommit|oid) and (.registrySnapshotId|test("^sha256:[0-9a-f]{64}$")) and
       (.reviewedRegistryDigest|digest) and (.coordinationRepository|type=="string" and test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and
-      (.activation|keys==["digest","epoch","guardVersion"] and (.digest|digest) and (.epoch|type=="number" and floor==. and .>=1) and .guardVersion==1) and
+      (.activation|(.digest|digest) and (.epoch|type=="number" and floor==. and .>=1) and .guardVersion==1) and
+      (if .schema==1 then
+         (.activation|keys==["digest","epoch","guardVersion"])
+       else
+         (.activation|keys==["commit","digest","epoch","guardVersion","minimumCompatibleTaskDagCommit"] and (.commit|oid) and (.minimumCompatibleTaskDagCommit|oid))
+       end) and
       (.acquiredAt|timestamp) and (.observedAt|timestamp) and (.expiresAt|timestamp) and
       (.acquiredAt<=.observedAt and .observedAt<.expiresAt) and
       if .type=="lease" then
-        keys==["acquiredAt","activation","coordinationRepository","expiresAt","fence","holder","observedAt","registrySnapshotId","reviewedRegistryDigest","runtimeCommit","schema","sequence","type"]
+        (del(.activationGeneration)|keys)==["acquiredAt","activation","coordinationRepository","expiresAt","fence","holder","observedAt","registrySnapshotId","reviewedRegistryDigest","runtimeCommit","schema","sequence","type"]
       elif .type=="attempt" then
-        keys==["acquiredAt","activation","coordinationRepository","cycle","expiresAt","fence","holder","mode","observedAt","registry","registrySnapshotId","reviewedRegistryDigest","runtimeCommit","schema","sequence","type"] and
+        (del(.activationGeneration)|keys)==["acquiredAt","activation","coordinationRepository","cycle","expiresAt","fence","holder","mode","observedAt","registry","registrySnapshotId","reviewedRegistryDigest","runtimeCommit","schema","sequence","type"] and
         (.cycle|digest) and (.mode=="recent" or .mode=="complete") and (.registry|type=="array" and length>0 and .==sort_by(.repository) and (map(.repository)|length==(unique|length)) and all(.[];keys==["ingestionStartAt","repository"] and (.repository|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and (.ingestionStartAt|timestamp)))
       elif .type=="result" then
-        keys==["acquiredAt","activation","coordinationRepository","cycle","expiresAt","fence","holder","observedAt","registrySnapshotId","repository","result","reviewedRegistryDigest","runtimeCommit","schema","sequence","type"] and (.cycle|digest) and
+        (del(.activationGeneration)|keys)==["acquiredAt","activation","coordinationRepository","cycle","expiresAt","fence","holder","observedAt","registrySnapshotId","repository","result","reviewedRegistryDigest","runtimeCommit","schema","sequence","type"] and (.cycle|digest) and
         (.repository|type=="string" and .==ascii_downcase and test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and
         (.result|type=="object" and keys==["applied","deferred","dryRun","exhausted","failures","mode","status"] and
           (.mode=="recent" or .mode=="complete") and (.status=="success" or .status=="partial" or .status=="failed") and
           (.dryRun|type=="boolean") and (.exhausted|type=="boolean") and
           all(.applied,.deferred,.failures;type=="number" and floor==. and .>=0))
       else
-        keys==["acquiredAt","activation","completedAt","coordinationRepository","cycle","expiresAt","fence","holder","mode","observedAt","registrySnapshotId","repositories","reviewedRegistryDigest","runtimeCommit","schema","sequence","success","type"] and
+        (del(.activationGeneration)|keys)==["acquiredAt","activation","completedAt","coordinationRepository","cycle","expiresAt","fence","holder","mode","observedAt","registrySnapshotId","repositories","reviewedRegistryDigest","runtimeCommit","schema","sequence","success","type"] and
         (.cycle|digest) and (.mode=="recent" or .mode=="complete") and (.success|type=="boolean") and (.completedAt|timestamp) and
         (.repositories|type=="array" and length>0 and .==sort and length==(unique|length))
       end
@@ -82,7 +133,7 @@ _taskdag_comment_watchdog_validate_record() { # file expected-sequence
 
 taskdag_comment_watchdog_validate_tip() { # tip
     local tip=$1 tmp previous="" commit sequence=0 path record fence holder runtime registry reviewed coordination activation acquired expires type cycle="" cycle_mode=""
-    local last_attempt=none recent_success=none complete_success=none expected
+    local last_attempt=none recent_success=none complete_success=none expected schema generation tuple previous_tuple generation_changed=false
     tmp=$(mktemp -d) || return 1
     git rev-list --reverse --first-parent "$tip" >"$tmp/commits" 2>/dev/null || { rm -rf "$tmp"; return 1; }
     while IFS= read -r commit; do
@@ -93,11 +144,14 @@ taskdag_comment_watchdog_validate_tip() { # tip
         record="$tmp/record"; git show "$commit:$path" >"$record" || { rm -rf "$tmp"; return 1; }
         _taskdag_comment_watchdog_validate_record "$record" "$sequence" || { rm -rf "$tmp"; return 1; }
         [ "$sequence" -gt 0 ] || [ "$(jq -r .type "$record")" = lease ] || { rm -rf "$tmp"; return 1; }
+        if [ "$(jq -r .type "$record")" = lease ]; then
+            _taskdag_comment_watchdog_validate_lease_transition "$([ -f "$tmp/previous-lease" ] && cat "$tmp/previous-lease")" "$(cat "$record")" \
+              || { rm -rf "$tmp"; return 1; }
+        fi
         if [ "$sequence" -gt 0 ]; then
-            [ "$(jq -r .registrySnapshotId "$record")" = "$registry" ] \
-              && [ "$(jq -c .activation "$record")" = "$activation" ] \
-              && [ "$(jq -r .coordinationRepository "$record")" = "$coordination" ] || { rm -rf "$tmp"; return 1; }
+            [ "$(jq -r .coordinationRepository "$record")" = "$coordination" ] || { rm -rf "$tmp"; return 1; }
             type=$(jq -r .type "$record")
+            schema=$(jq -r .schema "$record")
             if [ "$type" = lease ]; then
                 if [ "$(jq -r .holder "$record")" = "$holder" ] && [ "$(jq -r .fence "$record")" = "$fence" ]; then
                     [ "$(jq -r .acquiredAt "$record")" = "$acquired" ] && [ "$(jq -r .fence "$record")" = "$fence" ] \
@@ -105,12 +159,33 @@ taskdag_comment_watchdog_validate_tip() { # tip
                 else
                     [ "$(jq -r .observedAt "$record")" \> "$expires" ] || [ "$(jq -r .observedAt "$record")" = "$expires" ] || { rm -rf "$tmp"; return 1; }
                     [ "$(jq -r .acquiredAt "$record")" = "$(jq -r .observedAt "$record")" ] && [ "$(jq -r .fence "$record")" -eq $((fence+1)) ] || { rm -rf "$tmp"; return 1; }
-                    cycle=""; cycle_mode=""
+                    cycle=""; cycle_mode=""; generation_changed=false
+                    if [ "$schema" -eq 2 ]; then
+                        generation=$(jq -r .activationGeneration "$record")
+                        tuple=$(_taskdag_comment_watchdog_generation_tuple "$(cat "$record")") || { rm -rf "$tmp"; return 1; }
+                        if [ "$(jq -r .schema "$tmp/previous-record")" -eq 1 ]; then
+                            [ "$generation" -eq 1 ] || { rm -rf "$tmp"; return 1; }
+                            generation_changed=true
+                        else
+                            previous_tuple=$(_taskdag_comment_watchdog_generation_tuple "$(cat "$tmp/previous-record")") || { rm -rf "$tmp"; return 1; }
+                            if [ "$tuple" = "$previous_tuple" ]; then [ "$generation" -eq "$(jq -r .activationGeneration "$tmp/previous-record")" ] || { rm -rf "$tmp"; return 1; }
+                            else
+                                [ "$generation" -eq $(( $(jq -r .activationGeneration "$tmp/previous-record") + 1 )) ] || { rm -rf "$tmp"; return 1; }
+                                generation_changed=true
+                            fi
+                        fi
+                        if [ "$generation_changed" = true ]; then last_attempt=none; recent_success=none; complete_success=none; fi
+                    else
+                        [ "$(jq -r .schema "$tmp/previous-record")" -eq 1 ] || { rm -rf "$tmp"; return 1; }
+                    fi
                 fi
             else
                 [ "$(jq -r .holder "$record")" = "$holder" ] && [ "$(jq -r .acquiredAt "$record")" = "$acquired" ] \
                   && [ "$(jq -r .fence "$record")" = "$fence" ] && [ "$(jq -r .expiresAt "$record")" = "$expires" ] \
-                  && [ "$(jq -r .runtimeCommit "$record")" = "$runtime" ] && [ "$(jq -r .reviewedRegistryDigest "$record")" = "$reviewed" ] || { rm -rf "$tmp"; return 1; }
+                  && [ "$(jq -r .runtimeCommit "$record")" = "$runtime" ] && [ "$(jq -r .registrySnapshotId "$record")" = "$registry" ] \
+                  && [ "$(jq -c .activation "$record")" = "$activation" ] && [ "$(jq -r .reviewedRegistryDigest "$record")" = "$reviewed" ] \
+                  && [ "$(jq -r .schema "$record")" = "$(jq -r .schema "$tmp/previous-record")" ] \
+                  && [ "$(jq -r '.activationGeneration // "none"' "$record")" = "$(jq -r '.activationGeneration // "none"' "$tmp/previous-record")" ] || { rm -rf "$tmp"; return 1; }
             fi
         fi
         type=$(jq -r .type "$record")
@@ -143,8 +218,10 @@ taskdag_comment_watchdog_validate_tip() { # tip
             holder=$(jq -r .holder "$record"); runtime=$(jq -r .runtimeCommit "$record"); registry=$(jq -r .registrySnapshotId "$record")
             reviewed=$(jq -r .reviewedRegistryDigest "$record"); coordination=$(jq -r .coordinationRepository "$record")
             activation=$(jq -c .activation "$record"); acquired=$(jq -r .acquiredAt "$record"); fence=$(jq -r .fence "$record"); expires=$(jq -r .expiresAt "$record")
+            cp "$record" "$tmp/previous-lease"
         fi
         previous=$commit; sequence=$((sequence+1))
+        cp "$record" "$tmp/previous-record"
     done <"$tmp/commits"
     [ "$sequence" -gt 0 ] || { rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
@@ -173,8 +250,8 @@ taskdag_comment_watchdog_check_file() { # token-file [minimum-seconds]
 }
 
 _taskdag_comment_watchdog_append() { # activation old record actor operation
-    local activation=$1 old=$2 record=$3 actor=$4 operation=$5 tmp index tree commit sequence updates type
-    local last_attempt=none recent_success=none complete_success=none message
+    local activation=$1 old=$2 record=$3 actor=$4 operation=$5 tmp index tree commit sequence updates type prior_path prior_record
+    local last_attempt=none recent_success=none complete_success=none message reset_generation=false
     sequence=$(jq -r .sequence <<<"$record"); tmp=$(mktemp -d) || return 2; index="$tmp/index"
     GIT_INDEX_FILE="$index" git read-tree "$(git mktree </dev/null)" || { rm -rf "$tmp"; return 2; }
     mkdir -p "$tmp/records"; printf '%s\n' "$record" >"$tmp/records/$(printf '%016d' "$sequence").json"
@@ -187,6 +264,19 @@ _taskdag_comment_watchdog_append() { # activation old record actor operation
         [ -n "$last_attempt" ] && [ -n "$recent_success" ] && [ -n "$complete_success" ] || return 3
     fi
     type=$(jq -r .type <<<"$record")
+    if [ "$type" = lease ] && [ "$(jq -r .schema <<<"$record")" -eq 2 ] \
+      && [ "$(jq -r .acquiredAt <<<"$record")" = "$(jq -r .observedAt <<<"$record")" ]; then
+        if [ -z "$old" ]; then reset_generation=true
+        else
+            prior_path=$(git ls-tree -r --name-only "$old") || return 3
+            prior_record=$(git show "$old:$prior_path") || return 3
+            if [ "$(jq -r .schema <<<"$prior_record")" -eq 1 ] \
+              || [ "$(jq -r .activationGeneration <<<"$prior_record")" != "$(jq -r .activationGeneration <<<"$record")" ]; then
+                reset_generation=true
+            fi
+        fi
+    fi
+    if [ "$reset_generation" = true ]; then last_attempt=none; recent_success=none; complete_success=none; fi
     [ "$type" != attempt ] || last_attempt=$(jq -r .observedAt <<<"$record")
     if [ "$type" = fleet ] && [ "$(jq -r .success <<<"$record")" = true ]; then
         [ "$(jq -r .mode <<<"$record")" != recent ] || recent_success=$(jq -r .completedAt <<<"$record")
@@ -206,7 +296,7 @@ cmd_comment_watchdog() {
     local action=${1:-}; shift || :
     case "$action" in
       acquire|renew)
-        local holder="" ttl=180 registry_file="" reviewed old="" activation activation_record runtime registry repo observation now tip prior sequence=0 fence=1 acquired observed expires record commit
+        local holder="" ttl=180 registry_file="" reviewed old="" activation activation_record activation_provenance runtime registry repo observation now tip prior="" sequence=0 fence=1 acquired observed expires record commit schema=1 generation=0 tuple prior_tuple
         while [ $# -gt 0 ]; do case "$1" in --holder) holder=$2; shift 2;; --ttl) ttl=$2; shift 2;; --registry-file) registry_file=$2; shift 2;; *) return 2;; esac; done
         [[ -n "$holder" && ${#holder} -le 256 && "$ttl" =~ ^[1-9][0-9]*$ && "$ttl" -ge 60 && "$ttl" -le 900 && -f "$registry_file" ]] || return 2
         reviewed=$(_taskdag_comment_watchdog_registry_digest "$registry_file") || return 2
@@ -236,15 +326,35 @@ cmd_comment_watchdog() {
             done
             [ -n "$cursor" ] || return 3
         fi
+        if [ -n "$old" ] && [ "$(jq -r .schema <<<"$prior")" -eq 1 ]; then
+            activation_provenance=$(jq -cS '{epoch,digest,guardVersion}' <<<"$activation") || return 3
+        else
+            activation_provenance=$(jq -cS '{commit:.activationCommit,digest,epoch,guardVersion,minimumCompatibleTaskDagCommit}' <<<"$activation") || return 3
+        fi
         if [ -n "$old" ] && [ "$(date -u -d "$(jq -r .expiresAt <<<"$prior")" +%s)" -gt "$now" ]; then
-            [ "$(jq -r .holder <<<"$prior")" = "$holder" ] && [ "$(jq -r .runtimeCommit <<<"$prior")" = "$runtime" ] && [ "$(jq -r .registrySnapshotId <<<"$prior")" = "$registry" ] && [ "$(jq -r .reviewedRegistryDigest <<<"$prior")" = "$reviewed" ] || return 10
+            [ "$(jq -r .holder <<<"$prior")" = "$holder" ] && [ "$(jq -r .runtimeCommit <<<"$prior")" = "$runtime" ] && [ "$(jq -r .registrySnapshotId <<<"$prior")" = "$registry" ] && [ "$(jq -r .reviewedRegistryDigest <<<"$prior")" = "$reviewed" ] \
+              && [ "$(jq -cS .activation <<<"$prior")" = "$activation_provenance" ] || return 10
             fence=$(jq -r .fence <<<"$prior"); acquired=$(jq -r .acquiredAt <<<"$prior")
+            schema=$(jq -r .schema <<<"$prior"); generation=$(jq -r '.activationGeneration // 0' <<<"$prior")
         elif [ -n "$old" ]; then
             [ "$action" = acquire ] || return 10
             fence=$(( $(jq -r .fence <<<"$prior") + 1 )); acquired=$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)
+            if [ "$(jq -r .schema <<<"$prior")" -eq 2 ]; then
+                schema=2
+                prior_tuple=$(_taskdag_comment_watchdog_generation_tuple "$prior") || return 3
+                tuple=$(_taskdag_comment_watchdog_generation_tuple "$(jq -ncS --argjson activation "$activation_provenance" --arg runtime "$runtime" --arg registry "$registry" --arg reviewed "$reviewed" '{activation:$activation,runtimeCommit:$runtime,registrySnapshotId:$registry,reviewedRegistryDigest:$reviewed}')") || return 3
+                generation=$(jq -r .activationGeneration <<<"$prior"); [ "$tuple" = "$prior_tuple" ] || generation=$((generation+1))
+            else schema=2; generation=1
+            fi
+        fi
+        if [ "$schema" -eq 1 ]; then
+            activation_provenance=$(jq -cS '{epoch,digest,guardVersion}' <<<"$activation") || return 3
+        else
+            activation_provenance=$(jq -cS '{commit:.activationCommit,digest,epoch,guardVersion,minimumCompatibleTaskDagCommit}' <<<"$activation") || return 3
         fi
         observed=$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ); expires=$(date -u -d "@$((now+ttl))" +%Y-%m-%dT%H:%M:%SZ)
-        record=$(jq -ncS --argjson sequence "$sequence" --arg holder "$holder" --argjson fence "$fence" --arg runtime "$runtime" --arg registry "$registry" --arg reviewed "$reviewed" --arg coordinationRepository "$repo" --arg acquired "$acquired" --arg observed "$observed" --arg expires "$expires" --argjson activation "$(jq -c '{epoch,digest,guardVersion}' <<<"$activation")" '{schema:1,type:"lease",sequence:$sequence,holder:$holder,fence:$fence,runtimeCommit:$runtime,registrySnapshotId:$registry,reviewedRegistryDigest:$reviewed,coordinationRepository:$coordinationRepository,activation:$activation,acquiredAt:$acquired,observedAt:$observed,expiresAt:$expires}')
+        record=$(jq -ncS --argjson schema "$schema" --argjson generation "$generation" --argjson sequence "$sequence" --arg holder "$holder" --argjson fence "$fence" --arg runtime "$runtime" --arg registry "$registry" --arg reviewed "$reviewed" --arg coordinationRepository "$repo" --arg acquired "$acquired" --arg observed "$observed" --arg expires "$expires" --argjson activation "$activation_provenance" '{schema:$schema,type:"lease",sequence:$sequence,holder:$holder,fence:$fence,runtimeCommit:$runtime,registrySnapshotId:$registry,reviewedRegistryDigest:$reviewed,coordinationRepository:$coordinationRepository,activation:$activation,acquiredAt:$acquired,observedAt:$observed,expiresAt:$expires} + (if $schema==2 then {activationGeneration:$generation} else {} end)')
+        _taskdag_comment_watchdog_validate_lease_transition "$prior" "$record" || return 3
         commit=$(_taskdag_comment_watchdog_append "$activation" "$old" "$record" "$holder" "$action") || return $?
         _taskdag_comment_watchdog_token "$commit" "$record" "$commit";;
       check)
@@ -276,7 +386,9 @@ cmd_comment_watchdog() {
         [ "$observed" \< "$(jq -r .expiresAt <<<"$lease")" ] || return 3
         record=$(jq -ncS --argjson sequence "$sequence" --argjson lease "$lease" --arg observed "$observed" --arg repository "$result_repo" --arg cycle "$cycle" --argjson result "$result" '$lease + {type:"result",sequence:$sequence,observedAt:$observed,repository:$repository,cycle:$cycle,result:$result}') || return 2
         activation=$(taskdag_activation_snapshot_token) || return 3
-        jq -e --argjson activation "$(jq -c '{epoch,digest,guardVersion}' <<<"$activation")" '.activation==$activation' <<<"$lease" >/dev/null || return 3
+        jq -e --argjson current "$activation" '
+          .activation == (if .schema==1 then ($current|{epoch,digest,guardVersion}) else ($current|{commit:.activationCommit,digest,epoch,guardVersion,minimumCompatibleTaskDagCommit}) end)
+        ' <<<"$lease" >/dev/null || return 3
         commit=$(_taskdag_comment_watchdog_append "$activation" "$(jq -r .authorityTip <<<"$token")" "$record" "$(jq -r .holder <<<"$lease")" result) || return $?
         _taskdag_comment_watchdog_token "$commit" "$lease" "$(jq -r .leaseCommit <<<"$token")";;
       finish)
@@ -292,13 +404,15 @@ cmd_comment_watchdog() {
         activation=$(taskdag_activation_snapshot_token) || return 3; commit=$(_taskdag_comment_watchdog_append "$activation" "$(jq -r .authorityTip <<<"$token")" "$record" "$(jq -r .holder <<<"$lease")" finish) || return $?
         _taskdag_comment_watchdog_token "$commit" "$lease" "$(jq -r .leaseCommit <<<"$token")";;
       status)
-        local remote last_attempt recent_success complete_success
+        local remote last_attempt recent_success complete_success path record
         remote=$(git ls-remote --refs origin "$TASKDAG_COMMENT_WATCHDOG_REF") || return 2; [ -n "$remote" ] || return 3; remote=${remote%%[[:space:]]*}; git fetch -q origin "$remote" || return 2
         last_attempt=$(git show -s --format='%(trailers:key=Watchdog-Last-Attempt,valueonly)' "$remote")
         recent_success=$(git show -s --format='%(trailers:key=Watchdog-Recent-Success,valueonly)' "$remote")
         complete_success=$(git show -s --format='%(trailers:key=Watchdog-Complete-Success,valueonly)' "$remote")
         [ -n "$last_attempt" ] && [ -n "$recent_success" ] && [ -n "$complete_success" ] || return 3
-        jq -ncS --arg tip "$remote" --arg last "$last_attempt" --arg recent "$recent_success" --arg complete "$complete_success" '{schema:1,authorityTip:$tip,lastAttempt:(if $last=="none" then null else {observedAt:$last} end),recentSuccess:(if $recent=="none" then null else {completedAt:$recent} end),completeSuccess:(if $complete=="none" then null else {completedAt:$complete} end)}';;
+        taskdag_comment_watchdog_validate_tip "$remote" || return 3
+        path=$(git ls-tree -r --name-only "$remote"); record=$(git show "$remote:$path") || return 3
+        jq -ncS --arg tip "$remote" --arg last "$last_attempt" --arg recent "$recent_success" --arg complete "$complete_success" --argjson record "$record" '{schema:2,authorityTip:$tip,activationGeneration:($record.activationGeneration // null),generationTuple:{activation:$record.activation,runtimeCommit:$record.runtimeCommit,registrySnapshotId:$record.registrySnapshotId,reviewedRegistryDigest:$record.reviewedRegistryDigest},holder:$record.holder,fence:$record.fence,lease:{acquiredAt:$record.acquiredAt,observedAt:$record.observedAt,expiresAt:$record.expiresAt},lastAttempt:(if $last=="none" then null else {observedAt:$last} end),recentSuccess:(if $recent=="none" then null else {completedAt:$recent} end),completeSuccess:(if $complete=="none" then null else {completedAt:$complete} end)}';;
       *) echo 'Usage: task-dag comment-watchdog acquire|renew|check|attempt|result|finish|status ...'; [ "$action" = -h ] || [ "$action" = --help ] || [ -z "$action" ] || return 2;;
     esac
 }

@@ -234,7 +234,7 @@ absent_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widg
 absent_rc=$?
 set -e
 [ "$absent_rc" -ne 0 ]
-jq -e 'any(.failure_items[]; .message | contains("--initialize-index"))' <<<"$absent_out" >/dev/null
+jq -e 'any(.failure_items[]; .message == "reconciliation checkpoint repair is required (reason: absent)")' <<<"$absent_out" >/dev/null
 : >"$GH_LOG"
 init_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     reconcile-fixture --mode complete --ingestion-start-at 2025-01-01T00:00:00Z \
@@ -243,6 +243,46 @@ jq -e '.status == "success" and .requests == 0' <<<"$init_out" >/dev/null
 [ ! -s "$GH_LOG" ]
 index_tip=$(git --git-dir="$tmp/origin.git" rev-parse refs/heads/tasks/v1/reconcile-comments-index)
 [ "$(git --git-dir="$tmp/origin.git" rev-list --parents -n1 "$index_tip" | wc -w)" -eq 1 ]
+# A missing derived checkpoint repairs through the same full-census path,
+# returns before API effects, and publishes explicit old/new/reason evidence.
+git --git-dir="$tmp/origin.git" update-ref -d refs/heads/tasks/v1/reconcile-comments-index "$index_tip"
+: >"$GH_LOG"
+repair_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    reconcile-fixture --mode complete --ingestion-start-at 2025-01-01T00:00:00Z \
+    --watchdog-token-file "$tmp/watchdog-token")
+jq -e '.status == "success" and .requests == 0 and
+       any(.warnings[]; .type == "checkpoint-reconstructed" and .old == null and
+           (.new | test("^[0-9a-f]{40}$")) and .reason == "absent")' <<<"$repair_out" >/dev/null
+[ ! -s "$GH_LOG" ]
+index_tip=$(git --git-dir="$tmp/origin.git" rev-parse refs/heads/tasks/v1/reconcile-comments-index)
+[ "$(git --git-dir="$tmp/origin.git" rev-list --parents -n1 "$index_tip" | wc -w)" -eq 1 ]
+[ "$(git --git-dir="$tmp/origin.git" show "$index_tip:queue.tsv")" = $'10\n12' ]
+# Checkpoint reads reject every Git mechanism that can hide, lazily supply, or
+# rewrite the ordinary reachable-object closure.
+(cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
+! (cd "$tmp/work" && GIT_SHALLOW_FILE="$tmp/shallow" _xrepo_reconcile_checkpoint_store_safe)
+! (cd "$tmp/work" && GIT_OBJECT_DIRECTORY="$tmp/objects" _xrepo_reconcile_checkpoint_store_safe)
+! (cd "$tmp/work" && GIT_ALTERNATE_OBJECT_DIRECTORIES="$tmp/objects" _xrepo_reconcile_checkpoint_store_safe)
+! (cd "$tmp/work" && GIT_GRAFT_FILE="$tmp/grafts" _xrepo_reconcile_checkpoint_store_safe)
+git -C "$tmp/work" config remote.origin.promisor yes
+! (cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
+git -C "$tmp/work" config --unset remote.origin.promisor
+git -C "$tmp/work" config remote.origin.partialCloneFilter blob:none
+! (cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
+git -C "$tmp/work" config --unset remote.origin.partialCloneFilter
+mkdir -p "$tmp/work/.git/objects/info" "$tmp/work/.git/objects/pack" "$tmp/work/.git/info"
+printf '%s\n' "$tmp/origin.git/objects" >"$tmp/work/.git/objects/info/alternates"
+! (cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
+rm "$tmp/work/.git/objects/info/alternates"
+: >"$tmp/work/.git/objects/pack/pack-fixture.promisor"
+! (cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
+rm "$tmp/work/.git/objects/pack/pack-fixture.promisor"
+: >"$tmp/work/.git/info/grafts"
+! (cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
+rm "$tmp/work/.git/info/grafts"
+git -C "$tmp/work" update-ref "refs/replace/$clarification" "$clarification"
+! (cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
+git -C "$tmp/work" update-ref -d "refs/replace/$clarification"
 # Strict history validation rejects a merge successor even when its tree is
 # otherwise byte-for-byte valid.
 bad_index=$(printf 'Malformed index successor\n' | git -C "$tmp/work" commit-tree \
@@ -251,6 +291,7 @@ bad_index=$(printf 'Malformed index successor\n' | git -C "$tmp/work" commit-tre
 refs_before=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname) %(refname)' | sort)
 : >"$tmp/validation-work"
 out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    TASKDAG_CHECKPOINT_FETCH_SLOW_SECONDS=0 \
     TASKDAG_VALIDATION_WORK_COUNTER="$tmp/validation-work" \
     reconcile-fixture --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --allow-comment 10:99 --dry-run)
@@ -261,6 +302,7 @@ jq -e '.schema_version == 1 and .status == "success" and .dry_run == true and
        .pre_boundary == 1 and .pull_requests == 1 and .eligible == 4 and
        .missing == 4 and .dispositions == {human:2,completion:0,machine_skip:2} and
        .attempted == 0 and .deferred == 4 and .failures == 0 and
+       any(.warnings[]; .type == "checkpoint-fetch-slow" and .threshold_seconds == 0) and
        .recent_success_at == null and .complete_success_at == null' <<<"$out" >/dev/null
 grep -q 'since=2024-12-31T23:45:00Z' "$GH_LOG"
 grep -Fxq 'repositories/123/issues/comments?sort=updated&direction=asc&per_page=100&since=2025-01-01T00%3A00%3A00Z&page=2' "$GH_LOG"

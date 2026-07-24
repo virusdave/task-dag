@@ -203,7 +203,16 @@ audits the whole `refs/heads/tasks/**` + `refs/heads/gh/**` namespace and
 ### Comment-watchdog authority (`tasks/v1/comment-watchdog`)
 
 This exact data-in-tree ref is a linear append-only sequence of canonical JSON
-records. Lease records bind the holder, monotonic fence, authoritative GitHub
+records. Schema-v1 history remains replayable unchanged. Schema v2 adds
+`activationGeneration` and may first appear only in a lease acquired at or
+after expiry. Its generation tuple is the activation commit, digest, epoch,
+guard version, and minimum-compatible runtime plus the executing runtime
+commit, registry snapshot ID, and reviewed-registry digest; the coordination
+repository remains immutable. An expired takeover preserves generation and
+watermarks for an identical tuple, or increments it exactly once for a changed
+tuple and resets all attempt/success watermarks. Same-generation records retain
+the exact tuple and generation.
+Lease records bind the holder, monotonic fence, authoritative GitHub
 server observation and expiry, immutable task-dag runtime, activation epoch,
 and activation registry snapshot. A current holder may renew without changing
 its fence; only an acquire observed at or after expiry may change holder and
@@ -813,21 +822,32 @@ Malformed or unsupported origin objects are fatal and are never replaced.
 ### Reconciliation validation checkpoint (v1)
 
 `refs/heads/tasks/v1/reconcile-comments-index` is the sole watchdog-owned
-validation checkpoint. It is initialized only by the explicit
-`reconcile-comments --initialize-index` operation and thereafter advances by
-one-parent compare-and-swap commits. Each tree contains exactly
+validation checkpoint. It is initialized by the explicit
+`reconcile-comments --initialize-index` operation or reconstructed when—and
+only when—the derived ref is absent, then advances by one-parent
+compare-and-swap commits. Each tree contains exactly
 `manifest.tsv`, `metadata.json`, `peers.json`, `proofs.json`, and `queue.tsv`:
 a ref-sorted coordination snapshot, normalized delegation proofs, per-peer
 first-parent close indexes and tips, a stable activation-record/watchdog
-binding, and an ordered-unique durable FIFO. Online readers validate the
-current tree and at most its direct predecessor. Strict maintenance mode may
+binding, and an ordered-unique durable FIFO. Online readers require a
+non-shallow, non-partial, non-promisor repository and fetch the advertised
+checkpoint's complete history into its ordinary object store; no alternate
+object or shallow-file environment participates. They validate the current
+tree and at most its direct predecessor. Strict maintenance mode may
 validate complete history. A previously indexed ref disappearing or changing
 object ID is
 corruption; only newly advertised refs are fetched and semantically validated.
+Slow checkpoint fetches produce bounded structured warnings, never pages or
+issues.
 Publication requires a stable second advertisement, a current watchdog fence,
-an exact ref lease, and origin readback. An absent or corrupt checkpoint is
-never treated as an empty cache: normal reconciliation fails with the explicit
-initialization instruction.
+an exact ref lease, and origin readback. An absent checkpoint is reconstructed
+effect-free from a full census as a parentless generation-zero checkpoint;
+every issue implicated by live facts is conservatively queued and the command
+returns before GitHub effects. Dry run only reports repair-required. Malformed
+checkpoints, activation incompatibility, fetch/network ambiguity, unstable
+advertisements, immutable indexed-ref replacement/deletion, malformed live
+facts, and non-fast-forward peers remain fail-closed pending narrower safe
+classification; they are never guessed into an empty cache.
 
 Apply is two-phase. Before effects, a fenced checkpoint durably records the
 newly validated additions and the merged issue queue. After idempotent effects,
@@ -850,3 +870,9 @@ last validated first-parent `master` tip plus issue-keyed immutable
 `{close,root}` witnesses. Indexed discovery combines that mutable scan cursor
 with the exact immutable witness rather than invoking the whole-history
 resolver.
+
+Proof-envelope readers dispatch on the envelope version, normalize every
+supported version into one semantic representation, and compare those semantic
+forms rather than wire JSON. Proof envelopes remain v1. Any future v2 writer
+must retain v1 reader and migration fixtures alongside semantic-equivalence
+tests; introducing v2 is not an implicit license to remove v1 replay.
