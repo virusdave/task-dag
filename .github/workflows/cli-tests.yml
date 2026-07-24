@@ -26,6 +26,7 @@ on:
       - 'docs/MIGRATION.md'
       - '.github/scripts/**'
       - '.github/workflows/cli-tests.yml'
+      - '.github/workflows/verify-materialise-app.yml'
   pull_request:
     paths:
       - '.github/workflows/task-dag.yml'
@@ -44,6 +45,7 @@ on:
       - 'docs/MIGRATION.md'
       - '.github/scripts/**'
       - '.github/workflows/cli-tests.yml'
+      - '.github/workflows/verify-materialise-app.yml'
 
 permissions:
   contents: read
