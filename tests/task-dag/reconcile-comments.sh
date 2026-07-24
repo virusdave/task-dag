@@ -16,7 +16,7 @@ classify() {
 }
 source "$(dirname "$TD")/task-dag.d/cross-repo.sh"
 source "$(dirname "$TD")/task-dag.d/materialise.sh"
-touch "$tmp/watchdog-token"
+printf '%s\n' '{"lease":{"holder":"fixture","fence":1},"cycle":"fixture-cycle"}' >"$tmp/watchdog-token"
 taskdag_comment_watchdog_check_file() { [ "$1" = "$tmp/watchdog-token" ] && [ "$2" -eq 510 ]; }
 _xrepo_watchdog_token_valid_for "$tmp/watchdog-token" 480
 ! _xrepo_watchdog_token_valid_for "$tmp/missing-token" 480
@@ -165,6 +165,7 @@ comment() {
 }
 case "$endpoint" in
   repos/acme/widgets)
+    if [[ "${GH_TIMEOUT_REPO:-0}" == 1 ]]; then sleep 5; exit 1; fi
     header; printf '\r\n{"id":123}\n'
     ;;
   *issues/comments/99)
@@ -204,10 +205,56 @@ esac
 EOF
 chmod +x "$tmp/bin/gh"
 export GH_LOG="$tmp/gh.log"
+cat >"$tmp/bin/reconcile-fixture" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$TD" --help >/dev/null
+taskdag_comment_watchdog_check_file() { :; }
+taskdag_consumer_prepare() { :; }
+taskdag_activation_snapshot_token() {
+  jq -ncS --arg commit "$FIXTURE_COMMIT" --arg runtime "$FIXTURE_RUNTIME" '{activationCommit:$commit,authorityTip:$commit,digest:"3333333333333333333333333333333333333333333333333333333333333333",epoch:1,guardVersion:1,minimumCompatibleTaskDagCommit:$runtime,origin:"fixture",runtimeCommit:$runtime,state:"enabled"}'
+}
+taskdag_activation_validate_provenance() { :; }
+_taskdag_activation_runtime_commit() { printf '%s\n' "$FIXTURE_RUNTIME"; }
+taskdag_consumer_fenced_scheduling_push() {
+  local updates=$3 ref old new
+  ref=$(jq -r '.[0].ref' <<<"$updates")
+  old=$(jq -r '.[0].old' <<<"$updates")
+  new=$(jq -r '.[0].new' <<<"$updates")
+  git push -q origin "--force-with-lease=${ref}:${old}" "$new:$ref"
+}
+_xrepo_reconcile_comments_impl "$@"
+EOF
+chmod +x "$tmp/bin/reconcile-fixture"
+export TD FIXTURE_COMMIT="$clarification" FIXTURE_RUNTIME="$(git -C "$(dirname "$TD")/.." rev-parse HEAD)"
+# Initialization is explicit, watchdog-fenced, and performs no API work.
+set +e
+absent_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    reconcile-fixture --mode complete --ingestion-start-at 2025-01-01T00:00:00Z --dry-run)
+absent_rc=$?
+set -e
+[ "$absent_rc" -ne 0 ]
+jq -e 'any(.failure_items[]; .message | contains("--initialize-index"))' <<<"$absent_out" >/dev/null
+: >"$GH_LOG"
+init_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    reconcile-fixture --mode complete --ingestion-start-at 2025-01-01T00:00:00Z \
+    --initialize-index --watchdog-token-file "$tmp/watchdog-token")
+jq -e '.status == "success" and .requests == 0' <<<"$init_out" >/dev/null
+[ ! -s "$GH_LOG" ]
+index_tip=$(git --git-dir="$tmp/origin.git" rev-parse refs/heads/tasks/v1/reconcile-comments-index)
+[ "$(git --git-dir="$tmp/origin.git" rev-list --parents -n1 "$index_tip" | wc -w)" -eq 1 ]
+# Strict history validation rejects a merge successor even when its tree is
+# otherwise byte-for-byte valid.
+bad_index=$(printf 'Malformed index successor\n' | git -C "$tmp/work" commit-tree \
+    "$(git --git-dir="$tmp/origin.git" rev-parse "$index_tip^{tree}")" -p "$index_tip" -p "$clarification")
+! (cd "$tmp/work" && _xrepo_reconcile_index_read "$bad_index" "$tmp/bad-index" acme/widgets "")
 refs_before=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname) %(refname)' | sort)
+: >"$tmp/validation-work"
 out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
-    "$TD" reconcile-comments --mode complete \
+    TASKDAG_VALIDATION_WORK_COUNTER="$tmp/validation-work" \
+    reconcile-fixture --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --allow-comment 10:99 --dry-run)
+[ ! -s "$tmp/validation-work" ]
 [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]
 jq -e '.schema_version == 1 and .status == "success" and .dry_run == true and
        .pages == 2 and .requests == 7 and .returned == 7 and .unique == 6 and
@@ -225,19 +272,26 @@ refs_after=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname
 # same closed issue does not attempt close convergence against a retired root.
 : >"$GH_LOG"
 apply_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
-    GH_CLOSED_ONLY=1 CROSS="$(dirname "$TD")/task-dag.d/cross-repo.sh" \
-    bash -c 'source "$CROSS"; taskdag_comment_watchdog_check_file() { :; }; \
-      _xrepo_reconcile_comments_impl --mode complete \
-        --ingestion-start-at 2025-01-01T00:00:00Z \
-        --watchdog-token-file "'$tmp'/watchdog-token"')
-jq -e '.status == "success" and .dry_run == false and .applied == 1 and
-       .failures == 0 and .dispositions.machine_skip == 1 and
-       .complete_success_at != null' <<<"$apply_out" >/dev/null
+    GH_CLOSED_ONLY=1 reconcile-fixture --mode complete \
+    --ingestion-start-at 2025-01-01T00:00:00Z --watchdog-token-file "$tmp/watchdog-token" || true)
+jq -e '.status == "failed" and .dry_run == false and .applied == 1 and
+       .dispositions.machine_skip == 1 and
+       any(.failure_items[]; .message | contains("coordination refs advanced after effects"))' <<<"$apply_out" >/dev/null
 receipt=$(git --git-dir="$tmp/origin.git" rev-parse refs/heads/gh/comments/12/5)
 [ "$(git --git-dir="$tmp/origin.git" rev-list --parents -n1 "$receipt" | wc -w)" -eq 1 ]
 git --git-dir="$tmp/origin.git" show -s --format=%B "$receipt" | grep -Fxq 'Disposition: machine-skip'
 ! git --git-dir="$tmp/origin.git" show-ref --verify --quiet refs/heads/tasks/pending/12
 ! git --git-dir="$tmp/origin.git" for-each-ref --format='%(refname)' refs/heads/tasks/frontier/ | grep -q .
+# The next sweep validates exactly the new immutable receipt, then clears the
+# preserved queue. No previously indexed fact is reparsed.
+: >"$tmp/validation-work"
+apply_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+    GH_CLOSED_ONLY=1 TASKDAG_VALIDATION_WORK_COUNTER="$tmp/validation-work" \
+    reconcile-fixture --mode complete --ingestion-start-at 2025-01-01T00:00:00Z \
+    --watchdog-token-file "$tmp/watchdog-token")
+jq -e '.status == "success" and .dry_run == false and .applied == 0 and
+       .already_receipted == 1 and .failures == 0 and .complete_success_at != null' <<<"$apply_out" >/dev/null
+[ "$(cut -f1 "$tmp/validation-work")" = receipt ]
 # Immutable completion backlog converges before the potentially long API
 # pagination scan, while the invocation still has its full time budget.
 issue_line=$(grep -n -m1 '^repos/acme/widgets/issues/12$' "$GH_LOG" | cut -d: -f1)
@@ -249,22 +303,20 @@ list_line=$(grep -n -m1 '^repos/acme/widgets/issues/comments?' "$GH_LOG" | cut -
 # the synthetic timeout as a missing master/HEAD tip.
 set +e
 timeout_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
-    GH_TIMEOUT_ISSUE=1 CROSS="$(dirname "$TD")/task-dag.d/cross-repo.sh" \
-    bash -c 'source "$CROSS"; taskdag_comment_watchdog_check_file() { :; }; \
-      _xrepo_reconcile_comments_impl --mode complete \
-        --ingestion-start-at 2025-01-01T00:00:00Z --max-seconds 3 \
-        --watchdog-token-file "'$tmp'/watchdog-token"' 2>"$tmp/timeout.err")
+    GH_TIMEOUT_REPO=1 GH_CLOSED_ONLY=1 reconcile-fixture --mode complete \
+    --ingestion-start-at 2025-01-01T00:00:00Z --max-seconds 3 \
+    --watchdog-token-file "$tmp/watchdog-token" 2>"$tmp/timeout.err")
 timeout_rc=$?
 set -e
 [ "$timeout_rc" -eq 124 ]
 jq -e '.status == "failed" and .failures == 1 and
-       .failure_items == [{stage:"convergence",issue:12,comment_id:null,message:"time ceiling reached"}]' \
+       (.failure_items | length) == 1 and .failure_items[0].message == "time ceiling reached"' \
   <<<"$timeout_out" >/dev/null
 ! grep -Eq 'cannot resolve (a )?master/HEAD tip|integer expected' "$tmp/timeout.err"
 
 set +e
 mismatch_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets GH_BAD_NUMERIC_LINK=1 \
-    "$TD" reconcile-comments --mode complete \
+    reconcile-fixture --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --dry-run)
 mismatch_rc=$?
 set -e
@@ -279,7 +331,7 @@ unsupported=$(printf '%s\n' 'kind: message' 'role: human' 'intent: unsupported' 
 git -C "$tmp/work" push -q origin "$unsupported:refs/heads/gh/comments/10/97"
 set +e
 bad_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
-    "$TD" reconcile-comments --mode complete \
+    reconcile-fixture --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --dry-run)
 bad_rc=$?
 set -e
@@ -366,4 +418,66 @@ git --git-dir="$integration/origin.git" show -s --format=%B "$activation_after" 
   _xrepo_reconcile_delegated_close 1 peer/repo 2 "$integration_delegation")
 [ "$integration_record" = "$(git --git-dir="$integration/origin.git" rev-parse "$close_ref")" ]
 [ "$activation_after" = "$(git --git-dir="$integration/origin.git" rev-parse refs/heads/tasks/v1/activation)" ]
+
+# Peer indexing scans genesis once, then only the first-parent delta. An
+# unrelated fast-forward preserves the immutable oldest-close witness, and an
+# unchanged cursor performs no history work at all.
+peer_index_0="$integration/peer-index-0.json"
+peer_index_1="$integration/peer-index-1.json"
+peer_index_2="$integration/peer-index-2.json"
+peer_work="$integration/peer-work.tsv"
+(cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  TASKDAG_VALIDATION_WORK_COUNTER="$peer_work" _xrepo_index_peer_delta peer/repo "" "$peer_index_0")
+witness_0=$(jq -c '.witnesses["2"]' "$peer_index_0")
+printf unrelated >>"$integration/peer/state"
+git -C "$integration/peer" add state
+git -C "$integration/peer" commit -qm 'Advance peer without another close'
+git -C "$integration/peer" push -q origin master:master
+: >"$peer_work"
+(cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  TASKDAG_VALIDATION_WORK_COUNTER="$peer_work" _xrepo_index_peer_delta peer/repo "$(cat "$peer_index_0")" "$peer_index_1")
+[ "$(jq -c '.witnesses["2"]' "$peer_index_1")" = "$witness_0" ]
+[ "$(cut -f1 "$peer_work")" = peer-delta ]
+: >"$peer_work"
+(cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  TASKDAG_VALIDATION_WORK_COUNTER="$peer_work" _xrepo_index_peer_delta peer/repo "$(cat "$peer_index_1")" "$peer_index_2")
+[ ! -s "$peer_work" ]
+(cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  _xrepo_validate_delegated_close_v1 "$integration_record" "$integration_delegation" \
+    virusdave/task-dag 1 peer/repo 2 "" "$witness_0")
+# Indexed creation combines the peer-level mutable cursor with the immutable
+# issue witness; Peer-Tip must never be read from the witness itself.
+indexed_delegation=$(printf '%s\n' 'kind: delegated' 'role: system' 'intent: delegated-child' '' \
+  'issue:' '  repo: virusdave/task-dag' '  number: 4' '' \
+  'delegated:' '  repo: peer/repo' '  number: 2' \
+  | git -C "$integration/parent" commit-tree "$integration_empty")
+indexed_ref=refs/heads/tasks/delegated/4/peer/repo/2
+git -C "$integration/parent" push -q origin "$indexed_delegation:$indexed_ref"
+indexed_proof=$(cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  _xrepo_normalize_delegation "$indexed_delegation" "$indexed_ref" virusdave/task-dag 4 peer/repo 2)
+jq -ncS --arg ref "$indexed_ref" --argjson proof "$indexed_proof" '{version:1,delegations:{($ref):$proof}}' \
+  >"$integration/indexed-proofs.json"
+jq -ncS --argjson peer "$(cat "$peer_index_1")" '{version:1,peers:{"peer/repo":$peer}}' \
+  >"$integration/indexed-peers.json"
+(cd "$integration/parent" && source "$TD" --help >/dev/null && _xrepo_watchdog_fence() { :; } && \
+  _XREPO_INDEX_PROOFS_FILE="$integration/indexed-proofs.json" \
+  _XREPO_INDEX_PEERS_FILE="$integration/indexed-peers.json" \
+  _xrepo_reconcile_delegated_close 4 peer/repo 2 "$indexed_delegation")
+indexed_close=$(git --git-dir="$integration/origin.git" rev-parse refs/heads/tasks/delegated-close/v1/4/peer/repo/2)
+[ "$(git --git-dir="$integration/origin.git" show -s --format='%(trailers:key=Peer-Tip,valueonly)' "$indexed_close")" \
+  = "$(jq -r .tip "$peer_index_1")" ]
+# Generic graph ancestry is insufficient: if the previous cursor appears only
+# as a merge's second parent, the first-parent delta is discontinuous.
+indexed_tip=$(jq -r .tip "$peer_index_1")
+side_tip=$(printf 'Side line\n' | git -C "$integration/peer" commit-tree \
+  "$(git -C "$integration/peer" rev-parse "$integration_base^{tree}")" -p "$integration_base")
+second_parent_tip=$(printf 'Old cursor is second parent\n' | git -C "$integration/peer" commit-tree \
+  "$(git -C "$integration/peer" rev-parse "$side_tip^{tree}")" -p "$side_tip" -p "$indexed_tip")
+git -C "$integration/peer" push -q --force origin "$second_parent_tip:refs/heads/master"
+! (cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  _xrepo_index_peer_delta peer/repo "$(cat "$peer_index_1")" "$integration/second-parent.json")
+# Replacing the peer cursor with a non-descendant fails closed.
+git -C "$integration/peer" push -q --force origin "$integration_base:refs/heads/master"
+! (cd "$integration/parent" && source "$TD" --help >/dev/null && \
+  _xrepo_index_peer_delta peer/repo "$(cat "$peer_index_1")" "$integration/non-ff.json")
 echo "reconcile-comments fixture: ok"

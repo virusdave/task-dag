@@ -809,3 +809,44 @@ the narrowly grandfathered
 `gh/comments/10/manual-cleanup-<repo>-<issue>` shape; they are validated as
 completion provenance but never treated as numeric GitHub comment receipts.
 Malformed or unsupported origin objects are fatal and are never replaced.
+
+### Reconciliation validation checkpoint (v1)
+
+`refs/heads/tasks/v1/reconcile-comments-index` is the sole watchdog-owned
+validation checkpoint. It is initialized only by the explicit
+`reconcile-comments --initialize-index` operation and thereafter advances by
+one-parent compare-and-swap commits. Each tree contains exactly
+`manifest.tsv`, `metadata.json`, `peers.json`, `proofs.json`, and `queue.tsv`:
+a ref-sorted coordination snapshot, normalized delegation proofs, per-peer
+first-parent close indexes and tips, a stable activation-record/watchdog
+binding, and an ordered-unique durable FIFO. Online readers validate the
+current tree and at most its direct predecessor. Strict maintenance mode may
+validate complete history. A previously indexed ref disappearing or changing
+object ID is
+corruption; only newly advertised refs are fetched and semantically validated.
+Publication requires a stable second advertisement, a current watchdog fence,
+an exact ref lease, and origin readback. An absent or corrupt checkpoint is
+never treated as an empty cache: normal reconciliation fails with the explicit
+initialization instruction.
+
+Apply is two-phase. Before effects, a fenced checkpoint durably records the
+newly validated additions and the merged issue queue. After idempotent effects,
+a successor acknowledges terminal and waiting issues; only failed or deferred
+issues remain queued. A later immutable fact requeues a waiting issue. Dry runs
+never publish either checkpoint, and explicit initialization performs no GitHub
+API requests. Existing checkpoints fetch no historical coordination refs; new
+facts are validated topologically against normalized proofs. An unchanged peer
+tip requires no scan. A fast-forward advancement is scanned once from old tip
+to new tip and requeues affected issues; non-fast-forward movement fails. The
+final pre-ack advertisement must be exact: late additions preserve the queue
+and force a non-success result.
+
+`proofs.json.delegations` is keyed by the complete canonical delegation ref.
+Each proof binds its object ID, parent and peer repository/issue, legacy mode,
+and all six identity values (all strings in current mode, all null in legacy
+mode). Dependent additions consume that proof without parsing an old
+delegation. `peers.json.peers` is keyed by live peer repository and stores its
+last validated first-parent `master` tip plus issue-keyed immutable
+`{close,root}` witnesses. Indexed discovery combines that mutable scan cursor
+with the exact immutable witness rather than invoking the whole-history
+resolver.

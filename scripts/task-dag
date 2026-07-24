@@ -385,6 +385,14 @@ TASKDAG_MATERIALISATION_REF="refs/heads/tasks/v1/materialisation"
 TASKDAG_ACTIVATION_REF="refs/heads/tasks/v1/activation"
 TASKDAG_MATERIALISE_PRODUCER_REF="refs/heads/tasks/v1/materialisation-producer"
 TASKDAG_COMMENT_WATCHDOG_REF="refs/heads/tasks/v1/comment-watchdog"
+TASKDAG_RECONCILE_COMMENTS_INDEX_REF="refs/heads/tasks/v1/reconcile-comments-index"
+
+taskdag_is_reconcile_comments_index_ref() {
+    case "$1" in
+        refs/heads/tasks/v1/reconcile-comments-index|tasks/v1/reconcile-comments-index) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 taskdag_is_activation_ref() {
     case "$1" in
@@ -549,7 +557,7 @@ taskdag_ref_violations() {
     local sha="$1" ref="$2" activation_authority=${3:-} expected_repository=${4:-}
     local objtype tree rest ns
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || {
-        { taskdag_is_materialisation_ref "$ref" || taskdag_is_materialisation_producer_ref "$ref" || taskdag_is_comment_watchdog_ref "$ref" || taskdag_is_activation_ref "$ref"; } \
+        { taskdag_is_materialisation_ref "$ref" || taskdag_is_materialisation_producer_ref "$ref" || taskdag_is_comment_watchdog_ref "$ref" || taskdag_is_activation_ref "$ref" || taskdag_is_reconcile_comments_index_ref "$ref"; } \
             && echo "✗ ${ref} → ${sha} is missing or unreadable"
         return 0
     }
@@ -587,6 +595,20 @@ taskdag_ref_violations() {
     if taskdag_is_comment_watchdog_ref "$ref"; then
         taskdag_comment_watchdog_validate_tip "$sha" \
             || echo "✗ ${ref} has malformed comment-watchdog authority"
+        return 0
+    fi
+    if taskdag_is_reconcile_comments_index_ref "$ref"; then
+        local index_repo index_tmp index_provenance
+        index_repo=$(printf '%s' "$(_xrepo_current_repo_offline)" | tr '[:upper:]' '[:lower:]')
+        index_tmp=$(mktemp -d)
+        if ! _xrepo_reconcile_index_read "$sha" "$index_tmp" "$index_repo" "" true "$activation_authority"; then
+            echo "✗ ${ref} has malformed reconciliation checkpoint"
+        elif [ -n "$activation_authority" ]; then
+            index_provenance=$(jq -c '.activation|{digest,epoch,guardVersion}' "$index_tmp/metadata.json")
+            taskdag_activation_validate_provenance "$activation_authority" "$index_provenance" \
+                || echo "✗ ${ref} has stale or forged activation provenance"
+        fi
+        rm -rf "$index_tmp"
         return 0
     fi
     if taskdag_is_activation_ref "$ref"; then
@@ -6206,11 +6228,8 @@ EOF
     fi
     
     # Check 1: All task commits have empty tree.
-    # The data-in-tree refs (the dependency-graph index tasks/v1/graph and the
-    # 16 cross-repo mailbox shards tasks/v1/mailbox/00..0f) are the exempt
-    # refs — their trees ARE their data (the active edge set / in-flight
-    # message set); their shape is audited by the --strict floor (Check 3),
-    # not here.
+    # Data-in-tree coordination refs are exempt: their trees ARE their data,
+    # and their shape is audited by the strict ref validator, not here.
     while read -r sha ref; do
         taskdag_is_graph_ref "$ref" && continue
         taskdag_is_mailbox_ref "$ref" && continue
@@ -6218,6 +6237,7 @@ EOF
         taskdag_is_materialisation_producer_ref "$ref" && continue
         taskdag_is_comment_watchdog_ref "$ref" && continue
         taskdag_is_activation_ref "$ref" && continue
+        taskdag_is_reconcile_comments_index_ref "$ref" && continue
         local tree
         tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
         if [ "$tree" != "$EMPTY_TREE" ]; then
