@@ -80,3 +80,34 @@ and the fixture suite wired through `.github/workflows/cli-tests.yml`.
 Before changing any caller workflow, run the preflight from `docs/MIGRATION.md`;
 CI also runs the fixture suite when the self-hosting caller, reusable scripts,
 tests, or migration docs change.
+
+## Native Rust bootstrap
+
+The native CLI is an incremental migration target; `scripts/task-dag` remains
+the canonical production CLI until the migration is complete. Do not install
+Rust, Cargo, or native libraries imperatively. The repository's flake provides
+the pinned development and build environment:
+
+```sh
+nix develop                     # interactive Rust development shell
+nix develop --command cargo run --locked # build and run the native bootstrap
+nix build                       # reproducible native package in result/
+nix run                         # run the flake's native package directly
+nix flake check                 # evaluate and build the package check
+```
+
+`flake.lock` pins the same `nixpkgs` revision already used by the production
+development host. The flake deliberately uses nixpkgs' standard
+`rustPlatform.buildRustPackage` and Rust toolchain instead of another overlay:
+this keeps evaluation small, maximizes binary-store reuse, and makes a
+toolchain update an explicit flake-input and lock-file change. `Cargo.lock`
+independently pins the Rust dependency graph.
+
+The planned canonical Rust stack is `clap` for root/command/subcommand parsing,
+`proptest` for shrinkable semantic and invariant tests, and `git2` for direct
+Git operations. These dependencies will be added only with the first code that
+uses them, avoiding unused build, security, and platform cost. When remote Git
+transport is introduced, `git2` must enable both `https` and `ssh`. The same
+change must deliberately choose and encode a vendored-versus-system-library
+policy, including the platform-specific Nix inputs it actually requires,
+rather than relying on ambient system libraries.

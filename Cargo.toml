@@ -1,0 +1,14 @@
+[package]
+name = "task-dag-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Native task-dag CLI migration target"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "task-dag-native"
+path = "src/main.rs"
+
+[dependencies]
