@@ -41,17 +41,18 @@ jobs:
 
       - name: Verify App and destination identities
         env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           CREATOR_NODE_ID: ${{ inputs.creator_node_id }}
           EXPECTED_APP_SLUG: ${{ inputs.app_slug }}
           EXPECTED_REPOSITORY: ${{ matrix.destination.owner }}/${{ matrix.destination.repository }}
           EXPECTED_REPOSITORY_ID: ${{ matrix.destination.repositoryId }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$APP_SLUG" = "$EXPECTED_APP_SLUG"
-          actor=$(gh api user)
-          repository=$(gh api "repos/$EXPECTED_REPOSITORY")
+          actor=$(gh api "users/${APP_SLUG}%5Bbot%5D")
+          repository=$(GH_TOKEN="$APP_TOKEN" gh api "repos/$EXPECTED_REPOSITORY")
           test "$(jq -r .type <<<"$actor")" = Bot
           test "$(jq -r .node_id <<<"$actor")" = "$CREATOR_NODE_ID"
           test "$(jq -r .node_id <<<"$repository")" = "$EXPECTED_REPOSITORY_ID"
