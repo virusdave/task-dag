@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Run the task-dag fixture smoke tests. Each test builds a throwaway bare
-# "origin" + working clone in a tempdir (no network, no real repo), so it
-# is safe to run anywhere. Pass an explicit CLI path as $1 to test a
-# specific copy; defaults to ../../scripts/task-dag.
+# Run the native Rust tests and task-dag fixture smoke tests. Each shell fixture
+# builds a throwaway bare "origin" + working clone in a tempdir (no network, no
+# real repo), so it is safe to run anywhere. Pass an explicit CLI path as $1 to
+# test a specific copy; defaults to ../../scripts/task-dag.
 #
 # These are the central quality gate that replaces the per-repo
 # task-dag-drift-guard (see docs/task_dag/CLI_DISTRIBUTION.md, issue #22).
@@ -12,9 +12,10 @@ usage() {
     cat <<'EOF'
 Usage: run-all.sh [TASK_DAG_CLI]
 
-Run shellcheck (when available), bash -n, and the task-dag fixture suite.
-Fixture logs are buffered and printed in declaration order; starts,
-completions, wall times, and active-fixture heartbeats stream live.
+Run the canonical Rust test command, shellcheck (when available), bash -n,
+and the task-dag fixture suite. Fixture logs are buffered and printed in
+declaration order; starts, completions, wall times, and active-fixture
+heartbeats stream live.
 
 Options:
   -h, --help  Show this help and exit.
@@ -61,6 +62,9 @@ case "$TD" in
 esac
 
 echo "Testing CLI: $TD"
+
+echo "== rust tests =="
+"$here/../../scripts/run-rust-tests.sh" || exit 1
 
 # GitHub Actions exports the caller repository globally, but these fixtures
 # create independent synthetic repositories and supply their own identity when

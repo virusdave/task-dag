@@ -12,3 +12,6 @@ name = "task-dag-native"
 path = "src/main.rs"
 
 [dependencies]
+
+[dev-dependencies]
+proptest = "1"

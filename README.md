@@ -91,6 +91,8 @@ the pinned development and build environment:
 ```sh
 nix develop                     # interactive Rust development shell
 nix develop --command cargo run --locked # build and run the native bootstrap
+scripts/run-rust-tests.sh       # run all Rust tests through pinned Nix
+scripts/run-rust-tests.sh NAME  # run Rust tests matching NAME
 nix build                       # reproducible native package in result/
 nix run                         # run the flake's native package directly
 nix flake check                 # evaluate and build the package check
@@ -103,11 +105,18 @@ this keeps evaluation small, maximizes binary-store reuse, and makes a
 toolchain update an explicit flake-input and lock-file change. `Cargo.lock`
 independently pins the Rust dependency graph.
 
+`scripts/run-rust-tests.sh` is the canonical Rust test entry point. It uses
+Cargo's built-in parallel runner for both the complete suite and selected test
+filters; do not create a second scheduler. The aggregate
+`tests/task-dag/run-all.sh` gate invokes this command before its shell checks
+and fixtures.
+
 The planned canonical Rust stack is `clap` for root/command/subcommand parsing,
 `proptest` for shrinkable semantic and invariant tests, and `git2` for direct
-Git operations. These dependencies will be added only with the first code that
-uses them, avoiding unused build, security, and platform cost. When remote Git
-transport is introduced, `git2` must enable both `https` and `ssh`. The same
-change must deliberately choose and encode a vendored-versus-system-library
-policy, including the platform-specific Nix inputs it actually requires,
-rather than relying on ambient system libraries.
+Git operations. `proptest` is provisioned now as test infrastructure; `clap`
+and `git2` will be added only with the first code that uses them, avoiding
+unused build, security, and platform cost. When remote Git transport is
+introduced, `git2` must enable both `https` and `ssh`. The same change must
+deliberately choose and encode a vendored-versus-system-library policy,
+including the platform-specific Nix inputs it actually requires, rather than
+relying on ambient system libraries.
