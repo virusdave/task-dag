@@ -76,10 +76,13 @@ if [ -n "$LEAF" ]; then
   else
     bad "1b: completion was not local-only or omitted explicit push"
   fi
-  if [ -n "$CM" ] && [ "$(git rev-parse "$CM^{tree}")" = "$(git rev-parse "$CM^1^{tree}")" ]; then
-    ok "1c: ops completion merge is tree-equal to its first parent"
+  if [ -n "$CM" ] \
+     && [ "$(git rev-list --parents -n 1 "$CM" | wc -w)" -eq 3 ] \
+     && [ "$(git rev-parse "$CM^2")" = "$LEAF_SHA" ] \
+     && [ "$(git rev-parse "$CM^{tree}")" = "$(git rev-parse "$CM^1^{tree}")" ]; then
+    ok "1c: ops completion has exact tree-equal base/task shape"
   else
-    bad "1c: ops completion merge carries a file diff"
+    bad "1c: ops completion has a non-canonical parent or tree shape"
   fi
   if [ -n "$CM" ] && git log -1 --format='%B' "$CM" | git interpret-trailers --parse \
       | grep -q '^Ops-Completion: true$' \

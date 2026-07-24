@@ -50,6 +50,7 @@ if [ -n "$T1" ]; then
   TASK1=$(git rev-parse "refs/heads/tasks/frontier/$T1")
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$T1" >/dev/null 2>&1
   echo "real work" > impl.txt; git add impl.txt; git commit -qm "impl t1"
+  IMPL1=$(git rev-parse HEAD)
   echo "UNCOMMITTED" > dirty.txt          # untracked dirty file
   echo "seed-modified" >> seed.txt        # modified tracked file (unstaged)
   TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T1" >/dev/null 2>&1
@@ -60,11 +61,14 @@ if [ -n "$T1" ]; then
   else
     bad "B: dirty changes lost or complete failed (rc=$rc)"
   fi
-  # And the completion commit must be HEAD with the task as 2nd parent
-  if [ "$(git rev-parse HEAD^2)" = "$TASK1" ]; then
-    ok "B: completion commit links task as second parent"
+  # The public completion producer has one canonical semantic shape.
+  if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] \
+     && [ "$(git rev-parse HEAD^1)" = "$IMPL1" ] \
+     && [ "$(git rev-parse HEAD^2)" = "$TASK1" ] \
+     && [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse HEAD^1^{tree})" ]; then
+    ok "B: completion has exact impl/task parent order and tree-equal shape"
   else
-    bad "B: completion commit missing task parent"
+    bad "B: completion commit has a non-canonical parent or tree shape"
   fi
   # cleanup dirty state for next tests
   git checkout -q -- seed.txt 2>/dev/null; rm -f dirty.txt
@@ -294,10 +298,13 @@ if [ -n "$S_LEAF" ] && [ -n "$C_LEAF" ]; then
   bad2parent=0
   for m in $merges; do
     p2=$(git rev-parse "$m^2")
-    [ "$p2" = "$SLEAF_SHA" ] || [ "$p2" = "$CLEAF_SHA" ] || bad2parent=1
+    [ "$(git rev-list --parents -n 1 "$m" | wc -w)" -eq 3 ] \
+      && [ "$(git rev-parse "$m^{tree}")" = "$(git rev-parse "$m^1^{tree}")" ] \
+      && { [ "$p2" = "$SLEAF_SHA" ] || [ "$p2" = "$CLEAF_SHA" ]; } \
+      || bad2parent=1
   done
   if [ "$nmerges" = "2" ] && [ "$bad2parent" = "0" ]; then
-    ok "7: only the 2 completion merges exist and each 2nd parent is a leaf task commit"
+    ok "7: both batch completions have exact tree-equal impl/task shapes"
   else
     bad "7: unexpected DAG shape (merges=$nmerges bad2parent=$bad2parent)"
   fi

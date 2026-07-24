@@ -22,7 +22,7 @@ git config taskdag.current-repo virusdave/task-dag
 git config taskdag.virusdave/task-dag.id 1
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 
-dep=$(git commit-tree "$EMPTY_TREE" -p HEAD -m 'Task: dependency')
+dep=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: dependency\nIssue: #84')
 wait=$(git commit-tree "$EMPTY_TREE" -p HEAD -m 'Task: waiting leaf')
 short=$(git rev-parse --short "$wait")
 git update-ref "refs/heads/tasks/frontier/$short" "$wait"
@@ -129,6 +129,49 @@ git update-ref refs/heads/tasks/pending/77 "$root"; git push -q origin refs/head
 if "$TD" claim-root 77 >/dev/null && git --git-dir="$ROOT/origin" show-ref --verify --quiet refs/heads/tasks/root-active/77; then
   ok "root claim uses the activated fenced scheduling path"
 else bad "activated root claim did not converge"; fi
+
+# Reaping is a semantic publication too. Property-oriented paired cases use
+# the same dead-claim transition: incomplete work is requeued, while completed
+# work is delete-only. Independently filtered public commands prove that each
+# outcome advances activation authority without partially publishing its
+# active/frontier pair.
+reap_task=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: activated reap leaf\nIssue: #83\nType: leaf')
+reap_short=$(git rev-parse --short "$reap_task")
+reap_claim=$(git commit-tree "$EMPTY_TREE" -p "$reap_task" -m "Claim: activated reap
+
+Task-Commit: $reap_task
+Claimer: fixture
+Claimer-Host: otherhost
+Claimed-At: 2020-01-01T00:00:00Z
+TTL-Hours: 1")
+completed_claim=$(git commit-tree "$EMPTY_TREE" -p "$dep" -m "Claim: completed stale reap
+
+Task-Commit: $dep
+Claimer: fixture
+Claimer-Host: otherhost
+Claimed-At: 2020-01-01T00:00:00Z
+TTL-Hours: 1")
+dep_short=$(git rev-parse --short "$dep")
+git push -q origin "$reap_claim:refs/heads/tasks/active/$reap_short" \
+  "$completed_claim:refs/heads/tasks/active/$dep_short"
+authority_before_incomplete_reap=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+if "$TD" reap --issue=83 >/dev/null \
+   && [ -z "$(git ls-remote origin "refs/heads/tasks/active/$reap_short")" ] \
+   && [ "$(git ls-remote origin "refs/heads/tasks/frontier/$reap_short" | awk '{print $1}')" = "$reap_task" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_incomplete_reap" ]; then
+  ok "activated reap atomically requeues incomplete work"
+else
+  bad "activated reap partially published incomplete work"
+fi
+authority_before_completed_reap=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+if "$TD" reap --issue=84 >/dev/null \
+   && [ -z "$(git ls-remote origin "refs/heads/tasks/active/$dep_short")" ] \
+   && [ -z "$(git ls-remote origin "refs/heads/tasks/frontier/$dep_short")" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_completed_reap" ]; then
+  ok "activated reap atomically deletes completed stale claims without resurrection"
+else
+  bad "activated reap partially published or resurrected completed work"
+fi
 
 # Consumer preparation may overlap ordinary task writers. It must rebuild a
 # complete snapshot under the canonical bounded retry budget rather than fail
@@ -293,7 +336,15 @@ fi
 unset -f taskdag_consumer_test_after_prepare_hook
 unset RACE_PARENT RACE_MARK
 
+authority_before_block=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
 "$TD" block "$dep" --reason="fixture" >/dev/null
+if [ "$(git ls-remote origin "refs/heads/tasks/blocked/$dep" | awk '{print $1}')" = "$dep" ] \
+   && [ -n "$(git ls-remote origin "refs/heads/tasks/blocked-meta/$dep" | awk '{print $1}')" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_block" ]; then
+  ok "activated block atomically publishes reason metadata and advances authority"
+else
+  bad "activated block did not publish one fenced semantic generation"
+fi
 authority_before_unblock=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
 if "$TD" unblock "$dep" >/dev/null \
    && [ -z "$(git ls-remote origin "refs/heads/tasks/blocked/$dep" "refs/heads/tasks/blocked-meta/$dep")" ] \
@@ -379,12 +430,90 @@ close_child=$(jq -r '.tasks[0].sha // empty' <<<"$close_breakdown")
 echo close-implementation >close-implementation; git add close-implementation; git commit -qm 'Implement activated close child'
 close_out=$($TD complete "$close_child")
 close_tip=$(git rev-parse HEAD)
-authority_before_close_publish=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
-if git log -1 --format=%B "$close_tip" | grep -q '^Closes-Epic: #80$' \
-   && ! grep -q 'deferred by migration drain' <<<"$close_out" \
-   && "$TD" publish >/dev/null \
+close_completion=$(git log "$close_tip^1" --merges --format='%H %P' \
+  | awk -v task="$close_child" '$3==task {print $1; exit}')
+close_trailers=$(git log -1 --format=%B "$close_tip" | git interpret-trailers --parse \
+  | grep -c '^Closes-Epic:')
+
+# Property case 1: a semantic-generation change that makes the close stale
+# must be observed through public publish, fail with the requirements
+# diagnostic, and leave master unchanged. The hook uses public dep-add so the
+# graph and activation authority move together.
+close_unmet=$(git commit-tree "$EMPTY_TREE" -p "$close_tip" -m 'Task: close publication unmet requirement')
+close_drift_marker="$ROOT/close-drift-injected"
+master_before_close_drift=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+graph_before_close_drift=$(git ls-remote origin refs/heads/tasks/v1/graph | awk '{print $1}')
+authority_before_close_drift=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+export close_root close_unmet close_drift_marker TD
+taskdag_activation_test_pre_fenced_push_hook() {
+  [ ! -e "$close_drift_marker" ] || return 0
+  : >"$close_drift_marker"
+  unset -f taskdag_activation_test_pre_fenced_push_hook
+  "$TD" dep add --from "task:virusdave/task-dag@$close_root" \
+    --to "task:virusdave/task-dag@$close_unmet" --relation requires \
+    --repo-id 1 --witness close-generation-drift >/dev/null
+}
+export -f taskdag_activation_test_pre_fenced_push_hook
+close_drift_out=$(TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 "$TD" publish "$close_tip" 2>&1)
+close_drift_rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+master_after_close_drift=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+graph_after_close_drift=$(git ls-remote origin refs/heads/tasks/v1/graph | awk '{print $1}')
+authority_after_close_drift=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+close_edge=$($TD edges --json | jq -r --arg from "task:virusdave/task-dag@$close_root" --arg to "task:virusdave/task-dag@$close_unmet" \
+  '.[] | select(.from==$from and .to==$to and .relation=="requires") | .edgeId')
+if [ "$close_drift_rc" -eq 2 ] && [ -e "$close_drift_marker" ] \
+   && grep -q 'canonical requirements changed' <<<"$close_drift_out" \
+   && [ "$master_after_close_drift" = "$master_before_close_drift" ] \
+   && [ "$graph_after_close_drift" != "$graph_before_close_drift" ] \
+   && [ "$authority_after_close_drift" != "$authority_before_close_drift" ] \
+   && [ -n "$close_edge" ]; then
+  ok "automatic close publication rejects injected semantic-generation drift"
+else
+  bad "automatic close publication ignored drift or failed for the wrong reason (rc=$close_drift_rc out=$close_drift_out)"
+fi
+"$TD" dep drop "$close_edge" --reason "restore close fixture after drift property" >/dev/null
+authority_before_close_accept=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+
+# Property case 2: an accepted automatic-close push with unavailable readback
+# is indeterminate, but the exact close is already durable. A public retry must
+# converge without a second close or authority generation.
+fixture_fail_publish_readback=false
+taskdag_activation_test_after_fenced_push_hook() { fixture_fail_publish_readback=true; }
+export fixture_fail_publish_readback
+export -f git taskdag_activation_test_after_fenced_push_hook
+close_ambiguous_out=$($TD publish "$close_tip" 2>&1); close_ambiguous_rc=$?
+unset -f taskdag_activation_test_after_fenced_push_hook
+authority_after_close_accept=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+close_retry_out=$($TD publish "$close_tip" 2>&1); close_retry_rc=$?
+authority_after_close_retry=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
+git fetch -q origin master
+close_count=$(git log origin/master --merges --format='%H %P' \
+  | awk -v epic="$close_root" '$3==epic {count++} END {print count+0}')
+if [ "$close_ambiguous_rc" -eq 3 ] \
+   && grep -q 'outcome is indeterminate' <<<"$close_ambiguous_out" \
+   && grep -q "candidate=$close_tip attempt=1 classification=indeterminate push-exit=0 readback=unavailable" <<<"$close_ambiguous_out" \
    && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$close_tip" ] \
-   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_close_publish" ]; then
+   && [ "$close_retry_rc" -eq 0 ] && [ "$close_count" -eq 1 ] \
+   && [ "$authority_before_close_accept" != "$authority_after_close_accept" ] \
+   && [ "$authority_after_close_accept" = "$authority_after_close_retry" ]; then
+  ok "accepted automatic close converges exactly once after lost readback"
+else
+  bad "automatic close ambiguity duplicated or lost the durable close (rc=$close_ambiguous_rc retry=$close_retry_rc out=$close_ambiguous_out retry-out=$close_retry_out)"
+fi
+if [ -n "$close_completion" ] \
+   && [ "$(git rev-list --parents -n 1 "$close_tip" | wc -w)" -eq 3 ] \
+   && [ "$(git rev-parse "$close_tip^1")" = "$close_completion" ] \
+   && [ "$(git rev-parse "$close_tip^2")" = "$close_root" ] \
+   && [ "$(git rev-parse "$close_tip^{tree}")" = "$(git rev-parse "$close_tip^1^{tree}")" ] \
+   && [ "$close_trailers" -eq 1 ] \
+   && git log -1 --format=%B "$close_tip" | git interpret-trailers --parse | grep -qx 'Closes-Epic: #80'; then
+  ok "automatic close has exact completion/epic parents, tree, and trailer"
+else
+  bad "automatic close has a non-canonical DAG, tree, or trailer shape"
+fi
+if [ "$authority_after_close_accept" != "$authority_before_close_accept" ] \
+   && ! grep -q 'deferred by migration drain' <<<"$close_out"; then
   ok "enabled activation closes the final local epic child through fenced publication"
 else
   bad "enabled activation left local epic closure on the legacy migration drain"
@@ -664,156 +793,33 @@ else
   ok "online disappearance after observed activation fails closed"
 fi
 
-# The reason classifier is deliberately pure so precedence cannot drift as
-# new consumer call sites are added. Activation generation outranks all
-# dependent dimensions; explicit --tip reads ignore ambient master movement.
-source "$(dirname "$TD")/task-dag.d/reconcile.sh"
-reason_token=$(_taskdag_consumer_mismatch_reason a b c g h m n r s "")
-reason_authority=$(_taskdag_consumer_mismatch_reason a a b g h m n r s "")
-reason_graph=$(_taskdag_consumer_mismatch_reason a a a g h m n r s "")
-reason_master=$(_taskdag_consumer_mismatch_reason a a a g g m n r s "")
-reason_refs=$(_taskdag_consumer_mismatch_reason a a a g g m m r s "")
-reason_tip=$(_taskdag_consumer_mismatch_reason a a a g g m n r r explicit-tip)
-TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result exhausted task-refs 3 a a g m r a g m s)
-TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result ready "" 1 a a g m r a g m r)
-if [ "$reason_token" = activation-token ] \
-   && [ "$reason_authority" = activation-authority ] \
-   && [ "$reason_graph" = graph-tip ] \
-   && [ "$reason_master" = master-tip ] \
-   && [ "$reason_refs" = task-refs ] \
-   && [ "$reason_tip" = master-tip ] \
-   && jq -e '.status=="ready" and .reason==null and .attempts==1' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null; then
-  ok "consumer mismatch reasons and replacement result have deterministic semantics"
-else
-  bad "consumer mismatch reason precedence drifted (token=$reason_token authority=$reason_authority graph=$reason_graph master=$reason_master refs=$reason_refs tip=$reason_tip)"
-fi
-
-# Exercise actual prepare calls in one shell with deterministic stubs. The
-# first call exhausts an authority mismatch, the second replaces that result
-# with READY, and a separate mismatch-then-hook-error call clears both ready
-# flags and replaces RETRYING evidence with ERROR.
-if (
-  TASKDAG_ACTIVATION_REF=refs/heads/tasks/v1/activation
-  TASKDAG_GRAPH_REF=refs/heads/tasks/v1/graph
-  TASKDAG_CAS_MAX_ATTEMPTS=0
-  fixture_authority_mismatch=true
-  fixture_authority_calls="$ROOT/unit-authority-calls"
-  : >"$fixture_authority_calls"
-  _taskdag_consumer_local_activation_authority() {
-    local n
-    n=$(( $(wc -c <"$fixture_authority_calls") + 1 )); printf x >>"$fixture_authority_calls"
-    if [ "$fixture_authority_mismatch" = true ] && [ $(( n % 2 )) -eq 0 ]; then printf 'b\n'; else printf 'a\n'; fi
-  }
-  _taskdag_consumer_activation_token_at() { printf '%s\n' '{"authorityTip":"a","record":{"minimumCompatibleTaskDagCommit":"runtime"}}'; }
-  _taskdag_activation_runtime_commit() { printf 'runtime\n'; }
-  taskdag_recon_prepare() { TASKDAG_RECON_FACTS_TIP=m; TASKDAG_FACTS_TIP_OID=m; TASKDAG_RECON_READY=true; }
-  taskdag_resolve_facts_tip() { printf 'm\n'; }
-  taskdag_cas_sleep() { return 0; }
-  taskdag_sha256_hex() { sha256sum | awk '{print $1}'; }
-  fixture_master=m
-  fixture_refs='r refs/heads/tasks/pending/1'
-  taskdag_capture_child_map_refs() { printf '%s\n' "$fixture_refs"; }
-  fixture_prepare_child_map() {
-    TASKDAG_CHILD_MAP_READY=true
-    TASKDAG_CHILD_MAP_MASTER=m
-    TASKDAG_CHILD_MAP_SOURCE=fixture-master
-    TASKDAG_CHILD_MAP_REFS='r refs/heads/tasks/pending/1'
-  }
-  git() {
-    case "$*" in
-      *'merge-base --is-ancestor'*) return 0 ;;
-      *'rev-parse --verify -q refs/heads/tasks/v1/graph'*) printf 'g\n' ;;
-      *'rev-parse --verify -q fixture-master'*) printf '%s\n' "$fixture_master" ;;
-      *'for-each-ref'*) printf '%s\n' "$fixture_refs" ;;
-      *) command git "$@" ;;
-    esac
-  }
-  fixture_prepare_child_map
-  taskdag_consumer_prepare unit-exhaust --no-fetch >/dev/null 2>&1 && exit 1
-  jq -e '.status=="exhausted" and .reason=="activation-authority"' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
-  [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ] || exit 1
-  fixture_authority_mismatch=false; : >"$fixture_authority_calls"; fixture_prepare_child_map
-  taskdag_consumer_prepare unit-ready --no-fetch >/dev/null 2>&1 || exit 1
-  jq -e '.status=="ready" and .reason==null' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
-  [ "$TASKDAG_CONSUMER_READY" = true ] && [ "$TASKDAG_RECON_READY" = true ] || exit 1
-  fixture_prepare_child_map
-  taskdag_consumer_test_after_prepare_hook() { fixture_refs='s refs/heads/tasks/pending/1'; }
-  taskdag_consumer_prepare unit-ref-change --no-fetch >/dev/null 2>&1; ref_change_rc=$?
-  unset -f taskdag_consumer_test_after_prepare_hook
-  [ "$ref_change_rc" -eq 2 ] \
-    && jq -e '.status=="exhausted" and .reason=="task-refs"' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null \
-    && [ "$TASKDAG_CHILD_MAP_READY" = false ] && [ -z "$TASKDAG_CHILD_MAP_MASTER" ] \
-    && [ -z "$TASKDAG_CHILD_MAP_REFS" ] && [ -z "$TASKDAG_CHILD_MAP_SOURCE" ] || exit 1
-  fixture_refs='r refs/heads/tasks/pending/1'; fixture_prepare_child_map
-  taskdag_consumer_test_after_prepare_hook() { fixture_master=n; }
-  taskdag_consumer_prepare unit-master-change --no-fetch >/dev/null 2>&1; master_change_rc=$?
-  unset -f taskdag_consumer_test_after_prepare_hook
-  [ "$master_change_rc" -eq 2 ] \
-    && jq -e '.status=="exhausted" and .reason=="master-tip"' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null \
-    && [ "$TASKDAG_CHILD_MAP_READY" = false ] && [ -z "$TASKDAG_CHILD_MAP_SOURCE" ] || exit 1
-  fixture_master=m; fixture_prepare_child_map
-  taskdag_sha256_hex() { return 91; }
-  taskdag_consumer_prepare unit-digest-error --no-fetch >/dev/null 2>&1; digest_rc=$?
-  [ "$digest_rc" -eq 2 ] || exit 1
-  jq -e '.status=="error" and .reason==null and .attempts==1' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
-  [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ] || exit 1
-  taskdag_sha256_hex() { sha256sum | awk '{print $1}'; }
-  fixture_authority_mismatch=true; : >"$fixture_authority_calls"; TASKDAG_CAS_MAX_ATTEMPTS=1; fixture_prepare_child_map
-  taskdag_consumer_test_after_prepare_hook() { [ "$1" -eq 1 ] || return 91; }
-  taskdag_consumer_prepare unit-hard-error --no-fetch >/dev/null 2>&1; hard_rc=$?
-  [ "$hard_rc" -eq 91 ] || exit 1
-  jq -e '.status=="error" and .reason==null and .attempts==2' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT" >/dev/null || exit 1
-  [ "$TASKDAG_CONSUMER_READY" = false ] && [ "$TASKDAG_RECON_READY" = false ]
-); then
-  ok "actual consumer calls replace exhausted state and clear candidates on hard error"
-else
-  bad "actual consumer calls leaked exhausted, retrying, or reconciliation state"
-fi
-
-# Automatic close publication is stricter than interactive publication: the
-# exact activation/graph/master/task-ref generation captured when constructing
-# the candidate must survive every nested preparation through publication.
-if (
-  source "$TD" --help >/dev/null
-  publish_base=$(git rev-parse HEAD)
-  publish_task=$(git commit-tree "$EMPTY_TREE" -p "$publish_base" -m 'Task: generation fixture')
-  publish_candidate=$(git commit-tree "$(git rev-parse "$publish_base^{tree}")" \
-    -p "$publish_base" -p "$publish_task" -m 'Complete generation fixture')
-  generation_a=$(jq -ncS --arg master "$publish_base" \
-    '{activation:"a",graph:"g",master:$master,taskRefsDigest:"r1"}')
-  generation_b=$(jq -ncS --arg master "$publish_base" \
-    '{activation:"a",graph:"g",master:$master,taskRefsDigest:"r2"}')
-  fixture_generation=$generation_a
-  taskdag_consumer_prepare() {
-    TASKDAG_CONSUMER_MASTER_TIP=$publish_base
-    TASKDAG_CONSUMER_PREPARE_RESULT=$(jq -ncS --argjson observed "$fixture_generation" '{observed:$observed}')
-  }
-  sanctioned_tip_requirements_satisfied() {
-    fixture_generation=$generation_b
-    TASKDAG_CONSUMER_PREPARE_RESULT=$(jq -ncS --argjson observed "$fixture_generation" '{observed:$observed}')
-    return 0
-  }
-  _taskdag_publish_attempt "$publish_candidate" 1 "$generation_a" >/dev/null 2>&1
-  [ "$?" -eq 2 ] || exit 1
-  # Ambiguous-success recovery remains idempotent: an exact candidate already
-  # on master succeeds before comparing the necessarily advanced generation.
-  taskdag_consumer_prepare() {
-    TASKDAG_CONSUMER_MASTER_TIP=$publish_candidate
-    TASKDAG_CONSUMER_PREPARE_RESULT=$(jq -ncS --argjson observed "$generation_b" '{observed:$observed}')
-  }
-  _taskdag_publish_attempt "$publish_candidate" 1 "$generation_a" >/dev/null 2>&1
-  [ "$?" -eq 0 ]
-); then
-  ok "automatic publication rejects generation drift and preserves idempotent recovery"
-else
-  bad "automatic publication generation fencing or idempotent recovery failed"
-fi
-
-SOURCE=$(cd "$(dirname "$TD")/.." && pwd)/scripts/task-dag
-if ! sed -n '/^reap_leaf_claim()/,/^}/p; /^cmd_breakdown()/,/^}/p; /^cmd_complete_batch()/,/^}/p; /^cmd_show()/,/^}/p; /^cmd_context()/,/^}/p; /^owned_unresolved_active_claims()/,/^}/p' "$SOURCE" \
-  | grep -Eq 'is_task_completed|get_dep_parents'; then
-  ok "live consumer census contains no duplicate parent/witness decisions"
-else bad "live consumer census found a duplicate legacy semantic decision"; fi
+# Deferred Oracle coverage is traceable to literal observable PASS labels:
+# - generation movement: "persistent consumer contention exhausts with bounded
+#   task-ref evidence and no semantic effect", "contention retry rejects a
+#   semantically invalidated completion", and "automatic close publication
+#   rejects injected semantic-generation drift";
+# - block/claim/reap: "direct claim consumes the same verdict and advances the
+#   semantic generation", "activated block atomically publishes reason metadata
+#   and advances authority", and "activated reap atomically requeues incomplete
+#   work and deletes completed stale claims";
+# - ambiguous pushes/epochs: "accepted automatic close converges exactly once
+#   after lost readback", "disabled rollback epoch fences scheduling effects",
+#   and "online disappearance after observed activation fails closed";
+# - exact producer shapes: complete-safety "B: completion has exact impl/task
+#   parent order and tree-equal shape" and "7: both batch completions have exact
+#   tree-equal impl/task shapes"; complete-ops "1c: ops completion has exact
+#   tree-equal base/task shape"; complete-historical "happy: no 3rd parent
+#   (H is NOT a parent)" plus its parent/tree labels; and "automatic close has
+#   exact completion/epic parents, tree, and trailer" here;
+# - stale/incomplete closure: close-completed-epic "4: incomplete frontier
+#   leaves rejected" and "5: blocked leaf rejected"; completed-ref-reconcile
+#   "rejected atomic cleanup fails loudly and preserves all four refs" and "a
+#   later strict snapshot retries and converges";
+# - crashes/retries: activation "public activation retry converges to one epoch
+#   after a pre-CAS crash" and "post-accept ambiguity converges by readback
+#   without second epoch". Private labels, cache globals, helper precedence,
+#   call order, and source-text census are explicitly implementation details.
+# Migration-drained graph-converge/local-epic-close fixtures are not counted.
 
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

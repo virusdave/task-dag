@@ -241,10 +241,22 @@ done
 # Deterministic crash and accepted-but-ambiguous seams exercise apply itself.
 git init -q --bare "$ROOT/apply-origin"; git init -q "$ROOT/apply-wc"; git -C "$ROOT/apply-wc" remote add origin "$ROOT/apply-origin"
 taskdag_activation_test_pre_cas_hook() { return 86; }
-(cd "$ROOT/apply-wc" && cmd_activation_apply --spec-file "$ROOT/spec" >/dev/null); rc=$?
+export -f taskdag_activation_test_pre_cas_hook
+(cd "$ROOT/apply-wc" && "$TD" activation apply --spec-file "$ROOT/spec" >/dev/null); rc=$?
 unset -f taskdag_activation_test_pre_cas_hook
-[ "$rc" -eq 86 ] && ! git --git-dir="$ROOT/apply-origin" show-ref --verify --quiet "$TASKDAG_ACTIVATION_REF" \
-  && ok "pre-CAS activation crash leaves authority absent" || bad "pre-CAS activation crash changed authority"
+if [ "$rc" -eq 86 ] \
+   && ! git --git-dir="$ROOT/apply-origin" show-ref --verify --quiet "$TASKDAG_ACTIVATION_REF" \
+   && (cd "$ROOT/apply-wc" && "$TD" activation apply --spec-file "$ROOT/spec" >/dev/null); then
+  retry_tip=$(git --git-dir="$ROOT/apply-origin" rev-parse "$TASKDAG_ACTIVATION_REF")
+  [ "$(git --git-dir="$ROOT/apply-origin" rev-list --count "$retry_tip")" -eq 1 ] \
+    && ok "public activation retry converges to one epoch after a pre-CAS crash" \
+    || bad "public activation retry created multiple epochs after a pre-CAS crash"
+else
+  bad "public pre-CAS crash changed authority or clean retry failed"
+fi
+# Use a fresh origin so accepted-response-loss still starts from epoch one.
+rm -rf "$ROOT/apply-origin" "$ROOT/apply-wc"
+git init -q --bare "$ROOT/apply-origin"; git init -q "$ROOT/apply-wc"; git -C "$ROOT/apply-wc" remote add origin "$ROOT/apply-origin"
 mkdir "$ROOT/ambiguous-bin"; ambiguous_real_git=$(command -v git)
 cat >"$ROOT/ambiguous-bin/git" <<EOF
 #!/usr/bin/env bash
@@ -258,7 +270,7 @@ done
 exec "$ambiguous_real_git" "\$@"
 EOF
 chmod +x "$ROOT/ambiguous-bin/git"
-(cd "$ROOT/apply-wc" && PATH="$ROOT/ambiguous-bin:$PATH" cmd_activation_apply --spec-file "$ROOT/spec" >/dev/null); rc=$?
+(cd "$ROOT/apply-wc" && PATH="$ROOT/ambiguous-bin:$PATH" "$TD" activation apply --spec-file "$ROOT/spec" >/dev/null); rc=$?
 apply_tip=$(git --git-dir="$ROOT/apply-origin" rev-parse "$TASKDAG_ACTIVATION_REF")
 [ "$rc" -eq 0 ] && [ -e "$ROOT/ambiguous-push-seen" ] && [ "$(git --git-dir="$ROOT/apply-origin" rev-list --count "$apply_tip")" -eq 1 ] \
   && ok "post-accept ambiguity converges by readback without second epoch" || bad "ambiguous apply did not converge"
