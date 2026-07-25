@@ -25,6 +25,23 @@ The final work must include its Agent Gate Record. This file adds only
 task-dag-specific instructions and cannot weaken canon. Shared repository
 knowledge is indexed at `top-level:docs/agent-kb/repos/index.md`.
 
+## Threat model for task-dag design and review
+
+The current task-dag design does **not defend against deliberate malicious
+mutation by an actor who already has write access to a participating
+repository**. That adversary is out of scope unless the operator explicitly
+expands the threat model for a specific task. Within this boundary, optimize
+for simplicity, correctness, orthogonality, and composability.
+
+Natural failures and correctness hazards remain in scope, including races,
+crashes, stale or concurrent writers, malformed state, and external API
+failure or uncertainty. This boundary is not permission to weaken ordinary
+safety, validation, fail-closed behavior, recovery, or least privilege.
+
+Every Oracle prompt that reviews a task-dag design or architecture, including
+a post-implementation change review, MUST state this boundary explicitly; a
+link to this section alone is insufficient.
+
 ## Test resource policy on Helios
 
 - On the production Helios host, do **not** run

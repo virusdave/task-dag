@@ -7,6 +7,23 @@ individual commits/refs see [`INVARIANTS.md`](./INVARIANTS.md); this doc is
 the higher-level rule that governs where task semantics are allowed to
 live at all.
 
+## Threat model for task-dag design and review
+
+The current task-dag design does **not defend against deliberate malicious
+mutation by an actor who already has write access to a participating
+repository**. That adversary is out of scope unless the operator explicitly
+expands the threat model for a specific task. Within this boundary, optimize
+for simplicity, correctness, orthogonality, and composability.
+
+Natural failures and correctness hazards remain in scope, including races,
+crashes, stale or concurrent writers, malformed state, and external API
+failure or uncertainty. This boundary is not permission to weaken ordinary
+safety, validation, fail-closed behavior, recovery, or least privilege.
+
+Every Oracle prompt that reviews a task-dag design or architecture, including
+a post-implementation change review, MUST state this boundary explicitly; a
+link to this section alone is insufficient.
+
 ## Principle 1 — encode task semantics in the git DAG and git refs (operator law)
 
 > **We encode task semantics, wherever possible and sensible, in the
