@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh scheduling-fence.sh cross-repo.sh edges-prune.sh edges-write.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh scheduling-fence.sh cross-repo.sh edges-write.sh edges-prune.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -208,6 +208,34 @@ else bad "scheduling-fence prerequisite failure was not actionable"; fi
 if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/scheduling-fence.sh" "$fence_prereqs" >/dev/null 2>"$ROOT/fence-complete-err"; then
   ok "scheduling fence accepts its complete prerequisite set"
 else bad "scheduling fence rejected its complete prerequisite set: $(cat "$ROOT/fence-complete-err")"; fi
+
+writer_prereqs='taskdag_normalize_node taskdag_repo_numeric_id taskdag_current_repo taskdag_node_repo taskdag_relation_mode_ok taskdag_edge_id taskdag_edge_blob taskdag_tombstone_blob _taskdag_tombstone_edge_id taskdag_sync_graph_ref taskdag_sync_master taskdag_edge_prunable taskdag_cas_sleep taskdag_consumer_prepare taskdag_consumer_fenced_scheduling_push'
+writer_globals='TASKDAG_CAS_MAX_ATTEMPTS=8 TASKDAG_CONSUMER_MODE= TASKDAG_CONSUMER_GRAPH_TIP= TASKDAG_GRAPH_REF=refs/heads/tasks/v1/graph EMPTY_TREE=fixture GREEN= BLUE= RESET='
+if bash -c 'for n in $2; do [ "$n" = taskdag_edge_prunable ] || eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/edges-write.sh" "$writer_prereqs" "$writer_globals" >"$ROOT/writer-order-out" 2>"$ROOT/writer-order-err"; then
+  bad "edge writer loaded without fact-backed prunability"
+elif grep -q 'requires provider taskdag_edge_prunable' "$ROOT/writer-order-err"; then
+  ok "edge writer fails loudly without a direct prerequisite"
+else bad "edge-writer prerequisite failure was not actionable"; fi
+
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/edges-write.sh" "$writer_prereqs" "$writer_globals" >/dev/null 2>"$ROOT/writer-complete-err"; then
+  ok "edge writer accepts its complete prerequisite set"
+else bad "edge writer rejected its complete prerequisite set: $(cat "$ROOT/writer-complete-err")"; fi
+
+prune_prereqs='taskdag_read_edges taskdag_sync_graph_ref taskdag_sync_master taskdag_edge_prunable taskdag_consumer_prepare _taskdag_graph_edge_tuple _taskdag_graph_cas _taskdag_graph_has_path taskdag_dep_help _cmd_dep_add _cmd_dep_drop'
+prune_globals='TASKDAG_GRAPH_REF=refs/heads/tasks/v1/graph BLUE= BOLD= RESET='
+if bash -c 'for n in $2; do [ "$n" = _taskdag_graph_cas ] || eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/edges-prune.sh" "$prune_prereqs" "$prune_globals" >"$ROOT/prune-order-out" 2>"$ROOT/prune-order-err"; then
+  bad "edge pruner loaded without graph writer primitives"
+elif grep -q 'requires provider _taskdag_graph_cas' "$ROOT/prune-order-err"; then
+  ok "edge pruner fails loudly without its writer prerequisite"
+else bad "edge-pruner prerequisite failure was not actionable"; fi
+
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/edges-prune.sh" "$prune_prereqs" "$prune_globals" >/dev/null 2>"$ROOT/prune-complete-err"; then
+  ok "edge pruner accepts its complete prerequisite set"
+else bad "edge pruner rejected its complete prerequisite set: $(cat "$ROOT/prune-complete-err")"; fi
+
+if rg -n '_taskdag_edge_prunable|_cmd_dep_prune' "$REPO_ROOT/scripts/task-dag.d/edges-write.sh" >"$ROOT/writer-reverse-deps"; then
+  bad "edge writer retains a reverse dependency: $(cat "$ROOT/writer-reverse-deps")"
+else ok "edge writer has no reverse dependency on the edge pruner"; fi
 
 if bash -c 'taskdag_node_complete(){ :; }; taskdag_leaf_ready(){ :; }; taskdag_normalize_node(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconcile.sh" >"$ROOT/reconcile-core-out" 2>"$ROOT/reconcile-core-err"; then
   bad "reconcile loaded without reconciliation preparation"

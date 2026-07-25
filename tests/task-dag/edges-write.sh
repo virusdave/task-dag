@@ -55,7 +55,11 @@ done < <(
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
     # shellcheck source=/dev/null
+    taskdag_sync_master() { :; }
+    taskdag_edge_prunable() { return 1; }
     taskdag_consumer_prepare() { :; }
+    taskdag_consumer_fenced_scheduling_push() { :; }
+    TASKDAG_CONSUMER_MODE=legacy TASKDAG_CONSUMER_GRAPH_TIP=
     source "$LIBDIR/edges-write.sh"
 
     r1=$(taskdag_cas_ramp_ms 1); r2=$(taskdag_cas_ramp_ms 2); r3=$(taskdag_cas_ramp_ms 3)
@@ -229,6 +233,10 @@ cexhaust() {
         TASKDAG_CONSUMER_GRAPH_TIP=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
         TASKDAG_CONSUMER_READY=true
     }
+    taskdag_sync_master() { :; }
+    taskdag_edge_prunable() { return 1; }
+    taskdag_consumer_fenced_scheduling_push() { :; }
+    TASKDAG_CONSUMER_MODE=legacy TASKDAG_CONSUMER_GRAPH_TIP=
     source "$LIBDIR/edges-write.sh"
     # Neutralize the sync so the writer never learns origin's real tip: `old`
     # (from the local ref) stays behind origin → every FF lease is rejected.

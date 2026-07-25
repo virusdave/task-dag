@@ -260,6 +260,21 @@ taskdag_node_done() {
     esac
 }
 
+# taskdag_edge_prunable <relation> <from> <to>: 0 iff removing this edge is
+# backed by a durable master completion witness. This is deliberately distinct
+# from satisfied(edge)=done(to): a live `satisfies` edge remains the supersede
+# signal until its dependent (from) is itself done.
+taskdag_edge_prunable() {
+    local relation="$1" from="$2" to="$3" node drc=0
+    case "$relation" in
+        requires) node="$to" ;;
+        satisfies) node="$from" ;;
+        *) return 1 ;;
+    esac
+    taskdag_node_done "$node" >/dev/null 2>&1 || drc=$?
+    [ "$drc" -eq 0 ]
+}
+
 # Explicit-tip variants are the only production authority wrappers need.
 taskdag_task_completed_at_tip() {
     local tip="$1" task="$2"

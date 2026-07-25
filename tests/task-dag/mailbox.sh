@@ -59,8 +59,6 @@ done < <(
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
-    taskdag_consumer_prepare() { :; }
-    source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
 
@@ -348,8 +346,6 @@ cond_out=$(
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
-    taskdag_consumer_prepare() { :; }
-    source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
     mid=$(taskdag_mailbox_message_id completion "$NODE" "$WIT" owner/repo)
@@ -467,8 +463,6 @@ gexhaust() {
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
-    taskdag_consumer_prepare() { :; }
-    source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
     # Neutralize the shard sync so `old` stays a STALE local ref while origin's

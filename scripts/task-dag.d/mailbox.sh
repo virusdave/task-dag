@@ -46,7 +46,7 @@
 #   (add/remove one message blob via a scratch index) → FF push
 #   --force-with-lease + origin readback → on rejection refetch/recompute/
 #   re-push with the SAME bounded quadratic backoff (taskdag_cas_* from
-#   edges-write.sh) → FAIL LOUD on retry-budget exhaustion. A shard tree is
+#   cas-retry.sh) → FAIL LOUD on retry-budget exhaustion. A shard tree is
 #   a commutative idempotent union of message blobs, so contention converges.
 #
 # ORDERED FOLD-THEN-DELETE (operator-locked decision 4 on issue #13)
@@ -72,7 +72,7 @@
 #
 # Relies on the data-model helpers in edges.sh (taskdag_normalize_node,
 # taskdag_norm_owner_repo, taskdag_sha256_hex, taskdag_repo_numeric_id), the
-# bounded backoff in edges-write.sh (taskdag_cas_* / TASKDAG_CAS_*), the
+# bounded backoff in cas-retry.sh (taskdag_cas_* / TASKDAG_CAS_*), the
 # current-repo seam in facts.sh (taskdag_current_repo), and EMPTY_TREE /
 # colors from the main script.
 # ═══════════════════════════════════════════════════════════════════════

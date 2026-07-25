@@ -85,6 +85,26 @@ done < <(
     else
         echo "PASS: A4 disallowed relation/mode tombstone is rejected"
     fi
+
+    # Prunability is intentionally asymmetric for satisfies edges. Stub only
+    # the done-fact lookup so this directly characterizes provider policy.
+    source "$LIBDIR/facts.sh"
+    from="issue:owner/repo#2"; to="issue:owner/repo#3"; done_node="$to"
+    taskdag_node_done() { [ "$1" = "$done_node" ]; }
+    if taskdag_edge_prunable requires "$from" "$to" \
+        && ! taskdag_edge_prunable satisfies "$from" "$to"; then
+        echo "PASS: A5 done(to) prunes requires but keeps the live satisfies signal"
+    else
+        echo "FAIL: A5 prunability did not distinguish requires from satisfies"
+    fi
+    done_node="$from"
+    if ! taskdag_edge_prunable requires "$from" "$to" \
+        && taskdag_edge_prunable satisfies "$from" "$to" \
+        && ! taskdag_edge_prunable unknown "$from" "$to"; then
+        echo "PASS: A6 done(from) prunes satisfies and invalid relations fail closed"
+    else
+        echo "FAIL: A6 satisfies/invalid-relation prunability was incorrect"
+    fi
 )
 
 # ===========================================================================

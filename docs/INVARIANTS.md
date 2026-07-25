@@ -403,10 +403,10 @@ aware): it PRUNES a prunable edge (plain FF deletion — `done(to)` for a
 landed **atomically** with the edge removal in one compound FF commit) for a
 deliberate removal BEFORE the edge is prunable — never a silent tree deletion
 of a not-yet-prunable edge. The tombstone blob serializer + tombstone-aware
-reader masking live in `edges.sh`; the relation-aware prunability predicate +
-scan primitives (`_taskdag_edge_prunable`, `taskdag_prune_edge`,
-`taskdag_prune_satisfied`, and the `dep prune` command) live in
-`scripts/task-dag.d/edges-prune.sh`. The mailbox transport lives in
+reader masking live in `edges.sh`; the relation-aware fact-backed retention
+predicate `taskdag_edge_prunable` lives in `scripts/task-dag.d/facts.sh`; and
+the scan primitives (`taskdag_prune_edge`, `taskdag_prune_satisfied`, and the
+`dep prune` command) live in `scripts/task-dag.d/edges-prune.sh`. The mailbox transport lives in
 `scripts/task-dag.d/mailbox.sh`; graph convergence (push reaction, periodic
 backstop, local folds, cross-repo hints, cascade, supersede synth-completion,
 and obligation-based epic close) lives in `scripts/task-dag.d/graph-converge.sh`.

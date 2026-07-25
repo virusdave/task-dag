@@ -36,16 +36,29 @@
 # the `graph --explain` resolver are separate sibling tasks and are NOT
 # implemented here.
 #
-# Relies on the data-model + reader helpers in edges.sh (taskdag_edge_id,
-# taskdag_edge_blob, taskdag_normalize_node, taskdag_repo_numeric_id,
-# taskdag_sync_graph_ref) and on TASKDAG_GRAPH_REF / json_escape / colors
-# from the main script.
+# Relies on the data-model + reader helpers in edges.sh, fact-backed
+# prunability in facts.sh, bounded retry timing in cas-retry.sh, semantic
+# snapshot preparation, and the scheduling fence. Every direct provider is
+# checked below so source order cannot silently change writer behavior.
 # ═══════════════════════════════════════════════════════════════════════
 
-if ! declare -F taskdag_consumer_prepare >/dev/null; then
-    echo "Error: edges-write.sh requires semantic-consumer.sh to be loaded first" >&2
-    return 2 2>/dev/null || exit 2
-fi
+for prerequisite in taskdag_normalize_node taskdag_repo_numeric_id taskdag_current_repo taskdag_node_repo \
+    taskdag_relation_mode_ok taskdag_edge_id taskdag_edge_blob taskdag_tombstone_blob \
+    _taskdag_tombstone_edge_id taskdag_sync_graph_ref taskdag_sync_master taskdag_edge_prunable \
+    taskdag_cas_sleep taskdag_consumer_prepare taskdag_consumer_fenced_scheduling_push; do
+    if ! declare -F "$prerequisite" >/dev/null; then
+        echo "Error: edges-write.sh requires provider $prerequisite to be loaded first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+for prerequisite in TASKDAG_CAS_MAX_ATTEMPTS TASKDAG_CONSUMER_MODE \
+    TASKDAG_CONSUMER_GRAPH_TIP TASKDAG_GRAPH_REF EMPTY_TREE GREEN BLUE RESET; do
+    if ! declare -p "$prerequisite" >/dev/null 2>&1; then
+        echo "Error: edges-write.sh requires global $prerequisite to be initialized first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+unset prerequisite
 
 # _taskdag_edge_blob_check <blob>: validate a STORED edge blob exactly as the
 # reader (taskdag_read_edges) does — typed schema:1 structure, the fixed
@@ -368,7 +381,7 @@ _taskdag_graph_has_path() {
 # taskdag_dep_drop <edge-id> [<reason>]: remove an edge from this repo's graph
 # index (issue #13 satisfied-edge-pruning sibling). Removal is PRUNABILITY-
 # AWARE (never a silent tree deletion of a not-yet-prunable edge). Prunability
-# is relation-aware (see _taskdag_edge_prunable):
+# is relation-aware (see taskdag_edge_prunable):
 #   • edge PRUNABLE on master        → PRUNE: plain FF deletion of
 #     edges/<edge-id>.json (master's completion is the durable witness, so no
 #     tombstone is needed). Prunable means done(TO) for a requires edge, or
@@ -383,10 +396,7 @@ _taskdag_graph_has_path() {
 #   • edge absent AND no tombstone   → FAIL LOUD: with only an edge-id we
 #     cannot reconstruct the tuple a tombstone needs, and a silent success
 #     would mask a lost edge.
-# Prunability is derived from master via the fact layer when available (the
-# full CLI always sources it); standalone (no fact layer) it conservatively
-# TOMBSTONES rather than prune, since pruning without a durable witness would
-# be an unwitnessed deletion.
+# Prunability is derived from master through the required fact provider.
 taskdag_dep_drop() {
     local eid="$1" reason="${2:-}" msg rc
     [[ "$eid" =~ ^[0-9a-f]{64}$ ]] || { echo "Error: dep drop needs a 64-hex edge-id (got: $eid)" >&2; return 1; }
@@ -416,7 +426,7 @@ taskdag_dep_drop() {
     IFS=$'\t' read -r from to relation mode repoid <<<"$tuple"
 
     # Route: PRUNABLE → prune; ANYTHING ELSE → tombstone. Prunability is
-    # relation-aware (see _taskdag_edge_prunable): a requires edge is prunable
+    # relation-aware (see taskdag_edge_prunable): a requires edge is prunable
     # iff done(TO), a satisfies edge iff done(FROM) — NOT done(to), because a
     # satisfies edge whose target is done is the LIVE supersede signal and must
     # stay active until the DEPENDENT itself completes. Prune is the only
@@ -428,12 +438,8 @@ taskdag_dep_drop() {
     # best-effort freshen (so a just-completed witness prunes cleanly rather
     # than leaving a redundant tombstone), never fatal.
     local prunable=false
-    if declare -F _taskdag_edge_prunable >/dev/null 2>&1; then
-        if declare -F taskdag_sync_master >/dev/null 2>&1; then
-            taskdag_sync_master || true
-        fi
-        _taskdag_edge_prunable "$relation" "$from" "$to" && prunable=true
-    fi
+    taskdag_sync_master || true
+    taskdag_edge_prunable "$relation" "$from" "$to" && prunable=true
 
     if [ "$prunable" = true ]; then
         # PRUNE: the completion witness lives on master; a plain deletion is
@@ -484,16 +490,10 @@ Reason: ${reason}"
     esac
 }
 
-# Command: dep — WRITE (add/drop) dependency edges (direct-CAS writer).
-cmd_dep() {
-    local sub="${1:-}"
-    [ $# -gt 0 ] && shift
-    case "$sub" in
-        add) _cmd_dep_add "$@" ;;
-        drop) _cmd_dep_drop "$@" ;;
-        prune) _cmd_dep_prune "$@" ;;
-        ""|--help|-h)
-            cat <<'EOF'
+# Shared help for the add/drop writer adapters and the later dep command
+# composition point in edges-prune.sh.
+taskdag_dep_help() {
+    cat <<'EOF'
 Usage:
   task-dag dep add --from <node> --to <node> --relation requires|satisfies
                    [--mode all|any] [--repo-id <n>] [--witness <id>]
@@ -531,10 +531,6 @@ contention the writer refetches, recomputes the commutative edge-set union,
 and re-pushes with a bounded quadratic backoff (~1s base + jitter ramping
 toward a ~10s cap); an exhausted retry budget fails loud. Requires jq + git.
 EOF
-            return 0
-            ;;
-        *) echo "Error: unknown 'dep' subcommand: $sub (expected add|drop|prune)" >&2; return 2 ;;
-    esac
 }
 
 _cmd_dep_add() {
@@ -554,7 +550,7 @@ _cmd_dep_add() {
             --repo-id) repo_id="$2"; shift 2 ;;
             --witness) witness="$2"; shift 2 ;;
             --reason) reason="$2"; shift 2 ;;
-            --help|-h) cmd_dep --help; return 0 ;;
+            --help|-h) taskdag_dep_help; return 0 ;;
             *) echo "Error: unknown option to 'dep add': $1" >&2; return 2 ;;
         esac
     done
@@ -600,7 +596,7 @@ _cmd_dep_drop() {
             --reason)
                 [ $# -ge 2 ] || { echo "Error: --reason requires a value" >&2; return 2; }
                 reason="$2"; shift 2 ;;
-            --help|-h) cmd_dep --help; return 0 ;;
+            --help|-h) taskdag_dep_help; return 0 ;;
             -*) echo "Error: unknown option to 'dep drop': $1" >&2; return 2 ;;
             *) [ -z "$eid" ] || { echo "Error: dep drop takes a single edge-id" >&2; return 2; }; eid="$1"; shift ;;
         esac

@@ -15,10 +15,9 @@
 # an unsatisfied edge (that would be an unwitnessed silent deletion). The
 # tombstone blob serializer + reader masking live in edges.sh.
 #
-# Relies on: taskdag_read_edges / taskdag_edges_with_facts (facts.sh),
-# taskdag_node_done (facts.sh), _taskdag_graph_edge_tuple / _taskdag_graph_cas
-# / _taskdag_graph_has_path (edges-write.sh), taskdag_sync_graph_ref (edges.sh),
-# taskdag_sync_master (facts.sh), TASKDAG_GRAPH_REF / colors (main script).
+# Relies on the edge reader, fact-backed prunability, semantic preparation,
+# and the graph mutation primitives in edges-write.sh. This module is loaded
+# after the writer and owns the final `dep` command composition point.
 #
 # Scope boundary: this module PRUNES prunable edges; it does NOT decide what
 # a completion TRIGGERS (the reconciler / supersede / mailbox siblings do). In
@@ -28,51 +27,33 @@
 # still-needed supersede signal.
 # ═══════════════════════════════════════════════════════════════════════
 
-if ! declare -F taskdag_consumer_prepare >/dev/null; then
-    echo "Error: edges-prune.sh requires semantic-consumer.sh to be loaded first" >&2
-    return 2 2>/dev/null || exit 2
-fi
-
-# _taskdag_edge_prunable <relation> <from> <to>: 0 iff removing this edge is
-# backed by a DURABLE master completion witness (so re-deriving the graph from
-# master would reconfirm the same active set — a plain prune loses nothing):
-#   • requires  edge → prunable iff done(TO)   (the target completed; the
-#                      obligation is permanently met and recorded on master).
-#   • satisfies edge → prunable iff done(FROM) (the DEPENDENT completed; the
-#                      supersede has been consumed and recorded on master — the
-#                      reconcile predicate no longer needs the edge to detect
-#                      it). NOT done(to): a satisfies edge whose target is done
-#                      is the LIVE supersede signal and must stay active until
-#                      the dependent's own completion is durable.
-# Returns non-zero (not prunable) if the fact layer is unavailable or the
-# witness node is not done / indeterminate — pruning is the only unwitnessed
-# action, so it fails closed.
-_taskdag_edge_prunable() {
-    local relation="$1" from="$2" to="$3" node drc=0
-    declare -F taskdag_node_done >/dev/null 2>&1 || return 1
-    case "$relation" in
-        requires) node="$to" ;;
-        satisfies) node="$from" ;;
-        *) return 1 ;;
-    esac
-    taskdag_node_done "$node" >/dev/null 2>&1 || drc=$?
-    [ "$drc" -eq 0 ]
-}
+for prerequisite in taskdag_read_edges taskdag_sync_graph_ref taskdag_sync_master \
+    taskdag_edge_prunable taskdag_consumer_prepare _taskdag_graph_edge_tuple \
+    _taskdag_graph_cas _taskdag_graph_has_path taskdag_dep_help _cmd_dep_add _cmd_dep_drop; do
+    if ! declare -F "$prerequisite" >/dev/null; then
+        echo "Error: edges-prune.sh requires provider $prerequisite to be loaded first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+for prerequisite in TASKDAG_GRAPH_REF BLUE BOLD RESET; do
+    if ! declare -p "$prerequisite" >/dev/null 2>&1; then
+        echo "Error: edges-prune.sh requires global $prerequisite to be initialized first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+unset prerequisite
 
 # taskdag_prune_edge <edge-id>: prune ONE edge iff it is PRUNABLE (see
-# _taskdag_edge_prunable). Returns:
+# taskdag_edge_prunable). Returns:
 #   0  pruned (or already absent — nothing to prune)
 #   1  failed loud (edge is NOT prunable, corrupt, indeterminate facts, or a
 #      transport/CAS failure) — a not-yet-prunable edge must be `dep drop`ped
 #      (tombstoned), never silently pruned.
-# Requires the fact layer (taskdag_node_done); pruning without a durable
-# completion witness would be an unwitnessed deletion, so it fails loud if the
-# fact layer is unavailable.
+# The source-time contract requires the fact-backed predicate; pruning without
+# a durable completion witness would be an unwitnessed deletion.
 taskdag_prune_edge() {
     local eid="$1"
     [[ "$eid" =~ ^[0-9a-f]{64}$ ]] || { echo "Error: prune needs a 64-hex edge-id (got: $eid)" >&2; return 1; }
-    declare -F taskdag_node_done >/dev/null 2>&1 || { echo "Error: prune requires the fact layer (taskdag_node_done) to verify the completion witness" >&2; return 1; }
-
     local epath="edges/${eid}.json"
     # Already gone (e.g. concurrently pruned) → idempotent success.
     if ! _taskdag_graph_has_path "$epath"; then
@@ -84,7 +65,7 @@ taskdag_prune_edge() {
     tuple=$(_taskdag_graph_edge_tuple "$eid") || { echo "Error: edge ${eid:0:12} is corrupt / non-canonical; cannot prune it safely" >&2; return 1; }
     IFS=$'\t' read -r from to relation _ <<<"$tuple"
 
-    if ! _taskdag_edge_prunable "$relation" "$from" "$to"; then
+    if ! taskdag_edge_prunable "$relation" "$from" "$to"; then
         local w; [ "$relation" = satisfies ] && w="dependent ${from}" || w="target ${to}"
         echo "Error: edge ${eid:0:12} is NOT prunable (${w} not done); refusing to prune — use 'dep drop' to tombstone a deliberate removal before its completion witness exists" >&2
         return 1
@@ -114,7 +95,7 @@ taskdag_prune_satisfied() {
     edges=$(taskdag_read_edges "$@") || { echo "Error: could not read edges to prune" >&2; return 1; }
     while IFS=$'\t' read -r eid from to relation; do
         [ -n "$eid" ] || continue
-        if _taskdag_edge_prunable "$relation" "$from" "$to"; then
+        if taskdag_edge_prunable "$relation" "$from" "$to"; then
             any=1
             taskdag_prune_edge "$eid" || rc=1
         fi
@@ -128,7 +109,7 @@ _cmd_dep_prune() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-fetch) do_fetch=false; shift ;;
-            --help|-h) cmd_dep --help; return 0 ;;
+            --help|-h) taskdag_dep_help; return 0 ;;
             -*) echo "Error: unknown option to 'dep prune': $1" >&2; return 2 ;;
             *) [ -z "$eid" ] || { echo "Error: dep prune takes a single edge-id" >&2; return 2; }; eid="$1"; shift ;;
         esac
@@ -142,9 +123,7 @@ _cmd_dep_prune() {
     # reporting a false "not present" against a stale local ref.
     if [ "$do_fetch" = true ]; then
         taskdag_sync_graph_ref || { echo "Error: could not sync ${TASKDAG_GRAPH_REF} (indeterminate); refusing to prune on a possibly-stale view (use --no-fetch to prune against local refs)" >&2; return 1; }
-        if declare -F taskdag_sync_master >/dev/null 2>&1; then
-            taskdag_sync_master || { echo "Error: could not sync origin/master (indeterminate); refusing to prune on a possibly-stale view (use --no-fetch to prune against local refs)" >&2; return 1; }
-        fi
+        taskdag_sync_master || { echo "Error: could not sync origin/master (indeterminate); refusing to prune on a possibly-stale view (use --no-fetch to prune against local refs)" >&2; return 1; }
     fi
 
     local consumer_args=()
@@ -158,4 +137,18 @@ _cmd_dep_prune() {
         [ "$do_fetch" = false ] && args+=(--no-fetch)
         taskdag_prune_satisfied "${args[@]}"
     fi
+}
+
+# Command: dep — compose the edge writer and pruning adapters only after both
+# provider modules have loaded, keeping their dependency direction acyclic.
+cmd_dep() {
+    local sub="${1:-}"
+    [ $# -gt 0 ] && shift
+    case "$sub" in
+        add) _cmd_dep_add "$@" ;;
+        drop) _cmd_dep_drop "$@" ;;
+        prune) _cmd_dep_prune "$@" ;;
+        ""|--help|-h) taskdag_dep_help ;;
+        *) echo "Error: unknown 'dep' subcommand: $sub (expected add|drop|prune)" >&2; return 2 ;;
+    esac
 }
