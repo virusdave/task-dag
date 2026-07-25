@@ -7729,6 +7729,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/facts.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/reconciliation-core.sh"
 # shellcheck source=task-dag.d/semantic-consumer.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-consumer.sh"
+# shellcheck source=task-dag.d/status-projection.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/status-projection.sh"
 # shellcheck source=task-dag.d/cross-repo.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/cross-repo.sh"
 # shellcheck source=task-dag.d/edges-prune.sh
