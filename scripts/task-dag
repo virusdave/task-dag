@@ -231,11 +231,6 @@ blocked_structural_ancestor() {
 # over the breakdown tree) and closure goes through the canonical
 # Closes-Epic trailer merge — see maybe_emit_local_epic_close().
 
-# Helper: list all task refs
-list_task_refs() {
-    git for-each-ref refs/heads/tasks/ --format='%(objectname) %(refname:short)'
-}
-
 # ─────────────────────────────────────────────────────────────────────
 # Task-ref invariants (see docs/INVARIANTS.md)
 #
@@ -252,192 +247,6 @@ list_task_refs() {
 # at a path the tool would never mint — i.e. exactly the "I'll just do the
 # ref surgery by hand" mistake this whole subsystem exists to prevent.
 # ─────────────────────────────────────────────────────────────────────
-TASKDAG_KNOWN_TASK_NS="pending root-active frontier active blocked blocked-meta delegated delegated-close completions ci-chains repair-superseded"
-TASKDAG_KNOWN_GH_NS="issues comments child-epics child-epic-slots materialisation-markers"
-
-# ─────────────────────────────────────────────────────────────────────
-# The dependency-graph index branch (issue #13 north-star, Phase 2).
-#
-# `refs/heads/tasks/v1/graph` is the ONE task-namespace ref that is NOT an
-# empty-tree commit: its latest tree IS the active dependency-edge set, a
-# content-addressed collection of blobs at `edges/<edge-id>.json`. It is a
-# NEW ref KIND with its OWN invariant (a commit whose tree contains only
-# `edges/<64-hex>.json` blobs), NOT a loosening of the empty-tree floor for
-# everything under `tasks/v1/*`. We deliberately do NOT add `v1` to
-# TASKDAG_KNOWN_TASK_NS — that would legitimise arbitrary `tasks/v1/*` hand
-# surgery. Only this EXACT ref is recognised; a hand-crafted `tasks/v1/junk`
-# still fails the namespace check. Operator-approved bounded-ref namespace
-# (issue #13 Phase 0); see docs/INVARIANTS.md § "The dependency-graph index".
-TASKDAG_GRAPH_REF="refs/heads/tasks/v1/graph"
-
-# Immutable materialisation reservations have one exact data-in-tree ref.
-# Never broaden this exception to tasks/v1/*.
-TASKDAG_MATERIALISATION_REF="refs/heads/tasks/v1/materialisation"
-TASKDAG_ACTIVATION_REF="refs/heads/tasks/v1/activation"
-TASKDAG_MATERIALISE_PRODUCER_REF="refs/heads/tasks/v1/materialisation-producer"
-TASKDAG_COMMENT_WATCHDOG_REF="refs/heads/tasks/v1/comment-watchdog"
-TASKDAG_RECONCILE_COMMENTS_INDEX_REF="refs/heads/tasks/v1/reconcile-comments-index"
-
-taskdag_is_reconcile_comments_index_ref() {
-    case "$1" in
-        refs/heads/tasks/v1/reconcile-comments-index|tasks/v1/reconcile-comments-index) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-taskdag_is_activation_ref() {
-    case "$1" in
-        refs/heads/tasks/v1/activation|tasks/v1/activation) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-taskdag_is_materialisation_ref() {
-    case "$1" in
-        refs/heads/tasks/v1/materialisation|tasks/v1/materialisation) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-taskdag_is_materialisation_producer_ref() {
-    case "$1" in
-        refs/heads/tasks/v1/materialisation-producer|tasks/v1/materialisation-producer) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-taskdag_is_comment_watchdog_ref() {
-    case "$1" in
-        refs/heads/tasks/v1/comment-watchdog|tasks/v1/comment-watchdog) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# taskdag_is_graph_ref <ref>: true iff <ref> is EXACTLY the graph index
-# branch, in either the fully-qualified or short (`tasks/v1/graph`) form.
-taskdag_is_graph_ref() {
-    case "$1" in
-        refs/heads/tasks/v1/graph|tasks/v1/graph) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# taskdag_graph_tree_violations <commit-sha>: echo one human-readable line
-# per graph-index shape violation (nothing when well-formed). The graph
-# index tree may contain ONLY regular blobs named `edges/<64-hex>.json`
-# (the content-addressed active edge set) or `tombstones/<64-hex>.json`
-# (explicit witnessed removals — issue #13 satisfied-edge-pruning sibling).
-# Any other path, a non-blob entry, or a malformed edge-id filename is a
-# violation. An empty tree (zero edges) is valid. This checks tree SHAPE
-# only; the reader (taskdag_read_edges) is the content validator. Never
-# mutates anything; returns 0 always.
-taskdag_graph_tree_violations() {
-    local sha="$1" mode type obj path
-    while read -r mode type obj path; do
-        [ -n "$type" ] || continue
-        if [ "$type" != blob ]; then
-            echo "✗ ${TASKDAG_GRAPH_REF} tree entry '${path}' is a ${type}, expected a blob (edges/<edge-id>.json or tombstones/<edge-id>.json)"
-            continue
-        fi
-        # A regular file only — reject symlinks (120000) and executables
-        # (100755), which git also reports as type 'blob'.
-        if [ "$mode" != 100644 ]; then
-            echo "✗ ${TASKDAG_GRAPH_REF} tree entry '${path}' has mode ${mode}, expected a regular file (100644)"
-            continue
-        fi
-        case "$path" in
-            edges/[0-9a-f]*.json)
-                # Assert the exact edge-id shape: edges/<64 lowercase hex>.json
-                local base="${path#edges/}"; base="${base%.json}"
-                if ! [[ "$base" =~ ^[0-9a-f]{64}$ ]]; then
-                    echo "✗ ${TASKDAG_GRAPH_REF} edge blob '${path}' has a malformed edge-id (expected edges/<64-hex>.json)"
-                fi
-                ;;
-            tombstones/[0-9a-f]*.json)
-                # Same content-addressed edge-id shape for a tombstone.
-                local tbase="${path#tombstones/}"; tbase="${tbase%.json}"
-                if ! [[ "$tbase" =~ ^[0-9a-f]{64}$ ]]; then
-                    echo "✗ ${TASKDAG_GRAPH_REF} tombstone blob '${path}' has a malformed edge-id (expected tombstones/<64-hex>.json)"
-                fi
-                ;;
-            *)
-                echo "✗ ${TASKDAG_GRAPH_REF} tree contains unexpected path '${path}' (only edges/<edge-id>.json and tombstones/<edge-id>.json blobs are allowed)"
-                ;;
-        esac
-    done < <(git ls-tree -r "$sha" 2>/dev/null)
-    return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# The cross-repo mailbox shards (issue #13 north-star, Phase 3).
-#
-# `refs/heads/tasks/v1/mailbox/00` .. `/0f` are the SECOND data-in-tree task
-# ref kind (after the graph index): exactly 16 fixed shard branches whose
-# trees carry cross-repo notification messages as `msg/<message-id>.json`
-# blobs. This keeps the live mirrored ref count O(1)=16 regardless of
-# in-flight message count (the bounded-ref invariant) — a message costs a
-# tree blob, not a ref. Like the graph index they are EXEMPT from the
-# empty-tree floor but have their OWN shape invariant, and ONLY these exact
-# 16 refs are recognised: a hand-crafted `tasks/v1/mailbox/10` or
-# `tasks/v1/mailbox/0g` still fails the namespace check. We deliberately do
-# NOT add `v1` to TASKDAG_KNOWN_TASK_NS. Operator-approved bounded-ref
-# namespace (issue #13 Phase 0); see docs/INVARIANTS.md § "The cross-repo
-# mailbox shards".
-TASKDAG_MAILBOX_REF_GLOB="refs/heads/tasks/v1/mailbox"
-
-# taskdag_is_mailbox_ref <ref>: true iff <ref> is EXACTLY one of the 16 fixed
-# mailbox shard branches (00..0f), in either the fully-qualified or short
-# (`tasks/v1/mailbox/0f`) form.
-taskdag_is_mailbox_ref() {
-    case "$1" in
-        refs/heads/tasks/v1/mailbox/0[0-9a-f]|tasks/v1/mailbox/0[0-9a-f]) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# taskdag_mailbox_tree_violations <commit-sha> <full-refname>: echo one
-# human-readable line per mailbox-shard shape violation (nothing when
-# well-formed). A shard tree may contain ONLY regular blobs named
-# `msg/<64-hex>.json` (the content-addressed in-flight message set), AND each
-# message MUST live in the shard its id derives to (the first hex nibble,
-# formatted %02x → 00..0f); a mis-sharded blob is corruption. Any other path,
-# a non-blob entry, a malformed message-id filename, or a wrong-shard blob is
-# a violation. An empty tree (zero messages) is valid. Never mutates anything;
-# returns 0 always.
-taskdag_mailbox_tree_violations() {
-    local sha="$1" ref="$2" mode type obj path shard
-    shard="${ref##*/}"
-    while read -r mode type obj path; do
-        [ -n "$type" ] || continue
-        if [ "$type" != blob ]; then
-            echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} shard tree entry '${path}' is a ${type}, expected a blob (msg/<message-id>.json)"
-            continue
-        fi
-        if [ "$mode" != 100644 ]; then
-            echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} shard tree entry '${path}' has mode ${mode}, expected a regular file (100644)"
-            continue
-        fi
-        case "$path" in
-            msg/[0-9a-f]*.json)
-                local base="${path#msg/}"; base="${base%.json}"
-                if ! [[ "$base" =~ ^[0-9a-f]{64}$ ]]; then
-                    echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} message blob '${path}' has a malformed message-id (expected msg/<64-hex>.json)"
-                    continue
-                fi
-                local want_shard
-                want_shard=$(printf '%02x' "$((16#${base:0:1}))")
-                if [ "$want_shard" != "$shard" ]; then
-                    echo "✗ ${ref} message ${base} is in shard ${shard} but derives to shard ${want_shard} (mis-sharded blob is corruption)"
-                fi
-                ;;
-            *)
-                echo "✗ ${TASKDAG_MAILBOX_REF_GLOB} shard tree contains unexpected path '${path}' (only msg/<message-id>.json blobs are allowed in schema v1)"
-                ;;
-        esac
-    done < <(git ls-tree -r "$sha" 2>/dev/null)
-    return 0
-}
-
 # taskdag_ref_violations <objectname> <full-refname>
 # Echoes one human-readable line per invariant violation (nothing when the
 # ref is well-formed). Never mutates anything. Returns 0 always; the caller
@@ -567,56 +376,6 @@ taskdag_ref_violations() {
 # DAG view — e.g. the epic auto-close completeness check — use this and
 # fail CLOSED on a non-zero return. Most callers want the non-fatal
 # `fetch_task_refs` wrapper below instead.
-fetch_task_refs_strict() {
-    git fetch --quiet --prune origin \
-        '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
-        '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
-        '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
-        '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
-        '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
-        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
-        '+refs/heads/tasks/v1/*:refs/heads/tasks/v1/*' \
-        '+refs/heads/gh/issues/*:refs/heads/gh/issues/*'
-}
-
-fetch_task_refs() {
-    fetch_task_refs_strict 2>/dev/null || true
-}
-
-# normalize_task_ref: validate + normalize a task ref before it is ever
-# interpolated into a git refspec. Accepts either the short namespace form
-# (`tasks/<ns>/<short>`) or the fully-qualified `refs/heads/tasks/<ns>/<short>`
-# and prints the normalized short form (`tasks/<ns>/<short>`) on stdout.
-# Returns non-zero for anything outside the `tasks/*` namespace or containing
-# refspec/rev metacharacters — NEVER feed an unchecked manifest/user value
-# straight into `git fetch` (design §3 Layer A step 1, §5 risk 3).
-normalize_task_ref() {
-    local ref="$1"
-    ref="${ref#refs/heads/}"
-    case "$ref" in
-        tasks/*) : ;;
-        *) return 1 ;;
-    esac
-    # Reject refspec-injection / rev-metacharacter payloads and empty
-    # trailing components. A well-formed task ref is a plain slash path.
-    case "$ref" in
-        *' '*|*'	'*|*'*'*|*'..'*|*'~'*|*'^'*|*':'*|*'?'*|*'['*|*'\'*|*'+'*) return 1 ;;
-        */) return 1 ;;
-    esac
-    printf '%s\n' "$ref"
-}
-
-# fetch_task_ref_exact: fetch exactly one already-normalized task ref into the
-# LOCAL refs/heads/tasks/* namespace (the same namespace the CLI enumerates —
-# NOT refs/remotes/origin/tasks/*, per design §5 risk 4). No --prune (we are
-# fetching a single ref, not syncing a namespace) and no --depth (dependency
-# completeness needs full parent history, design §2 / §5 risk 6). Returns
-# git's exit status so callers can fall back.
-fetch_task_ref_exact() {
-    local ref="$1"
-    git fetch --quiet --no-tags origin "+refs/heads/${ref}:refs/heads/${ref}"
-}
-
 # Helper: print 'yes' iff the remote currently has a tasks/active/<short>
 # ref. The remote is the source of truth for claim state — local refs may
 # lag if another worker just won the CAS.
@@ -8577,6 +8336,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/cas-retry.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 # shellcheck source=task-dag.d/task-model.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/task-model.sh"
+# shellcheck source=task-dag.d/ref-schema.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/ref-schema.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh
