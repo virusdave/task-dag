@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 TD="$(realpath "${1:?task-dag path required}")"
+TASKDAG_SCRIPT_DIR=$(dirname "$TD")
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 source "$(dirname "$TD")/task-dag.d/git-objects.sh"
 source "$(dirname "$TD")/task-dag.d/child-map.sh"
@@ -8,7 +9,10 @@ source "$(dirname "$TD")/task-dag.d/claim-model.sh"
 source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
 source "$(dirname "$TD")/task-dag.d/github-origin.sh"
 source "$(dirname "$TD")/task-dag.d/blocked-core.sh"
-taskdag_consumer_prepare() { :; }
+taskdag_consumer_prepare() {
+  TASKDAG_CONSUMER_READY=true
+  TASKDAG_CHILD_MAP_REFS=$(git for-each-ref --format='%(objectname) %(refname)' refs/heads/tasks/pending/ refs/heads/gh/issues/)
+}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 git init -q --bare "$tmp/origin.git"
 git init -q "$tmp/work"
@@ -233,7 +237,10 @@ cat >"$tmp/bin/reconcile-fixture" <<'EOF'
 set -euo pipefail
 source "$TD" --help >/dev/null
 taskdag_comment_watchdog_check_file() { :; }
-taskdag_consumer_prepare() { :; }
+taskdag_consumer_prepare() {
+  TASKDAG_CONSUMER_READY=true
+  TASKDAG_CHILD_MAP_REFS=$(git for-each-ref --format='%(objectname) %(refname)' refs/heads/tasks/pending/ refs/heads/gh/issues/)
+}
 taskdag_activation_snapshot_token() {
   jq -ncS --arg commit "$FIXTURE_COMMIT" --arg runtime "$FIXTURE_RUNTIME" '{activationCommit:$commit,authorityTip:$commit,digest:"3333333333333333333333333333333333333333333333333333333333333333",epoch:1,guardVersion:1,minimumCompatibleTaskDagCommit:$runtime,origin:"fixture",runtimeCommit:$runtime,state:"enabled"}'
 }
@@ -340,6 +347,102 @@ printf '%s\n' '{"peers":{}}' >"$tmp/locale-current/peers.json"
 LC_ALL=en_US.utf8 _xrepo_reconcile_index_validate_successor \
   "$tmp/locale-current" "$tmp/locale-parent" "$tmp/locale-join"
 [ "$(wc -l <"$tmp/locale-join.manifest")" -eq 3 ]
+
+# Checkpoint cache validation is bounded by the successor delta, not by the
+# checkpoint's total age.  Build a long immutable chain, bootstrap its tip in
+# one authority unit, then exercise every discontinuity at the helper boundary.
+assert_fixture() { [ "$1" = true ] || { echo "fixture assertion failed: $2" >&2; exit 1; }; }
+checkpoint="$tmp/checkpoint-helper"
+mkdir "$checkpoint"
+: >"$checkpoint/manifest"
+: >"$checkpoint/queue"
+printf '%s\n' '{"delegations":{},"version":1}' >"$checkpoint/proofs"
+printf '%s\n' '{"peers":{},"version":1}' >"$checkpoint/peers"
+activation=$(jq -ncS --arg commit "$clarification" --arg runtime "$(git -C "$(dirname "$TD")/.." rev-parse HEAD)" \
+  '{activationCommit:$commit,authorityTip:$commit,digest:"3333333333333333333333333333333333333333333333333333333333333333",epoch:1,guardVersion:1,minimumCompatibleTaskDagCommit:$runtime}')
+export GIT_DIR="$tmp/work/.git"
+_taskdag_activation_runtime_commit() { jq -r .minimumCompatibleTaskDagCommit <<<"$activation"; }
+taskdag_activation_validate_provenance() { :; }
+checkpoint_tip=""
+for generation in $(seq 0 24); do
+  checkpoint_tip=$(_xrepo_reconcile_index_commit "$checkpoint_tip" "$checkpoint/manifest" "$checkpoint/queue" \
+    "$tmp/watchdog-token" acme/widgets "$activation" "$checkpoint/proofs" "$checkpoint/peers")
+done
+git -C "$tmp/work" update-ref "$_XREPO_RECONCILE_INDEX_CACHE_REF" "$checkpoint_tip"
+cache_before=$(git -C "$tmp/work" rev-parse "$_XREPO_RECONCILE_INDEX_CACHE_REF")
+_xrepo_reconcile_index_read "$checkpoint_tip" "$checkpoint/index" acme/widgets
+: >"$checkpoint/bootstrap-work"; : >"$checkpoint/bootstrap-queue"
+TASKDAG_VALIDATION_WORK_COUNTER="$checkpoint/bootstrap-work" \
+  _xrepo_reconcile_index_bootstrap_authority "$checkpoint/index" "$checkpoint/index/manifest.tsv" \
+    "$tmp/origin.git" acme/widgets "$checkpoint/bootstrap-queue"
+printf 'checkpoint-bootstrap\tauthority\n' >>"$checkpoint/bootstrap-work"
+assert_fixture "$([ "$(wc -l <"$checkpoint/bootstrap-work")" -eq 1 ] && echo true || echo false)" \
+  "long-chain authority bootstrap must perform exactly one bootstrap-authority unit"
+assert_fixture "$([ "$(git -C "$tmp/work" rev-parse "$_XREPO_RECONCILE_INDEX_CACHE_REF")" = "$cache_before" ] && echo true || echo false)" \
+  "authority bootstrap must not mutate the private cache ref"
+printf '%s\n' 2147483648 >"$checkpoint/overflow-queue"
+if _xrepo_reconcile_index_commit "$checkpoint_tip" "$checkpoint/manifest" "$checkpoint/overflow-queue" \
+  "$tmp/watchdog-token" acme/widgets "$activation" "$checkpoint/proofs" "$checkpoint/peers" >/dev/null; then
+  assert_fixture false "an out-of-contract reconstructed queue must fail before candidate publication"
+fi
+bad_activation=$(jq -c '.minimumCompatibleTaskDagCommit="ffffffffffffffffffffffffffffffffffffffff"' <<<"$activation")
+bad_activation_parent=$(_xrepo_reconcile_index_commit "$checkpoint_tip" "$checkpoint/manifest" "$checkpoint/queue" \
+  "$tmp/watchdog-token" acme/widgets "$bad_activation" "$checkpoint/proofs" "$checkpoint/peers")
+healed_activation_tip=$(_xrepo_reconcile_index_commit "$bad_activation_parent" "$checkpoint/manifest" "$checkpoint/queue" \
+  "$tmp/watchdog-token" acme/widgets "$activation" "$checkpoint/proofs" "$checkpoint/peers")
+if _xrepo_reconcile_index_read "$healed_activation_tip" "$checkpoint/healed-activation" acme/widgets "$activation"; then
+  assert_fixture false "a valid tip must not conceal an activation-invalid direct parent"
+fi
+
+# A current advertisement may strictly contain the checkpoint manifest.  The
+# bootstrap helper intentionally validates only checkpoint-covered authority.
+printf '%s\t%s\n' "$clarification" refs/heads/gh/comments/99/999 >"$checkpoint/superset"
+cat "$checkpoint/index/manifest.tsv" >>"$checkpoint/superset"
+LC_ALL=C sort -t $'\t' -k2,2 "$checkpoint/superset" -o "$checkpoint/superset"
+LC_ALL=C join -t $'\t' -j 2 -o 1.1,1.2,2.1 "$checkpoint/index/manifest.tsv" "$checkpoint/superset" >"$checkpoint/covered"
+assert_fixture "$([ "$(wc -l <"$checkpoint/covered")" -eq "$(wc -l <"$checkpoint/index/manifest.tsv")" ] && echo true || echo false)" \
+  "strictly-superset advertisement must preserve every checkpoint-covered fact"
+
+# Exactly N valid successors produce N work records; an unchanged tip produces
+# none. Invalid middle generations, first-parent divergence, second-parent-only
+# ancestry, and a simulated cache-CAS race all fail without changing the cache.
+delta_base=$checkpoint_tip
+delta_tip=$delta_base
+for generation in 1 2 3; do
+  delta_tip=$(_xrepo_reconcile_index_commit "$delta_tip" "$checkpoint/manifest" "$checkpoint/queue" \
+    "$tmp/watchdog-token" acme/widgets "$activation" "$checkpoint/proofs" "$checkpoint/peers")
+done
+: >"$checkpoint/delta-work"
+(cd "$tmp/work" && TASKDAG_VALIDATION_WORK_COUNTER="$checkpoint/delta-work" \
+  _xrepo_reconcile_index_validate_cached "$delta_tip" "$delta_base" "$checkpoint/valid-delta" acme/widgets "$activation")
+assert_fixture "$([ "$(wc -l <"$checkpoint/delta-work")" -eq 3 ] && echo true || echo false)" \
+  "three cached successors must log exactly three checkpoint-delta units"
+: >"$checkpoint/delta-work"
+(cd "$tmp/work" && TASKDAG_VALIDATION_WORK_COUNTER="$checkpoint/delta-work" \
+  _xrepo_reconcile_index_validate_cached "$delta_base" "$delta_base" "$checkpoint/no-delta" acme/widgets "$activation")
+assert_fixture "$([ ! -s "$checkpoint/delta-work" ] && echo true || echo false)" \
+  "unchanged cached checkpoint must log zero delta units"
+bad_middle=$(printf 'Invalid middle generation\n' | git -C "$tmp/work" commit-tree "$(git -C "$tmp/work" rev-parse "$delta_base^{tree}")" -p "$delta_base")
+bad_tail=$(printf 'Tail after invalid middle\n' | git -C "$tmp/work" commit-tree "$(git -C "$tmp/work" rev-parse "$delta_base^{tree}")" -p "$bad_middle")
+if (cd "$tmp/work" && _xrepo_reconcile_index_validate_cached "$bad_tail" "$delta_base" "$checkpoint/bad-middle" acme/widgets "$activation"); then
+  assert_fixture false "invalid middle checkpoint successor must fail"
+fi
+diverged=$(printf 'First-parent divergence\n' | git -C "$tmp/work" commit-tree "$(git -C "$tmp/work" rev-parse "$delta_base^{tree}")")
+if (cd "$tmp/work" && _xrepo_reconcile_index_validate_cached "$diverged" "$delta_base" "$checkpoint/diverged" acme/widgets "$activation"); then
+  assert_fixture false "first-parent-diverged checkpoint tip must fail"
+fi
+second_parent=$(printf 'Cache only second parent\n' | git -C "$tmp/work" commit-tree "$(git -C "$tmp/work" rev-parse "$delta_base^{tree}")" -p "$diverged" -p "$delta_base")
+if (cd "$tmp/work" && _xrepo_reconcile_index_validate_cached "$second_parent" "$delta_base" "$checkpoint/second-parent" acme/widgets "$activation"); then
+  assert_fixture false "second-parent-only checkpoint ancestry must fail"
+fi
+if git -C "$tmp/work" update-ref "$_XREPO_RECONCILE_INDEX_CACHE_REF" "$delta_tip" "$diverged"; then
+  assert_fixture false "checkpoint cache confirm race must reject stale expected old value"
+fi
+assert_fixture "$([ "$(git -C "$tmp/work" rev-parse "$_XREPO_RECONCILE_INDEX_CACHE_REF")" = "$cache_before" ] && echo true || echo false)" \
+  "all checkpoint mismatch/race failures must leave private cache unchanged"
+git -C "$tmp/work" update-ref -d "$_XREPO_RECONCILE_INDEX_CACHE_REF" "$cache_before"
+unset GIT_DIR
+
 locale_issue_1=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarification' '' \
   'issue:' '  number: 1' '  repo: acme/widgets' '' 'github:' '  comment_id: 95' \
   | git -C "$tmp/work" commit-tree "$empty")
@@ -351,7 +454,7 @@ out=$(cd "$tmp/work" && LC_ALL=en_US.utf8 PATH="$tmp/bin:$PATH" GITHUB_REPOSITOR
     TASKDAG_VALIDATION_WORK_COUNTER="$tmp/validation-work" \
     reconcile-fixture --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --allow-comment 10:99 --dry-run)
-[ "$(cut -f1 "$tmp/validation-work")" = receipt ]
+[ "$(awk -F '\t' '$1=="checkpoint-bootstrap"{boot++} $1=="receipt"{receipts++} END{print boot ":" receipts}' "$tmp/validation-work")" = 1:5 ]
 [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]
 jq -e '.schema_version == 1 and .status == "success" and .dry_run == true and
        .pages == 2 and .requests == 7 and .returned == 7 and .unique == 6 and
@@ -389,7 +492,7 @@ apply_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widge
     --watchdog-token-file "$tmp/watchdog-token")
 jq -e '.status == "success" and .dry_run == false and .applied == 0 and
        .already_receipted == 1 and .failures == 0 and .complete_success_at != null' <<<"$apply_out" >/dev/null
-[ "$(cut -f1 "$tmp/validation-work")" = receipt ]
+[ "$(cut -f1 "$tmp/validation-work")" = $'checkpoint-delta\nreceipt' ]
 # Immutable completion backlog converges before the potentially long API
 # pagination scan, while the invocation still has its full time budget.
 issue_line=$(grep -n -m1 '^repos/acme/widgets/issues/12$' "$GH_LOG" | cut -d: -f1)
@@ -402,7 +505,7 @@ list_line=$(grep -n -m1 '^repos/acme/widgets/issues/comments?' "$GH_LOG" | cut -
 set +e
 timeout_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     GH_TIMEOUT_REPO=1 GH_CLOSED_ONLY=1 reconcile-fixture --mode complete \
-    --ingestion-start-at 2025-01-01T00:00:00Z --max-seconds 3 \
+    --ingestion-start-at 2025-01-01T00:00:00Z --max-seconds 5 \
     --watchdog-token-file "$tmp/watchdog-token" 2>"$tmp/timeout.err")
 timeout_rc=$?
 set -e
@@ -422,6 +525,49 @@ set -e
 jq -e '.status == "failed" and .failures == 1 and
        .failure_items == [{stage:"list",issue:null,comment_id:null,message:"unsafe pagination link"}]' \
   <<<"$mismatch_out" >/dev/null
+
+# The atomic helper batches three human comments (including two for one issue)
+# behind one preparation and one fenced push.  Its create-only payload is
+# sorted and unique, and prepared child-map refs are the parent authority.
+batch="$tmp/batch-helper"; mkdir "$batch"
+batch_root_31=$(printf 'Issue 31 root\n' | git -C "$tmp/work" commit-tree "$empty")
+batch_root_32=$(printf 'Issue 32 root\n' | git -C "$tmp/work" commit-tree "$empty")
+git -C "$tmp/work" update-ref refs/heads/tasks/pending/31 "$batch_root_31"
+git -C "$tmp/work" update-ref refs/heads/tasks/pending/32 "$batch_root_32"
+git -C "$tmp/work" push -q origin "$batch_root_31:refs/heads/tasks/pending/31" "$batch_root_32:refs/heads/tasks/pending/32"
+for issue in 31 32; do
+  jq -nc --argjson number "$issue" '{number:$number,title:"Batch issue",body:"",html_url:("https://example.invalid/"+($number|tostring)),user:{login:"alice"}}' >"$batch/issue-$issue.json"
+done
+printf alpha >"$batch/body-301"; printf beta >"$batch/body-302"; printf gamma >"$batch/body-303"
+for spec in '31 301' '31 302' '32 303'; do
+  set -- $spec
+  jq -ncS --argjson issue "$1" --arg cid "$2" '{issue:$issue,cid:$cid,disposition:"human",author:"alice",url:"https://example.invalid/comment",created:"2026-01-01T00:00:00Z",updated:"2026-01-01T00:00:00Z"}' >>"$batch/staged"
+done
+: >"$batch/counters"
+(cd "$tmp/work" && \
+  _xrepo_ensure_issue_epic() { [ "$1" = 31 ] && printf '%s\n' "$batch_root_31" || printf '%s\n' "$batch_root_32"; } && \
+  taskdag_consumer_prepare() { printf 'prepare\n' >>"$batch/counters"; TASKDAG_CONSUMER_READY=true; TASKDAG_CHILD_MAP_REFS=$(git for-each-ref --format='%(objectname) %(refname)' refs/heads/tasks/pending/ refs/heads/gh/issues/); } && \
+  _xrepo_watchdog_fence() { printf 'fence\n' >>"$batch/counters"; } && \
+  taskdag_consumer_fenced_scheduling_push() { printf 'push\n' >>"$batch/counters"; cat >"$batch/payload" <<<"$3"; } && \
+  _xrepo_reconcile_apply_batch "$batch" acme/widgets "$batch/staged" "$batch/applied" "$batch/result")
+assert_fixture "$([ "$(grep -c '^prepare$' "$batch/counters")" -eq 1 ] && echo true || echo false)" "three-comment batch must prepare exactly once"
+assert_fixture "$([ "$(grep -c '^push$' "$batch/counters")" -eq 1 ] && echo true || echo false)" "three-comment batch must fenced-push exactly once"
+assert_fixture "$([ "$(grep -c '^fence$' "$batch/counters")" -eq 1 ] && echo true || echo false)" "three-comment batch must check the watchdog fence exactly once"
+jq -e 'length==6 and all(.[];.old=="") and ([.[].ref]|sort==. and length==(unique|length))' "$batch/payload" >/dev/null \
+  || assert_fixture false "batch update payload must be sorted, unique, and create-only"
+assert_fixture "$([ "$(cat "$batch/applied")" -eq 3 ] && echo true || echo false)" "three-comment batch applied count must equal three"
+assert_fixture "$([ "$(jq -r '[.[].new]|unique|length' "$batch/payload")" -eq 6 ] && echo true || echo false)" "three comments must create three unique receipts and three unique effects"
+
+# Prepared child-map state, rather than a changed post-prepare observation,
+# governs acceptance. A mismatching prepared root fails before fence/push.
+batch_bad="$tmp/batch-prepared-mismatch"; cp -a "$batch" "$batch_bad"; rm -f "$batch_bad/applied" "$batch_bad/result"
+(cd "$tmp/work" && \
+  _xrepo_ensure_issue_epic() { [ "$1" = 31 ] && printf '%s\n' "$batch_root_31" || printf '%s\n' "$batch_root_32"; } && \
+  taskdag_consumer_prepare() { TASKDAG_CONSUMER_READY=true; TASKDAG_CHILD_MAP_REFS="$clarification refs/heads/tasks/pending/31"; } && \
+  _xrepo_watchdog_fence() { assert_fixture false "prepared child-map mismatch must fail before watchdog fence"; } && \
+  taskdag_consumer_fenced_scheduling_push() { assert_fixture false "prepared child-map mismatch must fail before push"; } && \
+  ! _xrepo_reconcile_apply_batch "$batch_bad" acme/widgets "$batch_bad/staged" "$batch_bad/applied" "$batch_bad/result")
+assert_fixture "$([ ! -s "$batch_bad/applied" ] && echo true || echo false)" "prepared child-map mismatch must apply zero comments"
 
 unsupported=$(printf '%s\n' 'kind: message' 'role: human' 'intent: unsupported' '' \
   'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 97' \

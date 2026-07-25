@@ -55,6 +55,7 @@ _xrepo_watchdog_token_valid_for() { # token-file max-seconds
 }
 
 _XREPO_RECONCILE_INDEX_REF=refs/heads/tasks/v1/reconcile-comments-index
+_XREPO_RECONCILE_INDEX_CACHE_REF=refs/taskdag/cache/reconcile-comments-index
 _XREPO_RECONCILE_INDEX_CONTRACT=1
 
 _xrepo_reconcile_checkpoint_store_safe() {
@@ -130,7 +131,7 @@ _xrepo_reconcile_index_read_one() { # commit output-directory expected-repositor
           (.value.close|test("^[0-9a-f]{40}$")) and (.value.root|test("^[0-9a-f]{40}$"))))
     ' "$out/peers.json" >/dev/null || return 2
     LC_ALL=C awk -F '\t' 'BEGIN{p=""} NF!=2 || $1!~/^[0-9a-f]{40}$/ || $2!~/^refs\/heads\/gh\/comments\/[1-9][0-9]*\/([1-9][0-9]*|manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$/ && $2!~/^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ || (p!="" && $2<=p){exit 1} {p=$2}' "$out/manifest.tsv" || return 2
-    awk 'NF!=1 || $0 !~ /^[1-9][0-9]*$/ || seen[$0]++ {exit 1}' "$out/queue.tsv" || return 2
+    awk 'NF!=1 || $0 !~ /^[1-9][0-9]*$/ || $0>2147483647 || seen[$0]++ {exit 1}' "$out/queue.tsv" || return 2
 }
 
 _xrepo_reconcile_index_validate_activation() { # expanded-index-directory activation-token
@@ -139,7 +140,7 @@ _xrepo_reconcile_index_validate_activation() { # expanded-index-directory activa
     taskdag_activation_validate_provenance "$(jq -r .authorityTip <<<"$token")" "$provenance" || return 2
     floor=$(jq -r .activation.minimumCompatibleTaskDagCommit "$dir/metadata.json")
     runtime=$(_taskdag_activation_runtime_commit) || return 2
-    git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor "$floor" "$runtime" || return 2
+    env -u GIT_DIR git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor "$floor" "$runtime" || return 2
 }
 
 _xrepo_first_parent_is_ancestor() { # worktree old-tip new-tip
@@ -177,29 +178,32 @@ _xrepo_reconcile_index_validate_successor() { # current-dir parent-dir scratch-p
     ' "$parent/proofs.json" >/dev/null || return 2
 }
 
+_xrepo_reconcile_index_validate_generation() { # commit output-directory repository [activation-token]
+    local commit=$1 out=$2 repo=$3 token=${4:-}
+    _xrepo_reconcile_index_read_one "$commit" "$out" "$repo" || return 2
+    awk -F '\t' '$2 ~ /^refs\/heads\/tasks\/delegated\// {print $2 "\t" $1}' "$out/manifest.tsv" >"$out/manifest-delegations"
+    jq -r '.delegations|to_entries[]|[.key,.value.oid]|@tsv' "$out/proofs.json" | LC_ALL=C sort >"$out/proof-delegations"
+    cmp -s "$out/manifest-delegations" "$out/proof-delegations" || return 2
+    [ -z "$token" ] || _xrepo_reconcile_index_validate_activation "$out" "$token"
+}
+
 _xrepo_reconcile_index_read() { # tip output-directory expected-repository [activation-token] [strict]
     local tip=$1 out=$2 repo=$3 token=${4:-} strict=${5:-false} authority=${6:-} parent dir generation
     rm -rf "$out"; mkdir -p "$out" || return 2
-    dir="$out/current"; _xrepo_reconcile_index_read_one "$tip" "$dir" "$repo" || return 2
+    dir="$out/current"; _xrepo_reconcile_index_validate_generation "$tip" "$dir" "$repo" "$token" || return 2
     generation=$(jq -r .generation "$dir/metadata.json")
-    if [ -n "$token" ]; then
-        _xrepo_reconcile_index_validate_activation "$dir" "$token" || return 2
-    fi
     parent=$(git rev-list --parents -n1 "$tip" | awk '{print $2}')
     if [ -z "$parent" ]; then [ "$generation" -eq 0 ] || return 2
     else
-        _xrepo_reconcile_index_read_one "$parent" "$out/parent" "$repo" || return 2
+        _xrepo_reconcile_index_validate_generation "$parent" "$out/parent" "$repo" "$token" || return 2
         _xrepo_reconcile_index_validate_successor "$dir" "$out/parent" "$out/current-parent" || return 2
     fi
-    awk -F '\t' '$2 ~ /^refs\/heads\/tasks\/delegated\// {print $2 "\t" $1}' "$dir/manifest.tsv" >"$out/manifest-delegations"
-    jq -r '.delegations|to_entries[]|[.key,.value.oid]|@tsv' "$dir/proofs.json" | LC_ALL=C sort >"$out/proof-delegations"
-    cmp -s "$out/manifest-delegations" "$out/proof-delegations" || return 2
     cp "$dir/manifest.tsv" "$out/manifest.tsv"; cp "$dir/metadata.json" "$out/metadata.json"
     cp "$dir/peers.json" "$out/peers.json"; cp "$dir/proofs.json" "$out/proofs.json"; cp "$dir/queue.tsv" "$out/queue.tsv"
     if [ "$strict" = true ]; then
         local commit=$parent expected=$((generation-1)) child_dir="$dir" historical_dir
         while [ -n "$commit" ]; do
-            historical_dir="$out/strict-$commit"; _xrepo_reconcile_index_read_one "$commit" "$historical_dir" "$repo" || return 2
+            historical_dir="$out/strict-$commit"; _xrepo_reconcile_index_validate_generation "$commit" "$historical_dir" "$repo" "$token" || return 2
             [ "$(jq -r .generation "$historical_dir/metadata.json")" -eq "$expected" ] || return 2
             _xrepo_reconcile_index_validate_successor "$child_dir" "$historical_dir" "$out/strict-pair-$expected" || return 2
             if [ -n "$authority" ]; then
@@ -211,6 +215,70 @@ _xrepo_reconcile_index_read() { # tip output-directory expected-repository [acti
         done
         [ "$expected" -eq -1 ] || return 2
     fi
+}
+
+# Validate only successors of an already authority-reconstructed boundary.
+_xrepo_reconcile_index_validate_cached() { # tip cache-tip output-dir repository activation-token
+    local tip=$1 cache=$2 out=$3 repo=$4 token=$5 commit prior_dir current_dir commits="$out/delta-commits"
+    [ -n "$cache" ] && _xrepo_reconcile_index_validate_generation "$cache" "$out/cache" "$repo" "$token" || return 2
+    _xrepo_first_parent_is_ancestor . "$cache" "$tip" || return 2
+    git rev-list --first-parent --reverse "${cache}..${tip}" >"$commits" || return 2
+    prior_dir="$out/cache"
+    while IFS= read -r commit; do
+        [ -n "$commit" ] || continue
+        current_dir="$out/delta-$commit"
+        _xrepo_reconcile_index_validate_generation "$commit" "$current_dir" "$repo" "$token" || return 2
+        _xrepo_reconcile_index_validate_successor "$current_dir" "$prior_dir" "$out/pair-$commit" || return 2
+        [ -z "${TASKDAG_VALIDATION_WORK_COUNTER:-}" ] \
+            || printf 'checkpoint-delta\t%s\n' "$commit" >>"$TASKDAG_VALIDATION_WORK_COUNTER"
+        prior_dir=$current_dir
+    done <"$commits"
+}
+
+# Rebuild the saved proof material from immutable authority. This is bounded by
+# the advertised fact and peer sets, never by checkpoint generation count.
+_xrepo_reconcile_index_bootstrap_authority() { # index-dir manifest snapshot-git repo output-queue
+    local index=$1 manifest=$2 snapshot=$3 repo=$4 queue=$5 sha ref issue proof rebuilt peer saved entry wt current
+    printf '%s\n' '{"delegations":{},"version":1}' >"$index/rebuilt-proofs.json"
+    while IFS=$'\t' read -r sha ref; do
+        case "$ref" in
+            refs/heads/tasks/delegated/*)
+                IFS=/ read -r _ _ _ _ issue owner name peer_issue <<<"$ref"
+                proof=$(GIT_DIR="$snapshot" _xrepo_normalize_delegation "$sha" "$ref" "$repo" "$issue" "$owner/$name" "$peer_issue") || return 2
+                jq --arg ref "$ref" --argjson proof "$proof" '.delegations[$ref]=$proof' "$index/rebuilt-proofs.json" >"$index/rebuilt-proofs.next" || return 2
+                mv "$index/rebuilt-proofs.next" "$index/rebuilt-proofs.json"
+                printf '%s\n' "$issue" >>"$queue"
+                ;;
+            refs/heads/gh/comments/*)
+                [[ "$ref" =~ ^refs/heads/gh/comments/([1-9][0-9]*)/ ]] && printf '%s\n' "${BASH_REMATCH[1]}" >>"$queue"
+                ;;
+            refs/heads/tasks/completions/*)
+                [[ "$ref" =~ ^refs/heads/tasks/completions/([1-9][0-9]*)/ ]] && printf '%s\n' "${BASH_REMATCH[1]}" >>"$queue"
+                ;;
+            refs/heads/tasks/delegated-close/*)
+                [[ "$ref" =~ ^refs/heads/tasks/delegated-close/v1/([1-9][0-9]*)/ ]] && printf '%s\n' "${BASH_REMATCH[1]}" >>"$queue"
+                ;;
+        esac
+    done <"$manifest"
+    jq -cS . "$index/rebuilt-proofs.json" >"$index/rebuilt-proofs.canonical" || return 2
+    jq -cS . "$index/proofs.json" >"$index/proofs.canonical" || return 2
+    cmp -s "$index/rebuilt-proofs.canonical" "$index/proofs.canonical" || return 2
+
+    printf '%s\n' '{"peers":{},"version":1}' >"$index/rebuilt-peers.json"
+    while IFS= read -r peer; do
+        saved=$(jq -c --arg peer "$peer" '.peers[$peer]' "$index/peers.json") || return 2
+        wt=$(taskdag_peer_worktree_for "$peer") || return 2
+        env -u GIT_DIR git -C "$wt" fetch -q --no-tags origin '+refs/heads/master:refs/remotes/origin/master' || return 2
+        current=$(env -u GIT_DIR git -C "$wt" rev-parse refs/remotes/origin/master^{commit}) || return 2
+        _xrepo_first_parent_is_ancestor "$wt" "$(jq -r .tip <<<"$saved")" "$current" || return 2
+        entry=$(mktemp) || return 2
+        _xrepo_index_peer_delta "$peer" "" "$entry" "$(jq -r .tip <<<"$saved")" true || { rm -f "$entry"; return 2; }
+        jq --arg peer "$peer" --slurpfile entry "$entry" '.peers[$peer]=$entry[0]' "$index/rebuilt-peers.json" >"$index/rebuilt-peers.next" || { rm -f "$entry"; return 2; }
+        mv "$index/rebuilt-peers.next" "$index/rebuilt-peers.json"; rm -f "$entry"
+    done < <(jq -r '.delegations[].peerRepo' "$index/proofs.json" | LC_ALL=C sort -u)
+    jq -cS . "$index/rebuilt-peers.json" >"$index/rebuilt-peers.canonical" || return 2
+    jq -cS . "$index/peers.json" >"$index/peers.canonical" || return 2
+    cmp -s "$index/rebuilt-peers.canonical" "$index/peers.canonical"
 }
 
 _xrepo_reconcile_index_commit() { # predecessor manifest queue token-file repository activation-token proofs peers
@@ -228,7 +296,10 @@ _xrepo_reconcile_index_commit() { # predecessor manifest queue token-file reposi
       || { rm -rf "$tmp"; return 2; }
     jq -e '.lease.holder|type=="string"' <<<"$token" >/dev/null \
       && jq -e '.lease.fence|type=="number"' <<<"$token" >/dev/null || { rm -rf "$tmp"; return 2; }
-    cp "$manifest" "$tmp/manifest.tsv"; awk '!seen[$0]++' "$queue" >"$tmp/queue.tsv"; printf '%s\n' "$metadata" >"$tmp/metadata.json"
+    cp "$manifest" "$tmp/manifest.tsv"; awk '!seen[$0]++' "$queue" >"$tmp/queue.tsv"
+    awk 'NF!=1 || $0 !~ /^[1-9][0-9]*$/ || $0>2147483647 || seen[$0]++ {exit 1}' "$tmp/queue.tsv" \
+        || { rm -rf "$tmp"; return 2; }
+    printf '%s\n' "$metadata" >"$tmp/metadata.json"
     jq -cS . "$proofs" >"$tmp/proofs.json" || { rm -rf "$tmp"; return 2; }
     jq -cS . "$peers" >"$tmp/peers.json" || { rm -rf "$tmp"; return 2; }
     rm -f "$index"
@@ -1178,13 +1249,15 @@ _xrepo_resolve_peer_close() { # peer-worktree peer-tip issue
     printf '%s\t%s\n' "$close" "$identity"
 }
 
-_xrepo_index_peer_delta() { # peer-repo old-entry-json output-entry-file
-    local peer=$1 old=${2:-} out=$3 wt tip old_tip range log candidate parents first root extra tree first_tree trailer issue
+_xrepo_index_peer_delta() { # peer-repo old-entry-json output-entry-file [target-tip] [already-fetched]
+    local peer=$1 old=${2:-} out=$3 target=${4:-} fetched=${5:-false} wt tip old_tip range log candidate parents first root extra tree first_tree trailer issue
     local candidates identity rc roots close
     [ -n "$old" ] || old='{}'
     wt=$(taskdag_peer_worktree_for "$peer") || return 2
-    env -u GIT_DIR git -C "$wt" fetch -q --no-tags origin '+refs/heads/master:refs/remotes/origin/master' || return 2
-    tip=$(env -u GIT_DIR git -C "$wt" rev-parse refs/remotes/origin/master^{commit}) || return 2
+    [ "$fetched" = true ] || env -u GIT_DIR git -C "$wt" fetch -q --no-tags origin '+refs/heads/master:refs/remotes/origin/master' || return 2
+    if [ -n "$target" ]; then tip=$target
+    else tip=$(env -u GIT_DIR git -C "$wt" rev-parse refs/remotes/origin/master^{commit}) || return 2
+    fi
     old_tip=$(jq -r '.tip // empty' <<<"$old")
     if [ -n "$old_tip" ] && [ "$tip" = "$old_tip" ]; then printf '%s\n' "$old" >"$out"; return 0; fi
     if [ -n "$old_tip" ]; then
@@ -2134,6 +2207,83 @@ _xrepo_reconcile_argument_failure() {
          recent_success_at:null,complete_success_at:null}'
 }
 
+_xrepo_reconcile_apply_batch() { # staging-dir repository staged-jsonl applied-count-file result-file
+    local stage=$1 repo=$2 staged=$3 applied_out=$4 result_out=$5
+    local roots="$stage/batch-roots" objects="$stage/batch-objects" updates_file="$stage/batch-updates"
+    local issue root refs pending issue_ref pending_oid issue_oid item cid disposition body hash effect="" effect_ref="" receipt msgf nonce short
+    : >"$roots"; : >"$objects"; : >"$updates_file"
+    [ -s "$staged" ] || return 0
+
+    # Root creation is deliberately outside the comment transaction. Resolve
+    # each distinct human issue once, so a batch never creates a root and its
+    # children in the same scheduling push.
+    while IFS= read -r issue; do
+        root=$(ISSUE_TITLE="$(jq -r .title "$stage/issue-${issue}.json")" \
+            ISSUE_AUTHOR="$(jq -r .user.login "$stage/issue-${issue}.json")" \
+            ISSUE_URL="$(jq -r .html_url "$stage/issue-${issue}.json")" \
+            ISSUE_BODY="$(jq -r '.body // ""' "$stage/issue-${issue}.json")" \
+            _xrepo_ensure_issue_epic "$issue") || return 2
+        refs=$(git ls-remote --refs origin "refs/heads/gh/issues/$issue" "refs/heads/tasks/pending/$issue") || return 2
+        pending_oid=$(awk -v r="refs/heads/tasks/pending/$issue" '$2==r{print $1}' <<<"$refs")
+        issue_oid=$(awk -v r="refs/heads/gh/issues/$issue" '$2==r{print $1}' <<<"$refs")
+        [ -n "$pending_oid$issue_oid" ] && { [ -z "$pending_oid" ] || [ "$pending_oid" = "$root" ]; } \
+            && { [ -z "$issue_oid" ] || [ "$issue_oid" = "$root" ]; } || return 2
+        printf '%s\t%s\t%s\t%s\n' "$issue" "$root" "$pending_oid" "$issue_oid" >>"$roots"
+    done < <(jq -r 'select(.disposition=="human")|.issue' "$staged" | LC_ALL=C sort -un)
+
+    # Author every effect first. Frontier abbreviations are derived only after
+    # the complete object set exists in the local object database.
+    while IFS= read -r item; do
+        issue=$(jq -r .issue <<<"$item"); cid=$(jq -r .cid <<<"$item")
+        disposition=$(jq -r .disposition <<<"$item"); body="$stage/body-$cid"
+        hash=$(sha256sum "$body" | awk '{print $1}'); effect=""
+        if [ "$disposition" = human ]; then
+            root=$(awk -F '\t' -v i="$issue" '$1==i{print $2}' "$roots")
+            [ -n "$root" ] || return 2
+            msgf="$stage/batch-message-$cid"
+            nonce=$(printf '%s:%s:%s\n' "$repo" "$issue" "$cid" | git hash-object --stdin) || return 2
+            { printf 'kind: message\nrole: human\nintent: comment\n\nissue:\n  number: %s\n\ngithub:\n  comment_id: %s\n  actor: %s\n  url: %s\n\nmessage_id: msg_%s\n\nbody: |\n' \
+                  "$issue" "$cid" "$(jq -r .author <<<"$item")" "$(jq -r .url <<<"$item")" "$nonce"; sed 's/^/  /' "$body"; } >"$msgf"
+            effect=$(git commit-tree "$(_xrepo_empty_tree)" -p "$root" -F "$msgf") || return 2
+        fi
+        jq -ncS --argjson item "$item" --arg effect "$effect" --arg hash "$hash" \
+            '$item + {effect:$effect,hash:$hash}' >>"$objects" || return 2
+    done <"$staged"
+
+    while IFS= read -r item; do
+        issue=$(jq -r .issue <<<"$item"); cid=$(jq -r .cid <<<"$item"); disposition=$(jq -r .disposition <<<"$item")
+        effect=$(jq -r .effect <<<"$item"); effect_ref=""
+        if [ -n "$effect" ]; then short=$(git rev-parse --short "$effect") || return 2; effect_ref="refs/heads/tasks/frontier/$short"; fi
+        receipt=$(_xrepo_make_receipt "$repo" "$issue" "$cid" "$disposition" \
+            "$(jq -r .created <<<"$item")" "$(jq -r .updated <<<"$item")" "$(jq -r .hash <<<"$item")" "$effect" "$effect_ref") || return 2
+        _xrepo_validate_receipt "$receipt" "$repo" "$issue" "$cid" >/dev/null || return 2
+        jq -ncS --arg ref "refs/heads/gh/comments/$issue/$cid" --arg new "$receipt" '{ref:$ref,old:"",new:$new}' >>"$updates_file"
+        [ -z "$effect_ref" ] || jq -ncS --arg ref "$effect_ref" --arg new "$effect" '{ref:$ref,old:"",new:$new}' >>"$updates_file"
+    done <"$objects"
+    jq -sS 'sort_by(.ref) | if (group_by(.ref)|any(length>1)) then error("duplicate batch target") else . end' \
+        "$updates_file" >"$stage/batch-updates.json" || return 2
+
+    taskdag_consumer_prepare reconcile-comments-batch || return 2
+    [ "$TASKDAG_CONSUMER_READY" = true ] || return 2
+    while IFS=$'\t' read -r issue root pending_oid issue_oid; do
+        pending=$(awk -v r="refs/heads/tasks/pending/$issue" '$2==r{print $1}' <<<"$TASKDAG_CHILD_MAP_REFS")
+        issue_ref=$(awk -v r="refs/heads/gh/issues/$issue" '$2==r{print $1}' <<<"$TASKDAG_CHILD_MAP_REFS")
+        [ -n "$pending$issue_ref" ] && { [ -z "$pending" ] || [ "$pending" = "$root" ]; } \
+            && { [ -z "$issue_ref" ] || [ "$issue_ref" = "$root" ]; } || return 2
+        while IFS= read -r effect; do
+            [ "$(git rev-parse "$effect^")" = "$root" ] || return 2
+        done < <(jq -r --argjson issue "$issue" 'select(.issue==$issue and .effect!="")|.effect' "$objects")
+    done <"$roots"
+    _xrepo_watchdog_fence || return 2
+    taskdag_consumer_fenced_scheduling_push reconcile-comments-batch \
+        "${TASK_DAG_CLAIMER:-comment-reconciler}" "$(cat "$stage/batch-updates.json")" || return 2
+    wc -l <"$staged" >"$applied_out"
+    jq -ncS --argjson applied "$(cat "$applied_out")" '{applied:$applied}' >"$result_out" || return 2
+    { printf 'start\n'; jq -r '.[]|"update \(.ref) \(.new)"' "$stage/batch-updates.json"; printf 'commit\n'; } \
+        | git update-ref --stdin >/dev/null \
+        || _xrepo_log "warning: atomic comment batch is durable on origin, but the local mirror update failed; fetch the published refs before relying on local state"
+}
+
 _xrepo_reconcile_comments_impl() {
     local mode="" start="" since="" dry=false initialize=false max_apply=100 max_pages=100 max_comments=10000 max_seconds=300 watchdog_token=""
     local -a allows=()
@@ -2217,11 +2367,15 @@ EOF
     _rc_convergence_time() { [ $((deadline - $(date +%s))) -ge "$convergence_reserve" ]; }
     # One authoritative namespace advertisement. It is also the proof used by
     # the private no-initial-probe ingestion mode.
-    local index_old index_dir="$tmp/index" activation_tip activation_binding
+    local index_old index_dir="$tmp/index" activation_tip activation_binding cache_raw="" cache_old="" cache_bootstrap=false
     taskdag_consumer_prepare reconcile-comments-index || { _rc_fail snapshot "" "" "cannot prepare activation-fenced index consumer"; fatal=true; }
     activation_binding=$(taskdag_activation_snapshot_token) || { _rc_fail snapshot "" "" "semantic activation is required for reconciliation indexing"; fatal=true; activation_binding=null; }
     activation_tip=$(jq -r '.authorityTip // empty' <<<"$activation_binding")
     index_old=$(_xrepo_remote_sha "$_XREPO_RECONCILE_INDEX_REF") || snapshot_rc=$?
+    cache_raw=$(git rev-parse -q --verify "$_XREPO_RECONCILE_INDEX_CACHE_REF" 2>/dev/null || true)
+    if [ -n "$cache_raw" ]; then
+        cache_old=$(git rev-parse -q --verify "${cache_raw}^{commit}" 2>/dev/null || true)
+    fi
     [ "$snapshot_rc" -ne 3 ] || { _rc_fail snapshot "" "" "cannot read reconciliation index"; fatal=true; }
     if [ "$initialize" = true ] && [ -n "$index_old" ]; then _rc_fail snapshot "" "" "reconciliation index already exists"; fatal=true; fi
     if [ "$initialize" = false ] && [ -z "$index_old" ]; then
@@ -2249,9 +2403,19 @@ EOF
             fi
         fi
         if [ "$fatal" = false ]; then
-            _xrepo_reconcile_index_read "$index_old" "$index_dir" "$repo" "" \
-                && _xrepo_reconcile_index_validate_activation "$index_dir" "$activation_binding" \
+            _xrepo_reconcile_index_read "$index_old" "$index_dir" "$repo" "$activation_binding" \
                 || { _rc_fail snapshot "" "" "reconciliation index current/direct-parent structure or activation binding is invalid"; fatal=true; }
+            if [ "$fatal" = false ] && [ -n "$cache_old" ]; then
+                _xrepo_reconcile_index_validate_cached "$index_old" "$cache_old" "$tmp/cache-validation" "$repo" "$activation_binding" \
+                    || { _rc_fail snapshot "" "" "cached checkpoint boundary diverged or has an invalid successor"; fatal=true; }
+            elif [ "$fatal" = false ]; then cache_bootstrap=true
+            fi
+        fi
+        if [ "$fatal" = false ]; then
+            local index_confirm
+            index_confirm=$(_xrepo_remote_sha "$_XREPO_RECONCILE_INDEX_REF") || { _rc_fail snapshot "" "" "cannot re-advertise validated reconciliation index"; fatal=true; }
+            [ "$fatal" = true ] || [ "$index_confirm" = "$index_old" ] \
+                || { _rc_fail snapshot "" "" "reconciliation index changed during validation"; fatal=true; }
         fi
     fi
     listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 2>"$tmp/git.err") || snapshot_rc=$?
@@ -2288,14 +2452,20 @@ EOF
         else _rc_fail snapshot "" "" "cannot initialize isolated snapshot"; fatal=true
         fi
     fi
-    if [ "$fatal" = false ] && [ -s "$tmp/additions" ]; then
+    local snapshot_fetch_manifest="$tmp/additions"
+    [ "$cache_bootstrap" = false ] || snapshot_fetch_manifest="$tmp/manifest"
+    if [ "$fatal" = false ] && [ -s "$snapshot_fetch_manifest" ]; then
         snapshot_rc=0
         local -a snapshot_refspecs=(); local addition_sha addition_ref addition_n=0
         while IFS=$'\t' read -r addition_sha addition_ref; do
             addition_n=$((addition_n+1)); printf -v addition_ref '%09d' "$addition_n"
             snapshot_refspecs+=("+${addition_sha}:refs/staging/additions/${addition_ref}")
-        done <"$tmp/additions"
-        timeout "${max_seconds}s" git --git-dir="$tmp/snapshot.git" fetch -q --no-tags origin "${snapshot_refspecs[@]}" || snapshot_rc=$?
+        done <"$snapshot_fetch_manifest"
+        local offset
+        for ((offset=0; offset<${#snapshot_refspecs[@]}; offset+=128)); do
+            timeout "${max_seconds}s" git --git-dir="$tmp/snapshot.git" fetch -q --no-tags origin "${snapshot_refspecs[@]:offset:128}" \
+                || { snapshot_rc=$?; break; }
+        done
         if [ "$snapshot_rc" -ne 0 ]; then
             [ "$snapshot_rc" -eq 124 ] && { terminal_rc=124; _rc_fail snapshot "" "" "time ceiling reached"; } \
                 || _rc_fail snapshot "" "" "isolated snapshot fetch failed"
@@ -2305,17 +2475,40 @@ EOF
     if [ "$fatal" = false ]; then
     snapshot_rc=0
     git --git-dir="$tmp/snapshot.git" for-each-ref --format='%(objectname)' refs/staging/additions \
-        | paste - <(cut -f2 "$tmp/additions") >"$tmp/fetched" || snapshot_rc=$?
+        | paste - <(cut -f2 "$snapshot_fetch_manifest") >"$tmp/fetched" || snapshot_rc=$?
     if [ "$snapshot_rc" -ne 0 ]; then
         if [ "$snapshot_rc" -eq 124 ] || ! _rc_time; then _rc_timeout snapshot "" ""
         else _rc_fail snapshot "" "" "snapshot readback failed"; fatal=true
         fi
-    elif ! cmp -s "$tmp/additions" "$tmp/fetched"; then
+    elif ! cmp -s "$snapshot_fetch_manifest" "$tmp/fetched"; then
         if ! _rc_time; then _rc_timeout snapshot "" ""
         else _rc_fail snapshot "" "" "snapshot changed during fetch"; fatal=true
         fi
     fi
+    if [ "$fatal" = false ] && [ "$cache_bootstrap" = true ]; then
+        : >"$tmp/bootstrap-required-issues"
+        _xrepo_reconcile_index_bootstrap_authority "$index_dir" "$index_dir/manifest.tsv" "$tmp/snapshot.git" "$repo" "$tmp/bootstrap-required-issues" \
+            || { _rc_fail snapshot "" "" "checkpoint proofs or peer witnesses disagree with immutable authority"; fatal=true; }
+        [ -z "${TASKDAG_VALIDATION_WORK_COUNTER:-}" ] || printf 'checkpoint-bootstrap\tauthority\n' >>"$TASKDAG_VALIDATION_WORK_COUNTER"
+        if [ "$fatal" = false ]; then
+            local bootstrap_listing
+            bootstrap_listing=$(git ls-remote --refs origin "$_XREPO_RECONCILE_INDEX_REF" 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*') \
+                || { _rc_fail snapshot "" "" "cannot re-advertise bounded checkpoint authority"; fatal=true; }
+            [ "$fatal" = true ] || [ "$(awk -v r="$_XREPO_RECONCILE_INDEX_REF" '$2==r{print $1}' <<<"$bootstrap_listing")" = "$index_old" ] \
+                || { _rc_fail snapshot "" "" "reconciliation index changed during bounded bootstrap"; fatal=true; }
+            if [ "$fatal" = false ]; then
+                _xrepo_write_sorted_listing "$(awk '$2!="'"$_XREPO_RECONCILE_INDEX_REF"'"' <<<"$bootstrap_listing")" "$tmp/bootstrap-manifest"
+                LC_ALL=C sort -t $'\t' -k2,2 "$tmp/bootstrap-manifest" -o "$tmp/bootstrap-manifest"
+                LC_ALL=C join -t $'\t' -j 2 -o 1.1,1.2,2.1 "$index_dir/manifest.tsv" "$tmp/bootstrap-manifest" >"$tmp/bootstrap-joined" || true
+                [ "$(wc -l <"$tmp/bootstrap-joined")" -eq "$(wc -l <"$index_dir/manifest.tsv")" ] && awk -F '\t' '$1==$3{next}{exit 1}' "$tmp/bootstrap-joined" \
+                    || { _rc_fail snapshot "" "" "checkpoint-covered authority changed during bootstrap"; fatal=true; }
+            fi
+            [ "$fatal" = true ] || cat "$tmp/bootstrap-required-issues" >>"$tmp/converge-issues"
+        fi
+    fi
     if [ "$fatal" = false ]; then
+    local validation_manifest="$tmp/additions"
+    [ "$cache_bootstrap" = false ] || validation_manifest="$tmp/manifest"
     local parsed_receipt_dir="$tmp/parsed-receipt"; mkdir -p "$parsed_receipt_dir"
     while IFS=$'\t' read -r sha ref; do
         if [[ "$ref" =~ ^refs/heads/tasks/delegated/([1-9][0-9]*)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/([1-9][0-9]*)$ ]]; then
@@ -2326,7 +2519,7 @@ EOF
                 && mv "$tmp/proofs.next" "$tmp/proofs.json" || { _rc_fail snapshot "$delegated_issue" "" "cannot store delegation proof"; fatal=true; break; }
             printf '%s\n' "$delegated_issue" >>"$tmp/converge-issues"
         fi
-    done <"$tmp/additions"
+    done <"$validation_manifest"
     # Delegation proofs determine the peer set. Advance each peer cursor once
     # before validating dependent close facts, so indexed operation never
     # falls back to a tip-to-genesis first-parent scan.
@@ -2344,7 +2537,7 @@ EOF
             elif [[ "$receipt_info" = completion* || "$receipt_info" = legacy-completion* ]]; then
                 printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"
             fi
-            if [ "$fatal" = false ] && [ -z "$index_old" ]; then printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"; fi
+            if [ "$fatal" = false ] && { [ -z "$index_old" ] || [ "$cache_bootstrap" = true ]; }; then printf '%s\n' "$receipt_issue" >>"$tmp/converge-issues"; fi
         elif [[ "$ref" =~ ^refs/heads/gh/comments/([1-9][0-9]*)/(manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$ ]]; then
             local legacy_issue="${BASH_REMATCH[1]}" legacy_id="${BASH_REMATCH[2]}" legacy_info
             rm -f "$parsed_receipt_dir/message" "$parsed_receipt_dir/subject" "$parsed_receipt_dir/trailers"
@@ -2387,7 +2580,7 @@ EOF
                 || { if ! _rc_time; then _rc_timeout snapshot "$fact_issue" ""; break; fi; _rc_fail snapshot "$fact_issue" "" "malformed completion fact"; fatal=true; }
             printf '%s\n' "$fact_issue" >>"$tmp/converge-issues"
         fi
-    done <"$tmp/additions"
+    done <"$validation_manifest"
     fi
     fi
     fi
@@ -2412,6 +2605,8 @@ EOF
         if [ "$fatal" = false ]; then
             _xrepo_watchdog_fence || { _rc_fail index "" "" "watchdog lease lost before index CAS"; fatal=true; }
             index_new=$(_xrepo_reconcile_index_commit "$index_old" "$tmp/manifest" "$tmp/converge-issues" "$watchdog_token" "$repo" "$activation_binding" "$tmp/proofs.json" "$tmp/peers.json") || { _rc_fail index "" "" "cannot construct reconciliation index"; fatal=true; }
+            [ "$fatal" = true ] || _xrepo_reconcile_index_read "$index_new" "$tmp/pre-push-index" "$repo" "$activation_binding" \
+                || { _rc_fail index "" "" "candidate reconciliation index is invalid"; fatal=true; }
         fi
         if [ "$fatal" = false ]; then
             local index_updates
@@ -2624,6 +2819,7 @@ EOF
     jq -sc 'map(select((.id|type)=="number" and (.issue_url|type)=="string" and (.created_at|type)=="string" and (.updated_at|type)=="string" and (.body|type)=="string")) | group_by(.id) | map(. as $g | (min_by([.updated_at,tojson])) + (if any($g[]; has("__allow_issue")) then {__allow_issue:($g|map(select(has("__allow_issue"))|.__allow_issue)|first)} else {} end)) | sort_by(.updated_at,.id) | .[]' "$tmp/all" >"$tmp/sorted" 2>/dev/null || { _rc_fail validate "" "" "invalid comment objects"; fatal=true; }
     unique=$(wc -l <"$tmp/sorted")
     declare -A issue_pr=()
+    : >"$tmp/staged-comments"
     while IFS= read -r item; do
         _rc_time || { _rc_timeout ceiling "" ""; break; }
         cid=$(jq -r '.id|tostring' <<<"$item"); iu=$(jq -r .issue_url <<<"$item"); issue=${iu##*/}
@@ -2671,22 +2867,22 @@ EOF
         if [ "$dry" = true ]; then deferred=$((deferred+1)); continue; fi
         if [ "$attempted" -ge "$max_apply" ]; then deferred=$((deferred+1)); continue; fi
         attempted=$((attempted+1)); ca=$(jq -r .created_at <<<"$item"); ua=$(jq -r .updated_at <<<"$item"); author=$(jq -r '.user.login // "unknown"' <<<"$item"); url=$(jq -r .html_url <<<"$item")
-        local ingest_rc=0
-        ISSUE_TITLE="$(jq -r .title "$tmp/issue-${issue}.json")" \
-            ISSUE_AUTHOR="$(jq -r .user.login "$tmp/issue-${issue}.json")" \
-            ISSUE_URL="$(jq -r .html_url "$tmp/issue-${issue}.json")" \
-            ISSUE_BODY="$(jq -r '.body // ""' "$tmp/issue-${issue}.json")" \
-            _XREPO_SNAPSHOT_ABSENT=true _XREPO_DEFER_CONVERGENCE=true \
-            _xrepo_ingest_observed_comment "$issue" "$cid" "$ca" "$ua" "$author" "$url" "$bodyf" "$classified" \
-            || ingest_rc=$?
-        if [ "$ingest_rc" -eq 0 ]; then
-            applied=$((applied+1))
-        elif [ "$ingest_rc" -eq 124 ] || ! _rc_time; then
-            _rc_timeout ingest "$issue" "$cid"; break
-        else
-            _rc_fail ingest "$issue" "$cid" "atomic ingestion failed"
-        fi
+        jq -ncS --argjson issue "$issue" --argjson cid "$cid" --arg disposition "${classified%%$'\x1f'*}" \
+            --arg created "$ca" --arg updated "$ua" --arg author "$author" --arg url "$url" \
+            '{issue:$issue,cid:$cid,disposition:$disposition,created:$created,updated:$updated,author:$author,url:$url}' \
+            >>"$tmp/staged-comments"
     done <"$tmp/sorted"
+    if [ "$fatal" = false ] && [ "$dry" = false ] && [ -s "$tmp/staged-comments" ]; then
+        local batch_rc=0
+        : >"$tmp/batch-applied"
+        _xrepo_reconcile_apply_batch "$tmp" "$repo" "$tmp/staged-comments" "$tmp/batch-applied" "$tmp/batch-result.json" || batch_rc=$?
+        [ "$batch_rc" -ne 0 ] || applied=$((applied + $(cat "$tmp/batch-applied")))
+        if [ "$batch_rc" -eq 124 ] || ! _rc_time; then
+            _rc_timeout ingest "" ""
+        elif [ "$batch_rc" -ne 0 ]; then
+            _rc_fail ingest "" "" "atomic comment batch failed"
+        fi
+    fi
     while IFS=: read -r issue cid; do
         [ -n "$issue" ] || continue
         if ! jq -e --argjson id "$cid" 'select(.id == $id)' "$tmp/sorted" >/dev/null 2>&1; then
@@ -2713,6 +2909,8 @@ EOF
         if [ "$fatal" = false ]; then
             _xrepo_watchdog_fence || { _rc_fail index "" "" "watchdog lease lost before acknowledgement"; fatal=true; }
             ack_new=$(_xrepo_reconcile_index_commit "$index_old" "$tmp/manifest" "$retry_queue" "$watchdog_token" "$repo" "$activation_binding" "$tmp/proofs.json" "$tmp/peers.json") || { _rc_fail index "" "" "cannot construct queue acknowledgement"; fatal=true; }
+            [ "$fatal" = true ] || _xrepo_reconcile_index_read "$ack_new" "$tmp/pre-push-ack" "$repo" "$activation_binding" \
+                || { _rc_fail index "" "" "candidate queue acknowledgement is invalid"; fatal=true; }
         fi
         if [ "$fatal" = false ]; then
             local ack_updates
@@ -2723,7 +2921,20 @@ EOF
             elif ! _xrepo_reconcile_index_read "$ack_new" "$tmp/final-index" "$repo" "$activation_binding"; then _rc_fail index "" "" "final queue acknowledgement is invalid"; fatal=true
             fi
             [ "$fatal" = true ] || [ ! -s "$tmp/final-index/queue.tsv" ] || { _rc_fail index "" "" "convergence queue remains non-empty"; fatal=true; }
+            [ "$fatal" = true ] || index_old=$ack_new
         fi
+    fi
+    # The private acceleration boundary is advanced only after the complete
+    # run, including effects, final advertisement, acknowledgement readback,
+    # and all semantic validation, has succeeded. It is never authority.
+    if [ "$fatal" = false ] && [ "$failures" -eq 0 ] && [ -n "$index_old" ]; then
+        local cache_expected=${cache_raw:-0000000000000000000000000000000000000000} cache_remote
+        cache_remote=$(_xrepo_remote_sha "$_XREPO_RECONCILE_INDEX_REF") \
+            || { _rc_fail snapshot "" "" "cannot confirm checkpoint before cache advancement"; fatal=true; }
+        [ "$fatal" = true ] || [ "$cache_remote" = "$index_old" ] \
+            || { _rc_fail snapshot "" "" "checkpoint advanced before cache publication"; fatal=true; }
+        [ "$fatal" = true ] || git update-ref "$_XREPO_RECONCILE_INDEX_CACHE_REF" "$index_old" "$cache_expected" \
+            || { _rc_fail snapshot "" "" "checkpoint cache raced after reconciliation"; fatal=true; }
     fi
     now=$(date +%s); local status=success exhausted=true
     if [ "$fatal" = true ] || [ "$failures" -gt 0 ]; then status=failed; exhausted=false
