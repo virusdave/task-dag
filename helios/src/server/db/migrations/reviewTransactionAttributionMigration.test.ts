@@ -11,10 +11,13 @@ describe('review transaction attribution migration', () => {
     expect(schema).toContain("invoice_match_status = 'matched' and matched_invoice_id is not null")
   })
 
-  it('has an idempotent forward include and a complete destructive down path', () => {
+  it('has a narrow idempotent forward migration and a complete destructive down path', () => {
     const forward = readFileSync(resolve('src/server/db/migrations/105_review_transaction_attribution.sql'), 'utf8')
     const down = readFileSync(resolve('src/server/db/migrations/105_review_transaction_attribution.down.sql'), 'utf8')
-    expect(forward).toContain('\\ir ../schema/customerReviews.sql')
+    expect(forward).not.toMatch(/\\i(?:r)?\s/)
+    expect(forward).toContain('alter table review_submissions')
+    expect(forward).toContain('add column if not exists invoice_match_status')
+    expect(forward).not.toContain('insert into site_review_settings')
     for (const column of ['invoice_match_status', 'matched_invoice_id', 'matched_cashier_user_id', 'matched_at']) {
       expect(down).toContain(`drop column if exists ${column}`)
     }

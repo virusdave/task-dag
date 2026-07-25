@@ -6,6 +6,7 @@ import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { queryBudtenderReviewCashiers } from '../budtenderAnalytics/budtenderAnalyticsQueries.js'
+import { getMigrationSentinel } from './pendingMigrations.js'
 import { insertReviewSubmissionAt, type InsertReviewSubmissionInput } from './queries/customerReviewsQueries.js'
 
 describe('review transaction attribution PostgreSQL integration', () => {
@@ -75,6 +76,24 @@ describe('review transaction attribution PostgreSQL integration', () => {
     execFileSync(psql, ['-v', 'ON_ERROR_STOP=1', '-f', forward], { env, stdio: 'ignore' })
     execFileSync(psql, ['-v', 'ON_ERROR_STOP=1', '-f', resolve('src/server/db/schema/customerReviewsLlmGate.sql')], { env, stdio: 'ignore' })
 
+    const sentinel = getMigrationSentinel('105_review_transaction_attribution')
+    expect(sentinel).not.toBeNull()
+    expect(await sentinel!.check(pool)).toBe(true)
+    await pool.query(`
+      alter table review_submissions
+        drop constraint review_submissions_invoice_match_status_check;
+      alter table review_submissions
+        add constraint review_submissions_invoice_match_status_check
+        check (invoice_match_status in ('not_attempted', 'matched'));
+    `)
+    expect(await sentinel!.check(pool)).toBe(false)
+    await pool.query(`
+      alter table review_submissions
+        drop constraint review_submissions_invoice_match_status_check;
+    `)
+    execFileSync(psql, ['-v', 'ON_ERROR_STOP=1', '-f', forward], { env, stdio: 'ignore' })
+    expect(await sentinel!.check(pool)).toBe(true)
+
     expect((await pool.query("select invoice_match_status, matched_invoice_id, matched_cashier_user_id, matched_at from review_submissions where id = $1", [legacyId])).rows[0]).toEqual({ invoice_match_status: 'not_attempted', matched_invoice_id: null, matched_cashier_user_id: null, matched_at: null })
     await pool.query(`
       create table staff_directory_cache (staff_id text primary key, full_name text);
@@ -132,6 +151,7 @@ describe('review transaction attribution PostgreSQL integration', () => {
 
     await expect(pool.query(`insert into review_submissions (dealer_id, raw_payload, invoice_match_status) values (210705, '{}', 'matched')`)).rejects.toMatchObject({ code: '23514' })
     execFileSync(psql, ['-v', 'ON_ERROR_STOP=1', '-f', down], { env, stdio: 'ignore' })
+    expect(await sentinel!.check(pool)).toBe(false)
     expect((await pool.query("select count(*)::int as n from information_schema.columns where table_name = 'review_submissions' and column_name = any($1::text[])", [['invoice_match_status', 'matched_invoice_id', 'matched_cashier_user_id', 'matched_at']])).rows[0]).toEqual({ n: 0 })
     expect((await pool.query("select count(*)::int as n from pg_constraint where conname = any($1::text[])", [['review_submissions_invoice_match_status_check', 'review_submissions_invoice_match_state_check']])).rows[0]).toEqual({ n: 0 })
   }, 20_000)
