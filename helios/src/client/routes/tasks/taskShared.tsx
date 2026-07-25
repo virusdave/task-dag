@@ -12,6 +12,7 @@ export interface TaskDagSourceStatus {
   repositories: Array<{
     repository: string
     available: boolean
+    mode: 'mirror' | 'local-checkout' | 'none'
     lastError: string | null
   }>
   mode: 'mirror' | 'local-checkout' | 'none'
@@ -254,6 +255,25 @@ export function TaskLocalNav() {
   )
 }
 
+const TASK_SOURCE_WARNING_STORAGE_KEY = 'helios.taskSourceWarning.dismissed.v1'
+
+function taskSourceSessionStorage(): Storage | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
+
+export function taskSourceWarningSignature(source: TaskDagSourceStatus | undefined): string | null {
+  if (!source || (source.coverage === 'complete' && source.lastError == null)) return null
+  return JSON.stringify(source.repositories
+    .filter((repository) => !repository.available || repository.lastError != null)
+    .map((repository) => [repository.repository, repository.available, repository.lastError])
+    .sort(([left], [right]) => String(left).localeCompare(String(right))))
+}
+
 export function SourceBanner({
   source,
   onRefresh,
@@ -263,26 +283,72 @@ export function SourceBanner({
   onRefresh?: () => void
   refreshing?: boolean
 }) {
-  if (!source || (source.coverage === 'complete' && source.lastError == null)) return null
-  const stale = source.lastError != null && source.available
-  const failed = source.repositories.filter((repository) => !repository.available)
+  const signature = taskSourceWarningSignature(source)
+  const [dismissedSignature, setDismissedSignature] = useState<string | null>(() => {
+    try {
+      return taskSourceSessionStorage()?.getItem(TASK_SOURCE_WARNING_STORAGE_KEY) ?? null
+    } catch {
+      return null
+    }
+  })
+  if (!source || signature == null || dismissedSignature === signature) return null
+  const degraded = source.repositories.filter(
+    (repository) => !repository.available || repository.lastError != null,
+  )
+  const omitted = degraded.filter((repository) => !repository.available).length
+
+  function dismissForTab(): void {
+    if (signature == null) return
+    try {
+      taskSourceSessionStorage()?.setItem(TASK_SOURCE_WARNING_STORAGE_KEY, signature)
+    } catch {
+      // React state still dismisses this mounted warning when storage is unavailable.
+    }
+    setDismissedSignature(signature)
+  }
+
   return (
-    <div className={`task-source-banner${stale ? ' task-source-banner--stale' : ''}`}>
-      <span>
-        {source.coverage === 'partial'
-          ? `Results are incomplete. Helios could not read: ${failed.map((repository) => repository.repository).join(', ')}.`
-          : stale
-          ? `Task data may be out of date. Last successful refresh ${formatAge(
-              source.lastSuccessAtMs,
-            )}.`
-          : 'Some task data is currently unavailable.'}
-      </span>
+    <section className="task-source-banner task-source-banner--stale" role="alert">
+      <div className="task-source-banner__header">
+        <strong>Task repository coverage warning</strong>
+        <button type="button" className="task-source-banner__dismiss" onClick={dismissForTab}>
+          Hide for this tab
+        </button>
+      </div>
+      <p>
+        {omitted > 0
+          ? `${omitted} ${omitted === 1 ? 'repository is' : 'repositories are'} omitted from these results.`
+          : `Task data may be stale. Last successful refresh ${formatAge(source.lastSuccessAtMs)}.`}
+      </p>
+      {degraded.length > 0 && (
+        <ul className="task-source-banner__repositories">
+          {degraded.map((repository) => (
+            <li key={repository.repository}>
+              <strong>{repository.repository}</strong>
+              <code>{repository.lastError ?? 'No usable task mirror is available; no additional error was reported.'}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      <details className="task-source-banner__help">
+        <summary>How to fix or report this</summary>
+        <p>
+          Check <code>HELIOS_TASK_DAG_REPOS_FILE</code> and <code>HELIOS_TASK_DAG_SSH_CONFIG</code>.
+          For local-checkout sources, also check <code>HELIOS_TASK_DAG_LOCAL_PATHS_FILE</code>;
+          for mirrors, check <code>HELIOS_TASK_DAG_MIRROR_ROOT</code>. After correcting the source,
+          wait for the server refresh cycle, then reload this page. If this is a regression, include
+          the repository name and technical detail above in a{' '}
+          <a href="https://github.com/FreshlyBakedNYC/automation/issues/new" target="_blank" rel="noreferrer">
+            Helios bug report
+          </a>.
+        </p>
+      </details>
       {onRefresh && (
         <button type="button" className="task-link-button" onClick={onRefresh} disabled={refreshing}>
           {refreshing ? 'Refreshing…' : 'Refresh data'}
         </button>
       )}
-    </div>
+    </section>
   )
 }
 

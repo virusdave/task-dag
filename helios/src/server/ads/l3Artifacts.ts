@@ -16,7 +16,8 @@
 //
 // Hard rules (Oracle P6 design review):
 //   * Fixed, server-resolved paths only — the endpoint accepts no file
-//     name. Read under automationRepoRoot()/ads/google/{outputs/l3,
+//     name. Read under the explicitly configured automation checkout's
+//     ads/google/{outputs/l3,
 //     outputs/prod/json,config/l3-addenda.md}.
 //   * Bounded reads: skip oversized files, cap parsed arrays, only read
 //     regular files (no symlinks/dirs).
@@ -30,7 +31,7 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 
-import { getAutomationRepoRoot } from './automationRepoRoot.js'
+import { getConfiguredRepositoryRoot } from './configuredRepositoryRoot.js'
 
 /** Max L3 evaluation JSON size we will read (bytes). */
 const L3_EVAL_MAX_BYTES = 2 * 1024 * 1024
@@ -429,7 +430,7 @@ export interface ReadL3ArtifactsArgs {
 export async function readL3Artifacts(
   args: ReadL3ArtifactsArgs = {},
 ): Promise<L3ArtifactSummary> {
-  const root = args.repoRoot ?? getAutomationRepoRoot()
+  const root = args.repoRoot ?? getConfiguredRepositoryRoot('automation')
   const l3Dir = path.join(root, L3_DIR)
   const l2Dir = path.join(root, L2_JSON_DIR)
   const addendaPath = path.join(root, ADDENDA_FILE)

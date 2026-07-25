@@ -135,8 +135,8 @@ becomes a UI capability badge, never guessed data.
 - `before_creative` / `after_creative` present on 63/63.
 
 **Filesystem artifacts (morning bundle / L2 / L3):** owned `helios:helios`
-mode `700` under `$AUTOMATION_REPO_PATH/ads/google/outputs/` (prod
-`AUTOMATION_REPO_PATH=/var/lib/helios/automation`), **not readable by the
+mode `700` under the `automation` working checkout explicitly registered in
+`HELIOS_TASK_DAG_LOCAL_PATHS_FILE`, **not readable by the
 audit user** (`amp-local`) — confirmed unreadable again on 2026-07-09
 (`namei` stops at `/var/lib/helios`; no sudo escalation used). Their
 presence is confirmed **by inference**: the 7 `run_id`s only exist

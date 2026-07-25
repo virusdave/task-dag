@@ -6,10 +6,8 @@
  * `HELIOS_TASK_DAG_MIRROR_ROOT`, and uses the aliases/keys in
  * `HELIOS_TASK_DAG_SSH_CONFIG`. Local development may map registry names
  * to absolute checkouts with `HELIOS_TASK_DAG_LOCAL_PATHS_FILE` (two
- * whitespace-delimited fields per line). Production requires the registry
- * file so a missing deployment setting cannot silently reduce task pages to
- * automation-only data. Local development retains the legacy REPO_URL,
- * LOCAL_DIR, DEPLOY_KEY, and AUTOMATION_REPO_PATH settings.
+ * whitespace-delimited fields per line). The registry is always required so
+ * no environment can silently reduce task pages to automation-only data.
  */
 import { execFile, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -18,9 +16,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 const execFileAsync = promisify(execFile)
-const DEFAULT_REPO_URL = 'git@github.com:FreshlyBakedNYC/automation.git'
 const DEFAULT_REFRESH_SECONDS = 60
-const CONVENTIONAL_DEPLOY_KEY = '/run/agenix/helios-github-automation-deploy-key'
 
 export interface TaskDagRepositoryStatus {
   repository: string
@@ -56,8 +52,12 @@ export interface TaskDagMirrorLogger {
   error: (msg: string, meta?: Record<string, unknown>) => void
 }
 
-interface SourceConfig { repository: string; repoUrl: string; localPath?: string; mirrorDir?: string }
-interface RuntimeSource extends SourceConfig { githubRepository?: string; status: TaskDagRepositoryStatus }
+interface SourceConfig { repository: string; repoUrl: string; localPath?: string }
+interface RuntimeSource extends SourceConfig {
+  mirrorDir: string
+  githubRepository?: string
+  status: TaskDagRepositoryStatus
+}
 
 let sources: RuntimeSource[] | null = null
 let log: TaskDagMirrorLogger | null = null
@@ -68,20 +68,38 @@ function envStr(name: string): string | null {
   const value = (process.env[name] ?? '').trim()
   return value === '' ? null : value
 }
-function envBool(name: string): boolean {
-  return ['1', 'true', 'yes', 'on'].includes((process.env[name] ?? '').trim().toLowerCase())
-}
 function isRepo(dir: string): boolean {
   return fs.existsSync(path.join(dir, '.git')) ||
     (fs.existsSync(path.join(dir, 'HEAD')) && fs.existsSync(path.join(dir, 'objects')))
 }
-function safeError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error)
-  return raw.replace(/(?:https?:\/\/)[^\s/@]+:[^\s/@]+@/g, 'https://[redacted]@').slice(0, 500)
+export function publicTaskDagError(error: unknown): string {
+  const raw = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  if (/permission denied \(publickey\)|authentication failed|could not read from remote/.test(raw)) {
+    return 'SSH authentication failed: the repository read key was rejected or is missing.'
+  }
+  if (/host key verification failed|remote host identification has changed/.test(raw)) {
+    return 'SSH host-key verification failed for the repository host.'
+  }
+  if (/repository not found|not found.*repository|access denied/.test(raw)) {
+    return 'The repository was not found or its read credential lacks access.'
+  }
+  if (/could not resolve|name or service not known|enotfound/.test(raw)) {
+    return 'DNS resolution failed for the repository host.'
+  }
+  if (/timed out|etimedout|timeout/.test(raw)) return 'The repository operation timed out.'
+  if (/connection refused|econnrefused/.test(raw)) return 'The repository host refused the connection.'
+  if (/no space left|enospc/.test(raw)) return 'The task mirror filesystem is out of space.'
+  if (/eacces|operation not permitted|permission denied/.test(raw)) {
+    return 'The Helios service cannot read or write the configured task mirror path.'
+  }
+  if (/not a git repository|bad object|invalid object|corrupt/.test(raw)) {
+    return 'The local task mirror is not a readable Git repository or contains corrupt refs.'
+  }
+  return 'The task repository operation failed. Check the Helios server log for the full error.'
 }
 function githubRepository(url: string): string | undefined {
-  const match = url.match(/(?:github[^/:]*[/:])([^/\s]+\/[^/\s]+?)(?:\.git)?$/i)
-  return match?.[1]
+  const match = url.match(/(?:github\.com[/:])([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i)
+  return match ? `${match[1]}/${match[2]}` : undefined
 }
 function assertRepository(value: string, line: number): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) || value === '.' || value === '..') {
@@ -123,41 +141,30 @@ export function parseTaskDagReposConfig(text: string): SourceConfig[] {
 
 function resolveConfigs(): SourceConfig[] {
   const file = envStr('HELIOS_TASK_DAG_REPOS_FILE')
-  if (file) {
-    const configs = parseTaskDagReposConfig(fs.readFileSync(file, 'utf8'))
-    const localPathsFile = envStr('HELIOS_TASK_DAG_LOCAL_PATHS_FILE')
-    if (!localPathsFile) return configs
-    const paths = new Map<string, string>()
-    for (const [index, raw] of fs.readFileSync(localPathsFile, 'utf8').split('\n').entries()) {
-      const line = raw.trim()
-      if (!line || line.startsWith('#')) continue
-      const fields = line.split(/\s+/)
-      if (fields.length !== 2 || !path.isAbsolute(fields[1])) throw new Error(`Malformed local task path on line ${index + 1}`)
-      if (paths.has(fields[0])) throw new Error(`Duplicate local task path '${fields[0]}'`)
-      paths.set(fields[0], fields[1])
-    }
-    for (const repository of paths.keys()) {
-      if (!configs.some((config) => config.repository === repository)) throw new Error(`Unknown local task repository '${repository}'`)
-    }
-    return configs.map((config) => ({ ...config, localPath: paths.get(config.repository) }))
+  if (!file) throw new Error('HELIOS_TASK_DAG_REPOS_FILE is required')
+  const configs = parseTaskDagReposConfig(fs.readFileSync(file, 'utf8'))
+  const localPathsFile = envStr('HELIOS_TASK_DAG_LOCAL_PATHS_FILE')
+  if (!localPathsFile) return configs
+  const paths = new Map<string, string>()
+  for (const [index, raw] of fs.readFileSync(localPathsFile, 'utf8').split('\n').entries()) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const fields = line.split(/\s+/)
+    if (fields.length !== 2 || !path.isAbsolute(fields[1])) throw new Error(`Malformed local task path on line ${index + 1}`)
+    if (paths.has(fields[0])) throw new Error(`Duplicate local task path '${fields[0]}'`)
+    paths.set(fields[0], fields[1])
   }
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('HELIOS_TASK_DAG_REPOS_FILE is required in production')
+  for (const repository of paths.keys()) {
+    if (!configs.some((config) => config.repository === repository)) throw new Error(`Unknown local task repository '${repository}'`)
   }
-  const localPath = envStr('AUTOMATION_REPO_PATH') ?? undefined
-  return [{
-    repository: 'automation',
-    repoUrl: envStr('HELIOS_TASK_DAG_REPO_URL') ?? DEFAULT_REPO_URL,
-    localPath,
-    mirrorDir: envStr('HELIOS_TASK_DAG_LOCAL_DIR') ?? undefined,
-  }]
+  return configs.map((config) => ({ ...config, localPath: paths.get(config.repository) }))
 }
 
 function buildSources(): RuntimeSource[] {
   const root = envStr('HELIOS_TASK_DAG_MIRROR_ROOT') ?? path.join(process.env.HOME || os.tmpdir(), '.cache', 'helios', 'task-dag')
   return resolveConfigs().map((source) => ({
     ...source,
-    mirrorDir: source.mirrorDir ?? path.join(root, `${source.repository}.git`),
+    mirrorDir: path.join(root, `${source.repository}.git`),
     githubRepository: githubRepository(source.repoUrl),
     status: {
       repository: source.repository,
@@ -192,9 +199,19 @@ export function getTaskDagSources(): TaskDagSource[] {
   })
 }
 
-/** Automation compatibility accessor. */
-export function getTaskDagGitDir(): string | null {
-  return getTaskDagSources().find((source) => source.repository === 'automation')?.gitDir ?? null
+/** Return an explicitly configured working checkout, never a mirror fallback. */
+export function getTaskDagLocalPath(repository: string): string {
+  const source = currentSources().find((candidate) => candidate.repository === repository)
+  if (!source) throw new Error(`Task repository '${repository}' is not configured`)
+  if (!source.localPath) {
+    throw new Error(
+      `Task repository '${repository}' has no working checkout in HELIOS_TASK_DAG_LOCAL_PATHS_FILE`,
+    )
+  }
+  if (!isRepo(source.localPath)) {
+    throw new Error(`The configured working checkout for task repository '${repository}' is not readable`)
+  }
+  return source.localPath
 }
 
 export function getTaskDagSourceStatus(): TaskDagSourceStatus {
@@ -214,24 +231,23 @@ export function getTaskDagSourceStatus(): TaskDagSourceStatus {
   }
 }
 
-function gitEnv(): NodeJS.ProcessEnv {
+export function taskDagGitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' }
-  const explicitKey = envStr('HELIOS_TASK_DAG_DEPLOY_KEY')
-  const legacyKey = !envStr('HELIOS_TASK_DAG_REPOS_FILE') && fs.existsSync(CONVENTIONAL_DEPLOY_KEY)
-    ? CONVENTIONAL_DEPLOY_KEY
-    : null
-  const key = explicitKey ?? legacyKey
+  delete env.GIT_SSH_COMMAND
   const sshConfig = envStr('HELIOS_TASK_DAG_SSH_CONFIG')
-  if (key || sshConfig) {
-    const configArg = sshConfig ? `-F ${sshConfig}` : '-F /dev/null'
-    const keyArg = key ? ` -o IdentitiesOnly=yes -i ${key}` : ''
-    env.GIT_SSH_COMMAND = `ssh ${configArg} -o BatchMode=yes -o StrictHostKeyChecking=accept-new${keyArg}`
+  if (sshConfig) {
+    env.GIT_SSH_COMMAND = `ssh -F ${sshConfig} -o BatchMode=yes`
   }
   return env
 }
 
 async function fetchSource(source: RuntimeSource): Promise<void> {
-  if (source.localPath && isRepo(source.localPath)) return
+  if (source.localPath && isRepo(source.localPath)) {
+    source.status.lastAttemptAtMs = Date.now()
+    source.status.lastSuccessAtMs = source.status.lastAttemptAtMs
+    source.status.lastError = null
+    return
+  }
   const dir = source.mirrorDir as string
   source.status.lastAttemptAtMs = Date.now()
   let verifiedExistingMirror = false
@@ -241,7 +257,7 @@ async function fetchSource(source: RuntimeSource): Promise<void> {
       try {
         const { stdout } = await execFileAsync('git', ['remote', 'get-url', 'origin'], {
           cwd: dir,
-          env: gitEnv(),
+          env: taskDagGitEnv(),
           timeout: 30_000,
         })
         verifiedExistingMirror = stdout.trim() === source.repoUrl
@@ -257,9 +273,9 @@ async function fetchSource(source: RuntimeSource): Promise<void> {
     }
     if (!isRepo(dir)) {
       if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true })
-      await execFileAsync('git', ['clone', '--mirror', '--filter=blob:none', source.repoUrl, dir], { cwd: path.dirname(dir), env: gitEnv(), timeout: 120_000 })
+      await execFileAsync('git', ['clone', '--mirror', '--filter=blob:none', source.repoUrl, dir], { cwd: path.dirname(dir), env: taskDagGitEnv(), timeout: 120_000 })
     } else {
-      await execFileAsync('git', ['fetch', '--prune', '--filter=blob:none', 'origin', '+refs/heads/*:refs/heads/*'], { cwd: dir, env: gitEnv(), timeout: 120_000 })
+      await execFileAsync('git', ['fetch', '--prune', '--filter=blob:none', 'origin', '+refs/heads/*:refs/heads/*'], { cwd: dir, env: taskDagGitEnv(), timeout: 120_000 })
     }
     source.status.lastSuccessAtMs = Date.now()
     source.status.lastError = null
@@ -267,7 +283,7 @@ async function fetchSource(source: RuntimeSource): Promise<void> {
     if (!verifiedExistingMirror && fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true })
     }
-    source.status.lastError = safeError(error)
+    source.status.lastError = publicTaskDagError(error)
     log?.error('task-dag mirror refresh failed', { repository: source.repository, error: source.status.lastError })
   }
 }
@@ -284,10 +300,6 @@ export async function refreshTaskDagMirror(): Promise<void> {
 
 export async function initTaskDagMirror(opts: { log?: TaskDagMirrorLogger } = {}): Promise<TaskDagSourceStatus> {
   log = opts.log ?? null
-  if (envBool('HELIOS_TASK_DAG_DISABLE')) {
-    sources = []
-    return getTaskDagSourceStatus()
-  }
   sources = buildSources()
   await refreshTaskDagMirror()
   if (refreshTimer) clearInterval(refreshTimer)

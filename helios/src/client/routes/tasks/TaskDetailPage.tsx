@@ -16,7 +16,7 @@ import {
 } from './taskShared.js'
 
 export function TaskDetailPage() {
-  const { sha, repository = 'automation' } = useParams<{ sha: string; repository?: string }>()
+  const { sha = '', repository = '' } = useParams<{ sha: string; repository: string }>()
   const { data, error, loading, refreshing, refresh } = usePolledData<TaskDetail>(
     () => fetchTaskJson<TaskDetail>(`/api/tasks/repositories/${repository}/tasks/${sha}`),
     [sha, repository],
@@ -40,6 +40,7 @@ export function TaskDetailPage() {
         <div className="page-header">
           <h2>Task details</h2>
         </div>
+        <SourceBanner source={sourceFromError(error)} onRefresh={refresh} refreshing={refreshing} />
         <TaskUnavailable error={error} onRetry={refresh} />
         <p className="subtle-copy" style={{ marginTop: '1rem' }}>
           <Link to="/tasks/frontier">Back to the task queue</Link>

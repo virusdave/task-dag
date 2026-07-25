@@ -35,7 +35,7 @@ import {
   preparePolicyExperiences,
   recordAttemptsFromL2Output,
 } from './adAttemptsTracker.js'
-import { automationRepoPath, getAutomationRepoRoot } from './automationRepoRoot.js'
+import { configuredRepositoryPath, getConfiguredRepositoryRoot } from './configuredRepositoryRoot.js'
 import { sharedSnapshotDir } from './sharedSnapshotPath.js'
 import { zipDirectoryToBuffer } from './zipDirectory.js'
 
@@ -64,12 +64,10 @@ export async function runMorningBundle(opts?: {
 }): Promise<MorningBundleRunResult> {
   const onLog = opts?.onLog ?? (() => {})
 
-  const repoRoot = getAutomationRepoRoot()
+  const repoRoot = getConfiguredRepositoryRoot('automation')
   const gadsDir = path.join(repoRoot, 'ads', 'google')
   // Read from the SHARED snapshot dir so manual ingest, the auto-
-  // poller, and the morning bundle all see the same file. Falls back
-  // to the in-repo snapshots dir for local dev when GADS_SNAPSHOT_PATH
-  // is unset. See helios/src/server/ads/sharedSnapshotPath.ts.
+  // poller, and the morning bundle all see the same explicitly configured file.
   const snapshotsDir = sharedSnapshotDir()
   const prodDir = path.join(gadsDir, 'outputs', 'prod')
   const bundleDir = path.join(prodDir, 'bundle')
@@ -539,4 +537,4 @@ Generated on ${generatedAtIso} from snapshot:
 }
 
 // Re-export for tests / route convenience.
-export { automationRepoPath }
+export { configuredRepositoryPath }

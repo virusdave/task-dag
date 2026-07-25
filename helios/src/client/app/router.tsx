@@ -534,16 +534,8 @@ export const router = createBrowserRouter([
         path: 'tasks/:repository/epic/:id',
       },
       {
-        element: <EpicDagPage />,
-        path: 'tasks/epic/:id',
-      },
-      {
         element: <TaskDetailPage />,
         path: 'tasks/:repository/task/:sha',
-      },
-      {
-        element: <TaskDetailPage />,
-        path: 'tasks/task/:sha',
       },
       {
         element: <VisitorScansPage />,

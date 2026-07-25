@@ -24,7 +24,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 
-import { automationRepoPath } from './automationRepoRoot.js'
+import { configuredRepositoryPath } from './configuredRepositoryRoot.js'
 
 export interface ClusterSweepRunSummary {
   runId: string
@@ -38,7 +38,7 @@ export interface ClusterSweepRunSummary {
 const CLUSTER_SWEEP_RELATIVE = path.join('ads', 'google', 'outputs', 'cluster-sweep')
 
 export function clusterSweepRootDir(): string {
-  return automationRepoPath(CLUSTER_SWEEP_RELATIVE)
+  return configuredRepositoryPath('automation', CLUSTER_SWEEP_RELATIVE)
 }
 
 export async function listClusterSweepRuns(): Promise<ClusterSweepRunSummary[]> {

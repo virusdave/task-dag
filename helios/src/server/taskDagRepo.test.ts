@@ -15,11 +15,15 @@ import {
   __resetTaskDagMirrorForTests,
   initTaskDagMirror,
   parseTaskDagReposConfig,
+  publicTaskDagError,
+  taskDagGitEnv,
 } from './taskDagMirror.js'
 
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
 let repoDir: string
+let defaultConfigFile: string
+let defaultPathsFile: string
 
 function git(args: string[]): string {
   return execFileSync('git', args, { cwd: repoDir, encoding: 'utf8' }).trim()
@@ -112,18 +116,26 @@ beforeAll(() => {
   const claim = taskCommit('claim: leaf', [leaf])
   git(['update-ref', `refs/heads/tasks/active/${leaf.slice(0, 7)}`, claim])
 
-  process.env.AUTOMATION_REPO_PATH = repoDir
-  delete process.env.HELIOS_TASK_DAG_LOCAL_DIR
+  defaultConfigFile = path.join(os.tmpdir(), `taskdag-default-repos-${process.pid}.conf`)
+  defaultPathsFile = `${defaultConfigFile}.paths`
+  fs.writeFileSync(defaultConfigFile, 'automation git@github.com:Example/automation.git\n')
+  fs.writeFileSync(defaultPathsFile, `automation ${repoDir}\n`)
+  process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+  process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
   __resetTaskIndexCacheForTests()
 })
 
 afterAll(() => {
+  delete process.env.HELIOS_TASK_DAG_REPOS_FILE
+  delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
+  fs.rmSync(defaultConfigFile, { force: true })
+  fs.rmSync(defaultPathsFile, { force: true })
   if (repoDir) fs.rmSync(repoDir, { recursive: true, force: true })
 })
 
 describe('taskDagRepo indexer', () => {
   it('detects completion via a master 2nd-parent', async () => {
-    const detail = await getTaskDetail((await frontierByTitle('Prerequisite')).sha)
+    const detail = await getTaskDetail((await frontierByTitle('Prerequisite')).sha, 'automation')
     expect(detail?.task.status).toBe('done')
     expect(detail?.task.completedBy.length).toBe(1)
   })
@@ -175,7 +187,7 @@ describe('taskDagRepo indexer', () => {
   })
 
   it('builds an epic DAG resolvable by issue number', async () => {
-    const dag = await getEpicDag('100')
+    const dag = await getEpicDag('100', 'automation')
     expect(dag.epic.issueNumber).toBe(100)
     expect(dag.nodes.length).toBeGreaterThanOrEqual(6) // epic + 5 tasks
     expect(dag.edges.some((e) => e.kind === 'dependency')).toBe(true)
@@ -214,7 +226,28 @@ describe('taskDagRepo indexer', () => {
         .toEqual(new Set(['automation', 'second']))
       expect(view.source.coverage).toBe('partial')
       expect(view.source.repositories.find((source) => source.repository === 'corrupt')?.available).toBe(false)
-      expect((await getTaskDetail((await nodeByTitle('Ready to go')).sha, 'second'))?.task.repository).toBe('second')
+      expect(view.source.repositories.find((source) => source.repository === 'corrupt')?.lastError)
+        .toBe('The local task mirror is not a readable Git repository or contains corrupt refs.')
+      const secondTask = await getTaskDetail((await nodeByTitle('Ready to go')).sha, 'second')
+      expect(secondTask?.task.repository).toBe('second')
+      expect(secondTask?.source.repositories.find((source) => source.repository === 'corrupt'))
+        .toMatchObject({ available: false })
+      expect((await getFrontierView({ repository: 'second' })).source.repositories
+        .find((source) => source.repository === 'corrupt')).toMatchObject({ available: false })
+      expect((await getEpicDag('100', 'second')).source.repositories
+        .find((source) => source.repository === 'corrupt')).toMatchObject({ available: false })
+      await expect(getTaskDetail('abc', 'corrupt')).rejects.toMatchObject({
+        name: 'TaskDagUnavailableError',
+        status: {
+          repositories: expect.arrayContaining([
+            expect.objectContaining({
+              repository: 'corrupt',
+              available: false,
+              lastError: 'The local task mirror is not a readable Git repository or contains corrupt refs.',
+            }),
+          ]),
+        },
+      })
       await expect(getTaskDetail('abc', 'unknown')).rejects.toMatchObject({
         name: 'TaskDagRepositoryNotFoundError',
       })
@@ -225,8 +258,8 @@ describe('taskDagRepo indexer', () => {
       __resetTaskIndexCacheForTests()
       await expect(getFrontierView()).rejects.toMatchObject({ name: 'TaskDagUnavailableError' })
     } finally {
-      delete process.env.HELIOS_TASK_DAG_REPOS_FILE
-      delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
       delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
       __resetTaskDagMirrorForTests()
       __resetTaskIndexCacheForTests()
@@ -250,6 +283,7 @@ describe('taskDagRepo indexer', () => {
     fs.writeFileSync(configFile, `repo ${target}\n`)
     try {
       process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
       process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
       __resetTaskDagMirrorForTests()
       await initTaskDagMirror()
@@ -266,7 +300,8 @@ describe('taskDagRepo indexer', () => {
         encoding: 'utf8',
       }).trim()).toBe(target)
     } finally {
-      delete process.env.HELIOS_TASK_DAG_REPOS_FILE
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
       delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
       __resetTaskDagMirrorForTests()
       fs.rmSync(target, { recursive: true, force: true })
@@ -288,19 +323,68 @@ describe('taskDagRepo indexer', () => {
     expect(() => parseTaskDagReposConfig('repo url enforce foo.\n')).toThrow(/repair branch/)
   })
 
-  it('rejects the automation-only fallback in production', async () => {
-    const nodeEnv = process.env.NODE_ENV
+  it('requires an explicit repository registry in every environment', async () => {
     try {
-      process.env.NODE_ENV = 'production'
       delete process.env.HELIOS_TASK_DAG_REPOS_FILE
       __resetTaskDagMirrorForTests()
       await expect(initTaskDagMirror()).rejects.toThrow(
-        'HELIOS_TASK_DAG_REPOS_FILE is required in production',
+        'HELIOS_TASK_DAG_REPOS_FILE is required',
       )
     } finally {
-      if (nodeEnv == null) delete process.env.NODE_ENV
-      else process.env.NODE_ENV = nodeEnv
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
       __resetTaskDagMirrorForTests()
+    }
+  })
+
+  it('categorizes public diagnostics without exposing secret-bearing process errors', () => {
+    const diagnostic = publicTaskDagError(new Error(
+      'fatal: https://oauth2:super-secret-token@github.com/acme/private.git?access_token=other-secret: Permission denied (publickey). /var/lib/helios/private',
+    ))
+    expect(diagnostic).toBe('SSH authentication failed: the repository read key was rejected or is missing.')
+    expect(diagnostic).not.toContain('super-secret-token')
+    expect(diagnostic).not.toContain('other-secret')
+    expect(diagnostic).not.toContain('/var/lib/helios')
+  })
+
+  it('defers strict host-key policy to the configured SSH file', () => {
+    const previousConfig = process.env.HELIOS_TASK_DAG_SSH_CONFIG
+    const previousCommand = process.env.GIT_SSH_COMMAND
+    try {
+      process.env.HELIOS_TASK_DAG_SSH_CONFIG = '/etc/helios/task-dag-ssh.conf'
+      process.env.GIT_SSH_COMMAND = 'ssh -i /tmp/legacy-key'
+      const command = taskDagGitEnv().GIT_SSH_COMMAND
+      expect(command).toBe('ssh -F /etc/helios/task-dag-ssh.conf -o BatchMode=yes')
+      expect(command).not.toContain('StrictHostKeyChecking')
+      expect(command).not.toContain('legacy-key')
+    } finally {
+      if (previousConfig == null) delete process.env.HELIOS_TASK_DAG_SSH_CONFIG
+      else process.env.HELIOS_TASK_DAG_SSH_CONFIG = previousConfig
+      if (previousCommand == null) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previousCommand
+    }
+  })
+
+  it('does not derive public repository links from credential-bearing URLs', async () => {
+    const configFile = path.join(os.tmpdir(), `taskdag-secret-repos-${process.pid}.conf`)
+    const pathsFile = `${configFile}.paths`
+    try {
+      fs.writeFileSync(configFile, 'secret https://github.com/acme/repo.git?access_token=do-not-leak\n')
+      fs.writeFileSync(pathsFile, `secret ${repoDir}\n`)
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
+      __resetTaskDagMirrorForTests()
+      __resetTaskIndexCacheForTests()
+      const serialized = JSON.stringify(await getFrontierView())
+      expect(serialized).not.toContain('do-not-leak')
+      expect(serialized).not.toContain('access_token')
+    } finally {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
+      __resetTaskDagMirrorForTests()
+      __resetTaskIndexCacheForTests()
+      fs.rmSync(configFile, { force: true })
+      fs.rmSync(pathsFile, { force: true })
     }
   })
 })
@@ -317,7 +401,7 @@ async function nodeByTitle(substr: string) {
     }
   }
   // Fall back to epic DAG (covers done/non-frontier nodes too).
-  const dag = await getEpicDag('100')
+  const dag = await getEpicDag('100', 'automation')
   const found = dag.nodes.find((n) => n.title.includes(substr))
   if (!found) throw new Error(`no node titled ~${substr}`)
   return found

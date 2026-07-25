@@ -11156,6 +11156,52 @@ span.metric-chart-legend-item {
   background: var(--warn, #fff0c9);
   border-color: var(--warning);
 }
+.task-source-banner > p { margin: 0; }
+.task-source-banner__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+}
+.task-source-banner__dismiss {
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+.task-source-banner__dismiss:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.task-source-banner__repositories {
+  display: grid;
+  gap: 0.5rem;
+  width: 100%;
+  margin: 0;
+  padding-left: 1.25rem;
+}
+.task-source-banner__repositories li { padding-left: 0.25rem; }
+.task-source-banner__repositories strong { display: block; }
+.task-source-banner__repositories code {
+  display: block;
+  margin-top: 0.15rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.task-source-banner__help { width: 100%; }
+.task-source-banner__help summary { cursor: pointer; font-weight: 700; }
+.task-source-banner__help p { margin: 0.5rem 0 0; }
+.task-source-banner > .task-link-button { min-height: 44px; padding: 0.5rem 0; }
+@media (max-width: 520px) {
+  .task-source-banner__header { align-items: stretch; flex-direction: column; }
+  .task-source-banner__dismiss { align-self: flex-start; white-space: normal; }
+}
 
 .task-link-button {
   background: transparent;

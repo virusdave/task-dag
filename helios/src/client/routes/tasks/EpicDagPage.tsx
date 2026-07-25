@@ -40,7 +40,7 @@ const STATUS_FILL: Record<string, string> = {
 }
 
 export function EpicDagPage() {
-  const { id, repository = 'automation' } = useParams<{ id: string; repository?: string }>()
+  const { id = '', repository = '' } = useParams<{ id: string; repository: string }>()
   const [view, setView] = useState<'list' | 'graph'>('list')
   const [selected, setSelected] = useState<TaskNode | null>(null)
 
@@ -67,6 +67,7 @@ export function EpicDagPage() {
         <div className="page-header">
           <h2>Task plan</h2>
         </div>
+        <SourceBanner source={sourceFromError(error)} onRefresh={refresh} refreshing={refreshing} />
         <TaskUnavailable error={error} onRetry={refresh} />
         <p className="subtle-copy" style={{ marginTop: '1rem' }}>
           <Link to="/tasks">Back to task management</Link>

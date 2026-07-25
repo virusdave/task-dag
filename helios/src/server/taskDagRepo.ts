@@ -22,7 +22,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import crypto from 'node:crypto'
 
-import { getTaskDagSources, getTaskDagSourceStatus } from './taskDagMirror.js'
+import { getTaskDagSources, getTaskDagSourceStatus, publicTaskDagError } from './taskDagMirror.js'
 import type { TaskDagSourceStatus } from './taskDagMirror.js'
 
 const execFileAsync = promisify(execFile)
@@ -492,7 +492,7 @@ async function readRefs(dir: string): Promise<RefSets> {
   }
 }
 
-export async function loadTaskIndex(repository = 'automation'): Promise<TaskIndex> {
+export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
   const source = requireSource(repository)
   const dir = source.gitDir
   const refs = await readRefs(dir)
@@ -676,11 +676,10 @@ export function getSourceStatus(): TaskDagSourceStatus {
   return getTaskDagSourceStatus()
 }
 
-async function getFrontierViewForSource(repository: string, filter?: {
+function getFrontierViewForSource(repository: string, index: TaskIndex, filter?: {
   issue?: number
   status?: string
-}): Promise<FrontierView> {
-  const index = await loadTaskIndex(repository)
+}): FrontierView {
   const source = getTaskDagSourceStatus()
 
   const frontier: TaskNode[] = []
@@ -795,12 +794,15 @@ function configuredRepositories(repository?: string): string[] {
   return [repository]
 }
 
-function sourceStatusForQueryFailures(failedRepositories: string[]): TaskDagSourceStatus {
+function queryFailureMessage(error: unknown): string {
+  return publicTaskDagError(error)
+}
+
+function sourceStatusForQueryFailures(failedRepositories: ReadonlyMap<string, string>): TaskDagSourceStatus {
   const base = getTaskDagSourceStatus()
-  if (failedRepositories.length === 0) return base
-  const failed = new Set(failedRepositories)
-  const repositories = base.repositories.map((repository) => failed.has(repository.repository)
-    ? { ...repository, available: false, lastError: 'Task data could not be read from this repository' }
+  if (failedRepositories.size === 0) return base
+  const repositories = base.repositories.map((repository) => failedRepositories.has(repository.repository)
+    ? { ...repository, available: false, lastError: repository.lastError ?? failedRepositories.get(repository.repository) as string }
     : repository)
   const availableCount = repositories.filter((repository) => repository.available).length
   return {
@@ -812,25 +814,41 @@ function sourceStatusForQueryFailures(failedRepositories: string[]): TaskDagSour
   }
 }
 
+async function loadConfiguredTaskIndexes(requestedRepository?: string): Promise<{
+  indexes: ReadonlyMap<string, TaskIndex>
+  source: TaskDagSourceStatus
+}> {
+  if (requestedRepository) configuredRepositories(requestedRepository)
+  const repositories = configuredRepositories()
+  const results = await Promise.allSettled(repositories.map((repository) => loadTaskIndex(repository)))
+  const indexes = new Map<string, TaskIndex>()
+  const failedRepositories = new Map<string, string>()
+  results.forEach((result, index) => {
+    const repository = repositories[index]
+    if (result.status === 'fulfilled') {
+      indexes.set(repository, result.value)
+      return
+    }
+    console.error(`task-dag read failed for ${repository}`, result.reason)
+    failedRepositories.set(repository, queryFailureMessage(result.reason))
+  })
+  const source = sourceStatusForQueryFailures(failedRepositories)
+  if (indexes.size === 0 || (requestedRepository && !indexes.has(requestedRepository))) {
+    throw new TaskDagUnavailableError(source)
+  }
+  return { indexes, source }
+}
+
 export async function getFrontierView(filter?: {
   issue?: number
   status?: string
   repository?: string
 }): Promise<FrontierView> {
-  const results = await Promise.allSettled(
-    configuredRepositories(filter?.repository).map((repository) =>
-      getFrontierViewForSource(repository, filter),
-    ),
+  const { indexes, source } = await loadConfiguredTaskIndexes(filter?.repository)
+  const repositories = filter?.repository ? [filter.repository] : [...indexes.keys()]
+  const views = repositories.map((repository) =>
+    getFrontierViewForSource(repository, indexes.get(repository) as TaskIndex, filter),
   )
-  const repositories = configuredRepositories(filter?.repository)
-  const failedRepositories = results.flatMap((result, index) => {
-    if (result.status === 'fulfilled') return []
-    console.error(`task-dag read failed for ${repositories[index]}`, result.reason)
-    return [repositories[index]]
-  })
-  const source = sourceStatusForQueryFailures(failedRepositories)
-  const views = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
-  if (views.length === 0) throw new TaskDagUnavailableError(source)
   const groups = views.flatMap((view) => view.groups).sort((a, b) =>
     b.counts.ready - a.counts.ready ||
     (a.epic?.repository ?? '').localeCompare(b.epic?.repository ?? '') ||
@@ -860,8 +878,7 @@ export async function getFrontier(filter?: {
   return view.groups.flatMap((g) => g.tasks)
 }
 
-async function getEpicsForSource(repository: string): Promise<EpicSummary[]> {
-  const index = await loadTaskIndex(repository)
+function getEpicsForSource(repository: string, index: TaskIndex): EpicSummary[] {
 
   // Aggregate by GitHub issue (one issue may have many epic snapshot
   // commits). Members are the non-epic task nodes belonging to the issue.
@@ -925,25 +942,16 @@ async function getEpicsForSource(repository: string): Promise<EpicSummary[]> {
 }
 
 export async function getEpics(): Promise<EpicsView> {
-  const repositories = configuredRepositories()
-  const results = await Promise.allSettled(repositories.map((repository) => getEpicsForSource(repository)))
-  const failedRepositories = results.flatMap((result, index) => {
-    if (result.status === 'fulfilled') return []
-    console.error(`task-dag read failed for ${repositories[index]}`, result.reason)
-    return [repositories[index]]
-  })
-  const source = sourceStatusForQueryFailures(failedRepositories)
-  const successful = results.filter((result) => result.status === 'fulfilled')
-  if (successful.length === 0) throw new TaskDagUnavailableError(source)
-  const epics = successful.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+  const { indexes, source } = await loadConfiguredTaskIndexes()
+  const epics = [...indexes].flatMap(([repository, index]) => getEpicsForSource(repository, index))
     .sort((a, b) => b.readyCount - a.readyCount || a.repository.localeCompare(b.repository) ||
       (a.issueNumber ?? 1e9) - (b.issueNumber ?? 1e9))
   return { source, epics }
 }
 
-export async function getEpicDag(epicRefOrSha: string, repository = 'automation'): Promise<DagResult> {
-  const index = await loadTaskIndex(repository)
-  const source = getTaskDagSourceStatus()
+export async function getEpicDag(epicRefOrSha: string, repository: string): Promise<DagResult> {
+  const { indexes, source } = await loadConfiguredTaskIndexes(repository)
+  const index = indexes.get(repository) as TaskIndex
 
   // Resolve to an issue number when possible (the canonical epic identity),
   // else to a specific epic commit sha.
@@ -1025,9 +1033,9 @@ export async function getEpicDag(epicRefOrSha: string, repository = 'automation'
   }
 }
 
-export async function getTaskDetail(shaOrRef: string, repository = 'automation'): Promise<TaskDetail | null> {
-  const index = await loadTaskIndex(repository)
-  const source = getTaskDagSourceStatus()
+export async function getTaskDetail(shaOrRef: string, repository: string): Promise<TaskDetail | null> {
+  const { indexes, source } = await loadConfiguredTaskIndexes(repository)
+  const index = indexes.get(repository) as TaskIndex
 
   let task = index.nodes.get(shaOrRef)
   if (!task) {
@@ -1063,11 +1071,13 @@ export async function getActivity(): Promise<{
 }> {
   const view = await getFrontierView()
   const epics = await getEpics()
-  const unavailableInEither = new Set([
-    ...view.source.repositories.filter((repository) => !repository.available).map((repository) => repository.repository),
-    ...epics.source.repositories.filter((repository) => !repository.available).map((repository) => repository.repository),
-  ])
-  const source = sourceStatusForQueryFailures([...unavailableInEither])
+  const unavailableInEither = new Map<string, string>()
+  for (const repository of [...view.source.repositories, ...epics.source.repositories]) {
+    if (!repository.available) {
+      unavailableInEither.set(repository.repository, repository.lastError ?? 'Task data could not be read from this repository')
+    }
+  }
+  const source = sourceStatusForQueryFailures(unavailableInEither)
   return {
     source,
     totalEpics: epics.epics.length,
@@ -1084,16 +1094,18 @@ export async function validateDag(): Promise<{
   warnings: number
   valid: boolean
 }> {
-  const index = await loadTaskIndex()
-  const source = getTaskDagSourceStatus()
+  const loaded = await loadConfiguredTaskIndexes()
+  const { source } = loaded
   let errors = 0
   let warnings = 0
-  for (const node of index.nodes.values()) {
-    // Frontier refs should point at task/leaf nodes.
-    if (node.isFrontier && node.type === 'epic') warnings++
-    // A dependency that isn't a known node and isn't completed is suspect.
-    for (const dep of node.dependencies) {
-      if (!index.nodes.has(dep)) warnings++
+  for (const index of loaded.indexes.values()) {
+    for (const node of index.nodes.values()) {
+      // Frontier refs should point at task/leaf nodes.
+      if (node.isFrontier && node.type === 'epic') warnings++
+      // A dependency that isn't a known node and isn't completed is suspect.
+      for (const dep of node.dependencies) {
+        if (!index.nodes.has(dep)) warnings++
+      }
     }
   }
   return { source, errors, warnings, valid: errors === 0 }

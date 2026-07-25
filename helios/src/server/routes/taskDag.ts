@@ -42,21 +42,6 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
     }
   })
 
-  // GET /api/tasks/epics/:id/dag - DAG for an epic (issue number, ref, or sha)
-  server.get<{ Params: { id: string } }>('/api/tasks/epics/:id/dag', async (request, reply) => {
-    try {
-      return reply.send(await taskDagRepo.getEpicDag(request.params.id))
-    } catch (error) {
-      if (error instanceof TaskDagUnavailableError) {
-        return handleError(server, reply, error, 'Failed to fetch epic DAG')
-      }
-      if (error instanceof Error && /not found/i.test(error.message)) {
-        return reply.status(404).send({ error: error.message })
-      }
-      return handleError(server, reply, error, 'Failed to fetch epic DAG')
-    }
-  })
-
   server.get<{ Params: { repository: string; id: string } }>(
     '/api/tasks/repositories/:repository/epics/:id/dag',
     async (request, reply) => {
@@ -87,17 +72,6 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
       }
     },
   )
-
-  // GET /api/tasks/task/:sha - task detail with resolved relations
-  server.get<{ Params: { sha: string } }>('/api/tasks/task/:sha', async (request, reply) => {
-    try {
-      const detail = await taskDagRepo.getTaskDetail(request.params.sha)
-      if (!detail) return reply.status(404).send({ error: 'Task not found' })
-      return reply.send(detail)
-    } catch (error) {
-      return handleError(server, reply, error, 'Failed to fetch task')
-    }
-  })
 
   server.get<{ Params: { repository: string; sha: string } }>(
     '/api/tasks/repositories/:repository/tasks/:sha',

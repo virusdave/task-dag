@@ -15,7 +15,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 
-import { automationRepoPath } from './automationRepoRoot.js'
+import { configuredRepositoryPath } from './configuredRepositoryRoot.js'
 
 export interface MorningBundleRunSummary {
   runId: string
@@ -27,7 +27,7 @@ export interface MorningBundleRunSummary {
 const BUNDLE_RELATIVE = path.join('ads', 'google', 'outputs', 'prod', 'bundle')
 
 export function morningBundleRootDir(): string {
-  return automationRepoPath(BUNDLE_RELATIVE)
+  return configuredRepositoryPath('automation', BUNDLE_RELATIVE)
 }
 
 export async function listMorningBundleRuns(): Promise<MorningBundleRunSummary[]> {

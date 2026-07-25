@@ -22,8 +22,8 @@
 
 1. **The data sources exist and are populated** (`gads_ad_attempts`,
    `landingpage_ad_outcomes`, `gads_lp_rollup`; morning-bundle/L2/L3
-   artifacts are produced on disk under the helios-owned
-   `$AUTOMATION_REPO_PATH/ads/google/outputs/`).
+   artifacts are produced under the helios-owned `automation` working
+   checkout registered in `HELIOS_TASK_DAG_LOCAL_PATHS_FILE`).
 2. **`gads_ad_attempts` has no `site` column, and `account_id` is
    useless for scoping** (uniformly `'unknown'` in prod — see §2). The
    **only reliable site signal already present is the campaign / ad-group
@@ -112,9 +112,9 @@ Per-run cadence (insert health):
 
 ### Filesystem artifacts (morning bundle / L2 / L3)
 
-- Produced under `$AUTOMATION_REPO_PATH/ads/google/outputs/` —
-  on prod `AUTOMATION_REPO_PATH=/var/lib/helios/automation`, resolved by
-  [`getAutomationRepoRoot()`](../../../helios/src/server/ads/automationRepoRoot.ts);
+- Produced under the `automation` working checkout explicitly registered in
+  `HELIOS_TASK_DAG_LOCAL_PATHS_FILE`, resolved by
+  [`getConfiguredRepositoryRoot()`](../../../helios/src/server/ads/configuredRepositoryRoot.ts);
   bundles live under `.../outputs/prod/bundle/run-<date>-<shortid>.zip`
   ([`morningBundleRuns.ts`](../../../helios/src/server/ads/morningBundleRuns.ts)).
 - That tree is owned `helios:helios` mode `700`, so the audit user
