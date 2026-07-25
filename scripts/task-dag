@@ -636,6 +636,9 @@ COMMANDS:
     release <sha>          Drop a claim back onto the frontier
     release-root <issue>   Drop a root orchestration claim (never creates a
                            frontier ref)
+    retire-owned           Release or park exact claims owned by the ambient
+                           process identity (--all|--task|--root)
+    capabilities --json    Print the effect-free machine capability contract
     reap                   Reclaim provably-dead leaf/root claims safely
     roots                  List epic roots + orchestration state
                            (decomposed/claimed/pickable); --pickable for
@@ -7103,6 +7106,14 @@ main() {
     case "$command" in
         help|--help|-h) cmd_help ;;
         --version|-v) echo "task-dag v${VERSION}" ;;
+        capabilities)
+            if [ "$#" -eq 1 ] && [ "$1" = "--json" ]; then
+                printf '%s\n' '{"schema":1,"epicIdRootReaders":1,"ownedClaimRetirement":1}'
+            elif [ "$#" -eq 1 ] && { [ "$1" = "--help" ] || [ "$1" = "-h" ]; }; then
+                echo "Usage: task-dag capabilities --json"
+            else
+                echo "Usage: task-dag capabilities --json" >&2; return 2
+            fi ;;
         migration-status)
             if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
                 echo "Usage: task-dag migration-status --json"
@@ -7116,6 +7127,7 @@ main() {
         claim-root) cmd_claim_root "$@" ;;
         release) cmd_release "$@" ;;
         release-root) cmd_release_root "$@" ;;
+        retire-owned) cmd_retire_owned "$@" ;;
         reap) cmd_reap "$@" ;;
         roots) cmd_roots "$@" ;;
         active) cmd_active "$@" ;;
@@ -7888,6 +7900,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/reconcile.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
 # shellcheck source=task-dag.d/root-containment.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/root-containment.sh"
+# shellcheck source=task-dag.d/retire-owned.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/retire-owned.sh"
 
 # Execute (must be the final statement so all functions, including those
 # in dead-code section above and any sourced extensions, are registered).

@@ -86,6 +86,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/repository-identity.sh" \
         "$(dirname "$TD")/task-dag.d/blocked-core.sh" \
         "$(dirname "$TD")/task-dag.d/root-containment.sh" \
+        "$(dirname "$TD")/task-dag.d/retire-owned.sh" \
         "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
         "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
         "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
@@ -142,6 +143,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/github-origin.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/blocked-core.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/root-containment.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/retire-owned.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
@@ -175,11 +177,13 @@ bash -n "$TD" \
     && bash -n "$here/reconcile-comments.sh" \
     && bash -n "$here/consumer-cutover.sh" \
     && bash -n "$here/loader-inventory.sh" \
-    && bash -n "$here/epic-id-protocol.sh" || exit 1
+    && bash -n "$here/epic-id-protocol.sh" \
+    && bash -n "$here/retire-owned.sh" || exit 1
 
 parallel_tests=(
     loader-inventory.sh
     epic-id-protocol.sh
+    retire-owned.sh
     reconcile.sh
     complete-safety.sh
     materialise-census.sh
