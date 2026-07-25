@@ -216,7 +216,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
 
     expect(result.schemaVersion).toBe(1)
     expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toMatch(/operator-guidance/)
+    expect(result.promptVersion).toMatch(/market-snapping/)
     expect(result.drafts).toHaveLength(1)
     const draft = result.drafts[0]!
     // Distributor identity comes from the INPUT, never the model echo.
@@ -225,6 +225,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
     // Confidence given as a percentage is normalized to 0..1.
     expect(draft.confidence).toBeCloseTo(0.9)
     expect(draft.reuseProductIdCandidate).toBe(7001)
+    expect(result.classifierCalls).toBe(1)
   })
 
   it('normalizes blank nullable target strings to null', async () => {
@@ -243,6 +244,54 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
 
     const result = await classifyPendingPurchasePacketWithLlm(buildInput())
     expect(result.drafts[0]!.targetStrainName).toBeNull()
+  })
+
+  it('sends row-scoped prior and LitAlerts evidence without authorizing its id for reuse', async () => {
+    const fetchMock = stubFetch(modelResponse({ drafts: [modelDraft()] }))
+    await classifyPendingPurchasePacketWithLlm(buildInput({ rows: [rowInput({
+      classificationEvidence: {
+        priorOutcome: null,
+        marketBrandCandidates: [{
+          litalertsBrandId: 'la-brand-9', brandName: 'Runtz',
+          observedAt: '2026-07-24T00:00:00.000Z', freshness: 'preferred-48h',
+        }],
+        marketCandidates: [{
+          litalertsProductId: 'la-998', brandName: 'Runtz', productName: 'Pink Runtz',
+          category: 'Flower', amount: '3.5', units: 'g', observedAt: '2026-07-24T00:00:00.000Z',
+          freshness: 'preferred-48h',
+        }],
+      },
+    })] }))
+    const request = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body) as {
+      messages: Array<{ role: string; content: string }>
+    }
+    const payload = JSON.parse(request.messages[1]!.content) as { rows: Array<{ classificationEvidence: unknown }> }
+    expect(payload.rows[0]?.classificationEvidence).toMatchObject({ marketCandidates: [{ litalertsProductId: 'la-998' }] })
+    expect(request.messages[0]!.content).toMatch(/NEVER authorizes reuseProductIdCandidate/)
+  })
+
+  it('quarantines a LitAlerts id proposed as if it were an offered Sweed reuse id', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    stubFetch(modelResponse({ drafts: [modelDraft({
+      reuseProductIdCandidate: 998,
+      reuseEvidence: { source: 'model-inference', rationale: 'LitAlerts match.', citedHintIds: [] },
+    })] }))
+    const result = await classifyPendingPurchasePacketWithLlm(buildInput({ rows: [rowInput({
+      classificationEvidence: {
+        priorOutcome: null,
+        marketBrandCandidates: [],
+        marketCandidates: [{
+          litalertsProductId: '998', brandName: 'Runtz', productName: 'Pink Runtz',
+          category: 'Flower', amount: '3.5', units: 'g', observedAt: '2026-07-24T00:00:00.000Z',
+          freshness: 'preferred-48h',
+        }],
+      },
+    })] }))
+    expect(result.drafts[0]).toMatchObject({
+      proposedAction: 'needs-review',
+      reuseProductIdCandidate: null,
+    })
+    expect(result.classifierCalls).toBe(3)
   })
 })
 
@@ -749,6 +798,7 @@ describe('classifyPendingPurchasePacketWithLlm — schema-repair retry', () => {
     expect(result.drafts.find((draft) => draft.rowKey === 'r1')?.rationale).toBe('First accepted rationale.')
     expect(result.drafts.find((draft) => draft.rowKey === 'r2')?.proposedAction).toBe('mapping-only')
     expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(result.classifierCalls).toBe(2)
     const repairMessages = messagesOf(fetchMock, 1)
     expect(repairMessages[3]!.content).toMatch(/draft "r2"/)
   })

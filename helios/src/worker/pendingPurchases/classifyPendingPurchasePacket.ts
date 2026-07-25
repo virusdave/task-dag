@@ -44,10 +44,11 @@ import {
 import { resolveBedrockModel } from '../../server/llm/bedrockModelConfig.js'
 import type { Queryable } from '../../server/db/pool.js'
 import { getWorkerEnv } from '../config/env.js'
+import type { PendingPurchaseRowClassificationEvidence } from './loadPendingPurchaseClassificationEvidence.js'
 
 // Bump when the prompt's SEMANTICS change (recorded on the result for
 // audit/replay). Date-stamped like DEFAULT_DESCRIPTION_PROMPT_VERSION.
-export const PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION = '2026-07-19-operator-guidance-vendor-evidence-v2'
+export const PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION = '2026-07-25-iterative-market-snapping-v3'
 
 // Event-level: one deliberate, rare call gets generous room but stays bounded.
 const CLASSIFIER_TIMEOUT_CEILING_MS = 120_000
@@ -150,6 +151,7 @@ export interface ClassifierRowInput {
   // purchase/manifest. A non-empty allowedBrandNames list is a hard row-scoped
   // brand boundary, not merely a model hint.
   readonly vendorEvidence: ClassifierVendorEvidence
+  readonly classificationEvidence?: PendingPurchaseRowClassificationEvidence
 }
 
 /** One inert C3 fact, flattened with the cited-id the model must use. */
@@ -235,7 +237,7 @@ export class PendingPurchaseClassifierError extends Error {}
  */
 export async function classifyPendingPurchasePacketWithLlm(
   input: ClassifyPendingPurchasePacketInput,
-): Promise<PendingPurchaseLlmClassifierResult> {
+): Promise<PendingPurchaseLlmClassifierResult & { readonly classifierCalls: number }> {
   assertWithinInputGuards(input)
 
   const model = await resolveBedrockModel(input.db, 'pending_purchase_classifier')
@@ -316,6 +318,7 @@ export async function classifyPendingPurchasePacketWithLlm(
       model,
       promptVersion: PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION,
       drafts: input.rows.map((row) => acceptedDrafts.get(row.rowKey)!),
+      classifierCalls: repairAttempt + 1,
     }
   }
 }
@@ -432,6 +435,8 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'Each row includes deterministic vendorEvidence from the canonical vendor-brand directory and known brands in that purchase/manifest. When allowedBrandNames is non-empty, targetBrand MUST be one of those names and a catalog candidate proposed for that row MUST be listed in allowedCatalogProductIds. status "explicit-override" is an authoritative operator pin. status "conflicting" or "unknown" supplies no brand constraint; do not invent one. Confidence and evidence are review context, not permission to escape the allowed lists.',
   'Produce EXACTLY ONE draft per input row, echoing its "rowKey", "distributorProductId", and "distributorProductName" verbatim.',
   'For each row set the structured target taxonomy (targetBrand, targetCategory, targetSubcategory, targetGroupName, targetVariantName, targetVariantTab, targetStrainName, targetSize, targetPackCount); use null for any field you cannot determine. targetCategory and targetSubcategory, when set, MUST be values present in the allowed taxonomy.',
+  'Make each row decision in this concise order: brand, taxonomy, pack size, unit size, then differentiator/variant. Row classificationEvidence contains an exact sanctioned prior outcome and/or LitAlerts market brand/SKU candidates. Prefer a reasonable existing prior or market brand/SKU; choose de novo/catalog-create only when none reasonably matches. Older market evidence is explicitly timestamped and remains useful, but fresh preferred-48h evidence is stronger.',
+  'LitAlerts evidence is market evidence only. Its litalertsProductId is NOT a Sweed/catalog product id and NEVER authorizes reuseProductIdCandidate. Only the separately offered catalog/current-link/Sweed ids may be proposed for reuse.',
   'Choose proposedAction: "mapping-only" when the row clearly IS an existing live product (then set reuseProductIdCandidate to that product\'s id and provide reuseEvidence); "catalog-create" when it is a genuinely new product (then reuseProductIdCandidate MUST be null); "needs-review" when you are not confident either way.',
   'reuseProductIdCandidate is a PROPOSAL ONLY — it must be the productId of one of the catalogCandidates, the row\'s currentDistributorLinkProductId, or one of the row\'s sweedSuggestions. Never invent a product id. A human and a deterministic validator decide whether your proposal is accepted; you never authorize a link.',
   'reuseEvidence.source records HOW you decided, and the candidate id MUST be consistent with it: "current-distributor-link" (candidate equals this row\'s currentDistributorLinkProductId), "sweed-suggestion" (candidate is one of this row\'s sweedSuggestions), "live-catalog-search" (candidate is one of the catalogCandidates), "sibling-po" (supported by a cited hint fact), or "model-inference" (weakest; any otherwise-offered candidate, no external corroboration).',
@@ -472,6 +477,7 @@ interface UserPayload {
     currentDistributorLinkProductId: number | null
     sweedSuggestions: readonly ClassifierSweedSuggestion[]
     vendorEvidence: ClassifierVendorEvidence
+    classificationEvidence: PendingPurchaseRowClassificationEvidence | null
   }>
 }
 
@@ -510,6 +516,7 @@ function buildUserPayload(input: ClassifyPendingPurchasePacketInput): UserPayloa
       currentDistributorLinkProductId: row.currentDistributorLinkProductId,
       sweedSuggestions: row.sweedSuggestions,
       vendorEvidence: row.vendorEvidence,
+      classificationEvidence: row.classificationEvidence ?? null,
     })),
   }
 }

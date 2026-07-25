@@ -54,6 +54,7 @@ import {
   type ClassifierSweedSuggestion,
   type ClassifierVendorEvidence,
 } from '../pendingPurchases/classifyPendingPurchasePacket.js'
+import { loadPendingPurchaseClassificationEvidence } from '../pendingPurchases/loadPendingPurchaseClassificationEvidence.js'
 import {
   loadPendingPurchaseVendorEvidence,
 } from '../pendingPurchases/pendingPurchaseVendorEvidence.js'
@@ -1009,9 +1010,18 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
     })
 
     const catalogCandidates = selectClassifierCandidatesForChunk(chunk, candidatePool)
+    const classificationEvidence = await loadPendingPurchaseClassificationEvidence(db, chunk.map((ctx) => ({
+      rowKey: ctx.classifierRow.rowKey,
+      siteDealerId: ctx.group.siteDealerId,
+      distributorProductId: ctx.classifierRow.distributorProductId,
+      distributorProductName: ctx.classifierRow.distributorProductName,
+      brandNames: [...ctx.vendorEvidence.allowedBrandNames, ctx.parseComparison.winner?.brand ?? '']
+        .filter((name) => name.trim().length > 0),
+    })))
     const offeredCandidateIds = new Set(catalogCandidates.map((candidate) => candidate.productId))
     const chunkRows = chunk.map((ctx) => ({
       ...ctx.classifierRow,
+      classificationEvidence: classificationEvidence.get(ctx.classifierRow.rowKey),
       vendorEvidence: {
         ...ctx.classifierRow.vendorEvidence,
         allowedCatalogProductIds: ctx.classifierRow.vendorEvidence.allowedCatalogProductIds.filter(
@@ -1030,7 +1040,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       allowedTaxonomy,
     })
 
-    classifierCalls += 1
+    classifierCalls += chunkResult.classifierCalls
     if (model === null) {
       model = chunkResult.model
       promptVersion = chunkResult.promptVersion
