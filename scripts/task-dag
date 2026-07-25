@@ -379,12 +379,6 @@ taskdag_ref_violations() {
 # Helper: print 'yes' iff the remote currently has a tasks/active/<short>
 # ref. The remote is the source of truth for claim state — local refs may
 # lag if another worker just won the CAS.
-task_is_claimed_on_remote() {
-    local short_sha="$1"
-    git ls-remote --exit-code origin "refs/heads/tasks/active/$short_sha" \
-        >/dev/null 2>&1 && echo "yes" || echo "no"
-}
-
 # Helper: read the SHA that origin currently has at tasks/active/<short>,
 # bypassing every local cache (no fetch + no use of local refs). Empty
 # string means "ref does not exist on origin".
@@ -395,20 +389,8 @@ task_is_claimed_on_remote() {
 # concurrent worker. This is the "verify" in "double-checked
 # locking": the lease check on push is the lock; this ls-remote
 # round-trip is the readback that confirms the lock is still ours.
-task_active_sha_on_remote() {
-    local short_sha="$1"
-    git ls-remote origin "refs/heads/tasks/active/$short_sha" 2>/dev/null \
-        | awk '{print $1; exit}'
-}
-
 # Helper: print 'yes' iff the remote currently has a tasks/frontier/<short>
 # ref pointing at the expected task SHA.
-task_frontier_on_remote() {
-    local short_sha="$1"
-    git ls-remote origin "refs/heads/tasks/frontier/$short_sha" 2>/dev/null \
-        | awk '{print $1; exit}'
-}
-
 # Helper: build the claim-commit metadata block. The active ref points
 # at a side-commit whose tree is identical to the task tree and whose
 # first parent is the task commit; the commit message holds claim
@@ -477,10 +459,6 @@ Note: ${note}"
 
 # Helper: print the SHA origin currently has at <ref>, bypassing local
 # caches (no fetch, no local-ref shortcut). Empty string = absent.
-remote_ref_sha() {
-    git ls-remote origin "$1" 2>/dev/null | awk '{print $1; exit}'
-}
-
 # Helper: tri-state remote ref lookup so safety-critical callers can FAIL
 # CLOSED on an indeterminate (transport/auth) error instead of mistaking a
 # transient failure for "ref absent". Mirrors pending_sha_on_remote_checked.
@@ -488,44 +466,14 @@ remote_ref_sha() {
 #   rc 0 + SHA  -> ref exists on origin
 #   rc 2        -> ref cleanly absent
 #   rc 3        -> origin unreachable / error (indeterminate)
-remote_ref_sha_checked() {
-    local out rc
-    out=$(git ls-remote --exit-code origin "$1" 2>/dev/null)
-    rc=$?
-    case "$rc" in
-        0) printf '%s\n' "$out" | awk '{print $1; exit}'; return 0 ;;
-        2) return 2 ;;   # exit-code 2: ref not found
-        *) return 3 ;;   # transport/auth/other
-    esac
-}
-
 # Helper: SHA of tasks/pending/<N> on origin (epic-root identity).
-pending_sha_on_remote() {
-    remote_ref_sha "refs/heads/tasks/pending/$1"
-}
-
 # Helper: tri-state pending lookup so callers can FAIL CLOSED on an
 # indeterminate (transport/auth) error instead of silently treating a
 # transient failure as "no root". Echoes the SHA on success.
 #   rc 0 + SHA  -> root exists on origin
 #   rc 2        -> root cleanly absent
 #   rc 3        -> origin unreachable / error (indeterminate)
-pending_sha_on_remote_checked() {
-    local out rc
-    out=$(git ls-remote --exit-code origin "refs/heads/tasks/pending/$1" 2>/dev/null)
-    rc=$?
-    case "$rc" in
-        0) printf '%s\n' "$out" | awk '{print $1; exit}'; return 0 ;;
-        2) return 2 ;;   # exit-code 2: ref not found
-        *) return 3 ;;   # transport/auth/other
-    esac
-}
-
 # Helper: SHA of tasks/root-active/<N> on origin (root orchestration lock).
-root_active_sha_on_remote() {
-    remote_ref_sha "refs/heads/tasks/root-active/$1"
-}
-
 # Helper: fetch the refs needed to reason about issue N's epic root —
 # the pending root, its orchestration lock, and every namespace a child
 # task could live in (so child detection sees active/blocked/delegated
@@ -545,18 +493,7 @@ fetch_root_refs() {
     # In particular, master is mandatory: completed children are reachable
     # only through their completion merge after their scheduling ref retires.
     # Never substitute HEAD/local master or retain a ready map after failure.
-    TASKDAG_CHILD_MAP_READY=false
-    TASKDAG_RECON_READY=false
-    git fetch --quiet --atomic --prune --no-tags origin \
-        '+refs/heads/master:refs/remotes/origin/master' \
-        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
-        '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
-        '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
-        '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
-        '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
-        '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
-        '+refs/heads/gh/issues/*:refs/heads/gh/issues/*' \
-        2>/dev/null || return 1
+    taskdag_sync_root_refs || return 1
     taskdag_prepare_child_map || return 1
 }
 
@@ -1121,33 +1058,6 @@ read_blocked_meta_field() {
 #     url:") and delegated nodes ("issue:\n repo:\n number:").
 # Emits one TAB-separated line: "<repo>\t<issue>\t<url>" (fields may be
 # empty). repo is owner/repo, parsed from the URL when present.
-derive_task_origin() {
-    local sha="$1"
-    local msg; msg=$(parse_commit_metadata "$sha")
-    local issue url repo
-    # `|| true` keeps a missing trailer from aborting under `set -e`
-    # (extract_field's grep returns non-zero when the field is absent).
-    issue=$(extract_field "$msg" "Issue" 2>/dev/null || true); issue="${issue#\#}"
-    if [ -z "$issue" ]; then
-        issue=$(echo "$msg" | awk '/^issue:[[:space:]]*$/{f=1;next} f&&/number:/{sub(/^[[:space:]]*number:[[:space:]]*/,"");print;exit}')
-    fi
-    url=$(extract_field "$msg" "URL" 2>/dev/null || true)
-    if [ -z "$url" ]; then
-        url=$(echo "$msg" | awk '/^github:[[:space:]]*$/{f=1;next} f&&/url:/{sub(/^[[:space:]]*url:[[:space:]]*/,"");print;exit}')
-    fi
-    repo=""
-    # Only parse a repo out of a real github.com URL; never echo back a
-    # non-matching URL as if it were owner/repo.
-    if [[ "$url" =~ ^https?://github\.com/([^/]+/[^/]+)(/.*)?$ ]]; then
-        repo="${BASH_REMATCH[1]}"
-    fi
-    if [ -z "$repo" ]; then
-        # Delegated/ingested nodes can carry an explicit "issue:\n repo:".
-        repo=$(echo "$msg" | awk '/^issue:[[:space:]]*$/{f=1;next} f&&/repo:/{sub(/^[[:space:]]*repo:[[:space:]]*/,"");print;exit}')
-    fi
-    printf '%s\t%s\t%s\n' "$repo" "$issue" "$url"
-}
-
 # Resolve owner/repo from a git remote URL. The task-dag DAG is keyed by
 # owner/repo, NOT by hostname — but the fleet's prepared/ephemeral checkouts
 # rewrite `origin` to an ALIASED SSH host (git@github-<repo>:owner/repo.git)
@@ -1165,21 +1075,6 @@ derive_task_origin() {
 # Emits owner/repo on stdout, or nothing when the URL is empty/unparseable
 # (callers keep --repo as the explicit override for genuinely ambiguous or
 # non-standard remotes; bare local fixture paths deliberately yield nothing).
-parse_owner_repo_from_url() {
-    local url="$1" stripped
-    [ -n "$url" ] || return 0
-    # Strip the leading scheme+host (https://host/, http://host/, git@host:,
-    # ssh://[user@]host[:port]/, git://host/) and any trailing .git / slash.
-    stripped=$(printf '%s' "$url" | sed -E \
-        's#^(https?://[^/]+/|git@[^:]+:|ssh://[^/]+/|git://[^/]+/)##; s#\.git/?$##; s#/$##')
-    # Keep only the leading owner/repo pair (drop any deeper path) and require
-    # exactly that shape, so unparseable inputs yield nothing rather than a
-    # bogus repo that would fail downstream validation with a worse message.
-    if [[ "$stripped" =~ ^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/.*)?$ ]]; then
-        printf '%s\n' "${BASH_REMATCH[1]}"
-    fi
-}
-
 # Best-effort "is this GitHub issue CLOSED?" used as a defense-in-depth gate
 # in claim-root: an orphan tasks/pending/<N> ref for an already-closed issue
 # (e.g. left behind by a pre-fix close workflow that lacked contents:write,
@@ -1192,14 +1087,6 @@ parse_owner_repo_from_url() {
 # never drop real work. Only a confirmed CLOSED state returns 0.
 #   args: <repo owner/name> <issue-number>
 #   return 0 -> confirmed CLOSED ; 1 -> open/unknown/indeterminate
-issue_is_closed_remote() {
-    local repo="$1" issue="$2" state
-    [ -n "$repo" ] && [ -n "$issue" ] || return 1
-    command -v gh >/dev/null 2>&1 || return 1
-    state="$(gh issue view "$issue" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)"
-    [ "$state" = "CLOSED" ]
-}
-
 # Three-valued live GitHub issue state, for the reconcile-closed-issue
 # fail-safe. Unlike issue_is_closed_remote (which fails OPEN, conflating
 # "open" with "couldn't tell"), this DISTINGUISHES a determined state from
@@ -1209,16 +1096,6 @@ issue_is_closed_remote() {
 #   stdout: the live state (e.g. CLOSED, OPEN) when determined
 #   return: 0 -> determined (state printed on stdout)
 #           3 -> undetermined (gh missing/unauth/API error/empty state)
-issue_state_remote() {
-    local repo="$1" issue="$2" state
-    [ -n "$repo" ] && [ -n "$issue" ] || return 3
-    command -v gh >/dev/null 2>&1 || return 3
-    state="$(gh issue view "$issue" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || return 3
-    [ -n "$state" ] || return 3
-    printf '%s\n' "$state"
-    return 0
-}
-
 # Helper: build the blocked-meta side-commit (tree == task tree, first
 # parent == task commit, body holds the metadata). We pin a CONSTANT
 # author/committer identity and use the blocked-at timestamp as the
@@ -8340,6 +8217,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/task-model.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/ref-schema.sh"
 # shellcheck source=task-dag.d/repository-identity.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
+# shellcheck source=task-dag.d/github-origin.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh

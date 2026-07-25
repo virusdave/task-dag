@@ -8,7 +8,11 @@ ok() { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.test
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
-TASKDAG_SCRIPT_DIR=$(dirname "$TD"); source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
+TASKDAG_SCRIPT_DIR=$(dirname "$TD"); EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 bare=$(printf '%s\n' 'Materialise-Child-Epic:) are allowed.' | taskdag_materialise_groups_json_from_message)
 partial=$(printf '%s\n' 'Materialise-Child-Epic: peer/repo' 'Child-Epic-Title: incomplete' | taskdag_materialise_groups_json_from_message)

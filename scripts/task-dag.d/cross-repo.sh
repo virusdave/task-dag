@@ -13,6 +13,11 @@
 # Refs live under refs/heads/* so they are pushable. See
 # docs/task_dag/CROSS_REPO_DRIVER_DESIGN.md.
 
+if ! declare -F remote_ref_sha_checked >/dev/null; then
+    echo "Error: cross-repo.sh requires github-origin.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 # Resolve this module's directory once, at source time (cwd is still the
 # invocation dir and BASH_SOURCE is the path task-dag sourced us with), so
 # later lookups (e.g. phase-gates.conf) are immune to subsequent `cd`s.

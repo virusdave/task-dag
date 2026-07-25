@@ -11,6 +11,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 source "$REPO_ROOT/scripts/task-dag.d/ci-chains.sh"
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+source "$REPO_ROOT/scripts/task-dag.d/git-objects.sh"
+source "$REPO_ROOT/scripts/task-dag.d/repository-identity.sh"
+source "$REPO_ROOT/scripts/task-dag.d/github-origin.sh"
 source "$REPO_ROOT/scripts/task-dag.d/ci-repair.sh"
 
 SNAP="$ROOT/snapshot.git"; git init -q --bare "$SNAP"

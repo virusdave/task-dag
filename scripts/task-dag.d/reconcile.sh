@@ -1,4 +1,9 @@
 # shellcheck shell=bash
+
+if ! declare -F taskdag_sync_root_refs >/dev/null; then
+    echo "Error: reconcile.sh requires github-origin.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
 # ═══════════════════════════════════════════════════════════════════════
 # task-dag RECONCILE PREDICATES: complete() + leaf-readiness over the edge
 # graph (issue #13 north-star — the AGGREGATION layer above the raw facts).

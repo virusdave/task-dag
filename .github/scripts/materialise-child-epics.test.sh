@@ -16,6 +16,14 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TASKDAG_LIB="$HERE/../../scripts/task-dag.d"
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+# shellcheck source=/dev/null
+source "$TASKDAG_LIB/git-objects.sh"
+# shellcheck source=/dev/null
+source "$TASKDAG_LIB/repository-identity.sh"
+# shellcheck source=/dev/null
+source "$TASKDAG_LIB/github-origin.sh"
 # shellcheck source=/dev/null
 MATERIALISE_LIB_ONLY=1 source "$HERE/materialise-child-epics.sh"
 

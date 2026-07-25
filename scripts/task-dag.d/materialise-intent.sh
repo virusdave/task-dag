@@ -8,6 +8,11 @@
 # emits Closes-Epic; the predicate fails closed until all three projections are
 # present on origin.
 
+if ! declare -F remote_ref_sha_checked >/dev/null; then
+    echo "Error: materialise-intent.sh requires github-origin.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 taskdag_extract_materialise_trailers_from_message() {
     local line key val key_lc in_group=0 in_fence=false fence_char="" fence_len=0 marker rest
     while IFS= read -r line || [ -n "$line" ]; do

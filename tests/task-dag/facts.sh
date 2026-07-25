@@ -43,7 +43,11 @@ RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
 # no network / gh is needed.
 export TASKDAG_CURRENT_REPO="owner/repo"
 # shellcheck source=/dev/null
+source "$LIB_DIR/git-objects.sh"
+# shellcheck source=/dev/null
 source "$LIB_DIR/repository-identity.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/github-origin.sh"
 source "$LIB_DIR/edges.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/facts.sh"

@@ -15,6 +15,10 @@ registry_blob=2222222222222222222222222222222222222222
 registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
 registry_file="$ROOT/registry"; printf '%s\n' "$registry" >"$registry_file"
 TASKDAG_SCRIPT_DIR="$(dirname "$TD")"
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"

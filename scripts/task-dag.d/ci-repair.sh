@@ -13,6 +13,11 @@
 # (Chain-state, classifier core, ticket/escalation, worker verifier, and the
 #  reusable workflow are the other leaves of #1.)
 
+if ! declare -F task_is_claimed_on_remote >/dev/null; then
+    echo "Error: ci-repair.sh requires github-origin.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 # ---------------------------------------------------------------------------
 # repair-reconcile evidence internals
 #

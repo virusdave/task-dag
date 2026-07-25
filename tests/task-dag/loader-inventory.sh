@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh ref-schema.sh repository-identity.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh ref-schema.sh repository-identity.sh github-origin.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -100,6 +100,24 @@ if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/edges.sh" >"$ROOT/iden
 elif grep -q 'requires repository-identity.sh to be loaded first' "$ROOT/identity-order-err"; then
   ok "feature modules fail loudly without their repository-identity prerequisite"
 else bad "repository-identity source-order failure was not actionable"; fi
+
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/github-origin.sh" >"$ROOT/origin-order-out" 2>"$ROOT/origin-order-err"; then
+  bad "GitHub/origin foundation loaded without Git-object primitives"
+elif grep -q 'requires git-objects.sh to be loaded first' "$ROOT/origin-order-err"; then
+  ok "GitHub/origin foundation fails loudly without Git-object primitives"
+else bad "GitHub/origin Git-object source-order failure was not actionable"; fi
+
+if bash -c 'parse_commit_metadata(){ :; }; extract_field(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/github-origin.sh" >"$ROOT/origin-repo-order-out" 2>"$ROOT/origin-repo-order-err"; then
+  bad "GitHub/origin foundation loaded without repository identity"
+elif grep -q 'requires repository-identity.sh to be loaded first' "$ROOT/origin-repo-order-err"; then
+  ok "GitHub/origin foundation fails loudly without repository identity"
+else bad "GitHub/origin repository source-order failure was not actionable"; fi
+
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/cross-repo.sh" >"$ROOT/cross-order-out" 2>"$ROOT/cross-order-err"; then
+  bad "cross-repo loaded without its GitHub/origin prerequisite"
+elif grep -q 'requires github-origin.sh to be loaded first' "$ROOT/cross-order-err"; then
+  ok "feature consumers fail loudly without their GitHub/origin prerequisite"
+else bad "GitHub/origin consumer source-order failure was not actionable"; fi
 
 # Source from an unrelated peer CWD. The loaded graph module must capture the
 # canonical absolute CLI; exercise the exact helper-generation/subprocess path

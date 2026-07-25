@@ -24,7 +24,8 @@
 set -uo pipefail
 
 TD="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}"
-CROSS_REPO="$(dirname "$TD")/task-dag.d/cross-repo.sh"
+LIB_DIR="$(dirname "$TD")/task-dag.d"
+CROSS_REPO="$LIB_DIR/cross-repo.sh"
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
@@ -35,6 +36,13 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required for this test"; echo "PA
 
 # Source the module directly to unit-test the internal helper. cross-repo.sh
 # only defines functions at source time (it does not run `main`).
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+# shellcheck source=/dev/null
+source "$LIB_DIR/git-objects.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/repository-identity.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/github-origin.sh"
 # shellcheck source=/dev/null
 source "$CROSS_REPO"
 

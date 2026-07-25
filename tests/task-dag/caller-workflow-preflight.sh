@@ -209,6 +209,10 @@ if (
     export HOME="$TMP/identity-home" XDG_CONFIG_HOME="$TMP/identity-home/.config" GIT_CONFIG_NOSYSTEM=1
     export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.test
     export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
+    EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+    source "$ROOT/scripts/task-dag.d/git-objects.sh"
+    source "$ROOT/scripts/task-dag.d/repository-identity.sh"
+    source "$ROOT/scripts/task-dag.d/github-origin.sh"
     source "$ROOT/scripts/task-dag.d/cross-repo.sh"
     _xrepo_ensure_git_identity
     ! git config --local --get user.name >/dev/null \
@@ -225,6 +229,10 @@ if (
     export HOME="$TMP/identity-home" XDG_CONFIG_HOME="$TMP/identity-home/.config" GIT_CONFIG_NOSYSTEM=1
     export GIT_AUTHOR_NAME=partial
     unset GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+    source "$ROOT/scripts/task-dag.d/git-objects.sh"
+    source "$ROOT/scripts/task-dag.d/repository-identity.sh"
+    source "$ROOT/scripts/task-dag.d/github-origin.sh"
     source "$ROOT/scripts/task-dag.d/cross-repo.sh"
     _xrepo_ensure_git_identity
     [ "$(git config --local --get user.name)" = "github-actions[bot]" ] \
