@@ -19,6 +19,10 @@ if ! declare -F taskdag_node_repo >/dev/null; then
     echo "Error: graph-converge.sh requires repository-identity.sh to be loaded first" >&2
     return 2 2>/dev/null || exit 2
 fi
+if ! declare -F taskdag_recon_prepare >/dev/null || ! declare -F taskdag_node_complete >/dev/null; then
+    echo "Error: graph-converge.sh requires reconciliation-core.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
 
 TASKDAG_GRAPH_CONVERGE_CLI="$TASKDAG_ENTRYPOINT"
 

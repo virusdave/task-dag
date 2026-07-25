@@ -7731,6 +7731,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/edges-write.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/edges.sh"
 # shellcheck source=task-dag.d/facts.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/facts.sh"
+# shellcheck source=task-dag.d/reconciliation-core.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/reconciliation-core.sh"
 # shellcheck source=task-dag.d/graph-converge.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/graph-converge.sh"
 # shellcheck source=task-dag.d/legacy-edges.sh

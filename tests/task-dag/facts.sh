@@ -57,6 +57,8 @@ source "$LIB_DIR/edges.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/facts.sh"
 # shellcheck source=/dev/null
+source "$LIB_DIR/reconciliation-core.sh"
+# shellcheck source=/dev/null
 TASKDAG_ENTRYPOINT="$TD"
 source "$LIB_DIR/graph-converge.sh"
 # shellcheck source=/dev/null

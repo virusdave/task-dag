@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh reconciliation-core.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -166,6 +166,33 @@ if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/ci-repair.sh" >"$ROOT/
 elif grep -q 'requires claim-model.sh to be loaded first' "$ROOT/repair-claim-err"; then
   ok "CI repair fails loudly without claim model"
 else bad "CI repair claim-model source-order failure was not actionable"; fi
+
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconciliation-core.sh" >"$ROOT/recon-core-out" 2>"$ROOT/recon-core-err"; then
+  bad "reconciliation core loaded without child-map primitives"
+elif grep -q 'requires child-map.sh to be loaded first' "$ROOT/recon-core-err"; then
+  ok "reconciliation core fails loudly without its first prerequisite"
+else bad "reconciliation-core source-order failure was not actionable"; fi
+
+if rg -n 'edges-write|cmd_' "$REPO_ROOT/scripts/task-dag.d/reconciliation-core.sh" >"$ROOT/recon-core-cycles"; then
+  bad "reconciliation core depends on a writer or command adapter: $(cat "$ROOT/recon-core-cycles")"
+else ok "reconciliation core is independent of edge writers and command adapters"; fi
+
+recon_core_prereqs='taskdag_prepare_child_map_from taskdag_prepare_child_map taskdag_reset_child_map taskdag_normalize_node taskdag_edges_with_facts taskdag_node_done taskdag_load_facts taskdag_current_repo taskdag_sync_root_refs is_task_commit is_task_blocked blocked_structural_ancestor'
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconciliation-core.sh" "$recon_core_prereqs" >/dev/null 2>"$ROOT/recon-core-complete-err"; then
+  ok "reconciliation core accepts its complete prerequisite set"
+else bad "reconciliation core rejected its complete prerequisite set: $(cat "$ROOT/recon-core-complete-err")"; fi
+
+if bash -c 'taskdag_sync_root_refs(){ :; }; taskdag_prepare_child_map_from(){ :; }; is_task_blocked(){ :; }; blocked_structural_ancestor(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconcile.sh" >"$ROOT/reconcile-core-out" 2>"$ROOT/reconcile-core-err"; then
+  bad "reconcile consumer loaded without reconciliation core"
+elif grep -q 'requires reconciliation-core.sh to be loaded first' "$ROOT/reconcile-core-err"; then
+  ok "reconcile consumer fails loudly without reconciliation core"
+else bad "reconcile consumer source-order failure was not actionable"; fi
+
+if bash -c 'taskdag_node_repo(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/graph-converge.sh" >"$ROOT/converge-core-out" 2>"$ROOT/converge-core-err"; then
+  bad "graph convergence loaded without reconciliation core"
+elif grep -q 'requires reconciliation-core.sh to be loaded first' "$ROOT/converge-core-err"; then
+  ok "graph convergence fails loudly without reconciliation core"
+else bad "graph convergence source-order failure was not actionable"; fi
 
 root_prereqs='taskdag_prepare_child_map taskdag_sync_root_refs taskdag_recon_prepare taskdag_current_repo taskdag_node_complete taskdag_issue_closed_at_tip get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic fetch_task_refs_strict taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard taskdag_materialisation_intents_durable'
 if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/root-containment.sh" "$root_prereqs" >"$ROOT/root-order-out" 2>"$ROOT/root-order-err"; then
