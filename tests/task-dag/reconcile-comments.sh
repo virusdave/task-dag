@@ -5,6 +5,7 @@ EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 source "$(dirname "$TD")/task-dag.d/git-objects.sh"
 source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
 source "$(dirname "$TD")/task-dag.d/github-origin.sh"
+source "$(dirname "$TD")/task-dag.d/blocked-core.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 git init -q --bare "$tmp/origin.git"
 git init -q "$tmp/work"

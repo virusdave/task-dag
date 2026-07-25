@@ -1,4 +1,9 @@
 # shellcheck shell=bash
+if ! declare -F has_blocked_meta >/dev/null || ! declare -F read_blocked_meta_field >/dev/null; then
+    echo "Error: legacy-edges.sh requires blocked-core.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 # ═══════════════════════════════════════════════════════════════════════
 # task-dag LEGACY DEPENDENCY ENCODING → edge migration (issue #13)
 #

@@ -44,6 +44,8 @@ source "$LIB_DIR/repository-identity.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/github-origin.sh"
 # shellcheck source=/dev/null
+source "$LIB_DIR/blocked-core.sh"
+# shellcheck source=/dev/null
 source "$CROSS_REPO"
 
 # Extract the JSON payload out of the rendered ```yaml block of a body file.

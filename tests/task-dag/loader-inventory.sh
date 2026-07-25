@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh ref-schema.sh repository-identity.sh github-origin.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -113,11 +113,29 @@ elif grep -q 'requires repository-identity.sh to be loaded first' "$ROOT/origin-
   ok "GitHub/origin foundation fails loudly without repository identity"
 else bad "GitHub/origin repository source-order failure was not actionable"; fi
 
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/blocked-core.sh" >"$ROOT/blocked-order-out" 2>"$ROOT/blocked-order-err"; then
+  bad "blocked core loaded without Git-object primitives"
+elif grep -q 'requires git-objects.sh to be loaded first' "$ROOT/blocked-order-err"; then
+  ok "blocked core fails loudly without Git-object primitives"
+else bad "blocked-core Git-object source-order failure was not actionable"; fi
+
+if bash -c 'get_first_parent(){ :; }; is_task_commit(){ :; }; get_task_title(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/blocked-core.sh" >"$ROOT/blocked-origin-out" 2>"$ROOT/blocked-origin-err"; then
+  bad "blocked core loaded without GitHub/origin prerequisite"
+elif grep -q 'requires github-origin.sh to be loaded first' "$ROOT/blocked-origin-err"; then
+  ok "blocked core fails loudly without GitHub/origin prerequisite"
+else bad "blocked-core GitHub/origin source-order failure was not actionable"; fi
+
 if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/cross-repo.sh" >"$ROOT/cross-order-out" 2>"$ROOT/cross-order-err"; then
   bad "cross-repo loaded without its GitHub/origin prerequisite"
 elif grep -q 'requires github-origin.sh to be loaded first' "$ROOT/cross-order-err"; then
   ok "feature consumers fail loudly without their GitHub/origin prerequisite"
 else bad "GitHub/origin consumer source-order failure was not actionable"; fi
+
+if bash -c 'remote_ref_sha_checked(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/cross-repo.sh" >"$ROOT/cross-blocked-out" 2>"$ROOT/cross-blocked-err"; then
+  bad "cross-repo loaded without blocked core"
+elif grep -q 'requires blocked-core.sh to be loaded first' "$ROOT/cross-blocked-err"; then
+  ok "feature consumers fail loudly without blocked core"
+else bad "blocked-core consumer source-order failure was not actionable"; fi
 
 # Source from an unrelated peer CWD. The loaded graph module must capture the
 # canonical absolute CLI; exercise the exact helper-generation/subprocess path

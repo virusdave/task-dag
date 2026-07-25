@@ -88,18 +88,23 @@ enrich_block_at_birth_meta() {
     local cli="${TASK_DAG_CLI:-}" dir="" rc=0
     if [ -z "$cli" ]; then
         dir="$(mktemp -d)"
-        local base="https://raw.githubusercontent.com/${TASK_DAG_REPO}/${TASK_DAG_REF}/scripts"
-        mkdir -p "$dir/task-dag.d"
-        # Retry on transient raw.githubusercontent.com failures (esp. HTTP 429
-        # rate-limits when the fleet is busy) so a single 429 does not make
-        # issue-to-task give up — mirrors the fix in sync-comment-to-tasks.sh
-        # (see virusdave/top-level#54).
-        local retry=(--retry 5 --retry-delay 2 --retry-all-errors)
-        curl "${retry[@]}" -fsSL "$base/task-dag"                    -o "$dir/task-dag"                 || { rm -rf "$dir"; return 1; }
-        curl "${retry[@]}" -fsSL "$base/task-dag.d/cross-repo.sh"    -o "$dir/task-dag.d/cross-repo.sh" || { rm -rf "$dir"; return 1; }
-        curl "${retry[@]}" -fsSL "$base/task-dag.d/phase-gates.conf" -o "$dir/task-dag.d/phase-gates.conf" 2>/dev/null || true
-        chmod +x "$dir/task-dag" || { rm -rf "$dir"; return 1; }
-        cli="$dir/task-dag"
+        local clone_url="$TASK_DAG_REPO"
+        if [[ "$clone_url" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            clone_url="https://github.com/${clone_url}"
+            if [ -n "${GH_TOKEN:-}" ]; then
+                clone_url="https://x-access-token:${GH_TOKEN}@github.com/${TASK_DAG_REPO}"
+            fi
+        fi
+        # Fetch one coherent revision rather than maintaining a partial file
+        # list that drifts whenever task-dag gains another sourced module.
+        if ! git init --quiet "$dir/task-dag" >/dev/null 2>&1 \
+            || ! git -C "$dir/task-dag" fetch --quiet --depth 1 "$clone_url" "$TASK_DAG_REF" 2>/dev/null \
+            || ! git -C "$dir/task-dag" checkout --quiet FETCH_HEAD 2>/dev/null; then
+            rm -rf "$dir"
+            return 1
+        fi
+        cli="$dir/task-dag/scripts/task-dag"
+        [ -x "$cli" ] || { rm -rf "$dir"; return 1; }
     fi
     TASK_DAG_CLAIMER="${TASK_DAG_CLAIMER:-github-actions[issue-to-task]}" \
         "$cli" block "$sha" --operator \

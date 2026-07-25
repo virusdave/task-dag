@@ -213,6 +213,7 @@ if (
     source "$ROOT/scripts/task-dag.d/git-objects.sh"
     source "$ROOT/scripts/task-dag.d/repository-identity.sh"
     source "$ROOT/scripts/task-dag.d/github-origin.sh"
+    source "$ROOT/scripts/task-dag.d/blocked-core.sh"
     source "$ROOT/scripts/task-dag.d/cross-repo.sh"
     _xrepo_ensure_git_identity
     ! git config --local --get user.name >/dev/null \
@@ -233,6 +234,7 @@ if (
     source "$ROOT/scripts/task-dag.d/git-objects.sh"
     source "$ROOT/scripts/task-dag.d/repository-identity.sh"
     source "$ROOT/scripts/task-dag.d/github-origin.sh"
+    source "$ROOT/scripts/task-dag.d/blocked-core.sh"
     source "$ROOT/scripts/task-dag.d/cross-repo.sh"
     _xrepo_ensure_git_identity
     [ "$(git config --local --get user.name)" = "github-actions[bot]" ] \

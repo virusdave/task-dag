@@ -143,6 +143,21 @@ p77b="$(origin_ref_sha refs/heads/tasks/pending/77)"
 b77b="$(origin_ref_sha "refs/heads/tasks/blocked/$p77b")"
 assert_eq "pending/77 unchanged on edit after unblock" "$p77" "$p77b"
 if [[ -z "$b77b" ]]; then ok "edit after unblock did NOT re-block (create-only)"; else bad "stale label re-blocked an unblocked epic"; fi
+
+echo "== coherent runtime fallback: no preconfigured CLI still enriches metadata =="
+runtime_source="$WORK/task-dag-runtime-source"
+git init -q "$runtime_source"
+git -C "$runtime_source" config user.name fixture
+git -C "$runtime_source" config user.email fixture@example.test
+cp -R "$SCRIPT_DIR/../scripts" "$runtime_source/scripts"
+git -C "$runtime_source" add scripts
+git -C "$runtime_source" commit -qm runtime
+unset TASK_DAG_CLI
+TASK_DAG_REPO="$runtime_source" TASK_DAG_REF=master ISSUE_LABELS="blocked-at-birth" \
+    run_script 79 "Fallback blocked epic" "body"
+p79="$(origin_ref_sha refs/heads/tasks/pending/79)"
+m79="$(origin_ref_sha "refs/heads/tasks/blocked-meta/$p79")"
+if [[ -n "$m79" ]]; then ok "coherent fallback runtime creates blocked metadata"; else bad "coherent fallback runtime did not create blocked metadata"; fi
 unset TASK_DAG_CLI
 
 echo

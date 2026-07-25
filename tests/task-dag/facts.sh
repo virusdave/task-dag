@@ -48,6 +48,7 @@ source "$LIB_DIR/git-objects.sh"
 source "$LIB_DIR/repository-identity.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/github-origin.sh"
+source "$LIB_DIR/blocked-core.sh"
 source "$LIB_DIR/edges.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/facts.sh"

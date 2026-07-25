@@ -38,11 +38,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.token }}
 
-      - name: Download create-task-commit script
-        run: |
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/create-task-commit.sh" \
-            -o /tmp/create-task-commit.sh
-          chmod +x /tmp/create-task-commit.sh
+      - name: Checkout coherent task-dag runtime
+        uses: actions/checkout@v4
+        with:
+          repository: virusdave/task-dag
+          ref: ${{ inputs.ref }}
+          path: .task-dag-runtime
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Create metadata commit for issue
         env:
@@ -57,5 +60,6 @@ jobs:
           # Pin the task-dag CLI (used for best-effort blocked-meta
           # enrichment) to the SAME ref this script was fetched from.
           TASK_DAG_REF: ${{ inputs.ref }}
+          TASK_DAG_CLI: .task-dag-runtime/scripts/task-dag
           GH_TOKEN: ${{ secrets.token }}
-        run: bash /tmp/create-task-commit.sh
+        run: bash .task-dag-runtime/.github/scripts/create-task-commit.sh

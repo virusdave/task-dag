@@ -12,6 +12,7 @@ TASKDAG_SCRIPT_DIR=$(dirname "$TD"); EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/blocked-core.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 bare=$(printf '%s\n' 'Materialise-Child-Epic:) are allowed.' | taskdag_materialise_groups_json_from_message)
