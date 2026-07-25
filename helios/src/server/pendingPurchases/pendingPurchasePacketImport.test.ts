@@ -87,7 +87,9 @@ describe('persistPendingPurchasePacket refinement lineage', () => {
       expect.stringMatching(/insert into pending_purchase_packet_roots/i),
       expect.stringMatching(/update pending_purchase_packets[\s\S]*packet_root_id = \$2[\s\S]*revision_number = 1/i),
     ]))
-    expect(calls.find((call) => /insert into pending_purchase_packet_roots/i.test(call.text))?.values).toEqual([74, 17])
+    const rootInsert = calls.find((call) => /insert into pending_purchase_packet_roots/i.test(call.text))
+    expect(rootInsert?.text).toMatch(/values \(\$1, \$2, \$2, 1, 'active', \$3, \$3, now\(\)\)/i)
+    expect(rootInsert?.values).toEqual(['pprroot_74', 74, 17])
     expect(calls.find((call) => /packet_root_id = \$2/i.test(call.text))?.values).toEqual([74, 91, 17])
   })
 

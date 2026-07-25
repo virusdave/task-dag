@@ -287,6 +287,11 @@ export async function persistPendingPurchasePacket(
       `,
       [packetId],
     )
+    const rootInsertValues: [rootKey: string, packetId: number, createdByUserId: number | null] = [
+      `pprroot_${packetId}`,
+      packetId,
+      input.createdByUserId,
+    ]
     const rootInsert = await db.query<{ id: number }>(
       `
         insert into pending_purchase_packet_roots (
@@ -299,10 +304,10 @@ export async function persistPendingPurchasePacket(
           current_updated_by_user_id,
           current_updated_at
         )
-        values ('pprroot_' || $1::text, $1, $1, 1, 'active', $2, $2, now())
+        values ($1, $2, $2, 1, 'active', $3, $3, now())
         returning id
       `,
-      [packetId, input.createdByUserId],
+      rootInsertValues,
     )
     await db.query(
       `
