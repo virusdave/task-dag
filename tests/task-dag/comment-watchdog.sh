@@ -41,6 +41,15 @@ append_record() {
     LAST_ATTEMPT=$last_attempt RECENT_SUCCESS=$recent_success COMPLETE_SUCCESS=$complete_success
     TIP=$commit
 }
+raw_record_commit() { # record parent message
+    local record=$1 parent=$2 message=$3 sequence path blob tree index="$ROOT/raw-index"
+    sequence=$(jq -r .sequence <<<"$record"); path=$(printf 'records/%016d.json' "$sequence")
+    rm -f "$index"; blob=$(printf '%s\n' "$record" | git hash-object -w --stdin)
+    GIT_INDEX_FILE="$index" git read-tree --empty
+    GIT_INDEX_FILE="$index" git update-index --add --cacheinfo "100644,$blob,$path"
+    tree=$(GIT_INDEX_FILE="$index" git write-tree); rm -f "$index"
+    printf '%s' "$message" | git commit-tree "$tree" -p "$parent"
+}
 lease() {
     jq -ncS --argjson sequence "$1" --arg holder "$2" --argjson fence "$3" --arg runtime "$4" --arg acquired "$5" --arg observed "$6" --arg expires "$7" --arg registry "$registry" --arg reviewed "$reviewed" --argjson activation "$activation" '{schema:1,type:"lease",sequence:$sequence,holder:$holder,fence:$fence,runtimeCommit:$runtime,registrySnapshotId:$registry,reviewedRegistryDigest:$reviewed,coordinationRepository:"virusdave/top-level",activation:$activation,acquiredAt:$acquired,observedAt:$observed,expiresAt:$expires}'
 }
@@ -56,12 +65,50 @@ r3=$(lease 3 holder-a 1 "$runtime1" 2026-07-18T00:00:00Z 2026-07-18T00:03:00Z 20
 r4=$(jq -ncS --argjson lease "$r3" --arg cycle "$cycle" '$lease+{type:"fleet",sequence:4,observedAt:"2026-07-18T00:04:00Z",completedAt:"2026-07-18T00:04:00Z",cycle:$cycle,mode:"recent",repositories:["virusdave/top-level"],success:true}'); append_record "$r4"
 r5=$(lease 5 holder-b 2 "$runtime2" 2026-07-18T00:07:00Z 2026-07-18T00:07:00Z 2026-07-18T00:12:00Z); append_record "$r5"
 taskdag_comment_watchdog_validate_tip "$TIP" && ok "valid renew, result, and expired takeover history" || bad "valid history rejected"
+bounded=$(taskdag_comment_watchdog_validate_watermark_tip "$TIP")
+if [ "$(jq -r .authorityTip <<<"$bounded")" = "$TIP" ] \
+  && [ "$(jq -r .assurance <<<"$bounded")" = latest-tip-projection ] \
+  && [ "$(jq -r 'keys==["activationGeneration","assurance","authorityTip","completeSuccess","fence","generationTuple","holder","lastAttempt","lease","recentSuccess","schema"]' <<<"$bounded")" = true ] \
+  && [ "$(jq -r .lastAttempt.observedAt <<<"$bounded")" = 2026-07-18T00:01:00Z ] \
+  && [ "$(jq -r .recentSuccess.completedAt <<<"$bounded")" = 2026-07-18T00:04:00Z ] \
+  && [ "$(jq -r .completeSuccess <<<"$bounded")" = null ]; then
+    ok "bounded watermark projection validates tip and parent"
+else bad "bounded watermark projection rejected valid transition"; fi
+
+# Keep the records valid while corrupting only the commit trailers. The
+# bounded projection must reject both unrelated-watermark mutation and
+# duplicate/malformed values rather than trusting the tip message blindly.
+r5_tree=$(git show -s --format=%T "$TIP"); r5_parent=$(git show -s --format=%P "$TIP")
+bad_unrelated=$(printf 'record\n\nWatchdog-Last-Attempt: 2026-07-18T00:01:00Z\nWatchdog-Recent-Success: none\nWatchdog-Complete-Success: none\n' | git commit-tree "$r5_tree" -p "$r5_parent")
+if taskdag_comment_watchdog_validate_watermark_tip "$bad_unrelated" >/dev/null; then bad "unrelated watermark mutation accepted"; else ok "unrelated watermark mutation rejected"; fi
+bad_duplicate=$(printf 'record\n\nWatchdog-Last-Attempt: 2026-07-18T00:01:00Z\nWatchdog-Last-Attempt: 2026-07-18T00:01:00Z\nWatchdog-Recent-Success: 2026-07-18T00:04:00Z\nWatchdog-Complete-Success: none\n' | git commit-tree "$r5_tree" -p "$r5_parent")
+if taskdag_comment_watchdog_validate_watermark_tip "$bad_duplicate" >/dev/null; then bad "duplicate watermark trailer accepted"; else ok "duplicate watermark trailer rejected"; fi
+bad_case_duplicate=$(printf 'record\n\nWatchdog-Last-Attempt: 2026-07-18T00:01:00Z\nwatchdog-last-attempt: 2026-07-18T00:01:00Z\nWatchdog-Recent-Success: 2026-07-18T00:04:00Z\nWatchdog-Complete-Success: none\n' | git commit-tree "$r5_tree" -p "$r5_parent")
+if taskdag_comment_watchdog_validate_watermark_tip "$bad_case_duplicate" >/dev/null; then bad "case-variant duplicate trailer accepted"; else ok "case-variant duplicate trailer rejected"; fi
+bad_empty_duplicate=$(printf 'record\n\nWatchdog-Last-Attempt: 2026-07-18T00:01:00Z\nwatchdog-last-attempt:\nWatchdog-Recent-Success: 2026-07-18T00:04:00Z\nWatchdog-Complete-Success: none\n' | git commit-tree "$r5_tree" -p "$r5_parent")
+if taskdag_comment_watchdog_validate_watermark_tip "$bad_empty_duplicate" >/dev/null; then bad "empty case-variant duplicate trailer accepted"; else ok "empty case-variant duplicate trailer rejected"; fi
+bad_timestamp=$(printf 'record\n\nWatchdog-Last-Attempt: yesterday\nWatchdog-Recent-Success: 2026-07-18T00:04:00Z\nWatchdog-Complete-Success: none\n' | git commit-tree "$r5_tree" -p "$r5_parent")
+if taskdag_comment_watchdog_validate_watermark_tip "$bad_timestamp" >/dev/null; then bad "malformed watermark timestamp accepted"; else ok "malformed watermark timestamp rejected"; fi
+valid_message='record
+
+Watchdog-Last-Attempt: 2026-07-18T00:01:00Z
+Watchdog-Recent-Success: 2026-07-18T00:04:00Z
+Watchdog-Complete-Success: none
+'
+bad_sequence=$(raw_record_commit "$(jq -cS '.sequence=7' <<<"$r5")" "$r5_parent" "$valid_message")
+if taskdag_comment_watchdog_validate_watermark_tip "$bad_sequence" >/dev/null; then bad "non-adjacent sequence accepted"; else ok "non-adjacent sequence rejected"; fi
+noncanonical=$(jq . <<<"$r5"); bad_json=$(raw_record_commit "$noncanonical" "$r5_parent" "$valid_message")
+if taskdag_comment_watchdog_validate_watermark_tip "$bad_json" >/dev/null; then bad "non-canonical record accepted"; else ok "non-canonical record rejected"; fi
 git update-ref refs/heads/tasks/v1/comment-watchdog "$TIP"
 "$TD" validate --strict >/dev/null 2>&1 && ok "strict audit accepts exact watchdog authority" || bad "strict audit rejected watchdog authority"
 
 r6=$(lease 6 holder-c 3 "$runtime2" 2026-07-18T00:12:00Z 2026-07-18T00:12:00Z 2026-07-18T00:17:00Z | jq -cS --argjson activation "$activation_v2" '.schema=2 | .activation=$activation | .activationGeneration=1')
 LAST_ATTEMPT=none; RECENT_SUCCESS=none; COMPLETE_SUCCESS=none; append_record "$r6"
 if taskdag_comment_watchdog_validate_tip "$TIP"; then ok "v1 to v2 rollover after expiry resets watermarks"; else bad "valid v1 to v2 rollover rejected"; fi
+if bounded=$(taskdag_comment_watchdog_validate_watermark_tip "$TIP") \
+  && [ "$(jq -r '[.lastAttempt,.recentSuccess,.completeSuccess]|all(.==null)' <<<"$bounded")" = true ]; then
+    ok "bounded watermark projection validates generation reset"
+else bad "bounded watermark projection rejected generation reset"; fi
 schema2_genesis=$(jq -cS '.sequence=0' <<<"$r6")
 if _taskdag_comment_watchdog_validate_lease_transition "" "$schema2_genesis"; then bad "schema-v2 genesis accepted"; else ok "schema-v2 genesis rejected"; fi
 pre_expiry=$(jq -cS '.sequence=6 | .acquiredAt="2026-07-18T00:11:00Z" | .observedAt="2026-07-18T00:11:00Z"' <<<"$r6")

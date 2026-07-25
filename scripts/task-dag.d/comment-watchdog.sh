@@ -131,6 +131,86 @@ _taskdag_comment_watchdog_validate_record() { # file expected-sequence
     [ "$(cat "$file")" = "$(jq -cS . "$file")" ]
 }
 
+_taskdag_comment_watchdog_trailer() { # commit key
+    local commit=$1 key=$2 row count values
+    row=$(git show -s --format=%B "$commit" | git interpret-trailers --parse \
+      | awk -v wanted="$key" 'index($0, ":") && tolower(substr($0,1,index($0,":")-1))==tolower(wanted) {n++; value=substr($0,index($0,":")+1); sub(/^[[:space:]]+/, "", value)} END{printf "%d\t%s", n+0, value}') || return 1
+    count=${row%%$'\t'*}; values=${row#*$'\t'}
+    [ "$count" -eq 1 ] || return 1
+    [[ "$values" == none || "$values" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+    [ "$values" = none ] || [ "$(date -u -d "$values" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" = "$values" ] || return 1
+    printf '%s\n' "$values"
+}
+
+_taskdag_comment_watchdog_bounded_record() { # commit output-file
+    local commit=$1 output=$2 sequence path
+    sequence=$(git show "$commit:$(git ls-tree -r --name-only "$commit")" 2>/dev/null | jq -r '.sequence // empty') || return 1
+    [[ "$sequence" =~ ^[0-9]+$ ]] || return 1
+    path="records/$(printf '%016d' "$sequence").json"
+    [ "$(git ls-tree -r --name-only "$commit")" = "$path" ] || return 1
+    git show "$commit:$path" >"$output" || return 1
+    _taskdag_comment_watchdog_validate_record "$output" "$sequence"
+}
+
+taskdag_comment_watchdog_validate_watermark_tip() { # tip; bounded tip+parent validation and projection
+    local tip=$1 tmp parents sequence parent="" type schema previous_schema generation_changed=false key
+    local last_attempt recent_success complete_success expected current
+    tmp=$(mktemp -d) || return 1
+    git rev-parse --verify "$tip^{commit}" >"$tmp/resolved" 2>/dev/null \
+      && [ "$(cat "$tmp/resolved")" = "$tip" ] || { rm -rf "$tmp"; return 1; }
+    parents=$(git show -s --format=%P "$tip") || { rm -rf "$tmp"; return 1; }
+    _taskdag_comment_watchdog_bounded_record "$tip" "$tmp/current" || { rm -rf "$tmp"; return 1; }
+    sequence=$(jq -r .sequence "$tmp/current")
+    if [ "$sequence" -eq 0 ]; then
+        if [ -n "$parents" ] || [ "$(jq -r .type "$tmp/current")" != lease ] \
+          || [ "$(jq -r .schema "$tmp/current")" -ne 1 ] \
+          || ! _taskdag_comment_watchdog_validate_lease_transition "" "$(cat "$tmp/current")"; then
+            rm -rf "$tmp"; return 1
+        fi
+        last_attempt=none; recent_success=none; complete_success=none
+    else
+        [[ "$parents" =~ ^[0-9a-f]{40}$ ]] || { rm -rf "$tmp"; return 1; }
+        parent=$parents
+        _taskdag_comment_watchdog_bounded_record "$parent" "$tmp/parent" || { rm -rf "$tmp"; return 1; }
+        [ "$sequence" -eq $(( $(jq -r .sequence "$tmp/parent") + 1 )) ] || { rm -rf "$tmp"; return 1; }
+        [ "$(jq -r .coordinationRepository "$tmp/current")" = "$(jq -r .coordinationRepository "$tmp/parent")" ] || { rm -rf "$tmp"; return 1; }
+        type=$(jq -r .type "$tmp/current"); schema=$(jq -r .schema "$tmp/current"); previous_schema=$(jq -r .schema "$tmp/parent")
+        if [ "$type" = lease ]; then
+            _taskdag_comment_watchdog_validate_lease_transition "$(cat "$tmp/parent")" "$(cat "$tmp/current")" \
+              || { rm -rf "$tmp"; return 1; }
+            if [ "$schema" -eq 2 ] && { [ "$previous_schema" -eq 1 ] \
+              || [ "$(jq -r .activationGeneration "$tmp/current")" != "$(jq -r '.activationGeneration // "none"' "$tmp/parent")" ]; }; then
+                generation_changed=true
+            fi
+        else
+            jq -e --argjson previous "$(cat "$tmp/parent")" '
+              .holder==$previous.holder and .fence==$previous.fence and .acquiredAt==$previous.acquiredAt and
+              .expiresAt==$previous.expiresAt and .runtimeCommit==$previous.runtimeCommit and
+              .registrySnapshotId==$previous.registrySnapshotId and .reviewedRegistryDigest==$previous.reviewedRegistryDigest and
+              .coordinationRepository==$previous.coordinationRepository and .activation==$previous.activation and
+              .schema==$previous.schema and (.activationGeneration // null)==($previous.activationGeneration // null)
+            ' "$tmp/current" >/dev/null || { rm -rf "$tmp"; return 1; }
+        fi
+        last_attempt=$(_taskdag_comment_watchdog_trailer "$parent" Watchdog-Last-Attempt) || { rm -rf "$tmp"; return 1; }
+        recent_success=$(_taskdag_comment_watchdog_trailer "$parent" Watchdog-Recent-Success) || { rm -rf "$tmp"; return 1; }
+        complete_success=$(_taskdag_comment_watchdog_trailer "$parent" Watchdog-Complete-Success) || { rm -rf "$tmp"; return 1; }
+        if [ "$generation_changed" = true ]; then last_attempt=none; recent_success=none; complete_success=none; fi
+        [ "$type" != attempt ] || last_attempt=$(jq -r .observedAt "$tmp/current")
+        if [ "$type" = fleet ] && [ "$(jq -r .success "$tmp/current")" = true ]; then
+            [ "$(jq -r .mode "$tmp/current")" != recent ] || recent_success=$(jq -r .completedAt "$tmp/current")
+            [ "$(jq -r .mode "$tmp/current")" != complete ] || complete_success=$(jq -r .completedAt "$tmp/current")
+        fi
+    fi
+    for expected in "Watchdog-Last-Attempt:$last_attempt" "Watchdog-Recent-Success:$recent_success" "Watchdog-Complete-Success:$complete_success"; do
+        key=${expected%%:*}; current=$(_taskdag_comment_watchdog_trailer "$tip" "$key") || { rm -rf "$tmp"; return 1; }
+        [ "$current" = "${expected#*:}" ] || { rm -rf "$tmp"; return 1; }
+    done
+    jq -ncS --arg tip "$tip" --arg last "$last_attempt" --arg recent "$recent_success" --arg complete "$complete_success" --argjson record "$(cat "$tmp/current")" \
+      '{schema:2,assurance:"latest-tip-projection",authorityTip:$tip,activationGeneration:($record.activationGeneration // null),generationTuple:{activation:$record.activation,runtimeCommit:$record.runtimeCommit,registrySnapshotId:$record.registrySnapshotId,reviewedRegistryDigest:$record.reviewedRegistryDigest},holder:$record.holder,fence:$record.fence,lease:{acquiredAt:$record.acquiredAt,observedAt:$record.observedAt,expiresAt:$record.expiresAt},lastAttempt:(if $last=="none" then null else {observedAt:$last} end),recentSuccess:(if $recent=="none" then null else {completedAt:$recent} end),completeSuccess:(if $complete=="none" then null else {completedAt:$complete} end)}' \
+      || { rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
+}
+
 taskdag_comment_watchdog_validate_tip() { # tip
     local tip=$1 tmp previous="" commit sequence=0 path record fence holder runtime registry reviewed coordination activation acquired expires type cycle="" cycle_mode=""
     local last_attempt=none recent_success=none complete_success=none expected schema generation tuple previous_tuple generation_changed=false
@@ -413,6 +493,18 @@ cmd_comment_watchdog() {
         taskdag_comment_watchdog_validate_tip "$remote" || return 3
         path=$(git ls-tree -r --name-only "$remote"); record=$(git show "$remote:$path") || return 3
         jq -ncS --arg tip "$remote" --arg last "$last_attempt" --arg recent "$recent_success" --arg complete "$complete_success" --argjson record "$record" '{schema:2,authorityTip:$tip,activationGeneration:($record.activationGeneration // null),generationTuple:{activation:$record.activation,runtimeCommit:$record.runtimeCommit,registrySnapshotId:$record.registrySnapshotId,reviewedRegistryDigest:$record.reviewedRegistryDigest},holder:$record.holder,fence:$record.fence,lease:{acquiredAt:$record.acquiredAt,observedAt:$record.observedAt,expiresAt:$record.expiresAt},lastAttempt:(if $last=="none" then null else {observedAt:$last} end),recentSuccess:(if $recent=="none" then null else {completedAt:$recent} end),completeSuccess:(if $complete=="none" then null else {completedAt:$complete} end)}';;
-      *) echo 'Usage: task-dag comment-watchdog acquire|renew|check|attempt|result|finish|status ...'; [ "$action" = -h ] || [ "$action" = --help ] || [ -z "$action" ] || return 2;;
+      watermarks)
+        local repo observation remote output confirm
+        [ "$#" -eq 0 ] || return 2
+        repo=$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]') || return 3
+        observation=$(_taskdag_comment_watchdog_server_observation "$repo") || return 3
+        remote=${observation#*$'\t'}
+        git fetch -q --no-write-fetch-head --no-tags origin "$remote" || return 2
+        [ "$(git rev-parse --verify "$remote^{commit}" 2>/dev/null)" = "$remote" ] || return 3
+        output=$(taskdag_comment_watchdog_validate_watermark_tip "$remote") || return 3
+        confirm=$(_taskdag_comment_watchdog_server_observation "$repo") || return 3
+        confirm=${confirm#*$'\t'}; [ "$confirm" = "$remote" ] || return 3
+        printf '%s\n' "$output";;
+      *) echo 'Usage: task-dag comment-watchdog acquire|renew|check|attempt|result|finish|status|watermarks ...'; [ "$action" = -h ] || [ "$action" = --help ] || [ -z "$action" ] || return 2;;
     esac
 }
