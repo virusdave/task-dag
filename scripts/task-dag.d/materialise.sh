@@ -1,6 +1,18 @@
 # shellcheck shell=bash
 # Canonical immutable materialisation reservation protocol (schema 1).
 
+for prerequisite in taskdag_materialise_groups_json_from_message taskdag_materialise_parent_number \
+    _taskdag_materialise_id _taskdag_materialise_authority_slot_id \
+    _taskdag_materialise_slot_state_path _taskdag_materialise_slot_authorization_path \
+    _taskdag_materialise_terminal_guard_path _taskdag_materialise_declared_slot \
+    _taskdag_materialise_authority_slot; do
+    if ! declare -F "$prerequisite" >/dev/null; then
+        echo "Error: materialise.sh requires materialise-parsing.sh provider $prerequisite" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+unset prerequisite
+
 TASKDAG_MATERIALISATION_REF="refs/heads/tasks/v1/materialisation"
 TASKDAG_MATERIALISATION_MAX_SPEC=2097152
 TASKDAG_MATERIALISATION_MAX_BODY=1048576
@@ -167,39 +179,6 @@ _taskdag_materialise_fresh_transition_violations() { # tip path state
     esac
 }
 
-# Hash a domain-separated sequence of UTF-8 values.  Decimal byte lengths and
-# separators make framing unambiguous, including absent versus present-empty.
-_taskdag_materialise_id() {
-    local LC_ALL=C domain=$1 value
-    shift
-    {
-        printf 'task-dag-materialisation-id-v1\000%s\000' "$domain"
-        for value in "$@"; do printf '%s:%s\000' "${#value}" "$value"; done
-    } | sha256sum | awk '{print $1}'
-}
-
-# A v1 declaration always retains its declared slot and operation identity.
-# Schema-3 imports use a second, collision-scoped identity only for authority
-# storage.  Keeping this in one helper prevents live producers from silently
-# rotating their IDs while allowing frozen declarations that reused a slot to
-# coexist.
-_taskdag_materialise_authority_slot_id() { # declared-slot declaration-digest collision(true|false)
-    if [ "$3" = true ]; then
-        _taskdag_materialise_id legacy-collision-slot-v1 "$1" "$2"
-    else
-        printf '%s\n' "$1"
-    fi
-}
-
-_taskdag_materialise_slot_state_path() { printf 'slots/%s/states/%016d.json\n' "$1" "$2"; }
-_taskdag_materialise_slot_authorization_path() { printf 'slots/%s/authorizations/%016d.json\n' "$1" "$2"; }
-_taskdag_materialise_terminal_guard_path() { printf 'replay-guards/%s/%s.json\n' "$1" "$2"; }
-
-# Extract identities only through these helpers.  A schema-1 record has one
-# identity; schema 3 deliberately retains the v1 declaration identity while
-# placing mutable authority below the collision-scoped identity.
-_taskdag_materialise_declared_slot() { jq -er 'if has("declaredSlotId") then .declaredSlotId else .slotId end' <<<"$1"; }
-_taskdag_materialise_authority_slot() { jq -er 'if has("authoritySlotId") then .authoritySlotId else .slotId end' <<<"$1"; }
 _taskdag_materialise_resolve_cli_slot() { # authority-tip requested-id
     local tip=$1 requested=$2 matches
     git cat-file -e "$tip:slots/$requested" 2>/dev/null && { printf '%s\n' "$requested"; return 0; }

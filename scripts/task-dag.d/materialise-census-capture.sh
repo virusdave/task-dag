@@ -1,6 +1,15 @@
 # shellcheck shell=bash
 # Read-only, fail-closed capture of strict materialisation census inputs.
 
+for prerequisite in taskdag_materialise_groups_json_from_message taskdag_materialise_parent_number \
+    _taskdag_materialise_id _taskdag_materialise_authority_slot_id; do
+    if ! declare -F "$prerequisite" >/dev/null; then
+        echo "Error: materialise-census-capture.sh requires materialise-parsing.sh provider $prerequisite" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+unset prerequisite
+
 _taskdag_census_capture_repo_stable() { # path repo ref tip manifest
     local path=$1 repo=$2 ref=$3 tip=$4 manifest=$5 actual
     actual=$(cd "$path" && _xrepo_current_repo_offline | tr '[:upper:]' '[:lower:]') || return 1

@@ -23,6 +23,7 @@ classify() {
   printf '%s\n' "${result%%$'\x1f'*}"
 }
 source "$(dirname "$TD")/task-dag.d/cross-repo.sh"
+source "$(dirname "$TD")/task-dag.d/materialise-parsing.sh"
 source "$(dirname "$TD")/task-dag.d/materialise-intent.sh"
 source "$(dirname "$TD")/task-dag.d/materialise.sh"
 printf '%s\n' '{"lease":{"holder":"fixture","fence":1},"cycle":"fixture-cycle"}' >"$tmp/watchdog-token"

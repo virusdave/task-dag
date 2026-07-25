@@ -55,6 +55,7 @@ TASKDAG_SCRIPT_DIR=$(dirname "$TD")
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/blocked-core.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-parsing.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"

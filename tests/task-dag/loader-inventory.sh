@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh scheduling-fence.sh cross-repo.sh edges-write.sh edges-prune.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh scheduling-fence.sh cross-repo.sh edges-write.sh edges-prune.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-parsing.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -267,6 +267,33 @@ if rg -n '_cmd_dep_(add|drop)|^[[:space:]]*(source|\.)[[:space:]]|^[[:space:]]*:
     "$REPO_ROOT/scripts/task-dag.d/legacy-edges.sh" >"$ROOT/graph-leaf-cycles"; then
   bad "graph leaf module retains a command-adapter, nested-source, or fallback-global dependency: $(cat "$ROOT/graph-leaf-cycles")"
 else ok "graph leaf modules have no command-adapter, nested-source, or fallback-global dependencies"; fi
+
+if bash -c 'source "$1"; groups=$(printf "%s\n" "Materialise-Child-Epic: peer/repo" "Child-Epic-Title: title" "Parent-Issue: #007" | taskdag_materialise_groups_json_from_message); [ "$(jq -r ".[0].peer + \":\" + .[0].title" <<<"$groups")" = peer/repo:title ] && [ "$(taskdag_materialise_parent_number " #007 ")" = 7 ] && [ "$(_taskdag_materialise_id operation slot declaration)" = 221be4f198077f4716c77a6c66087d7b8ebaa392be5df2a4754a5736d211b280 ]' _ "$REPO_ROOT/scripts/task-dag.d/materialise-parsing.sh"; then
+  ok "pure materialisation parser preserves group, parent, and identity semantics"
+else bad "pure materialisation parser changed established semantics"; fi
+
+if bash -c 'remote_ref_sha_checked(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/materialise-intent.sh" >"$ROOT/materialise-intent-order-out" 2>"$ROOT/materialise-intent-order-err"; then
+  bad "materialisation intent loaded without pure parser providers"
+elif grep -q 'requires provider taskdag_materialise_groups_json_from_message' "$ROOT/materialise-intent-order-err"; then
+  ok "materialisation intent fails loudly without its parser prerequisite"
+else bad "materialisation intent parser failure was not actionable"; fi
+
+if bash -c 'source "$1"; remote_ref_sha_checked(){ :; }; source "$2"' _ \
+    "$REPO_ROOT/scripts/task-dag.d/materialise-parsing.sh" \
+    "$REPO_ROOT/scripts/task-dag.d/materialise-intent.sh" >/dev/null 2>"$ROOT/materialise-intent-complete-err"; then
+  ok "materialisation intent accepts its parser and GitHub prerequisites"
+else bad "materialisation intent rejected complete prerequisites: $(cat "$ROOT/materialise-intent-complete-err")"; fi
+
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/materialise-census-capture.sh" >"$ROOT/materialise-capture-order-out" 2>"$ROOT/materialise-capture-order-err"; then
+  bad "materialisation census capture loaded without pure parser providers"
+elif grep -q 'requires materialise-parsing.sh provider taskdag_materialise_groups_json_from_message' "$ROOT/materialise-capture-order-err"; then
+  ok "materialisation census capture fails loudly without its parser prerequisite"
+else bad "materialisation census parser failure was not actionable"; fi
+
+if rg -n '(^|[^[:alnum:]_])(git|gh|curl|source|cmd_[[:alnum:]_]*|_cmd_[[:alnum:]_]*)[[:space:](]|^[[:space:]]*[A-Z][A-Z0-9_]*=' \
+    "$REPO_ROOT/scripts/task-dag.d/materialise-parsing.sh" >"$ROOT/materialise-parser-effects"; then
+  bad "pure materialisation parser retains an effect, nested source, adapter, or global owner: $(cat "$ROOT/materialise-parser-effects")"
+else ok "pure materialisation parser has no Git, network, mutation, adapter, nested-source, or global ownership"; fi
 
 if bash -c 'taskdag_node_complete(){ :; }; taskdag_leaf_ready(){ :; }; taskdag_normalize_node(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconcile.sh" >"$ROOT/reconcile-core-out" 2>"$ROOT/reconcile-core-err"; then
   bad "reconcile loaded without reconciliation preparation"

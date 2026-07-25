@@ -102,6 +102,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/edges-prune.sh" \
         "$(dirname "$TD")/task-dag.d/legacy-edges.sh" \
         "$(dirname "$TD")/task-dag.d/mailbox.sh" \
+        "$(dirname "$TD")/task-dag.d/materialise-parsing.sh" \
         "$(dirname "$TD")/task-dag.d/materialise.sh" \
         "$(dirname "$TD")/task-dag.d/activation.sh" \
         "$(dirname "$TD")/task-dag.d/activation-fleet.sh" \
@@ -156,6 +157,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/edges-prune.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/legacy-edges.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/mailbox.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/materialise-parsing.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/materialise.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/activation.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/activation-fleet.sh" \

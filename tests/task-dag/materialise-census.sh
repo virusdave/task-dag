@@ -15,6 +15,7 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/claim-model.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/blocked-core.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-parsing.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 bare=$(printf '%s\n' 'Materialise-Child-Epic:) are allowed.' | taskdag_materialise_groups_json_from_message)

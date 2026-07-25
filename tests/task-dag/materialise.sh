@@ -7,6 +7,7 @@ source "$(dirname "$TD")/task-dag.d/git-objects.sh"
 source "$(dirname "$TD")/task-dag.d/child-map.sh"
 source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
 source "$(dirname "$TD")/task-dag.d/github-origin.sh"
+source "$(dirname "$TD")/task-dag.d/materialise-parsing.sh"
 source "$(dirname "$TD")/task-dag.d/materialise-intent.sh"
 ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t

@@ -132,10 +132,25 @@ if [ "$MATERIALISE_LIBRARY_MODE" = false ]; then
     unset _migration_lib
 fi
 
-# Use the same whole-message parser as every epic-close barrier. The reusable
-# workflow downloads this module beside the script; repository/test runs use
-# the checked-in copy. Fail loud rather than letting parser drift recreate a
-# window where materialisation sees an obligation but closure does not.
+# Use the same pure whole-message parser and close-barrier providers as the
+# runtime. The reusable workflow downloads these modules beside the script;
+# repository/test runs use the checked-in copies. Keep MATERIALISE_INTENT_LIB
+# as the compatibility override for the close-barrier provider.
+MATERIALISE_PARSING_LIB="${MATERIALISE_PARSING_LIB:-}"
+if [ -z "$MATERIALISE_PARSING_LIB" ]; then
+    if [ -f "${_materialise_script_dir}/../../scripts/task-dag.d/materialise-parsing.sh" ]; then
+        MATERIALISE_PARSING_LIB="${_materialise_script_dir}/../../scripts/task-dag.d/materialise-parsing.sh"
+    else
+        MATERIALISE_PARSING_LIB="${_materialise_script_dir}/materialise-parsing.sh"
+    fi
+fi
+[ -r "$MATERIALISE_PARSING_LIB" ] || {
+    echo "::error ::shared Materialise-Child-Epic parser not found: $MATERIALISE_PARSING_LIB" >&2
+    exit 1
+}
+# shellcheck source=/dev/null
+source "$MATERIALISE_PARSING_LIB"
+
 MATERIALISE_INTENT_LIB="${MATERIALISE_INTENT_LIB:-}"
 if [ -z "$MATERIALISE_INTENT_LIB" ]; then
     if [ -f "${_materialise_script_dir}/../../scripts/task-dag.d/materialise-intent.sh" ]; then
