@@ -176,6 +176,29 @@ function stubFetch(response: Response | (() => Response)) {
   return fetchMock
 }
 
+async function expectQuarantined(
+  input: ClassifyPendingPurchasePacketInput,
+  rowKey = 'r1',
+) {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const result = await classifyPendingPurchasePacketWithLlm(input)
+  const draft = result.drafts.find((candidate) => candidate.rowKey === rowKey)
+  expect(draft).toMatchObject({
+    rowKey,
+    proposedAction: 'needs-review',
+    reuseProductIdCandidate: null,
+    reuseEvidence: null,
+    confidence: 0,
+  })
+  expect(draft?.warningFlags).toHaveLength(1)
+  expect(draft?.warningFlags[0]).toMatch(/Classifier/)
+  expect(draft?.rationale).toBe('Classifier output for this row requires operator review.')
+  expect(warn).toHaveBeenCalledWith(
+    expect.stringMatching(/1 row\(s\) require operator review/),
+  )
+  return result
+}
+
 beforeEach(() => {
   mockEnv.bedrockMantleBearerToken = 'token-test'
 })
@@ -247,13 +270,37 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
     await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/invalid JSON/)
   })
 
-  it('throws on a schema violation (mapping-only without a candidate)', async () => {
+  it('throws on a malformed root envelope rather than treating it as a row defect', async () => {
+    const fetchMock = stubFetch(modelResponse({ result: [modelDraft()] }))
+    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
+      /one JSON object containing only a drafts array/,
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('throws when the root envelope has an extra key', async () => {
+    const fetchMock = stubFetch(modelResponse({ drafts: [modelDraft()], explanation: 'extra' }))
+    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
+      /one JSON object containing only a drafts array/,
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('throws when the root envelope exceeds the bounded drafts-array size', async () => {
+    const fetchMock = stubFetch(modelResponse({ drafts: Array.from({ length: 2001 }, () => null) }))
+    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
+      /exceeds the 2000-row envelope limit/,
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('quarantines a schema violation (mapping-only without a candidate)', async () => {
     stubFetch(
       modelResponse({
         drafts: [modelDraft({ proposedAction: 'mapping-only', reuseProductIdCandidate: null, reuseEvidence: null })],
       }),
     )
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/schema/)
+    await expectQuarantined(buildInput())
   })
 
   it('rejects a live-catalog-search reuse id that is not among the catalog candidates', async () => {
@@ -267,9 +314,7 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         ],
       }),
     )
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /not among the catalog candidates/,
-    )
+    await expectQuarantined(buildInput())
   })
 
   it("rejects row B reusing row A's Sweed suggestion (row-scoped candidate)", async () => {
@@ -303,9 +348,8 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         ],
       }),
     )
-    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(
-      /not one of this row's Sweed suggestions/,
-    )
+    const result = await expectQuarantined(input, 'r2')
+    expect(result.drafts.find((draft) => draft.rowKey === 'r1')?.proposedAction).toBe('catalog-create')
   })
 
   it('rejects a current-distributor-link source pointing at a catalog-only id', async () => {
@@ -320,9 +364,7 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         ],
       }),
     )
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /not this row's current link/,
-    )
+    await expectQuarantined(buildInput())
   })
 
   it('rejects a sibling-po reuse with no cited hint fact', async () => {
@@ -336,9 +378,7 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         ],
       }),
     )
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /without citing a hint fact/,
-    )
+    await expectQuarantined(buildInput())
   })
 
   it('rejects oversized distributor identity on input (would break the output contract)', async () => {
@@ -354,16 +394,12 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         drafts: [modelDraft({ citedHintIds: [ghostId], reuseEvidence: { source: 'model-inference', rationale: 'x', citedHintIds: [] } })],
       }),
     )
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /was not provided/,
-    )
+    await expectQuarantined(buildInput())
   })
 
   it('rejects a target category outside the allowed taxonomy', async () => {
     stubFetch(modelResponse({ drafts: [modelDraft({ targetCategory: 'Concentrates' })] }))
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /not in the allowed taxonomy/,
-    )
+    await expectQuarantined(buildInput())
   })
 
   it('rejects a target brand outside the row-scoped vendor evidence', async () => {
@@ -381,9 +417,7 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         },
       })],
     })
-    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(
-      /outside the vendor-evidence brand set/,
-    )
+    await expectQuarantined(input)
   })
 
   it('rejects a catalog reuse candidate outside the row-scoped vendor evidence', async () => {
@@ -401,9 +435,7 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         },
       })],
     })
-    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(
-      /catalog product 7001 outside the vendor-evidence brand set/,
-    )
+    await expectQuarantined(input)
   })
 
   it('requires the model to retain an explicit brand override', async () => {
@@ -426,27 +458,24 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         },
       })],
     })
-    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(
-      /omitted the authoritative explicit brand override/,
-    )
+    await expectQuarantined(input)
   })
 
   it('rejects a draft for an unknown rowKey', async () => {
     stubFetch(modelResponse({ drafts: [modelDraft({ rowKey: 'ghost' })] }))
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /unknown rowKey/,
-    )
+    await expectQuarantined(buildInput())
   })
 
   it('rejects when a draft for an expected row is missing', async () => {
     const input = buildInput({ rows: [rowInput({ rowKey: 'r1' }), rowInput({ rowKey: 'r2', distributorProductId: 'dp-2' })] })
     stubFetch(modelResponse({ drafts: [modelDraft({ rowKey: 'r1' })] }))
-    await expect(classifyPendingPurchasePacketWithLlm(input)).rejects.toThrow(/omitted 1 expected/)
+    const result = await expectQuarantined(input, 'r2')
+    expect(result.drafts.find((draft) => draft.rowKey === 'r1')?.proposedAction).toBe('mapping-only')
   })
 
   it('rejects duplicate drafts for the same rowKey', async () => {
     stubFetch(modelResponse({ drafts: [modelDraft(), modelDraft()] }))
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/duplicate drafts/)
+    await expectQuarantined(buildInput())
   })
 })
 
@@ -581,11 +610,9 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
         ],
       }),
     )
-    await expect(
-      classifyPendingPurchasePacketWithLlm(
-        buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
-      ),
-    ).rejects.toThrow(/was not provided/)
+    await expectQuarantined(
+      buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+    )
   })
 
   it('does NOT let a glossary-only citation prop up a sibling-po reuse claim', async () => {
@@ -606,11 +633,9 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
         ],
       }),
     )
-    await expect(
-      classifyPendingPurchasePacketWithLlm(
-        buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
-      ),
-    ).rejects.toThrow(/only glossary evidence/)
+    await expectQuarantined(
+      buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+    )
   })
 
   it('does not widen reuse eligibility: a glossary cannot introduce a non-offered candidate', async () => {
@@ -631,11 +656,9 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
         ],
       }),
     )
-    await expect(
-      classifyPendingPurchasePacketWithLlm(
-        buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
-      ),
-    ).rejects.toThrow(/not offered as a candidate/)
+    await expectQuarantined(
+      buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+    )
   })
 
   it('rejects a glossary citedId that collides with a hint-fact citedId', async () => {
@@ -673,10 +696,10 @@ describe('classifyPendingPurchasePacketWithLlm — schema-repair retry', () => {
     return JSON.parse(options.body).messages
   }
 
-  it('recovers from the exact prod failure (invalid source + null rationale) via one repair round-trip', async () => {
+  it('normalizes the exact prod source alias without a repair round-trip', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // First reply reproduces prod job 614752: reuseEvidence.source is not in the
-    // enum and rationale is null. Second reply is corrected.
+    // This reproduces prod job 614752: the source uses the model's common
+    // equivalent alias and the duplicate evidence rationale is null.
     const fetchMock = stubFetchSequence([
       () =>
         modelResponse({
@@ -695,34 +718,55 @@ describe('classifyPendingPurchasePacketWithLlm — schema-repair retry', () => {
 
     expect(result.drafts).toHaveLength(1)
     expect(result.drafts[0]!.reuseEvidence?.source).toBe('live-catalog-search')
-    // Exactly two model calls: the failed one and the repaired one.
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    // The repair turn carries the model's rejected reply + a corrective user
-    // message that quotes the validation error.
-    const repairMessages = messagesOf(fetchMock, 1)
-    expect(repairMessages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user'])
-    expect(repairMessages[3]!.content).toMatch(/FAILED strict validation/)
-    expect(repairMessages[3]!.content).toMatch(/reuseEvidence/)
-    expect(warn).toHaveBeenCalledOnce()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(warn).not.toHaveBeenCalled()
   })
 
-  it('fails loud after exhausting the repair budget (initial + 2 repairs = 3 calls)', async () => {
+  it('preserves a valid first-attempt row while repairing only its invalid sibling', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const input = buildInput({
+      rows: [
+        rowInput({ rowKey: 'r1' }),
+        rowInput({ rowKey: 'r2', distributorProductId: 'dp-2' }),
+      ],
+    })
+    const fetchMock = stubFetchSequence([
+      () => modelResponse({ drafts: [
+        modelDraft({ rowKey: 'r1', rationale: 'First accepted rationale.' }),
+        modelDraft({
+          rowKey: 'r2',
+          reuseEvidence: { source: 'unknown-source', rationale: 'x', citedHintIds: [] },
+        }),
+      ] }),
+      () => modelResponse({ drafts: [
+        modelDraft({ rowKey: 'r1', rationale: 'Later replacement rationale.' }),
+        modelDraft({ rowKey: 'r2' }),
+      ] }),
+    ])
+
+    const result = await classifyPendingPurchasePacketWithLlm(input)
+
+    expect(result.drafts.find((draft) => draft.rowKey === 'r1')?.rationale).toBe('First accepted rationale.')
+    expect(result.drafts.find((draft) => draft.rowKey === 'r2')?.proposedAction).toBe('mapping-only')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const repairMessages = messagesOf(fetchMock, 1)
+    expect(repairMessages[3]!.content).toMatch(/draft "r2"/)
+  })
+
+  it('quarantines the row after exhausting the repair budget (initial + 2 repairs = 3 calls)', async () => {
     const badReply = () =>
       modelResponse({
         drafts: [
           modelDraft({
             proposedAction: 'mapping-only',
             reuseProductIdCandidate: 7001,
-            reuseEvidence: { source: 'catalog-search', rationale: null, citedHintIds: [] },
+            reuseEvidence: { source: 'invented-search', rationale: null, citedHintIds: [] },
           }),
         ],
       })
     const fetchMock = stubFetchSequence([badReply])
 
-    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /after 2 repair attempt\(s\)/,
-    )
+    await expectQuarantined(buildInput())
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 

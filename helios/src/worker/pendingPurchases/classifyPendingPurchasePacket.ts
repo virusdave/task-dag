@@ -23,19 +23,18 @@
 //     UNTRUSTED DATA; embedded instructions are ignored.
 //   - Hard input/output size guards; never silently truncate. An oversized
 //     event fails loud with an operator-facing "split it" message.
-//   - The model output is validated at the boundary: exactly one draft per
-//     expected row key, candidate ids must be ones we actually offered, cited
-//     hint ids must reference facts we actually provided, taxonomy must be in
-//     the allowed set. A hallucinated id/row/citation fails the whole pass
-//     rather than silently flowing to C5.
-//   - No silent fallback: a missing token, a truncated/garbled response, or a
-//     boundary-invariant violation throws. The classifier never returns a
-//     low-evidence packet.
+//   - The model output is validated at the boundary: candidate ids must be ones
+//     we actually offered, cited hint ids must reference facts we actually
+//     provided, and taxonomy must be in the allowed set. A bad model row is
+//     repaired independently, then becomes an explicit needs-review row if the
+//     bounded repair budget is exhausted; valid sibling rows are preserved.
+//   - Transport, truncation, invalid JSON, and malformed root envelopes still
+//     fail immediately. They cannot be represented as trustworthy row-level
+//     uncertainty.
 //
 // Satisfies: virusdave/top-level#33
 
 import {
-  PendingPurchaseLlmClassifierModelOutputSchema,
   PendingPurchaseLlmDraftRowSchema,
   PENDING_PURCHASE_CLASSIFIER_SCHEMA_VERSION,
   type PendingPurchaseLlmClassifierResult,
@@ -230,8 +229,9 @@ export class PendingPurchaseClassifierError extends Error {}
 /**
  * Classify a whole delivery event into draft pending-purchase rows with one
  * Bedrock call. Returns the validated drafts plus provenance (model id,
- * prompt version). Throws PendingPurchaseClassifierError on any boundary
- * violation — it never returns partial/low-evidence output.
+ * prompt version). Recoverable row-level model mistakes become explicit
+ * needs-review drafts after bounded repair; transport/root-envelope failures
+ * still throw PendingPurchaseClassifierError.
  */
 export async function classifyPendingPurchasePacketWithLlm(
   input: ClassifyPendingPurchasePacketInput,
@@ -263,7 +263,8 @@ export async function classifyPendingPurchasePacketWithLlm(
     { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
     { role: 'user', content: serialized },
   ]
-  const validationErrors: string[] = []
+  const acceptedDrafts = new Map<string, PendingPurchaseLlmDraftRow>()
+  const latestIssueByRow = new Map<string, DraftIssue>()
 
   for (let repairAttempt = 0; ; repairAttempt += 1) {
     // The model call is OUTSIDE the repair try/catch on purpose: transport,
@@ -274,36 +275,47 @@ export async function classifyPendingPurchasePacketWithLlm(
     // "repair" instruction.
     const { content } = await callClassifierModel({ model, messages, maxTokens })
 
-    let drafts: PendingPurchaseLlmDraftRow[]
-    try {
-      drafts = parseAndValidateDrafts(content, input)
-    } catch (error) {
-      // Only parse/schema/boundary-invariant failures — the model's own fixable
-      // near-misses — reach here and are eligible for a repair round-trip.
-      if (!(error instanceof PendingPurchaseClassifierError)) throw error
-      validationErrors.push(error.message)
-      if (repairAttempt >= CLASSIFIER_MAX_REPAIR_ATTEMPTS) {
-        throw new PendingPurchaseClassifierError(
-          `model output failed validation after ${repairAttempt} repair attempt(s): ${validationErrors.join(' | ')}`,
-        )
+    // Invalid JSON / a malformed root envelope throws immediately. Once we
+    // have a drafts array, validate rows independently so one model mistake
+    // cannot discard valid work for the rest of the purchase.
+    const attempt = parseAndValidateDraftAttempt(content, input)
+    for (const draft of attempt.validDrafts) {
+      if (!acceptedDrafts.has(draft.rowKey)) {
+        acceptedDrafts.set(draft.rowKey, draft)
       }
+    }
+    for (const issue of attempt.issues) {
+      if (!acceptedDrafts.has(issue.rowKey)) {
+        latestIssueByRow.set(issue.rowKey, issue)
+      }
+    }
+
+    const unresolvedRows = input.rows.filter((row) => !acceptedDrafts.has(row.rowKey))
+    if (unresolvedRows.length > 0 && repairAttempt < CLASSIFIER_MAX_REPAIR_ATTEMPTS) {
+      const issueSummary = unresolvedRows
+        .map((row) => latestIssueByRow.get(row.rowKey)?.detail ?? `row "${row.rowKey}" was omitted`)
+        .join(' | ')
       messages.push(
         { role: 'assistant', content },
-        { role: 'user', content: buildClassifierRepairPrompt(error.message) },
+        { role: 'user', content: buildClassifierRepairPrompt(issueSummary) },
       )
       continue
     }
 
     if (repairAttempt > 0) {
       console.warn(
-        `[pendingPurchaseClassifier] model=${model} output validated after ${repairAttempt} repair attempt(s); prior errors: ${validationErrors.join(' | ')}`,
+        `[pendingPurchaseClassifier] model=${model} retained ${acceptedDrafts.size}/${input.rows.length} valid row(s) after ${repairAttempt} repair attempt(s); ${unresolvedRows.length} row(s) require operator review.`,
       )
+    }
+    for (const row of unresolvedRows) {
+      const issue = latestIssueByRow.get(row.rowKey) ?? missingRowIssue(row.rowKey)
+      acceptedDrafts.set(row.rowKey, buildNeedsReviewDraft(row, issue.operatorWarning))
     }
     return {
       schemaVersion: PENDING_PURCHASE_CLASSIFIER_SCHEMA_VERSION,
       model,
       promptVersion: PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION,
-      drafts,
+      drafts: input.rows.map((row) => acceptedDrafts.get(row.rowKey)!),
     }
   }
 }
@@ -608,10 +620,21 @@ async function callClassifierModel(input: {
 
 // ── output parsing + boundary validation ────────────────────────────────
 
-function parseAndValidateDrafts(
+interface DraftIssue {
+  readonly rowKey: string
+  readonly detail: string
+  readonly operatorWarning: string
+}
+
+interface DraftAttempt {
+  readonly validDrafts: readonly PendingPurchaseLlmDraftRow[]
+  readonly issues: readonly DraftIssue[]
+}
+
+function parseAndValidateDraftAttempt(
   content: string,
   input: ClassifyPendingPurchasePacketInput,
-): PendingPurchaseLlmDraftRow[] {
+): DraftAttempt {
   let raw: unknown
   try {
     raw = JSON.parse(content)
@@ -619,14 +642,24 @@ function parseAndValidateDrafts(
     throw new PendingPurchaseClassifierError(`model returned invalid JSON: ${describeError(error)}`)
   }
 
-  const normalized = normalizeRawModelOutput(raw)
-  const parsed = PendingPurchaseLlmClassifierModelOutputSchema.safeParse(normalized)
-  if (!parsed.success) {
+  if (
+    raw === null
+    || typeof raw !== 'object'
+    || Array.isArray(raw)
+    || !Array.isArray((raw as { drafts?: unknown }).drafts)
+    || Object.keys(raw).some((key) => key !== 'drafts')
+  ) {
     throw new PendingPurchaseClassifierError(
-      `model output failed schema validation: ${parsed.error.message}`,
+      'model response must be one JSON object containing only a drafts array.',
     )
   }
-  const drafts = parsed.data.drafts
+  if ((raw as { drafts: unknown[] }).drafts.length > 2000) {
+    throw new PendingPurchaseClassifierError(
+      'model response drafts array exceeds the 2000-row envelope limit.',
+    )
+  }
+  const normalized = normalizeRawModelOutput(raw)
+  const rawDrafts = (normalized as { drafts: unknown[] }).drafts
 
   // Boundary invariants the static schema can't express.
   const catalogCandidatesById = new Map(
@@ -644,79 +677,150 @@ function parseAndValidateDrafts(
   const allowedSubcategories = new Set(input.allowedTaxonomy.subcategories.map(normalizeTaxon))
   const expectedRows = new Map(input.rows.map((row) => [row.rowKey, row]))
 
-  const seenRowKeys = new Set<string>()
+  const draftsByRowKey = new Map<string, unknown[]>()
+  for (const rawDraft of rawDrafts) {
+    if (rawDraft === null || typeof rawDraft !== 'object') continue
+    const rowKey = (rawDraft as { rowKey?: unknown }).rowKey
+    if (typeof rowKey !== 'string' || !expectedRows.has(rowKey)) continue
+    const existing = draftsByRowKey.get(rowKey)
+    if (existing === undefined) draftsByRowKey.set(rowKey, [rawDraft])
+    else existing.push(rawDraft)
+  }
+
   const validated: PendingPurchaseLlmDraftRow[] = []
-  for (const draft of drafts) {
-    const expected = expectedRows.get(draft.rowKey)
-    if (!expected) {
-      throw new PendingPurchaseClassifierError(
-        `model produced a draft for unknown rowKey "${draft.rowKey}".`,
-      )
+  const issues: DraftIssue[] = []
+  for (const expected of input.rows) {
+    const candidates = draftsByRowKey.get(expected.rowKey) ?? []
+    if (candidates.length === 0) {
+      issues.push(missingRowIssue(expected.rowKey))
+      continue
     }
-    if (seenRowKeys.has(draft.rowKey)) {
-      throw new PendingPurchaseClassifierError(`model produced duplicate drafts for rowKey "${draft.rowKey}".`)
-    }
-    seenRowKeys.add(draft.rowKey)
-
-    // Reuse candidate must be one this ROW was actually offered, consistent
-    // with the evidence source. Two sources are row-scoped (a row can't reuse
-    // another row's distributor link or Sweed suggestion); catalog candidates
-    // are event-wide. C5 still validates the link is correct; this only
-    // rejects ids/sources the model could not legitimately have proposed.
-    if (draft.reuseProductIdCandidate !== null && draft.reuseEvidence !== null) {
-      assertReuseCandidateOffered({
-        rowKey: draft.rowKey,
-        candidate: draft.reuseProductIdCandidate,
-        source: draft.reuseEvidence.source,
-        evidenceCitedIds: draft.reuseEvidence.citedHintIds,
-        expected,
-        catalogCandidateIds,
-        productFactCitedIds,
+    if (candidates.length > 1) {
+      issues.push({
+        rowKey: expected.rowKey,
+        detail: `model produced duplicate drafts for rowKey "${expected.rowKey}"`,
+        operatorWarning: 'Classifier returned duplicate rows; classify this line manually.',
       })
-      assertVendorCandidateAllowed(draft.rowKey, expected, draft.reuseProductIdCandidate, catalogCandidatesById)
+      continue
     }
 
-    assertVendorTargetBrandAllowed(draft.rowKey, expected, draft.targetBrand)
+    // Once an exact expected row key is known, distributor identity comes from
+    // authoritative input before schema parsing. A malformed model echo must
+    // not turn an otherwise reviewable row into a packet failure.
+    const rowCandidate = {
+      ...(candidates[0] as Record<string, unknown>),
+      rowKey: expected.rowKey,
+      distributorProductId: expected.distributorProductId,
+      distributorProductName: expected.distributorProductName,
+    }
+    const parsed = PendingPurchaseLlmDraftRowSchema.safeParse(rowCandidate)
+    if (!parsed.success) {
+      issues.push({
+        rowKey: expected.rowKey,
+        detail: `draft "${expected.rowKey}" failed schema validation: ${parsed.error.message}`,
+        operatorWarning:
+          'Classifier could not structure this row; choose an existing product or fill in the catalog fields.',
+      })
+      continue
+    }
+    const draft = parsed.data
 
-    for (const citedId of allCitedIds(draft)) {
-      if (!providedCitedIds.has(citedId)) {
+    try {
+      // Reuse candidate must be one this ROW was actually offered, consistent
+      // with the evidence source. C5 still decides whether it is correct.
+      if (draft.reuseProductIdCandidate !== null && draft.reuseEvidence !== null) {
+        assertReuseCandidateOffered({
+          rowKey: draft.rowKey,
+          candidate: draft.reuseProductIdCandidate,
+          source: draft.reuseEvidence.source,
+          evidenceCitedIds: draft.reuseEvidence.citedHintIds,
+          expected,
+          catalogCandidateIds,
+          productFactCitedIds,
+        })
+        assertVendorCandidateAllowed(draft.rowKey, expected, draft.reuseProductIdCandidate, catalogCandidatesById)
+      }
+
+      assertVendorTargetBrandAllowed(draft.rowKey, expected, draft.targetBrand)
+
+      for (const citedId of allCitedIds(draft)) {
+        if (!providedCitedIds.has(citedId)) {
+          throw new PendingPurchaseClassifierError(
+            `draft "${draft.rowKey}" cited hint id "${citedId}" which was not provided.`,
+          )
+        }
+      }
+
+      if (draft.targetCategory !== null && allowedCategories.size > 0 && !allowedCategories.has(normalizeTaxon(draft.targetCategory))) {
         throw new PendingPurchaseClassifierError(
-          `draft "${draft.rowKey}" cited hint id "${citedId}" which was not provided.`,
+          `draft "${draft.rowKey}" targetCategory "${draft.targetCategory}" is not in the allowed taxonomy.`,
         )
       }
+      if (draft.targetSubcategory !== null && allowedSubcategories.size > 0 && !allowedSubcategories.has(normalizeTaxon(draft.targetSubcategory))) {
+        throw new PendingPurchaseClassifierError(
+          `draft "${draft.rowKey}" targetSubcategory "${draft.targetSubcategory}" is not in the allowed taxonomy.`,
+        )
+      }
+      validated.push(draft)
+    } catch (error) {
+      if (!(error instanceof PendingPurchaseClassifierError)) throw error
+      issues.push(draftIssueFromValidationError(expected.rowKey, error.message))
     }
-
-    if (draft.targetCategory !== null && allowedCategories.size > 0 && !allowedCategories.has(normalizeTaxon(draft.targetCategory))) {
-      throw new PendingPurchaseClassifierError(
-        `draft "${draft.rowKey}" targetCategory "${draft.targetCategory}" is not in the allowed taxonomy.`,
-      )
-    }
-    if (draft.targetSubcategory !== null && allowedSubcategories.size > 0 && !allowedSubcategories.has(normalizeTaxon(draft.targetSubcategory))) {
-      throw new PendingPurchaseClassifierError(
-        `draft "${draft.rowKey}" targetSubcategory "${draft.targetSubcategory}" is not in the allowed taxonomy.`,
-      )
-    }
-
-    // Build the authoritative draft IMMUTABLY: distributor identity comes from
-    // the input, never the model echo. Re-parse so the returned object always
-    // satisfies the output contract even after the identity overwrite.
-    validated.push(
-      PendingPurchaseLlmDraftRowSchema.parse({
-        ...draft,
-        distributorProductId: expected.distributorProductId,
-        distributorProductName: expected.distributorProductName,
-      }),
-    )
   }
 
-  if (seenRowKeys.size !== expectedRows.size) {
-    const missing = [...expectedRows.keys()].filter((key) => !seenRowKeys.has(key))
-    throw new PendingPurchaseClassifierError(
-      `model omitted ${missing.length} expected row(s): ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? ' …' : ''}.`,
-    )
-  }
+  return { validDrafts: validated, issues }
+}
 
-  return validated
+function missingRowIssue(rowKey: string): DraftIssue {
+  return {
+    rowKey,
+    detail: `model omitted expected row "${rowKey}"`,
+    operatorWarning: 'Classifier omitted this row; choose an existing product or fill in the catalog fields.',
+  }
+}
+
+function draftIssueFromValidationError(rowKey: string, detail: string): DraftIssue {
+  let operatorWarning =
+    'Classifier could not validate this row; choose an existing product or fill in the catalog fields.'
+  if (/cited hint|hint fact|glossary evidence/.test(detail)) {
+    operatorWarning = 'Classifier cited unavailable evidence; verify this row before applying it.'
+  } else if (/allowed taxonomy/.test(detail)) {
+    operatorWarning = 'Classifier used unsupported taxonomy; select the category and subcategory.'
+  } else if (/vendor-evidence|brand override/.test(detail)) {
+    operatorWarning =
+      'Classifier proposal conflicts with vendor evidence; verify the brand and product.'
+  } else if (/reuse|candidate|current link|Sweed suggestions|catalog candidates/.test(detail)) {
+    operatorWarning =
+      'Classifier proposed an unsupported existing product; choose the correct product for this row.'
+  }
+  return { rowKey, detail, operatorWarning }
+}
+
+function buildNeedsReviewDraft(
+  row: ClassifierRowInput,
+  warning: string,
+): PendingPurchaseLlmDraftRow {
+  return PendingPurchaseLlmDraftRowSchema.parse({
+    rowKey: row.rowKey,
+    distributorProductId: row.distributorProductId,
+    distributorProductName: row.distributorProductName,
+    targetBrand: null,
+    targetCategory: null,
+    targetSubcategory: null,
+    targetGroupName: null,
+    targetVariantName: null,
+    targetVariantTab: null,
+    targetStrainName: null,
+    targetSize: null,
+    targetPackCount: null,
+    proposedAction: 'needs-review',
+    reuseProductIdCandidate: null,
+    reuseEvidence: null,
+    confidence: 0,
+    rationale: 'Classifier output for this row requires operator review.',
+    citedHintIds: [],
+    warningFlags: [warning],
+  })
 }
 
 function assertVendorTargetBrandAllowed(
@@ -892,6 +996,29 @@ function normalizeRawDraft(draft: unknown): unknown {
   // Confidence given as a 0..100 percentage → 0..1.
   if (typeof next.confidence === 'number' && next.confidence > 1 && next.confidence <= 100) {
     next.confidence = next.confidence / 100
+  }
+
+  // The OpenAI-compatible model commonly abbreviates the documented source
+  // as "catalog-search". It is semantically identical to
+  // "live-catalog-search" and remains subject to the exact offered-candidate
+  // and vendor-evidence checks below. Do not fuzzy-map unknown source values.
+  if (next.reuseEvidence !== null && typeof next.reuseEvidence === 'object') {
+    const reuseEvidence = { ...(next.reuseEvidence as Record<string, unknown>) }
+    if (reuseEvidence.source === 'catalog-search') {
+      reuseEvidence.source = 'live-catalog-search'
+    }
+    // A null/blank evidence rationale is a harmless shape miss when the draft
+    // itself carries a non-empty rationale. Copy that explanation rather than
+    // spending another model call solely to satisfy duplicate prose fields.
+    if (
+      (reuseEvidence.rationale === null
+        || (typeof reuseEvidence.rationale === 'string' && reuseEvidence.rationale.trim() === ''))
+      && typeof next.rationale === 'string'
+      && next.rationale.trim() !== ''
+    ) {
+      reuseEvidence.rationale = next.rationale
+    }
+    next.reuseEvidence = reuseEvidence
   }
 
   return next
