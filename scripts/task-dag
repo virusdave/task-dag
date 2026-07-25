@@ -1459,7 +1459,7 @@ EOF
 #   0 claimed   1 arg error   2 already-claimed/already-decomposed
 #   3 no pending root on origin   4 push failed
 cmd_claim_root() {
-    local issue=""
+    local issue="" root_locator
     local claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
     local claimer_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
     local ttl_hours="${TASK_DAG_TTL_HOURS:-12}"
@@ -1477,7 +1477,7 @@ cmd_claim_root() {
             --json) json=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag claim-root <issue-number> [options]
+Usage: task-dag claim-root <issue-number|epic-v1:ID|typed-root-ref> [options]
 
 Atomically claim the orchestration lock on an UNDECOMPOSED epic root so
 that only one host decomposes a given issue. This is the root-level
@@ -1519,10 +1519,11 @@ EOF
         echo "Error: issue number required" >&2
         return 1
     fi
-    if ! [[ "$issue" =~ ^[0-9]+$ ]]; then
-        echo "Error: issue must be a number (got '$issue')" >&2
+    root_locator=$(taskdag_root_locator "$issue" 2>/dev/null) || {
+        echo "Error: root must be a positive issue number, epic-v1:<64hex>, or canonical typed root ref (got '$issue')" >&2
         return 1
-    fi
+    }
+    issue=$(jq -r .suffix <<<"$root_locator")
 
     if [ "$json" = true ]; then require_jq_for_json || return 1; fi
 
@@ -1550,6 +1551,11 @@ EOF
         else
             printf "${RED}Cannot reach origin to verify epic root #%s state — refusing to claim.${RESET}\n" "$issue" >&2
         fi
+        return 3
+    fi
+    if [ "$(jq -r .dialect <<<"$root_locator")" = epic-v1 ] \
+       && ! taskdag_resolve_typed_root "$root_locator" "$root_sha" >/dev/null; then
+        echo "Error: typed pending ref does not point to its canonical Epic-ID root" >&2
         return 3
     fi
 
@@ -1607,15 +1613,31 @@ EOF
     existing_active=$(root_active_sha_on_remote "$issue")
     if [ -n "$existing_active" ] && [ "$do_force" = false ]; then
         local existing_claimer="unknown" existing_host="unknown" existing_pid="" existing_when="unknown" existing_taskcommit="" emsg
-        git fetch --quiet --no-tags origin \
-            "+refs/heads/tasks/root-active/$issue:refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true
-        if git show-ref --verify --quiet "refs/task-dag-tmp/root-active/$issue"; then
+        local claim_tmp="refs/task-dag-tmp/root-active/$issue" fetched_active
+        git update-ref -d "$claim_tmp" 2>/dev/null || true
+        if ! git fetch --quiet --no-tags origin "+refs/heads/tasks/root-active/$issue:$claim_tmp" 2>/dev/null; then
+            echo "Error: remote root claim could not be fetched for validation" >&2
+            return 2
+        fi
+        fetched_active=$(git rev-parse --verify -q "$claim_tmp" 2>/dev/null || true)
+        if [ "$fetched_active" != "$existing_active" ]; then
+            git update-ref -d "$claim_tmp" 2>/dev/null || true
+            echo "Error: remote root claim changed while being validated" >&2
+            return 2
+        fi
+        if git show-ref --verify --quiet "$claim_tmp"; then
             emsg=$(parse_commit_metadata "refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true)
             existing_claimer=$(extract_field "$emsg" "Claimer" 2>/dev/null || true)
             existing_host=$(extract_field "$emsg" "Claimer-Host" 2>/dev/null || true)
             existing_pid=$(extract_field "$emsg" "Claimer-PID" 2>/dev/null || true)
             existing_when=$(extract_field "$emsg" "Claimed-At" 2>/dev/null || true)
             existing_taskcommit=$(extract_field "$emsg" "Task-Commit" 2>/dev/null || true)
+            if ! taskdag_validate_root_claim "$root_locator" "$root_sha" \
+                    "refs/task-dag-tmp/root-active/$issue"; then
+                git update-ref -d "refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true
+                echo "Error: existing root claim is malformed or bound to another root" >&2
+                return 2
+            fi
             git update-ref -d "refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true
         fi
 
@@ -1635,10 +1657,10 @@ EOF
            && [ "$existing_pid" = "$claimer_pid" ] \
            && [ "$existing_taskcommit" = "$root_sha" ]; then
             if [ "$json" = true ]; then
-                jq -nc --argjson issue "$(json_int_or_null "$issue")" \
+                jq -nc --argjson root "$(taskdag_root_identity_json "$root_locator")" \
                     --arg claimer "$claimer" --arg host "$claimer_host" \
                     --argjson pid "$(json_int_or_null "$claimer_pid")" \
-                    '{ok:true,issue:$issue,claimer:$claimer,claimerHost:$host,claimerPid:$pid,alreadyHeld:true}'
+                    '$root+{ok:true,claimer:$claimer,claimerHost:$host,claimerPid:$pid,alreadyHeld:true}'
             else
                 printf "${GREEN}✓ Epic root #%s already claimed by you (%s, pid %s on %s) — verified.${RESET}\n" \
                     "$issue" "$claimer" "$claimer_pid" "$claimer_host"
@@ -1811,12 +1833,12 @@ EOF
         fi
 
         if [ "$json" = true ]; then
-            jq -nc --argjson issue "$(json_int_or_null "$issue")" \
+            jq -nc --argjson root "$(taskdag_root_identity_json "$root_locator")" \
                 --arg rootSha "$root_sha" --arg claim "$claim_commit" \
                 --arg claimer "$claimer" --arg host "$claimer_host" \
                 --argjson pid "$(json_int_or_null "$claimer_pid")" \
                 --argjson ttl "$(json_number_or_null "$ttl_hours")" \
-                '{ok:true,issue:$issue,rootSha:$rootSha,claimCommit:$claim,claimer:$claimer,claimerHost:$host,claimerPid:$pid,ttlHours:$ttl}'
+                '$root+{ok:true,rootSha:$rootSha,claimCommit:$claim,claimer:$claimer,claimerHost:$host,claimerPid:$pid,ttlHours:$ttl}'
         else
             printf "${GREEN}✓ Claimed epic root #%s as %s@%s (pid %s, TTL %sh, verified on origin)${RESET}\n" \
                 "$issue" "$claimer" "$claimer_host" "${claimer_pid:-?}" "$ttl_hours"
@@ -1847,14 +1869,14 @@ EOF
 # frontier ref (a root is not a leaf). Use when a worker takes the root
 # lock but cannot proceed and wants to hand orchestration back.
 cmd_release_root() {
-    local issue="" do_force=false json=false
+    local issue="" root_locator do_force=false json=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force) do_force=true; shift ;;
             --json) json=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag release-root <issue-number> [--force] [--json]
+Usage: task-dag release-root <issue-number|epic-v1:ID|typed-root-ref> [--force] [--json]
 
 Drop the orchestration lock tasks/root-active/<issue> so another worker
 can claim the root. Unlike leaf 'release', this never creates a frontier
@@ -1876,17 +1898,22 @@ EOF
         echo "Error: issue number required" >&2
         return 1
     fi
-    if ! [[ "$issue" =~ ^[0-9]+$ ]]; then
-        echo "Error: issue must be a number (got '$issue')" >&2
+    root_locator=$(taskdag_root_locator "$issue" 2>/dev/null) || {
+        echo "Error: root must be a positive issue number, epic-v1:<64hex>, or canonical typed root ref (got '$issue')" >&2
         return 1
-    fi
+    }
+    issue=$(jq -r .suffix <<<"$root_locator")
 
     if [ "$json" = true ]; then require_jq_for_json || return 1; fi
 
     local root_active_ref="refs/heads/tasks/root-active/$issue"
-    local active_sha
-    active_sha=$(root_active_sha_on_remote "$issue")
-    if [ -z "$active_sha" ]; then
+    local active_sha active_rc
+    active_sha=$(remote_ref_sha_checked "$root_active_ref"); active_rc=$?
+    if [ "$active_rc" -eq 3 ]; then
+        echo "Error: origin root claim state is indeterminate; refusing release" >&2
+        return 2
+    fi
+    if [ "$active_rc" -eq 2 ] || [ -z "$active_sha" ]; then
         if [ "$json" = true ]; then
             jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:false,reason:"not-claimed",issue:$issue}'
         else
@@ -1897,18 +1924,30 @@ EOF
 
     # Sanity guard: the claim must reference this issue's pending root.
     if [ "$do_force" = false ]; then
-        git fetch --quiet --no-tags origin \
-            "+$root_active_ref:refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true
+        local release_tmp="refs/task-dag-tmp/release-root/$issue" fetched_active
+        git update-ref -d "$release_tmp" 2>/dev/null || true
+        if ! git fetch --quiet --no-tags origin "+$root_active_ref:$release_tmp" 2>/dev/null; then
+            echo "Error: remote root claim could not be fetched for validation; refusing release" >&2
+            return 2
+        fi
+        fetched_active=$(git rev-parse --verify -q "$release_tmp" 2>/dev/null || true)
+        if [ "$fetched_active" != "$active_sha" ]; then
+            git update-ref -d "$release_tmp" 2>/dev/null || true
+            echo "Error: remote root claim changed while being validated; refusing release" >&2
+            return 2
+        fi
         if git show-ref --verify --quiet "refs/task-dag-tmp/release-root/$issue"; then
-            local cmsg ctask root_sha
-            cmsg=$(parse_commit_metadata "refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true)
-            ctask=$(extract_field "$cmsg" "Task-Commit" 2>/dev/null || true)
-            git update-ref -d "refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true
+            local root_sha
             root_sha=$(pending_sha_on_remote "$issue")
-            if [ -n "$root_sha" ] && [ -n "$ctask" ] && [ "$ctask" != "$root_sha" ]; then
-                echo "Error: tasks/root-active/$issue references $ctask, not the current pending root $root_sha. Rerun with --force if intended." >&2
+            if [ -z "$root_sha" ] || { [ "$(jq -r .dialect <<<"$root_locator")" = epic-v1 ] \
+                 && ! taskdag_resolve_typed_root "$root_locator" "$root_sha" >/dev/null; } \
+               || ! taskdag_validate_root_claim "$root_locator" "$root_sha" \
+                    "refs/task-dag-tmp/release-root/$issue"; then
+                git update-ref -d "refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true
+                echo "Error: tasks/root-active/$issue is malformed or does not bind the current root. Rerun with --force if intended." >&2
                 return 2
             fi
+            git update-ref -d "refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true
         fi
     fi
 
@@ -1925,7 +1964,7 @@ EOF
     if [ "$release_root_rc" -eq 0 ]; then
         git update-ref -d "$root_active_ref" 2>/dev/null || true
         if [ "$json" = true ]; then
-            jq -nc --argjson issue "$(json_int_or_null "$issue")" '{ok:true,issue:$issue}'
+            jq -nc --argjson root "$(taskdag_root_identity_json "$root_locator")" '$root+{ok:true}'
         else
             printf "${GREEN}✓ Released orchestration claim on epic root #%s${RESET}\n" "$issue"
         fi
@@ -2012,7 +2051,7 @@ cmd_reap() {
             --no-fetch) do_fetch=false; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag reap [--json] [--dry-run] [--issue=N] [--no-fetch]
+Usage: task-dag reap [--json] [--dry-run] [--issue=N|epic-v1:ID|typed-root-ref] [--no-fetch]
 
 Reclaim provably-dead claims. Leaf claims are moved from tasks/active/<short>
 back to tasks/frontier/<short> with leased atomic pushes; root claims are
@@ -2026,6 +2065,14 @@ EOF
 
     if [ "$json" = true ]; then require_jq_for_json || return 1; fi
 
+    local issue_filter_locator=""
+    if [ -n "$issue_filter" ]; then
+        issue_filter_locator=$(taskdag_root_locator "$issue_filter" 2>/dev/null) || {
+            echo "Error: reap filter must be a positive issue number, epic-v1:<64hex>, or canonical typed root ref" >&2
+            return 1
+        }
+    fi
+
     if [ "$do_fetch" = true ]; then
         fetch_task_refs
     fi
@@ -2034,9 +2081,17 @@ EOF
     add_reap_entry() {
         local kind="$1" id_key="$2" id_val="$3" claim_sha="$4" reason="$5" reclaimed="$6" obj
         if [ "$json" = true ]; then
-            obj=$(jq -nc --arg kind "$kind" --arg idk "$id_key" --arg idv "$id_val" \
-                --arg cc "$claim_sha" --arg dr "$reason" --argjson reclaimed "$reclaimed" \
-                '{kind:$kind,($idk):$idv,claimCommit:$cc,deadReason:$dr,reclaimed:$reclaimed}')
+            if [ "$kind" = root ]; then
+                local entry_locator
+                entry_locator=$(taskdag_root_locator "refs/heads/tasks/root-active/$id_val") || return 1
+                obj=$(jq -nc --argjson root "$(taskdag_root_identity_json "$entry_locator")" \
+                    --arg kind "$kind" --arg cc "$claim_sha" --arg dr "$reason" --argjson reclaimed "$reclaimed" \
+                    '$root+{kind:$kind,claimCommit:$cc,deadReason:$dr,reclaimed:$reclaimed}')
+            else
+                obj=$(jq -nc --arg kind "$kind" --arg idk "$id_key" --arg idv "$id_val" \
+                    --arg cc "$claim_sha" --arg dr "$reason" --argjson reclaimed "$reclaimed" \
+                    '{kind:$kind,($idk):$idv,claimCommit:$cc,deadReason:$dr,reclaimed:$reclaimed}')
+            fi
             if [ "$count" -gt 0 ]; then
                 entries="${entries},${obj}"
             else
@@ -2078,7 +2133,11 @@ EOF
         task_msg=$(parse_commit_metadata "$task_sha" 2>/dev/null || true)
         issue=$(extract_field "$task_msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
         if [ -n "$issue_filter" ] && [ "$issue" != "$issue_filter" ]; then
-            continue
+            local leaf_epic_id
+            leaf_epic_id=$(extract_field "$task_msg" Epic-ID 2>/dev/null || true)
+            [ -n "$issue_filter_locator" ] \
+                && [ "$leaf_epic_id" = "$(jq -r '.epicId // empty' <<<"$issue_filter_locator")" ] \
+                || continue
         fi
         if claim_is_dead "$claim_sha"; then rc=0; else rc=$?; fi
         reason="$claim_dead_reason"
@@ -2091,11 +2150,24 @@ EOF
         fi
     done < <(git for-each-ref refs/heads/tasks/active/ --format='%(objectname) %(refname:strip=3)')
 
-    local root_ref root_issue
+    local root_ref root_issue root_locator root_sha
     while read -r claim_sha root_ref; do
         [ -n "$claim_sha" ] || continue
         root_issue="${root_ref#root-active/}"
-        if [ -n "$issue_filter" ] && [ "$root_issue" != "$issue_filter" ]; then
+        root_locator=$(taskdag_root_locator "refs/heads/tasks/root-active/$root_issue" 2>/dev/null) || {
+            [ "$json" = false ] && echo "Skipping malformed root lock path $root_ref" >&2
+            continue
+        }
+        if [ -n "$issue_filter" ] && { [ -z "$issue_filter_locator" ] \
+             || [ "$(jq -r .suffix <<<"$issue_filter_locator")" != "$root_issue" ]; }; then
+            continue
+        fi
+        root_sha=$(git rev-parse "$(jq -r .pendingRef <<<"$root_locator")" 2>/dev/null || true)
+        if [ -z "$root_sha" ] \
+           || { [ "$(jq -r .dialect <<<"$root_locator")" = epic-v1 ] \
+                && ! taskdag_resolve_typed_root "$root_locator" "$root_sha" >/dev/null; } \
+           || ! taskdag_validate_root_claim "$root_locator" "$root_sha" "$claim_sha"; then
+            [ "$json" = false ] && echo "Skipping malformed root claim $root_ref" >&2
             continue
         fi
         if claim_is_dead "$claim_sha"; then rc=0; else rc=$?; fi
@@ -2105,7 +2177,7 @@ EOF
             if [ "$dry_run" = false ] && reap_root_claim "$root_issue" "$claim_sha"; then
                 reclaimed=true
             fi
-            add_reap_entry root issue "$root_issue" "$claim_sha" "$reason" "$reclaimed"
+            add_reap_entry root rootIdentity "$root_issue" "$claim_sha" "$reason" "$reclaimed"
         fi
     done < <(git for-each-ref refs/heads/tasks/root-active/ --format='%(objectname) %(refname:strip=3)')
 
@@ -2163,11 +2235,21 @@ EOF
         printf "%-8s %-50s %-12s\n" "========" "$(printf '%.50s' '==================================================')" "============"
     fi
 
-    local first=true ref issue root_sha title state root_status
+    local first=true ref issue identity locator root_sha title state root_status
     while IFS= read -r ref; do
         [ -z "$ref" ] && continue
-        issue="${ref##*/}"
+        locator=$(taskdag_root_locator "$ref") || {
+            echo "Error: malformed pending root path: $ref" >&2
+            return 2
+        }
+        issue=$(jq -r .suffix <<<"$locator")
+        identity=$(jq -r .rootIdentity <<<"$locator")
         root_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
+        if [ "$(jq -r .dialect <<<"$locator")" = epic-v1 ] \
+           && ! taskdag_resolve_typed_root "$locator" "$root_sha" >/dev/null; then
+            echo "Error: typed pending ref is not bound to a canonical matching root: $ref" >&2
+            return 2
+        fi
         root_status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${root_sha}" "$issue") || return 2
         if [ "$(jq -r .complete <<<"$root_status")" = true ]; then
             state="complete"
@@ -2189,12 +2271,19 @@ EOF
         if [ "$json" = true ]; then
             [ "$first" = false ] && echo ","
             first=false
-            printf '    {"issue": %s, "sha": %s, "title": %s, "state": %s}' \
-                "$(json_int_or_null "$issue")" "$(json_escape "$root_sha")" "$(json_escape "$title")" "$(json_escape "$state")"
+            jq -nc --argjson root "$(taskdag_root_identity_json "$locator")" \
+                --arg sha "$root_sha" --arg title "$title" --arg state "$state" \
+                '$root+{sha:$sha,title:$title,state:$state}' | sed 's/^/    /'
         else
-            printf "%-8s %-50s %-12s\n" "#$issue" "${title:0:50}" "$state"
+            if [[ "$issue" =~ ^[1-9][0-9]*$ ]]; then
+                printf "%-8s %-50s %-12s\n" "#$issue" "${title:0:50}" "$state"
+            else
+                printf "%-72s %-50s %-12s\n" "$identity" "${title:0:50}" "$state"
+            fi
         fi
-    done < <(git for-each-ref --format='%(refname)' refs/heads/tasks/pending/ | sort -t/ -k4 -n)
+    done < <(git for-each-ref --format='%(refname)' refs/heads/tasks/pending/ \
+        | awk '/\/pending\/[1-9][0-9]*$/{print "0 " substr($0,match($0,/[^/]+$/)), $0; next} {print "1 0", $0}' \
+        | sort -k1,1n -k2,2n -k3,3 | cut -d' ' -f3-)
 
     if [ "$json" = true ]; then echo ""; echo "]"; fi
 }
@@ -2941,7 +3030,8 @@ EOF
             and has("title") and (.title | type == "string")
                 and (.title | length > 0) and (.title | test("[\r\n]") | not)
             and ((has("description") | not) or (.description == null)
-                 or (.description | type == "string"))
+                 or (.description | type == "string" and
+                     (test("(?m)^(Task|Issue|Author|URL|Status|Type|Epic-ID|Epic-Root-Format|Epic-Root-Descriptor|Epic-Origin-Kind|Epic-Origin-Provider|Epic-Origin-Repository-ID|Epic-Origin-Operation-ID|Epic-Origin-Issue-ID|Projection-Provider|Projection-Repository|Projection-Repository-ID|Projection-Issue-ID|Projection-Issue-Number|Projection-URL):")|not)))
             and ((has("type") | not)
                  or (.type == "epic" or .type == "task" or .type == "leaf"))
             and ((has("status") | not) or (.status == "pending"))
@@ -2956,14 +3046,42 @@ EOF
         echo "       and 'dependencies' (array of non-empty strings). See --help." >&2
         return 1
     fi
+    local description
+    while IFS= read -r description; do
+        if taskdag_description_has_reserved_header "$description"; then
+            echo "Error: task descriptions may not contain reserved metadata headers" >&2
+            return 1
+        fi
+    done < <(jq -r '.[] | .description // ""' <<<"$spec_json")
 
     # ── inherit issue / url / author from the parent task commit ─────
-    local parent_msg issue_num issue_url author parent_title
+    local parent_msg issue_num issue_url author parent_title root_descriptor="" inherited_root_headers="" parent_is_typed_root=false
     parent_msg=$(parse_commit_metadata "$parent_sha")
     issue_num=$(extract_field "$parent_msg" "Issue" || true)
     issue_url=$(extract_field "$parent_msg" "URL" || true)
     author=$(extract_field "$parent_msg" "Author" || true)
     parent_title=$(get_task_title "$parent_sha")
+    local inherited_epic_id
+    inherited_epic_id=$(extract_field "$parent_msg" "Epic-ID" 2>/dev/null || true)
+    if [ -n "$inherited_epic_id" ]; then
+        if [ "$(extract_field "$parent_msg" "Epic-Root-Format" 2>/dev/null || true)" = 1 ]; then
+            parent_is_typed_root=true
+            local typed_parent_locator
+            typed_parent_locator=$(taskdag_root_locator "$inherited_epic_id") || return 1
+            root_descriptor=$(taskdag_resolve_typed_root "$typed_parent_locator" "$parent_sha") || {
+                echo "Error: Epic-ID root message is not exactly canonical" >&2
+                return 1
+            }
+        else
+            root_descriptor=$(extract_field "$parent_msg" "Epic-Root-Descriptor" 2>/dev/null || true)
+            root_descriptor=$(taskdag_canonicalize_epic_root_descriptor <<<"$root_descriptor") || {
+                echo "Error: child carries an invalid inherited Epic-ID root descriptor" >&2
+                return 1
+            }
+            [ "$(jq -r .epicId <<<"$root_descriptor")" = "$inherited_epic_id" ] || return 1
+        fi
+        inherited_root_headers=$(printf 'Epic-ID: %s\nEpic-Root-Descriptor: %s\n' "$inherited_epic_id" "$root_descriptor")
+    fi
 
     local count
     count=$(printf '%s' "$spec_json" | jq 'length')
@@ -3093,9 +3211,20 @@ EOF
         # CLOSED on an indeterminate origin lookup: if we cannot tell, we
         # must not silently decompose a root without its lock. (We are
         # about to push to origin anyway, so requiring origin here is fine.)
-        local parent_issue parent_pending parent_type rc
+        local parent_issue parent_pending parent_type rc parent_locator=""
         local parent_meta; parent_meta=$(parse_commit_metadata "$parent_sha")
         parent_issue=$(extract_field "$parent_meta" "Issue" 2>/dev/null | sed 's/^#//' || true)
+        if [ -z "$parent_issue" ] && [ "$parent_is_typed_root" = true ]; then
+            parent_issue="epic-v1/${inherited_epic_id#epic-v1:}"
+            parent_locator=$(taskdag_root_locator "$inherited_epic_id") || return 1
+            taskdag_resolve_typed_root "$parent_locator" "$parent_sha" >/dev/null || {
+                echo "Error: typed root locator and canonical root descriptor disagree" >&2
+                return 1
+            }
+        fi
+        if [ -n "$parent_issue" ] && [ -z "$parent_locator" ]; then
+            parent_locator=$(taskdag_root_locator "$parent_issue") || return 1
+        fi
         parent_type=$(extract_field "$parent_meta" "Type" 2>/dev/null || true)
         # Distinguish a top-level epic ROOT from a child/intermediate epic.
         # A root (from create-task-commit.sh) is parented on real repository
@@ -3179,6 +3308,11 @@ EOF
                 return 2
             fi
             local rmsg rtask rclaimer rhost me_claimer me_host
+            if ! taskdag_validate_root_claim "$parent_locator" "$parent_sha" "$rtmp"; then
+                git update-ref -d "$rtmp" 2>/dev/null || true
+                echo "Error: orchestration lock #${root_issue} is malformed or mismatched" >&2
+                return 1
+            fi
             rmsg=$(parse_commit_metadata "$rtmp" 2>/dev/null || true)
             rtask=$(extract_field "$rmsg" "Task-Commit" 2>/dev/null || true)
             rclaimer=$(extract_field "$rmsg" "Claimer" 2>/dev/null || true)
@@ -3331,6 +3465,7 @@ EOF
             [ -n "$issue_url" ] && printf 'URL: %s\n' "$issue_url"
             printf 'Status: %s\n' "${statuses[i]}"
             printf 'Type: %s\n' "${types[i]}"
+            [ -z "$inherited_root_headers" ] || printf '%s' "$inherited_root_headers"
             if [ -n "${descs[i]}" ]; then
                 printf '\n%s\n' "${descs[i]}"
             fi

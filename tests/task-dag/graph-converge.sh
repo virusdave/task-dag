@@ -10,13 +10,34 @@ trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+
+# This writer gate remains testable after migration drains its integration
+# command: invoke the helper in an isolated repository and prove it returns
+# before touching either authority.
+git init -q --bare "$ROOT/close-gate.git"
+git clone -q "$ROOT/close-gate.git" "$ROOT/close-gate"
+(
+    cd "$ROOT/close-gate" || exit 1
+    echo seed > seed
+    git add seed
+    git commit -qm seed
+    git push -q origin HEAD:master
+    source "$TD" --help >/dev/null
+    typed_identity="epic-v1:$(printf 'a%.0s' {1..64})"
+    head_before=$(git rev-parse HEAD)
+    origin_before=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+    ! taskdag_emit_origin_epic_close "$typed_identity" "$head_before" false >/dev/null 2>&1 \
+        && [ "$(git rev-parse HEAD)" = "$head_before" ] \
+        && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$origin_before" ]
+) && ok "typed identity is rejected before origin or HEAD mutation by the legacy close writer" \
+  || bad "legacy close writer accepted typed identity or mutated repository state"
 if [ "$($TD migration-status --json | jq -r .mode)" = draining-legacy-writers ]; then
   "$TD" graph-converge --no-fetch >/dev/null 2>&1; rc=$?
-  [ "$rc" -eq 75 ] && { echo "PASS: legacy graph convergence integration is drained"; exit 0; }
+  [ "$rc" -eq 75 ] && { ok "legacy graph convergence integration is drained"; echo "PASS=$PASS FAIL=$FAIL"; [ "$FAIL" -eq 0 ]; exit; }
   echo "FAIL: expected migration status 75, got $rc"; exit 1
 fi
 
-export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 init_repo() { # <name> <owner/repo>

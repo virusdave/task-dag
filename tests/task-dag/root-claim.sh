@@ -20,9 +20,46 @@ git init -q --bare "$ROOT/origin.git"
 git clone -q "$ROOT/origin.git" "$ROOT/wc"
 cd "$ROOT/wc"
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
+ETREE=$(git mktree </dev/null)
+source "$TD" --help >/dev/null
+set +e
+
+# The legacy root-lock writer is a byte protocol. Freeze volatile producers so
+# cmp covers the complete message, not merely the root task serialization.
+date() {
+  case "$*" in
+    '-u +%Y-%m-%dT%H:%M:%SZ') printf '%s\n' 2026-01-02T03:04:05Z ;;
+    *) command date "$@" ;;
+  esac
+}
+uuidgen() { printf '%s\n' 11111111-2222-3333-4444-555555555555; }
+LEGACY_GOLDEN_ROOT=$(git commit-tree "$ETREE" -p HEAD -m 'Task: Legacy golden root')
+LEGACY_GOLDEN_CLAIM=$(build_root_claim_commit 321 "$LEGACY_GOLDEN_ROOT" alice host1 7 'golden note' 4321)
+git show -s --format=%B "$LEGACY_GOLDEN_CLAIM" >"$ROOT/legacy-claim.actual"
+cat >"$ROOT/legacy-claim.expected" <<EOF
+Claim: Legacy golden root
+
+Claim-Kind: root
+Issue: #321
+Claim-ID: 11111111-2222-3333-4444-555555555555
+Task-Commit: $LEGACY_GOLDEN_ROOT
+Claimer: alice
+Claimer-Host: host1
+Claimer-PID: 4321
+Claimed-At: 2026-01-02T03:04:05Z
+TTL-Hours: 7
+Note: golden note
+
+EOF
+if cmp -s "$ROOT/legacy-claim.expected" "$ROOT/legacy-claim.actual"; then
+  ok "0: legacy build_root_claim_commit message bytes match the golden"
+else
+  bad "0: legacy build_root_claim_commit message bytes changed"
+fi
+unset -f date uuidgen
 
 # Mint an epic root for issue #999 (mirrors create-task-commit.sh output).
-EPIC=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Test epic
+EPIC=$(git commit-tree "$ETREE" -p HEAD -m "Task: Test epic
 
 Issue: #999
 URL: https://github.com/test/test/issues/999
@@ -72,7 +109,7 @@ fi
 # ---------------------------------------------------------------------------
 # TEST 2: breakdown WITHOUT the lock is refused (re-mint clean root #1000).
 # ---------------------------------------------------------------------------
-EPIC2=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic two
+EPIC2=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic two
 
 Issue: #1000
 URL: https://github.com/test/test/issues/1000
@@ -164,7 +201,7 @@ fi
 # ---------------------------------------------------------------------------
 # TEST 7: release-root deletes the lock and creates NO frontier ref.
 # ---------------------------------------------------------------------------
-EPIC3=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic three
+EPIC3=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic three
 
 Issue: #1001
 URL: https://github.com/test/test/issues/1001
@@ -219,7 +256,7 @@ fi
 # TEST 9: a foreign owner cannot consume someone else's root lock via
 #         breakdown (ownership enforced; take-over needs claim-root --force).
 # ---------------------------------------------------------------------------
-EPIC4=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic four
+EPIC4=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic four
 
 Issue: #1002
 URL: https://github.com/test/test/issues/1002
@@ -252,7 +289,7 @@ fi
 # TEST 10: two rapid claim-root --force by the same identity produce DISTINCT
 #          claim commit SHAs (Claim-ID nonce), so lock epochs never collide.
 # ---------------------------------------------------------------------------
-EPIC5=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic five
+EPIC5=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic five
 
 Issue: #1003
 URL: https://github.com/test/test/issues/1003
@@ -277,7 +314,7 @@ fi
 #          unlocked breakdown — it FAILS CLOSED. (Guards the close-epic /
 #          stale-root resurrection bypass.)
 # ---------------------------------------------------------------------------
-EPIC6=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic six
+EPIC6=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic six
 
 Issue: #1004
 URL: https://github.com/test/test/issues/1004
@@ -298,14 +335,14 @@ fi
 # TEST 12: a STALE epic-root SHA (pending/<N> exists but points at a newer
 #          root commit) is refused rather than decomposed as a normal task.
 # ---------------------------------------------------------------------------
-STALE=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic seven (stale)
+STALE=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic seven (stale)
 
 Issue: #1005
 URL: https://github.com/test/test/issues/1005
 Author: tester
 Status: pending
 Type: epic")
-CURRENT=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic seven (current)
+CURRENT=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic seven (current)
 
 Issue: #1005
 URL: https://github.com/test/test/issues/1005
@@ -326,7 +363,7 @@ fi
 #          Claimer/Task-Commit identity fields) does not let breakdown
 #          consume it — ownership cannot be positively confirmed, so refuse.
 # ---------------------------------------------------------------------------
-EPIC8=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic eight
+EPIC8=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic eight
 
 Issue: #1006
 URL: https://github.com/test/test/issues/1006
@@ -346,6 +383,8 @@ elif [ "$(git ls-remote origin refs/heads/tasks/root-active/1006 | awk '{print $
 else
   ok "13: breakdown refuses a malformed orchestration lock (no positive ownership)"
 fi
+git push -q origin :refs/heads/tasks/root-active/1006
+git update-ref -d refs/heads/tasks/root-active/1006 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # TEST 14: a CHILD epic (Type:epic but parented on a task commit, not on real
@@ -391,7 +430,7 @@ fi
 #          DECOMPOSED — fetch_root_refs refreshes master so task_has_children
 #          cannot miss completed children and re-open the dup-decompose race.
 # ---------------------------------------------------------------------------
-EPIC9=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic nine
+EPIC9=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic nine
 
 Issue: #1100
 URL: https://github.com/test/test/issues/1100
@@ -444,7 +483,7 @@ fi
 # ---------------------------------------------------------------------------
 # TEST 16: blocked and dependency-pending roots are not pickable/claimable.
 # ---------------------------------------------------------------------------
-EPIC_BLOCKED=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Blocked root
+EPIC_BLOCKED=$(git commit-tree "$ETREE" -p HEAD -m "Task: Blocked root
 
 Issue: #1208
 URL: https://github.com/test/test/issues/1208
@@ -482,7 +521,7 @@ Issue: #1209
 Author: tester
 Status: pending
 Type: leaf")
-EPIC_DEP=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -p "$DEP_ROOT" -m "Task: Dependency-gated root
+EPIC_DEP=$(git commit-tree "$ETREE" -p HEAD -p "$DEP_ROOT" -m "Task: Dependency-gated root
 
 Issue: #1209
 URL: https://github.com/test/test/issues/1209
@@ -520,7 +559,7 @@ fi
 #          but the commit is shaped like a top-level epic root, complete must
 #          REFUSE (never fall through and land an empty root over live leaves).
 # ---------------------------------------------------------------------------
-EPIC10=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic ten
+EPIC10=$(git commit-tree "$ETREE" -p HEAD -m "Task: Epic ten
 
 Issue: #1008
 URL: https://github.com/test/test/issues/1008
@@ -549,7 +588,7 @@ git remote set-url origin "$ROOT/origin.git"
 # dispatch). We stub `gh` on PATH to report CLOSED, and a separate stub to
 # report OPEN to prove the guard is state-driven, not a blanket refusal.
 # ---------------------------------------------------------------------------
-EPIC17=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Closed-issue epic
+EPIC17=$(git commit-tree "$ETREE" -p HEAD -m "Task: Closed-issue epic
 
 Issue: #1100
 URL: https://github.com/test/test/issues/1100
@@ -590,6 +629,153 @@ if [ "$rc17b" = 0 ] && remote_has refs/heads/tasks/root-active/1100; then
   ok "17b: claim-root proceeds when the same issue is OPEN (state-driven, not blanket)"
 else
   bad "17b: expected successful claim on OPEN issue, got rc=$rc17b"
+fi
+
+# Epic-ID roots use the same claim/roots/breakdown path, with a typed lock and
+# immutable descriptor inherited by every child. The fixture constructs the
+# protocol object directly; no public root writer is involved.
+EID=epic-v1:a453373770d0520fe9b2557c6779a47fe17a5ecf0f2c38af5a826e9531b0eb54
+EDIGEST=${EID#epic-v1:}
+OPID=$(printf 'a%.0s' {1..64})
+EMSG="Task: Typed epic
+
+Epic-Root-Format: 1
+Epic-ID: $EID
+Epic-Origin-Kind: operation
+Epic-Origin-Repository-ID: R_source
+Epic-Origin-Operation-ID: $OPID
+Author: worker
+Status: pending
+Type: epic
+Projection-Provider: github
+Projection-Repository: test/test
+Projection-Repository-ID: R_target"
+ETYPE=$(git commit-tree "$ETREE" -p HEAD -m "$EMSG")
+git update-ref "refs/heads/tasks/pending/epic-v1/$EDIGEST" "$ETYPE"
+git push -q origin "refs/heads/tasks/pending/epic-v1/$EDIGEST"
+if "$TD" claim-root "$EID" >/dev/null 2>&1 \
+   && remote_has "refs/heads/tasks/root-active/epic-v1/$EDIGEST" \
+   && "$TD" roots --json | jq -e --arg id "$EID" '.[]|select(.rootIdentity==$id and .issue==null and .epicId==$id)' >/dev/null; then
+  ok "18a: Epic-ID root is claimed through its typed lock and listed with string identity"
+else
+  bad "18a: Epic-ID root claim or roots projection failed"
+fi
+if "$TD" release-root "refs/heads/tasks/pending/epic-v1/$EDIGEST" >/dev/null 2>&1 \
+   && ! remote_has "refs/heads/tasks/root-active/epic-v1/$EDIGEST" \
+   && "$TD" claim-root "$EID" >/dev/null 2>&1; then
+  ok "18b: typed pending ref releases and reclaims the matching lock"
+else
+  bad "18b: Epic-ID root release/reclaim failed"
+fi
+
+TLOCK=$(git rev-parse "refs/heads/tasks/root-active/epic-v1/$EDIGEST")
+git update-ref "refs/task-dag-tmp/release-root/epic-v1/$EDIGEST" "$ETYPE"
+REAL_GIT=$(command -v git)
+mkdir -p "$ROOT/fail-fetch"
+cat >"$ROOT/fail-fetch/git" <<EOF
+#!/bin/sh
+[ "\$1" != fetch ] || exit 1
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$ROOT/fail-fetch/git"
+release_rc=0
+PATH="$ROOT/fail-fetch:$PATH" "$TD" release-root "$EID" >/dev/null 2>&1 || release_rc=$?
+if [ "$release_rc" -eq 2 ] \
+   && [ "$(git --git-dir="$ROOT/origin.git" rev-parse "refs/heads/tasks/root-active/epic-v1/$EDIGEST")" = "$TLOCK" ]; then
+  ok "18c: release fails closed on fetch failure and preserves the remote typed lock"
+else
+  bad "18c: release did not fail closed on fetch failure"
+fi
+
+TLOCATOR=$(taskdag_root_locator "$EID")
+TLOCK_MSG=$(git show -s --format=%B "$TLOCK")
+typed_rejections=true
+for mutation in opposite duplicate wrong-epic wrong-ref wrong-task no-space multi-space duplicate-epic duplicate-claimer; do
+  case "$mutation" in
+    opposite) bad_msg=$(printf '%s\nIssue : #999\n' "$TLOCK_MSG") ;;
+    duplicate) bad_msg=$(printf '%s\nIssue: #999\nIssue: #999\n' "$TLOCK_MSG") ;;
+    wrong-epic) bad_msg=${TLOCK_MSG/$EID/epic-v1:$(printf 'b%.0s' {1..64})} ;;
+    wrong-ref) bad_msg=${TLOCK_MSG#*}; bad_msg=${TLOCK_MSG/refs\/heads\/tasks\/pending\/epic-v1\/$EDIGEST/refs\/heads\/tasks\/pending\/epic-v1\/$(printf 'b%.0s' {1..64})} ;;
+    wrong-task) bad_msg=${TLOCK_MSG/Task-Commit: $ETYPE/Task-Commit: $(git rev-parse HEAD)} ;;
+    no-space) bad_msg=${TLOCK_MSG/Epic-ID: $EID/Epic-ID:$EID} ;;
+    multi-space) bad_msg=${TLOCK_MSG/Root-Ref: refs/Root-Ref:  refs/} ;;
+    duplicate-epic) bad_msg=$(printf '%s\nEpic-ID:%s\n' "$TLOCK_MSG" "$EID") ;;
+    duplicate-claimer) bad_msg=$(printf '%s\nClaimer: intruder\n' "$TLOCK_MSG") ;;
+  esac
+  bad_lock=$(printf '%s' "$bad_msg" | git commit-tree "$ETREE" -p "$ETYPE")
+  taskdag_validate_root_claim "$TLOCATOR" "$ETYPE" "$bad_lock" && typed_rejections=false
+done
+if [ "$typed_rejections" = true ]; then
+  ok "18c: typed claim validation rejects opposite dialect, duplicates, and wrong bindings"
+else
+  bad "18c: typed claim validation accepted malformed or mismatched metadata"
+fi
+printf '[{"title":"typed leaf","type":"leaf"}]' >"$ROOT/typed-spec.json"
+if "$TD" breakdown "$ETYPE" --spec-file="$ROOT/typed-spec.json" >/dev/null 2>&1; then
+  TCHILD=$(git for-each-ref --format='%(objectname)' refs/heads/tasks/frontier/ \
+    | while read -r candidate; do [ "$(git show -s --format=%P "$candidate" | awk '{print $1}')" = "$ETYPE" ] && { echo "$candidate"; break; }; done)
+  TMSG=$(git show -s --format=%B "$TCHILD")
+  if ! remote_has "refs/heads/tasks/root-active/epic-v1/$EDIGEST" \
+     && grep -q "^Epic-ID: $EID$" <<<"$TMSG" \
+     && grep -q '^Epic-Root-Descriptor: {.*"epicId":"epic-v1:' <<<"$TMSG"; then
+    ok "18c: Epic-ID breakdown consumes typed lock and children inherit full descriptor"
+  else
+    bad "18c: typed lock consumption or child descriptor inheritance failed"
+  fi
+
+  close_head_before=$(git rev-parse HEAD)
+  close_origin_before=$(git ls-remote origin refs/heads/master | awk '{print $1}')
+  close_rc=0
+  maybe_emit_local_epic_close "$TCHILD" >/dev/null 2>&1 || close_rc=$?
+  if [ "$close_rc" -eq 75 ] && [ "$(git rev-parse HEAD)" = "$close_head_before" ] \
+     && [ "$(git ls-remote origin refs/heads/master | awk '{print $1}')" = "$close_origin_before" ]; then
+    ok "18d: local legacy close helper gates typed identity without moving HEAD or origin"
+  else
+    bad "18d: local close helper did not gate typed identity before mutation (rc=$close_rc)"
+  fi
+
+  TSHORT=$(git rev-parse --short "$TCHILD")
+  TASK_DAG_CLAIMER=test TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ \
+    "$TD" claim "$TSHORT" >/dev/null 2>&1
+  printf '[{"title":"typed grandchild","type":"leaf"}]' >"$ROOT/typed-grandchild-spec.json"
+  if TASK_DAG_CLAIMER=test TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ \
+      "$TD" breakdown "$TCHILD" --spec-file="$ROOT/typed-grandchild-spec.json" --json \
+      >"$ROOT/typed-grandchild.json" 2>/dev/null; then
+    TGRAND=$(jq -r '.tasks[0].sha' <"$ROOT/typed-grandchild.json")
+    if [ "$(git show -s --format=%B "$TGRAND" | sed -n 's/^Epic-Root-Descriptor: //p')" = \
+         "$(sed -n 's/^Epic-Root-Descriptor: //p' <<<"$TMSG")" ] \
+       && ! remote_has "refs/heads/tasks/root-active/epic-v1/$EDIGEST"; then
+      ok "18e: recursive typed breakdown preserves the root descriptor without a root lock"
+    else
+      bad "18e: typed grandchild changed its descriptor or required a root lock"
+    fi
+  else
+    bad "18e: recursive typed child breakdown failed"
+  fi
+else
+  bad "18c: Epic-ID root breakdown failed"
+fi
+
+# Root projection ordering is numeric for legacy issues, followed by typed
+# identities in deterministic lexical order rather than string ordering.
+for issue in 10 2; do
+  root=$(git commit-tree "$ETREE" -p HEAD -m "Task: ordering root $issue
+
+Issue: #$issue
+Author: tester
+Status: pending
+Type: epic")
+  git update-ref "refs/heads/tasks/pending/$issue" "$root"
+  git push -q --force-with-lease origin "refs/heads/tasks/pending/$issue"
+done
+mapfile -t ordered_roots < <("$TD" roots --json | jq -r '.[].rootIdentity')
+pos2=$(printf '%s\n' "${!ordered_roots[@]}" | while read -r i; do [ "${ordered_roots[i]}" = 2 ] && echo "$i"; done)
+pos10=$(printf '%s\n' "${!ordered_roots[@]}" | while read -r i; do [ "${ordered_roots[i]}" = 10 ] && echo "$i"; done)
+postyped=$(printf '%s\n' "${!ordered_roots[@]}" | while read -r i; do [ "${ordered_roots[i]}" = "$EID" ] && echo "$i"; done)
+if [ -n "$pos2" ] && [ "$pos2" -lt "$pos10" ] && [ "$pos10" -lt "$postyped" ]; then
+  ok "19: roots orders numeric 2 before 10 and typed identities after numeric roots"
+else
+  bad "19: roots identity ordering is not numeric-then-typed (${ordered_roots[*]})"
 fi
 
 echo "------------------------------------------------------------"

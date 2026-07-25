@@ -49,8 +49,18 @@ build_root_claim_commit() {
     local msg="Claim: ${root_title}
 
 Claim-Kind: root
-Issue: #${issue}
-Claim-ID: ${claim_id}
+"
+    if [[ "$issue" =~ ^[1-9][0-9]*$ ]]; then
+        msg="${msg}Issue: #${issue}
+"
+    else
+        local digest=${issue#epic-v1/}
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+        msg="${msg}Epic-ID: epic-v1:${digest}
+Root-Ref: refs/heads/tasks/pending/epic-v1/${digest}
+"
+    fi
+    msg="${msg}Claim-ID: ${claim_id}
 Task-Commit: ${root_sha}
 Claimer: ${claimer}
 Claimer-Host: ${claimer_host}"
@@ -62,6 +72,53 @@ TTL-Hours: ${ttl_hours}"
     [ -z "$note" ] || msg="${msg}
 Note: ${note}"
     git commit-tree "$root_tree" -p "$root_sha" -m "$msg"
+}
+
+# Validate the complete root-lock binding once for every root consumer. Typed
+# locks carry the explicit protocol fields; legacy locks retain their exact
+# historical bytes while still requiring the existing issue/task/path safety.
+taskdag_validate_root_claim() { # locator-json root-sha claim-sha
+    local locator=$1 root_sha=$2 claim_sha=$3 msg parent tree root_tree dialect expected field count
+    git cat-file -e "$root_sha^{commit}" 2>/dev/null || return 1
+    git cat-file -e "$claim_sha^{commit}" 2>/dev/null || return 1
+    parent=$(git show -s --format=%P "$claim_sha" 2>/dev/null) || return 1
+    [ "$parent" = "$root_sha" ] || return 1
+    tree=$(git rev-parse "$claim_sha^{tree}" 2>/dev/null) || return 1
+    root_tree=$(git rev-parse "$root_sha^{tree}" 2>/dev/null) || return 1
+    [ "$tree" = "$root_tree" ] || return 1
+    msg=$(parse_commit_metadata "$claim_sha" 2>/dev/null) || return 1
+    for field in Claim-Kind Claim-ID Task-Commit Claimer Claimer-Host Claimed-At TTL-Hours; do
+        count=$(grep -c "^${field}:" <<<"$msg")
+        [ "$count" -eq 1 ] || return 1
+        [ "$(grep -Ec "^${field}: [^ ]" <<<"$msg")" -eq 1 ] || return 1
+    done
+    count=$(grep -c '^Claimer-PID:' <<<"$msg")
+    [ "$count" -le 1 ] || return 1
+    [ "$count" -eq 0 ] || [ "$(grep -Ec '^Claimer-PID: [^ ]' <<<"$msg")" -eq 1 ] || return 1
+    [ "$(extract_field "$msg" Task-Commit 2>/dev/null || true)" = "$root_sha" ] || return 1
+    [ "$(extract_field "$msg" Claim-Kind 2>/dev/null || true)" = root ] || return 1
+    # A reserved identity key with whitespace before ':' is not an unrelated
+    # note: it is a malformed opposite-dialect field and must fail closed.
+    ! grep -Eq '^(Issue|Epic-ID|Root-Ref)[[:space:]]+:' <<<"$msg" || return 1
+    dialect=$(jq -r .dialect <<<"$locator") || return 1
+    if [ "$dialect" = epic-v1 ]; then
+        [ "$(grep -c '^Epic-ID:' <<<"$msg")" -eq 1 ] \
+            && [ "$(grep -c '^Root-Ref:' <<<"$msg")" -eq 1 ] \
+            && [ "$(grep -c '^Issue:' <<<"$msg")" -eq 0 ] || return 1
+        [ "$(grep -Ec '^Epic-ID: [^ ]' <<<"$msg")" -eq 1 ] \
+            && [ "$(grep -Ec '^Root-Ref: [^ ]' <<<"$msg")" -eq 1 ] || return 1
+        expected=$(jq -r .epicId <<<"$locator") || return 1
+        [ "$(extract_field "$msg" Epic-ID 2>/dev/null || true)" = "$expected" ] || return 1
+        expected=$(jq -r .pendingRef <<<"$locator") || return 1
+        [ "$(extract_field "$msg" Root-Ref 2>/dev/null || true)" = "$expected" ] || return 1
+    else
+        [ "$(grep -c '^Issue:' <<<"$msg")" -eq 1 ] \
+            && [ "$(grep -c '^Epic-ID:' <<<"$msg")" -eq 0 ] \
+            && [ "$(grep -c '^Root-Ref:' <<<"$msg")" -eq 0 ] || return 1
+        [ "$(grep -Ec '^Issue: [^ ]' <<<"$msg")" -eq 1 ] || return 1
+        expected=$(jq -r .issueNumber <<<"$locator") || return 1
+        [ "$(extract_field "$msg" Issue 2>/dev/null || true)" = "#$expected" ] || return 1
+    fi
 }
 
 # Positively validate the exact claim object a caller intends to consume.

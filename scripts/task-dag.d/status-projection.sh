@@ -110,7 +110,7 @@ taskdag_task_status_json() { # <task-node> [--include-claimed]
 }
 
 taskdag_root_status_json() { # <root-node> <issue>
-    local node=$1 issue=$2 normalized sha complete=false blocked=false claimed=false decomposed=false pickable=false req rc reasons='[]'
+    local node=$1 issue=$2 normalized sha complete=false blocked=false claimed=false decomposed=false pickable=false req rc reasons='[]' locator active_sha
     taskdag_consumer_require_prepared || return 2
     normalized=$(taskdag_normalize_node "$node") || return 2
     if [ "$TASKDAG_CONSUMER_MODE" = legacy ]; then
@@ -123,7 +123,14 @@ taskdag_root_status_json() { # <root-node> <issue>
     req=$(taskdag_requirements_status_json "$normalized") || return 2
     task_has_children "$sha" >/dev/null 2>&1 && decomposed=true
     is_task_blocked "$sha" && blocked=true
-    git show-ref --verify --quiet "refs/heads/tasks/root-active/$issue" && claimed=true
+    if git show-ref --verify --quiet "refs/heads/tasks/root-active/$issue"; then
+        locator=$(taskdag_root_locator "refs/heads/tasks/root-active/$issue") || return 2
+        [ "$(jq -r .dialect <<<"$locator")" != epic-v1 ] \
+            || taskdag_resolve_typed_root "$locator" "$sha" >/dev/null || return 2
+        active_sha=$(git rev-parse "refs/heads/tasks/root-active/$issue") || return 2
+        taskdag_validate_root_claim "$locator" "$sha" "$active_sha" || return 2
+        claimed=true
+    fi
     reasons=$(jq -c '.reasons' <<<"$req")
     [ "$complete" = true ] && reasons=$(jq -c '.+[{code:"complete"}]' <<<"$reasons")
     [ "$decomposed" = true ] && reasons=$(jq -c '.+[{code:"decomposed"}]' <<<"$reasons")

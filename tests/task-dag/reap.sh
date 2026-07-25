@@ -44,6 +44,29 @@ TTL-Hours: $ttl"
   git commit-tree "$(git rev-parse "$task^{tree}")" -p "$task" -m "$msg"
 }
 
+root_claim_msg(){
+  local task="$1" identity="$2" host="$3" when="$4" msg
+  msg="Claim: root
+
+Claim-Kind: root
+"
+  if [[ "$identity" = epic-v1/* ]]; then
+    msg+="Epic-ID: ${identity/epic-v1\//epic-v1:}
+Root-Ref: refs/heads/tasks/pending/$identity
+"
+  else
+    msg+="Issue: #$identity
+"
+  fi
+  msg+="Claim-ID: fixture-$identity
+Task-Commit: $task
+Claimer: test
+Claimer-Host: $host
+Claimed-At: $when
+TTL-Hours: 1"
+  git commit-tree "$(git rev-parse "$task^{tree}")" -p "$task" -m "$msg"
+}
+
 activate(){
   local task="$1" short="$2" claim="$3"
   git update-ref -d "refs/heads/tasks/frontier/$short" 2>/dev/null || true
@@ -106,12 +129,13 @@ else
   bad "dry-run modified origin or did not report"
 fi
 
-ROOT_EPIC=$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" -p HEAD -m "Task: root
+EMPTY_TREE=$(git mktree </dev/null)
+ROOT_EPIC=$(git commit-tree "$EMPTY_TREE" -p HEAD -m "Task: root
 
 Issue: #99
 Type: epic")
 git update-ref refs/heads/tasks/pending/99 "$ROOT_EPIC"
-ROOT_CLAIM=$(claim_msg "$ROOT_EPIC" otherhost "" "$past" 1 root)
+ROOT_CLAIM=$(root_claim_msg "$ROOT_EPIC" 99 otherhost "$past")
 git update-ref refs/heads/tasks/root-active/99 "$ROOT_CLAIM"
 git push -q origin refs/heads/tasks/pending/99 refs/heads/tasks/root-active/99
 "$TD" reap >/dev/null 2>&1
@@ -119,6 +143,32 @@ if [ -z "$(remote_sha refs/heads/tasks/root-active/99)" ] && [ "$(remote_sha ref
   ok "dead root-active is reaped and pending remains"
 else
   bad "root reap failed"
+fi
+
+TYPED_DIGEST=a453373770d0520fe9b2557c6779a47fe17a5ecf0f2c38af5a826e9531b0eb54
+TYPED_EPIC=$(git commit-tree "$EMPTY_TREE" -p HEAD -m "Task: Typed epic
+
+Epic-Root-Format: 1
+Epic-ID: epic-v1:$TYPED_DIGEST
+Epic-Origin-Kind: operation
+Epic-Origin-Repository-ID: R_source
+Epic-Origin-Operation-ID: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Author: worker
+Status: pending
+Type: epic
+Projection-Provider: github
+Projection-Repository: test/test
+Projection-Repository-ID: R_target")
+TYPED_CLAIM=$(root_claim_msg "$TYPED_EPIC" "epic-v1/$TYPED_DIGEST" otherhost "$past")
+git update-ref "refs/heads/tasks/pending/epic-v1/$TYPED_DIGEST" "$TYPED_EPIC"
+git update-ref "refs/heads/tasks/root-active/epic-v1/$TYPED_DIGEST" "$TYPED_CLAIM"
+git push -q origin "refs/heads/tasks/pending/epic-v1/$TYPED_DIGEST" "refs/heads/tasks/root-active/epic-v1/$TYPED_DIGEST"
+"$TD" reap >/dev/null 2>&1
+if [ -z "$(remote_sha "refs/heads/tasks/root-active/epic-v1/$TYPED_DIGEST")" ] \
+   && [ "$(remote_sha "refs/heads/tasks/pending/epic-v1/$TYPED_DIGEST")" = "$TYPED_EPIC" ]; then
+  ok "dead Epic-ID root claim is reaped while typed pending identity remains"
+else
+  bad "typed root reap failed"
 fi
 
 read -r LEASE LEASE_SHORT < <(mk_task lease 6)
@@ -143,6 +193,15 @@ if command -v jq >/dev/null 2>&1; then
   fi
 else
   ok "jq unavailable; skipped JSON parser check"
+fi
+
+before=$(git ls-remote origin 'refs/heads/tasks/*' | sort)
+if "$TD" reap --issue=definitely-not-a-root >/dev/null 2>&1; then
+  bad "malformed nonempty reap filter was accepted"
+elif [ "$(git ls-remote origin 'refs/heads/tasks/*' | sort)" = "$before" ]; then
+  ok "malformed nonempty reap filter is an argument error with no mutation"
+else
+  bad "malformed reap filter mutated task refs"
 fi
 
 echo "-----"; echo "PASS=$PASS FAIL=$FAIL"; [ "$FAIL" -eq 0 ]

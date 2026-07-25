@@ -88,6 +88,10 @@ taskdag_pending_root_for_task_sha() {
 
 taskdag_emit_origin_epic_close() {
     local issue="$1" root_sha="$2" do_fetch="${3:-true}"
+    [[ "$issue" =~ ^[1-9][0-9]*$ ]] || {
+        echo "Error: legacy Closes-Epic requires a positive-decimal issue identity" >&2
+        return 2
+    }
     _xrepo_ensure_git_identity
 
     local prepare_args=(auto-close-epic)

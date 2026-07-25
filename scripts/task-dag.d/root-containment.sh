@@ -25,10 +25,22 @@ fetch_root_refs() {
 # indeterminate unless the local mirror confirms the identity; root-shaped
 # uncertainty returns 3 so completion callers fail closed.
 task_is_pending_root() {
-    local sha="$1" issue remote rc
-    issue=$(extract_field "$(parse_commit_metadata "$sha")" "Issue" 2>/dev/null | sed 's/^#//' || true)
-    [ -n "$issue" ] || return 1
-    remote=$(pending_sha_on_remote_checked "$issue"); rc=$?
+    local sha="$1" issue epic_id root_format remote rc suffix locator msg
+    msg=$(parse_commit_metadata "$sha") || return 1
+    root_format=$(extract_field "$msg" "Epic-Root-Format" 2>/dev/null || true)
+    epic_id=$(extract_field "$msg" "Epic-ID" 2>/dev/null || true)
+    if [ -n "$root_format" ] || [ -n "$epic_id" ]; then
+        [ "$root_format" = 1 ] || return 1
+        [[ "$epic_id" =~ ^epic-v1:[0-9a-f]{64}$ ]] || return 1
+        suffix="epic-v1/${epic_id#epic-v1:}"
+        locator=$(taskdag_root_locator "$epic_id") || return 1
+        taskdag_resolve_typed_root "$locator" "$sha" >/dev/null || return 1
+    else
+        issue=$(extract_field "$msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
+        [ -n "$issue" ] || return 1
+        suffix=$issue
+    fi
+    remote=$(pending_sha_on_remote_checked "$suffix"); rc=$?
     if [ "$rc" = 0 ]; then
         [ "$remote" = "$sha" ] || return 1
     elif [ "$rc" = 2 ]; then
@@ -44,7 +56,7 @@ task_is_pending_root() {
         # commit is SHAPED like a top-level epic root we cannot prove it is
         # NOT a live (possibly decomposed) root, so signal indeterminate and
         # let the caller fail closed rather than completing it blindly.
-        if [ "$(git rev-parse --verify -q "refs/heads/tasks/pending/$issue" 2>/dev/null)" = "$sha" ]; then
+        if [ "$(git rev-parse --verify -q "refs/heads/tasks/pending/$suffix" 2>/dev/null)" = "$sha" ]; then
             : # local mirror confirms → root
         elif task_is_root_shaped_epic "$sha"; then
             return 3
@@ -52,7 +64,7 @@ task_is_pending_root() {
             return 1
         fi
     fi
-    printf '%s\n' "$issue"
+    printf '%s\n' "$suffix"
     return 0
 }
 
@@ -100,6 +112,15 @@ maybe_emit_local_epic_close() {
         node=$up
     done
     root_sha=$node
+
+    # Typed roots cannot be encoded by the legacy Closes-Epic trailer. Keep
+    # the writer gate closed until the completion codec child lands, before
+    # creating or moving any close commit.
+    if [[ "$issue" = epic-v1/* ]]; then
+        printf "${YELLOW}⚠ Epic-ID root %s is complete, but typed close writers remain gated pending external reader rollout and the Closes-Epic-ID codec.${RESET}\n" \
+            "${issue/epic-v1\//epic-v1:}" >&2
+        return 75
+    fi
 
     # Purely-local epics only; defer delegated/mixed epics to close-epic.
     epic_has_delegated_children "$issue" && return 0

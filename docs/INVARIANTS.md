@@ -685,6 +685,12 @@ message is `Epic-Root-Format: 1`, carries the complete immutable origin and
 desired projection metadata, and has no required `Issue:` field. Legacy root
 message bytes remain unchanged.
 
+The matching orchestration lock is
+`tasks/root-active/epic-v1/<same-64-lowercase-hex>`. Scheduling readers use
+one typed locator for both paths and reject every other nested pending or
+root-active path. Legacy numeric paths remain exactly
+`tasks/pending/<positive-decimal>` and `tasks/root-active/<same-decimal>`.
+
 This protocol lands reader/codec-first. At this stage no command may publish
 an Epic-ID root. Scheduling, claims, breakdown, completion, graph/delegation,
 cleanup, external dispatch, and compatibility-fence readers must all accept
@@ -712,7 +718,10 @@ are the contract you must preserve when editing a minter.
   `Issue: #N` + `Author:` + `URL:` + `Status: pending` + `Type: epic`.
   Empty tree, parent = master HEAD **at creation** (never re-anchored).
 - **Leaf** (`tasks/frontier/<short>` from `breakdown`): `Task: <title>` +
-  `Type: leaf|task`, parents = dependency task commits (DAG edges).
+  `Type: leaf|task`, parents = dependency task commits (DAG edges). Children
+  of an Epic-ID root also carry `Epic-ID:` and the canonical immutable JSON
+  `Epic-Root-Descriptor:`; `Issue:` and `URL:` are optional projection
+  metadata. Legacy child bytes are unchanged.
 - **Message/comment task** (`tasks/frontier/<short>` from `ingest-comment`):
   `kind: message` / `role: human` / `intent: comment` + YAML block, parent
   = epic.
@@ -721,6 +730,9 @@ are the contract you must preserve when editing a minter.
   `Claimed-At:` + `TTL-Hours:`, parent = the claimed commit. Written via an
   atomic `--force-with-lease` CAS + origin readback — **never** move these
   by hand.
+  Epic-ID root claims extend this same shape with `Epic-ID:` and the exact
+  canonical `Root-Ref:` and live at
+  `tasks/root-active/epic-v1/<digest>`. Numeric root claim bytes are unchanged.
 - **Blocked-meta** (`tasks/blocked-meta/<sha>`): `Blocked-Meta:` +
   `Task-Commit:` + `Blocker-Kind:` + `Reason:` + …; tree == task tree,
   first parent == task commit, **deterministic** identity (fixed

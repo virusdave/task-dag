@@ -115,6 +115,22 @@ if cmp -s "$ROOT/operation-message.expected" "$ROOT/operation-message"; then
 else
     bad "task-first root message bytes changed"
 fi
+parsed_descriptor=$(taskdag_parse_epic_root_message "$ROOT/operation-message" 2>/dev/null || true)
+for trailing in 1 2; do
+    trailing_descriptor=$(jq -c --argjson n "$trailing" '.task.description += ([range(0;$n)|"\n"]|join(""))' <<<"$operation_descriptor")
+    taskdag_serialize_epic_root_message <<<"$trailing_descriptor" >"$ROOT/trailing-$trailing"
+    taskdag_parse_epic_root_message "$ROOT/trailing-$trailing" >"$ROOT/trailing-$trailing.parsed"
+    taskdag_serialize_epic_root_message <"$ROOT/trailing-$trailing.parsed" >"$ROOT/trailing-$trailing.roundtrip"
+    cmp -s "$ROOT/trailing-$trailing" "$ROOT/trailing-$trailing.roundtrip" || parsed_descriptor=""
+done
+cp "$ROOT/operation-message" "$ROOT/noncanonical-message"
+printf 'Epic-ID: %s\n' "$operation_epic" >>"$ROOT/noncanonical-message"
+if [ "$parsed_descriptor" = "$operation_canonical" ] \
+    && ! taskdag_parse_epic_root_message "$ROOT/noncanonical-message" >/dev/null 2>&1; then
+    ok "strict root-message parser preserves trailing LFs and rejects noncanonical bytes"
+else
+    bad "strict root-message parser lost description bytes or accepted noncanonical bytes"
+fi
 
 provider_descriptor=$(jq -nc --arg epicId "$provider_epic" '
   {schema:1,epicId:$epicId,
@@ -171,8 +187,11 @@ jq '.projection.issueId="I_partial"' <<<"$operation_descriptor" \
     | taskdag_canonicalize_epic_root_descriptor >/dev/null 2>&1 && invalid_ok=false
 jq '.projection.repositoryId="R_other"' <<<"$provider_descriptor" \
     | taskdag_canonicalize_epic_root_descriptor >/dev/null 2>&1 && invalid_ok=false
-jq '.task.description="Epic-ID: spoof"' <<<"$operation_descriptor" \
-    | taskdag_canonicalize_epic_root_descriptor >/dev/null 2>&1 && invalid_ok=false
+for injected_header in 'Issue: #80' 'URL: https://example.invalid/' \
+    'Epic-ID: spoof' 'Epic-Root-Descriptor: {}' 'Root-Ref: refs/heads/tasks/pending/80'; do
+    jq --arg value "$injected_header" '.task.description=$value' <<<"$operation_descriptor" \
+        | taskdag_canonicalize_epic_root_descriptor >/dev/null 2>&1 && invalid_ok=false
+done
 for field in title author; do
     jq --arg field "$field" '.task[$field]="A\u0000B"' <<<"$operation_descriptor" \
         | taskdag_canonicalize_epic_root_descriptor >/dev/null 2>&1 && invalid_ok=false
@@ -184,10 +203,25 @@ jq '.projection.issueUrl="https://github.com/owner/repo/issues/80\u0000ignored"'
 printf '%s\n' "${operation_descriptor%\}}"',"schema":1}' \
     | taskdag_canonicalize_epic_root_descriptor >/dev/null 2>&1 && invalid_ok=false
 if [ "$invalid_ok" = true ]; then
-    ok "descriptor rejects mismatches, partial binding, controls, spoofed headers, and duplicate keys"
+    ok "descriptor rejects mismatches, partial binding, controls, header injection, and duplicate keys"
 else
     bad "invalid Epic-ID descriptor was accepted"
 fi
+
+git init -q "$ROOT/resolver"
+(
+    cd "$ROOT/resolver" || exit 1
+    export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+    echo occupied > payload
+    git add payload
+    git commit -qm seed
+    nonempty=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD <"$ROOT/operation-message")
+    parentless=$(git commit-tree "$EMPTY_TREE" <"$ROOT/operation-message")
+    locator=$(taskdag_root_locator "$operation_epic")
+    ! taskdag_resolve_typed_root "$locator" "$nonempty" >/dev/null 2>&1 \
+        && ! taskdag_resolve_typed_root "$locator" "$parentless" >/dev/null 2>&1
+) && ok "typed root resolver rejects non-empty and parentless roots" \
+  || bad "typed root resolver accepted a non-empty or parentless root"
 
 taskdag_serialize_task_message Legacy '#80' actor https://github.com/owner/repo/issues/80 pending epic body \
     >"$ROOT/legacy-message"
@@ -206,6 +240,12 @@ if cmp -s "$ROOT/legacy-message.expected" "$ROOT/legacy-message"; then
     ok "legacy root message bytes remain unchanged"
 else
     bad "legacy root serialization changed"
+fi
+
+if ! "$TD" --help | grep -Eq 'epic-create|create-epic|mint-root'; then
+    ok "no public Epic-ID root writer command exists"
+else
+    bad "an Epic-ID root writer command was exposed"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"
