@@ -17,12 +17,6 @@ if ! declare -F taskdag_reset_child_map >/dev/null; then
     return 2 2>/dev/null || exit 2
 fi
 
-task_is_claimed_on_remote() {
-    local short_sha="$1"
-    git ls-remote --exit-code origin "refs/heads/tasks/active/$short_sha" \
-        >/dev/null 2>&1 && echo "yes" || echo "no"
-}
-
 task_active_sha_on_remote() {
     local short_sha="$1"
     git ls-remote origin "refs/heads/tasks/active/$short_sha" 2>/dev/null \

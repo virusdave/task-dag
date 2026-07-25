@@ -11,6 +11,7 @@ export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
 TASKDAG_SCRIPT_DIR=$(dirname "$TD"); EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/child-map.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/claim-model.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/blocked-core.sh"

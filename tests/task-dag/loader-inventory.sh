@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -89,6 +89,12 @@ elif grep -q 'requires source-contract.sh to be loaded first' "$ROOT/child-map-o
   ok "child map fails loudly without its source-contract prerequisite"
 else bad "child-map source-order failure was not actionable"; fi
 
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/claim-model.sh" >"$ROOT/claim-order-out" 2>"$ROOT/claim-order-err"; then
+  bad "claim model loaded without its Git-object prerequisite"
+elif grep -q 'requires git-objects.sh to be loaded first' "$ROOT/claim-order-err"; then
+  ok "claim model fails loudly without Git-object primitives"
+else bad "claim-model source-order failure was not actionable"; fi
+
 if bash -c 'task_is_root_shaped_epic(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/ref-schema.sh" >"$ROOT/ref-json-out" 2>"$ROOT/ref-json-err"; then
   bad "ref schema loaded without its JSON prerequisite"
 elif grep -q 'requires json.sh to be loaded first' "$ROOT/ref-json-err"; then
@@ -148,6 +154,18 @@ if bash -c 'remote_ref_sha_checked(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/t
 elif grep -q 'requires blocked-core.sh to be loaded first' "$ROOT/cross-blocked-err"; then
   ok "feature consumers fail loudly without blocked core"
 else bad "blocked-core consumer source-order failure was not actionable"; fi
+
+if bash -c 'remote_ref_sha_checked(){ :; }; is_task_blocked(){ :; }; read_blocked_meta_field(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/cross-repo.sh" >"$ROOT/cross-claim-out" 2>"$ROOT/cross-claim-err"; then
+  bad "cross-repo loaded without claim model"
+elif grep -q 'requires claim-model.sh to be loaded first' "$ROOT/cross-claim-err"; then
+  ok "feature consumers fail loudly without claim model"
+else bad "claim-model consumer source-order failure was not actionable"; fi
+
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/ci-repair.sh" >"$ROOT/repair-claim-out" 2>"$ROOT/repair-claim-err"; then
+  bad "CI repair loaded without claim model"
+elif grep -q 'requires claim-model.sh to be loaded first' "$ROOT/repair-claim-err"; then
+  ok "CI repair fails loudly without claim model"
+else bad "CI repair claim-model source-order failure was not actionable"; fi
 
 # Source from an unrelated peer CWD. The loaded graph module must capture the
 # canonical absolute CLI; exercise the exact helper-generation/subprocess path

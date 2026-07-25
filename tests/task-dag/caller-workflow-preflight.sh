@@ -212,6 +212,7 @@ if (
     EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
     source "$ROOT/scripts/task-dag.d/git-objects.sh"
     source "$ROOT/scripts/task-dag.d/child-map.sh"
+    source "$ROOT/scripts/task-dag.d/claim-model.sh"
     source "$ROOT/scripts/task-dag.d/repository-identity.sh"
     source "$ROOT/scripts/task-dag.d/github-origin.sh"
     source "$ROOT/scripts/task-dag.d/blocked-core.sh"
@@ -234,6 +235,7 @@ if (
     EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
     source "$ROOT/scripts/task-dag.d/git-objects.sh"
     source "$ROOT/scripts/task-dag.d/child-map.sh"
+    source "$ROOT/scripts/task-dag.d/claim-model.sh"
     source "$ROOT/scripts/task-dag.d/repository-identity.sh"
     source "$ROOT/scripts/task-dag.d/github-origin.sh"
     source "$ROOT/scripts/task-dag.d/blocked-core.sh"

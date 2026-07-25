@@ -42,6 +42,8 @@ source "$LIB_DIR/git-objects.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/child-map.sh"
 # shellcheck source=/dev/null
+source "$LIB_DIR/claim-model.sh"
+# shellcheck source=/dev/null
 source "$LIB_DIR/repository-identity.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/github-origin.sh"

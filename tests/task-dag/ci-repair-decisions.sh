@@ -27,6 +27,7 @@ json_escape() { printf '%s' "$1" | jq -Rs .; }
 source "$REPO_ROOT/scripts/task-dag.d/ci-chains.sh"
 source "$REPO_ROOT/scripts/task-dag.d/git-objects.sh"
 source "$REPO_ROOT/scripts/task-dag.d/child-map.sh"
+source "$REPO_ROOT/scripts/task-dag.d/claim-model.sh"
 source "$REPO_ROOT/scripts/task-dag.d/repository-identity.sh"
 source "$REPO_ROOT/scripts/task-dag.d/github-origin.sh"
 # shellcheck source=../../scripts/task-dag.d/ci-repair.sh
