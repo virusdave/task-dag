@@ -58,24 +58,6 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
-EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
-TASKDAG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TASKDAG_ENTRYPOINT="$TASKDAG_SCRIPT_DIR/task-dag"
-
-# Colors for output (if supported)
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    BOLD='\033[1m'
-    RESET='\033[0m'
-else
-    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
-fi
-
 # Helper: resolve ref or SHA to full SHA
 resolve_sha() {
     local ref_or_sha="$1"
@@ -8749,6 +8731,8 @@ EOF
 # Temporary explicit module manifest. Keep this list static and ordered while
 # monolithic providers are extracted into their final acyclic modules. Modules
 # never source one another; this runtime entrypoint owns the complete order.
+# shellcheck source=task-dag.d/source-contract.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/task-dag.d/source-contract.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh

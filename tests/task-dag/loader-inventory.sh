@@ -24,11 +24,34 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+expected=(source-contract.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
 else bad "explicit module manifest changed: ${direct[*]}"; fi
+
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/source-contract.sh" >"$ROOT/standalone-out" 2>"$ROOT/standalone-err"; then
+  bad "source contract accepted a standalone/out-of-order import"
+elif grep -q 'must be loaded by the task-dag entrypoint' "$ROOT/standalone-err"; then
+  ok "source contract fails loudly outside the canonical entrypoint"
+else bad "source contract standalone failure was not actionable"; fi
+
+cat >"$ROOT/wrapper" <<'EOF'
+#!/usr/bin/env bash
+source "$1"
+exit $?
+EOF
+if bash "$ROOT/wrapper" "$REPO_ROOT/scripts/task-dag.d/source-contract.sh" >"$ROOT/wrapper-out" 2>"$ROOT/wrapper-err"; then
+  bad "source contract accepted a non-entrypoint wrapper"
+elif grep -q 'must be loaded by the task-dag entrypoint' "$ROOT/wrapper-err"; then
+  ok "source contract rejects a forged wrapper caller"
+else bad "source contract wrapper failure was not actionable"; fi
+
+if bash "$REPO_ROOT/scripts/task-dag.d/source-contract.sh" >"$ROOT/executed-out" 2>"$ROOT/executed-err"; then
+  bad "source contract executed directly"
+elif grep -q 'must be loaded by the task-dag entrypoint' "$ROOT/executed-err"; then
+  ok "source contract direct execution fails loudly"
+else bad "source contract direct-execution failure was not actionable"; fi
 
 # Source from an unrelated peer CWD. The loaded graph module must capture the
 # canonical absolute CLI; exercise the exact helper-generation/subprocess path
