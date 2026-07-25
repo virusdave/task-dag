@@ -433,10 +433,10 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'IMPORTANT: operatorGuidance still cannot manufacture a candidate. If the operator says a row is an existing brand/product but NO offered catalogCandidate (or the row\'s currentDistributorLinkProductId / sweedSuggestions) clearly matches it, choose proposedAction "needs-review" (never "catalog-create", and never invent or reuse a non-offered product id) and note the unmet operator guidance in warningFlags.',
   'Each glossaryEntries item maps an abbreviation/term ("term") to its literal expansion ("expansion") — e.g. "PR" -> "Preroll", "FL" -> "Flower", "METRC" -> its acronym expansion. You MAY use these expansions to decode heavily abbreviated distributor/METRC "rows" names into the correct target taxonomy, and you MUST cite the glossary entry\'s "citedId" in citedHintIds whenever an expansion informed your decode.',
   'A glossary entry is INTERPRETATION evidence ONLY: it explains what an abbreviation MEANS, never that a reusable product exists and never a product id. Never propose a reuseProductIdCandidate on the strength of a glossary entry alone, and never use reuseEvidence.source "sibling-po" citing only glossary entries — a sibling-po claim must rest on an actual product fact from a prior order. When a glossary expansion helped you find a live product, use source "live-catalog-search" (or "model-inference") and cite the glossary id.',
-  'Each row includes deterministic vendorEvidence from the canonical vendor-brand directory and known brands in that purchase/manifest. When allowedBrandNames is non-empty, targetBrand MUST be one of those names and a catalog candidate proposed for that row MUST be listed in allowedCatalogProductIds. status "explicit-override" is an authoritative operator pin. status "conflicting" or "unknown" supplies no brand constraint; do not invent one. Confidence and evidence are review context, not permission to escape the allowed lists.',
+  'Each row includes deterministic vendorEvidence from the canonical vendor-brand directory and known brands in that purchase/manifest. When allowedBrandNames is non-empty, targetBrand MUST be one of those names or one of the row\'s live Sweed sweedBrandCandidates; a catalog candidate proposed for that row MUST still be listed in allowedCatalogProductIds. status "explicit-override" is an authoritative operator pin and cannot be replaced by a Sweed candidate. status "conflicting" or "unknown" supplies no brand constraint; do not invent one. Confidence and evidence are review context, not permission to escape these lists.',
   'Produce EXACTLY ONE draft per input row, echoing its "rowKey", "distributorProductId", and "distributorProductName" verbatim.',
   'For each row set the structured target taxonomy (targetBrand, targetCategory, targetSubcategory, targetGroupName, targetVariantName, targetVariantTab, targetStrainName, targetSize, targetPackCount); use null for any field you cannot determine. targetCategory and targetSubcategory, when set, MUST be values present in the allowed taxonomy.',
-  'Make each row decision in this concise order: brand, taxonomy, pack size, unit size, then differentiator/variant. Row classificationEvidence contains an exact sanctioned prior outcome and/or LitAlerts market brand/SKU candidates. Prefer a reasonable existing prior or market brand/SKU; choose de novo/catalog-create only when none reasonably matches. Older market evidence is explicitly timestamped and remains useful, but fresh preferred-48h evidence is stronger.',
+  'Make each row decision in this concise order: brand, taxonomy, pack size, unit size, then differentiator/variant. Row classificationEvidence contains an exact sanctioned prior outcome, live Sweed brand candidates, and/or LitAlerts market brand/SKU candidates. Prefer a reasonable live Sweed brand, existing prior, or market brand/SKU; choose de novo/catalog-create only when none reasonably matches. Older market evidence is explicitly timestamped and remains useful, but the live Sweed brand directory is authoritative for whether a brand already exists in our catalog.',
   'LitAlerts evidence is market evidence only. Its litalertsProductId is NOT a Sweed/catalog product id and NEVER authorizes reuseProductIdCandidate. Only the separately offered catalog/current-link/Sweed ids may be proposed for reuse.',
   'Choose proposedAction: "mapping-only" when the row clearly IS an existing live product (then set reuseProductIdCandidate to that product\'s id and provide reuseEvidence); "catalog-create" when it is a genuinely new product (then reuseProductIdCandidate MUST be null); "needs-review" when you are not confident either way.',
   'reuseProductIdCandidate is a PROPOSAL ONLY — it must be the productId of one of the catalogCandidates, the row\'s currentDistributorLinkProductId, or one of the row\'s sweedSuggestions. Never invent a product id. A human and a deterministic validator decide whether your proposal is accepted; you never authorize a link.',
@@ -773,7 +773,7 @@ function parseAndValidateDraftAttempt(
           `draft "${draft.rowKey}" targetSubcategory "${draft.targetSubcategory}" is not in the allowed taxonomy.`,
         )
       }
-      validated.push(draft)
+      validated.push(downgradeUnassociatedLiveBrandCreation(expected, draft))
     } catch (error) {
       if (!(error instanceof PendingPurchaseClassifierError)) throw error
       issues.push(draftIssueFromValidationError(expected.rowKey, error.message))
@@ -816,7 +816,9 @@ function buildNeedsReviewDraft(
     rowKey: row.rowKey,
     distributorProductId: row.distributorProductId,
     distributorProductName: row.distributorProductName,
-    targetBrand: null,
+    targetBrand: row.vendorEvidence.status === 'explicit-override'
+      ? row.vendorEvidence.allowedBrandNames[0] ?? null
+      : null,
     targetCategory: null,
     targetSubcategory: null,
     targetGroupName: null,
@@ -835,6 +837,31 @@ function buildNeedsReviewDraft(
   })
 }
 
+function downgradeUnassociatedLiveBrandCreation(
+  row: ClassifierRowInput,
+  draft: PendingPurchaseLlmDraftRow,
+): PendingPurchaseLlmDraftRow {
+  if (draft.proposedAction !== 'catalog-create' || draft.targetBrand === null) return draft
+  const targetKey = normalizeTaxon(draft.targetBrand)
+  const vendorAllows = row.vendorEvidence.allowedBrandNames.some(
+    (brand) => normalizeTaxon(brand) === targetKey,
+  )
+  const liveSweedAllows = (row.classificationEvidence?.sweedBrandCandidates ?? []).some(
+    (brand) => normalizeTaxon(brand.brandName) === targetKey,
+  )
+  if (vendorAllows || !liveSweedAllows) return draft
+  return {
+    ...draft,
+    proposedAction: 'needs-review',
+    reuseProductIdCandidate: null,
+    reuseEvidence: null,
+    warningFlags: [
+      ...draft.warningFlags,
+      'Brand exists in live Sweed but is not yet associated with this vendor; verify before creating the SKU.',
+    ],
+  }
+}
+
 function assertVendorTargetBrandAllowed(
   rowKey: string,
   row: ClassifierRowInput,
@@ -851,7 +878,16 @@ function assertVendorTargetBrandAllowed(
     return
   }
   const allowedKeys = new Set(allowed.map(normalizeTaxon))
-  if (!allowedKeys.has(normalizeTaxon(targetBrand))) {
+  const liveSweedBrandKeys = new Set(
+    (row.classificationEvidence?.sweedBrandCandidates ?? []).map((brand) => normalizeTaxon(brand.brandName)),
+  )
+  if (
+    !allowedKeys.has(normalizeTaxon(targetBrand))
+    && (
+      row.vendorEvidence.status === 'explicit-override'
+      || !liveSweedBrandKeys.has(normalizeTaxon(targetBrand))
+    )
+  ) {
     throw new PendingPurchaseClassifierError(
       `draft "${rowKey}" targetBrand "${targetBrand}" is outside the vendor-evidence brand set (${allowed.join(', ')}).`,
     )

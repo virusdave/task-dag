@@ -260,6 +260,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
           category: 'Flower', amount: '3.5', units: 'g', observedAt: '2026-07-24T00:00:00.000Z',
           freshness: 'preferred-48h',
         }],
+        sweedBrandCandidates: [],
       },
     })] }))
     const request = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body) as {
@@ -285,6 +286,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
           category: 'Flower', amount: '3.5', units: 'g', observedAt: '2026-07-24T00:00:00.000Z',
           freshness: 'preferred-48h',
         }],
+        sweedBrandCandidates: [],
       },
     })] }))
     expect(result.drafts[0]).toMatchObject({
@@ -469,6 +471,42 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
       })],
     })
     await expectQuarantined(input)
+  })
+
+  it('accepts a current Sweed brand candidate when the vendor directory is stale', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft({
+      targetBrand: 'Dabbar',
+      proposedAction: 'catalog-create',
+      reuseProductIdCandidate: null,
+      reuseEvidence: null,
+    })] }))
+    const input = buildInput({
+      rows: [rowInput({
+        distributorProductName: 'Dabbar Blue Dream 2G',
+        classificationEvidence: {
+          priorOutcome: null,
+          marketBrandCandidates: [],
+          marketCandidates: [],
+          sweedBrandCandidates: [{ sweedBrandId: 88, brandName: 'Dabbar' }],
+        },
+        vendorEvidence: {
+          status: 'matched',
+          vendorId: 1,
+          vendorName: 'Legacy Distributor Directory',
+          confidence: 'medium',
+          allowedBrandNames: ['Old Brand'],
+          allowedCatalogProductIds: [],
+          evidence: ['The vendor directory has not learned the new brand yet.'],
+        },
+      })],
+    })
+
+    const result = await classifyPendingPurchasePacketWithLlm(input)
+    expect(result.drafts[0]).toMatchObject({
+      proposedAction: 'needs-review',
+      targetBrand: 'Dabbar',
+      warningFlags: [expect.stringMatching(/exists in live Sweed/i)],
+    })
   })
 
   it('rejects a catalog reuse candidate outside the row-scoped vendor evidence', async () => {

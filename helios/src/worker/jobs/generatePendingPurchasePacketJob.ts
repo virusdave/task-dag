@@ -76,6 +76,7 @@ import {
 import type { PricingMarketContext, ProductPricingMarketEvidence } from '../pricing/deterministicPricing.js'
 import { buildPricingMarketContext } from '../pricing/litAlertsMarket.js'
 import { enqueueMarketRefreshForProducts } from '../litalerts/enqueueMarketRefresh.js'
+import { isRetiredRecordName } from './screensCarouselHelpers.js'
 import { parseWith } from '../../lib/parsekit/engine.js'
 import { getParserRegistry } from '../../lib/parsekit/node/parserRegistry.js'
 import type { CompiledParser, CompiledRelease } from '../../lib/parsekit/types.js'
@@ -201,6 +202,20 @@ const ProductListShortSchema = z.object({
     name: z.string().nullable().optional(),
   }).passthrough()).default([]),
 }).passthrough()
+
+const PendingPurchaseBrandRowSchema = z.object({
+  enabled: z.boolean().optional(),
+  id: z.coerce.number().int().positive(),
+  name: z.string().trim().min(1),
+}).passthrough()
+
+export const PendingPurchaseBrandListSchema = z.union([
+  z.array(PendingPurchaseBrandRowSchema),
+  z.object({ data: z.array(PendingPurchaseBrandRowSchema).default([]) }).passthrough().transform((value) => value.data),
+])
+
+const PENDING_PURCHASE_BRAND_PAGE_SIZE = 200
+const MAX_PENDING_PURCHASE_LIVE_BRANDS = 10_000
 
 const ProductDetailSchema = z.object({
   product: z.object({
@@ -880,6 +895,55 @@ async function loadPendingPurchaseAllowedTaxonomy(stateDealerId: number): Promis
   }
 }
 
+export async function collectPendingPurchaseLiveBrands(
+  fetchPage: (page: number, pageSize: number) => Promise<unknown>,
+): Promise<Array<{
+  brandName: string
+  sweedBrandId: number
+}>> {
+  const brands: Array<z.infer<typeof PendingPurchaseBrandRowSchema>> = []
+  const seenIds = new Set<number>()
+  let page = 1
+  while (true) {
+    const pageRows = PendingPurchaseBrandListSchema.parse(
+      await fetchPage(page, PENDING_PURCHASE_BRAND_PAGE_SIZE),
+    )
+    let newRows = 0
+    for (const brand of pageRows) {
+      if (seenIds.has(brand.id)) continue
+      seenIds.add(brand.id)
+      brands.push(brand)
+      newRows += 1
+      if (brands.length > MAX_PENDING_PURCHASE_LIVE_BRANDS) {
+        throw new Error(
+          `Sweed brand directory exceeds the ${MAX_PENDING_PURCHASE_LIVE_BRANDS} brand safety limit.`,
+        )
+      }
+    }
+    if (pageRows.length === 0 || newRows === 0) break
+    page += 1
+  }
+  const active = brands.filter((brand) => brand.enabled !== false && !isRetiredRecordName(brand.name))
+  if (active.length === 0) {
+    throw new Error(
+      'Sweed `store.product.brand.list` returned no active brands; refusing to classify pending purchases against an empty brand directory.',
+    )
+  }
+  if (active.length !== brands.length) {
+    console.warn(`[pending-purchase] Skipped ${brands.length - active.length} disabled or retired Sweed brand(s).`)
+  }
+  return active.map((brand) => ({ brandName: brand.name, sweedBrandId: brand.id }))
+}
+
+async function loadPendingPurchaseLiveBrands(stateDealerId: number): Promise<Array<{
+  brandName: string
+  sweedBrandId: number
+}>> {
+  return collectPendingPurchaseLiveBrands((page, pageSize) =>
+    callSweedRpc(stateDealerId, 'store.product.brand.list', { page, pageSize }),
+  )
+}
+
 /**
  * C8a driving path. Turns the collected distributor-product groups into review
  * rows via one (or a few, chunked) event-level LLM classification pass(es),
@@ -978,6 +1042,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
     hintBundleId,
   )
   const allowedTaxonomy = await loadPendingPurchaseAllowedTaxonomy(stateDealerId)
+  const liveSweedBrands = await loadPendingPurchaseLiveBrands(stateDealerId)
 
   // ── Phase C: catalog candidate pool ─────────────────────────────────────
   const candidatePool = await buildPendingPurchaseCandidatePool(cache, contexts)
@@ -1010,14 +1075,18 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
     })
 
     const catalogCandidates = selectClassifierCandidatesForChunk(chunk, candidatePool)
-    const classificationEvidence = await loadPendingPurchaseClassificationEvidence(db, chunk.map((ctx) => ({
-      rowKey: ctx.classifierRow.rowKey,
-      siteDealerId: ctx.group.siteDealerId,
-      distributorProductId: ctx.classifierRow.distributorProductId,
-      distributorProductName: ctx.classifierRow.distributorProductName,
-      brandNames: [...ctx.vendorEvidence.allowedBrandNames, ctx.parseComparison.winner?.brand ?? '']
-        .filter((name) => name.trim().length > 0),
-    })))
+    const classificationEvidence = await loadPendingPurchaseClassificationEvidence(
+      db,
+      chunk.map((ctx) => ({
+        rowKey: ctx.classifierRow.rowKey,
+        siteDealerId: ctx.group.siteDealerId,
+        distributorProductId: ctx.classifierRow.distributorProductId,
+        distributorProductName: ctx.classifierRow.distributorProductName,
+        brandNames: [...ctx.vendorEvidence.allowedBrandNames, ctx.parseComparison.winner?.brand ?? '']
+          .filter((name) => name.trim().length > 0),
+      })),
+      liveSweedBrands,
+    )
     const offeredCandidateIds = new Set(catalogCandidates.map((candidate) => candidate.productId))
     const chunkRows = chunk.map((ctx) => ({
       ...ctx.classifierRow,

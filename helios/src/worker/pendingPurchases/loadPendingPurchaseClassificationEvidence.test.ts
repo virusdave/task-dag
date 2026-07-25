@@ -30,7 +30,15 @@ describe('loadPendingPurchaseClassificationEvidence', () => {
         { product_id: '101', brand_id: '9', brand_name: 'Acme', product_name: 'Pink Runtz 3.5g', category: 'Flower', amount: '3.5', units: 'g', observed_at: new Date('2026-07-23T00:00:00Z') },
       ] }
     })
-    const evidence = await loadPendingPurchaseClassificationEvidence({ query } as unknown as Queryable, [descriptor])
+    const evidence = await loadPendingPurchaseClassificationEvidence(
+      { query } as unknown as Queryable,
+      [descriptor],
+      [
+        { sweedBrandId: 88, brandName: 'Acme' },
+        { sweedBrandId: 89, brandName: 'Unrelated Brand' },
+        { sweedBrandId: 90, brandName: 'Runtz' },
+      ],
+    )
     expect(evidence.get('r1')?.priorOutcome?.targetBrand).toBe('Acme')
     expect(evidence.get('r1')?.priorOutcome).toMatchObject({
       targetVariantTab: 'Flower', targetStrainName: 'Pink Runtz',
@@ -38,6 +46,9 @@ describe('loadPendingPurchaseClassificationEvidence', () => {
     expect(evidence.get('r1')?.marketBrandCandidates[0]).toMatchObject({
       litalertsBrandId: '9', brandName: 'Acme',
     })
+    expect(evidence.get('r1')?.sweedBrandCandidates).toEqual([
+      { sweedBrandId: 88, brandName: 'Acme' },
+    ])
     expect(evidence.get('r1')?.marketCandidates[0]).toMatchObject({ litalertsProductId: '101', units: 'g' })
     const productCall = query.mock.calls.find(([text]) => text.includes('litalerts_products'))
     expect(productCall?.[0]).not.toMatch(/raw_(config|product)_json/i)
@@ -62,6 +73,7 @@ describe('loadPendingPurchaseClassificationEvidence', () => {
       priorOutcome: null,
       marketBrandCandidates: [],
       marketCandidates: [],
+      sweedBrandCandidates: [],
     })
     expect(warn).toHaveBeenCalled()
   })
@@ -74,13 +86,18 @@ describe('loadPendingPurchaseClassificationEvidence', () => {
       }] }
       return { rows: [] }
     })
-    const evidence = await loadPendingPurchaseClassificationEvidence({ query } as unknown as Queryable, [{
-      ...descriptor,
-      distributorProductName: 'ZXQ 3.5G',
-      brandNames: [],
-    }])
+    const evidence = await loadPendingPurchaseClassificationEvidence(
+      { query } as unknown as Queryable,
+      [{
+        ...descriptor,
+        distributorProductName: 'ZXQ 3.5G',
+        brandNames: [],
+      }],
+      [{ sweedBrandId: 89, brandName: 'Unrelated Brand' }],
+    )
     expect(evidence.get('r1')?.marketBrandCandidates).toEqual([])
     expect(evidence.get('r1')?.marketCandidates).toEqual([])
+    expect(evidence.get('r1')?.sweedBrandCandidates).toEqual([])
     expect(query.mock.calls.some(([text]) => text.includes('litalerts_products'))).toBe(false)
   })
 

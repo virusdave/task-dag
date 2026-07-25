@@ -53,10 +53,16 @@ export interface PendingPurchaseMarketBrandEvidence {
   readonly freshness: 'preferred-48h' | 'stale-newest-available'
 }
 
+export interface PendingPurchaseSweedBrandEvidence {
+  readonly sweedBrandId: number
+  readonly brandName: string
+}
+
 export interface PendingPurchaseRowClassificationEvidence {
   readonly priorOutcome: PendingPurchasePriorOutcomeEvidence | null
   readonly marketBrandCandidates: readonly PendingPurchaseMarketBrandEvidence[]
   readonly marketCandidates: readonly PendingPurchaseMarketCandidateEvidence[]
+  readonly sweedBrandCandidates: readonly PendingPurchaseSweedBrandEvidence[]
 }
 
 interface PriorRow extends QueryResultRow {
@@ -96,6 +102,7 @@ interface ProductRow extends QueryResultRow {
 export async function loadPendingPurchaseClassificationEvidence(
   db: Queryable,
   descriptors: readonly PendingPurchaseEvidenceRowDescriptor[],
+  sweedBrands: readonly PendingPurchaseSweedBrandEvidence[] = [],
 ): Promise<Map<string, PendingPurchaseRowClassificationEvidence>> {
   if (descriptors.length > MAX_INPUT_ROWS) {
     throw new Error(`Classification evidence loader received ${descriptors.length} rows (limit ${MAX_INPUT_ROWS}); batch by classifier chunk.`)
@@ -105,10 +112,12 @@ export async function loadPendingPurchaseClassificationEvidence(
     priorOutcome: PendingPurchasePriorOutcomeEvidence | null
     marketBrandCandidates: PendingPurchaseMarketBrandEvidence[]
     marketCandidates: PendingPurchaseMarketCandidateEvidence[]
+    sweedBrandCandidates: PendingPurchaseSweedBrandEvidence[]
   }>(rows.map((row) => [row.rowKey, {
     priorOutcome: null,
     marketBrandCandidates: [],
     marketCandidates: [],
+    sweedBrandCandidates: [],
   }]))
   const [priorRows, marketRows] = await Promise.all([
     loadPriorRows(db, rows).catch((error: unknown) => {
@@ -142,6 +151,17 @@ export async function loadPendingPurchaseClassificationEvidence(
 
   for (const descriptor of rows) {
     const preferredBrandNames = new Set(descriptor.brandNames.map(normalize))
+    const sweedBrandCandidates = sweedBrands
+      .map((brand) => ({
+        brand,
+        score: preferredBrandNames.has(normalize(brand.brandName))
+          ? 2
+          : startsWithBrandPhrase(descriptor.distributorProductName, brand.brandName) ? 1 : 0,
+      }))
+      .filter(({ score }) => score > 0)
+      .sort((left, right) => right.score - left.score || left.brand.brandName.localeCompare(right.brand.brandName))
+      .slice(0, MAX_BRAND_CANDIDATES_PER_ROW)
+      .map(({ brand }) => brand)
     const brandCandidates = marketRows.brands
       .map((brand) => ({
         brand,
@@ -183,13 +203,42 @@ export async function loadPendingPurchaseClassificationEvidence(
         freshness: freshnessOf(product.observed_at),
       }))
     const current = output.get(descriptor.rowKey)
-    if (
-      current !== undefined
-      && JSON.stringify({ brandCandidates, candidates }).length <= MAX_CONTEXT_CHARS_PER_ROW
+    if (current === undefined) continue
+    const boundedBrandCandidates = [...brandCandidates]
+    const boundedCandidates = [...candidates]
+    while (
+      JSON.stringify({
+        brandCandidates: boundedBrandCandidates,
+        candidates: boundedCandidates,
+        sweedBrandCandidates,
+      }).length > MAX_CONTEXT_CHARS_PER_ROW
+      && boundedCandidates.length > 0
     ) {
-      current.marketBrandCandidates = brandCandidates
-      current.marketCandidates = candidates
+      boundedCandidates.pop()
     }
+    while (
+      JSON.stringify({
+        brandCandidates: boundedBrandCandidates,
+        candidates: boundedCandidates,
+        sweedBrandCandidates,
+      }).length > MAX_CONTEXT_CHARS_PER_ROW
+      && boundedBrandCandidates.length > 0
+    ) {
+      boundedBrandCandidates.pop()
+    }
+    const contextChars = JSON.stringify({
+      brandCandidates: boundedBrandCandidates,
+      candidates: boundedCandidates,
+      sweedBrandCandidates,
+    }).length
+    if (contextChars > MAX_CONTEXT_CHARS_PER_ROW) {
+      throw new Error(
+        `Live Sweed brand evidence for row "${descriptor.rowKey}" is ${contextChars} chars (limit ${MAX_CONTEXT_CHARS_PER_ROW}).`,
+      )
+    }
+    current.marketBrandCandidates = boundedBrandCandidates
+    current.marketCandidates = boundedCandidates
+    current.sweedBrandCandidates = sweedBrandCandidates
   }
   return output
 }
@@ -344,6 +393,12 @@ function warnUnavailable(label: string, error: unknown): void {
 }
 
 function normalize(value: string): string { return value.trim().toLocaleLowerCase('en-US') }
+function startsWithBrandPhrase(productName: string, brandName: string): boolean {
+  const productTokens = normalize(productName).split(/[^a-z0-9]+/).filter(Boolean)
+  const brandTokens = normalize(brandName).split(/[^a-z0-9]+/).filter(Boolean)
+  return brandTokens.length > 0
+    && brandTokens.every((token, index) => productTokens[index] === token)
+}
 function freshnessOf(observedAt: Date): 'preferred-48h' | 'stale-newest-available' {
   return Date.now() - observedAt.getTime() <= 48 * 60 * 60 * 1000
     ? 'preferred-48h'

@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { ReconciledPendingPurchaseClassification } from '../pendingPurchases/reconcilePendingPurchaseDrafts.js'
 import {
+  collectPendingPurchaseLiveBrands,
   downgradeExplicitBrandConflict,
+  PendingPurchaseBrandListSchema,
   PendingPurchaseCategoryListSchema,
 } from './generatePendingPurchasePacketJob.js'
 
@@ -38,6 +40,63 @@ describe('PendingPurchaseCategoryListSchema', () => {
   it('normalizes both empty shapes to an empty array (the loader enforces non-empty)', () => {
     expect(PendingPurchaseCategoryListSchema.parse([])).toEqual([])
     expect(PendingPurchaseCategoryListSchema.parse({})).toEqual([])
+  })
+})
+
+describe('PendingPurchaseBrandListSchema', () => {
+  const brands = [
+    { id: 88, name: 'Dabbar', enabled: true },
+    { id: 89, name: 'DEAD - Old Brand', enabled: false },
+  ]
+
+  it('accepts the bare-array live Sweed response', () => {
+    expect(PendingPurchaseBrandListSchema.parse(brands)).toEqual(brands)
+  })
+
+  it('accepts the wrapped response shape', () => {
+    expect(PendingPurchaseBrandListSchema.parse({ data: brands })).toEqual(brands)
+  })
+
+  it('collects every clamped page and filters disabled or retired brands', async () => {
+    const fetchPage = async (page: number) => {
+      if (page <= 3) {
+        return Array.from({ length: 50 }, (_unused, index) => ({
+          id: ((page - 1) * 50) + index + 1,
+          name: `Brand ${((page - 1) * 50) + index + 1}`,
+          enabled: true,
+        }))
+      }
+      return page === 4
+        ? [
+            { id: 151, name: 'Dabbar', enabled: true },
+            { id: 152, name: 'DEAD - Retired', enabled: true },
+            { id: 153, name: 'Disabled', enabled: false },
+          ]
+        : []
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const result = await collectPendingPurchaseLiveBrands(fetchPage)
+      expect(result).toHaveLength(151)
+      expect(result.at(-1)).toEqual({ sweedBrandId: 151, brandName: 'Dabbar' })
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('stops safely when Sweed repeats a full page', async () => {
+    const page = Array.from({ length: 200 }, (_unused, index) => ({
+      id: index + 1,
+      name: `Brand ${index + 1}`,
+      enabled: true,
+    }))
+    let calls = 0
+    const result = await collectPendingPurchaseLiveBrands(async () => {
+      calls += 1
+      return page
+    })
+    expect(result).toHaveLength(200)
+    expect(calls).toBe(2)
   })
 })
 
