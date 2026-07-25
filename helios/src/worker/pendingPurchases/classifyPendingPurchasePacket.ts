@@ -25,9 +25,10 @@
 //     event fails loud with an operator-facing "split it" message.
 //   - The model output is validated at the boundary: candidate ids must be ones
 //     we actually offered, cited hint ids must reference facts we actually
-//     provided, and taxonomy must be in the allowed set. A bad model row is
-//     repaired independently, then becomes an explicit needs-review row if the
-//     bounded repair budget is exhausted; valid sibling rows are preserved.
+//     provided, and taxonomy must be in the allowed set. Fabricated evidence
+//     ids fail the packet; other bad model rows are repaired independently,
+//     then become explicit needs-review rows if the bounded repair budget is
+//     exhausted, while valid sibling rows are preserved.
 //   - Transport, truncation, invalid JSON, and malformed root envelopes still
 //     fail immediately. They cannot be represented as trustworthy row-level
 //     uncertainty.
@@ -732,6 +733,18 @@ function parseAndValidateDraftAttempt(
     }
     const draft = parsed.data
 
+    // Evidence citations are provenance, not merely row content. Accepting a
+    // row that cites unavailable evidence as a generic needs-review fallback
+    // would erase the integrity failure and let fabricated provenance appear
+    // recoverable, so fail the entire packet immediately.
+    for (const citedId of allCitedIds(draft)) {
+      if (!providedCitedIds.has(citedId)) {
+        throw new PendingPurchaseClassifierError(
+          `draft "${draft.rowKey}" cited hint id "${citedId}" which was not provided.`,
+        )
+      }
+    }
+
     try {
       // Reuse candidate must be one this ROW was actually offered, consistent
       // with the evidence source. C5 still decides whether it is correct.
@@ -749,14 +762,6 @@ function parseAndValidateDraftAttempt(
       }
 
       assertVendorTargetBrandAllowed(draft.rowKey, expected, draft.targetBrand)
-
-      for (const citedId of allCitedIds(draft)) {
-        if (!providedCitedIds.has(citedId)) {
-          throw new PendingPurchaseClassifierError(
-            `draft "${draft.rowKey}" cited hint id "${citedId}" which was not provided.`,
-          )
-        }
-      }
 
       if (draft.targetCategory !== null && allowedCategories.size > 0 && !allowedCategories.has(normalizeTaxon(draft.targetCategory))) {
         throw new PendingPurchaseClassifierError(

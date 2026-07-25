@@ -443,7 +443,9 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
         drafts: [modelDraft({ citedHintIds: [ghostId], reuseEvidence: { source: 'model-inference', rationale: 'x', citedHintIds: [] } })],
       }),
     )
-    await expectQuarantined(buildInput())
+    await expect(classifyPendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
+      /was not provided/,
+    )
   })
 
   it('rejects a target category outside the allowed taxonomy', async () => {
@@ -659,9 +661,11 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
         ],
       }),
     )
-    await expectQuarantined(
-      buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
-    )
+    await expect(
+      classifyPendingPurchasePacketWithLlm(
+        buildInput({ hintFacts: [], glossaryEntries: [glossaryEntry()] }),
+      ),
+    ).rejects.toThrow(/was not provided/)
   })
 
   it('does NOT let a glossary-only citation prop up a sibling-po reuse claim', async () => {
