@@ -21,6 +21,8 @@ import {
   updateVariantBarcode,
 } from '../catalog/maintenance.js'
 
+const CATALOG_UPLOAD_MAX_BYTES = 12 * 1024 * 1024
+
 const RefreshQuerySchema = z.object({
   refresh: z.union([z.literal('1'), z.literal('true')]).optional(),
 })
@@ -184,7 +186,7 @@ async function collectUploadFields(request: FastifyRequest): Promise<UploadFormF
   let contentType: string | null = null
   let originalFilename: string | null = null
 
-  for await (const part of request.parts()) {
+  for await (const part of request.parts({ limits: { fileSize: CATALOG_UPLOAD_MAX_BYTES, files: 1 } })) {
     if (part.type === 'file') {
       if (part.fieldname !== 'file') {
         await part.toBuffer()

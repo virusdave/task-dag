@@ -1,22 +1,30 @@
-import { createHash } from 'node:crypto'
+import { createHash, type Hash } from 'node:crypto'
+import { createWriteStream } from 'node:fs'
+import { chmod, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 
 import {
+  OPERATOR_CAPTURE_MAX_BYTES,
+  OPERATOR_CAPTURE_MAX_DIMENSION,
+  OPERATOR_CAPTURE_MAX_PIXELS,
   OperatorCaptureResponseSchema,
   OperatorCaptureUploadFieldsSchema,
   type OperatorCaptureResponse,
 } from '../../shared/contracts/index.js'
 import {
   findMssSlotsByNotePrefix,
+  MssUploadError,
   uploadStaticBundleToMssOneOffs,
   type MssStaticUploadResult,
 } from '../ads/mssOneOffsUpload.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 
-const MAX_PNG_BYTES = 8 * 1024 * 1024
-const MAX_PIXELS = 16_000_000
 const CAPTURE_TTL_SECONDS = 24 * 60 * 60
 const RATE_WINDOW_MS = 10 * 60 * 1000
 const RATE_LIMIT = 5
@@ -28,7 +36,11 @@ interface CaptureFields {
   captureName?: string
   metadata?: string
   redirectUrl?: string
-  png?: Buffer
+  pngByteLength?: number
+  pngHeader?: Buffer
+  pngHash?: Hash
+  pngPath?: string
+  tempDir?: string
   fileCount: number
 }
 
@@ -40,26 +52,40 @@ interface CachedCapture {
 
 const completedCaptures = new Map<string, CachedCapture>()
 const requestTimes = new Map<number, number[]>()
+let captureRequestActive = false
 
 export async function registerOperatorCaptureRoutes(server: FastifyInstance): Promise<void> {
   server.post('/api/operator-captures', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'admin')
     if (!user) return
+    if (captureRequestActive) {
+      return reply.status(503).send({ error: 'Another capture is uploading. Try again in a moment.' })
+    }
+    captureRequestActive = true
+    let fields: CaptureFields | undefined
+    try {
     if (!request.isMultipart()) {
       return reply.status(400).send({ error: 'multipart/form-data required.' })
     }
-    let fields: CaptureFields
     try {
       fields = await collectCaptureFields(request)
     } catch (error) {
       if (error instanceof CaptureRequestError) return reply.status(error.status).send({ error: error.message })
       const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : ''
-      if (code.startsWith('FST_')) return reply.status(413).send({ error: 'Capture multipart limits exceeded.' })
+      if (code.startsWith('FST_')) return reply.status(413).send({ error: 'Capture exceeds the 100 MB upload limit. Try the smaller-capture option.' })
       throw error
     }
-    if (fields.fileCount !== 1 || fields.png === undefined) {
+    if (
+      fields.fileCount !== 1 ||
+      fields.pngPath === undefined ||
+      fields.pngHeader === undefined ||
+      fields.pngHash === undefined ||
+      fields.pngByteLength === undefined
+    ) {
       return reply.status(400).send({ error: 'Exactly one capture PNG is required.' })
     }
+    const pngByteLength = fields.pngByteLength
+    const pngPath = fields.pngPath
     const parsed = OperatorCaptureUploadFieldsSchema.safeParse({
       captureKey: fields.captureKey,
       captureName: fields.captureName,
@@ -69,17 +95,17 @@ export async function registerOperatorCaptureRoutes(server: FastifyInstance): Pr
     if (!parsed.success) {
       return reply.status(400).send({ error: 'Capture fields are invalid.', issues: parsed.error.issues })
     }
-    const dimensions = readPngDimensions(fields.png)
+    const dimensions = readPngDimensions(fields.pngHeader)
     const expectedWidth = Math.round(parsed.data.metadata.width * parsed.data.metadata.devicePixelRatio)
     const expectedHeight = Math.round(parsed.data.metadata.height * parsed.data.metadata.devicePixelRatio)
     if (
-      fields.png.byteLength > MAX_PNG_BYTES ||
+      pngByteLength > OPERATOR_CAPTURE_MAX_BYTES ||
       dimensions === null ||
-      dimensions.width * dimensions.height > MAX_PIXELS ||
+      dimensions.width * dimensions.height > OPERATOR_CAPTURE_MAX_PIXELS ||
       Math.abs(dimensions.width - expectedWidth) > 2 ||
       Math.abs(dimensions.height - expectedHeight) > 2
     ) {
-      return reply.status(400).send({ error: 'Capture PNG failed size or dimension validation.' })
+      return reply.status(400).send({ error: 'Capture PNG is too large or its dimensions do not match. Try the smaller-capture option.' })
     }
     if (!isAllowedPageUrl(parsed.data.metadata.pageUrl)) {
       return reply.status(400).send({ error: 'Capture page URL is not an allowed Helios URL.' })
@@ -95,8 +121,7 @@ export async function registerOperatorCaptureRoutes(server: FastifyInstance): Pr
       redirectUrl: parsed.data.redirectUrl,
       requestedBy: { id: user.id, email: user.email, name: user.name },
     }, null, 2))
-    const identityHash = createHash('sha256')
-      .update(fields.png)
+    const identityHash = fields.pngHash
       .update(metadataJson)
       .digest('hex')
     pruneCompletedCaptures(Date.now())
@@ -127,7 +152,12 @@ export async function registerOperatorCaptureRoutes(server: FastifyInstance): Pr
         try {
           const upload = await uploadStaticBundleToMssOneOffs({
             files: [
-              { path: 'capture.png', bytes: fields.png!, contentType: 'image/png' },
+              {
+                path: 'capture.png',
+                sourcePath: pngPath,
+                byteLength: pngByteLength,
+                contentType: 'image/png',
+              },
               { path: 'index.html', bytes: reviewHtml, contentType: 'text/html; charset=utf-8' },
               { path: 'metadata.json', bytes: metadataJson, contentType: 'application/json' },
             ],
@@ -143,35 +173,75 @@ export async function registerOperatorCaptureRoutes(server: FastifyInstance): Pr
       })
     } catch (error) {
       if (error instanceof CaptureConflictError) return reply.status(409).send({ error: error.message })
+      if (error instanceof MssUploadError && error.code === 'slot_byte_limit') {
+        return reply.status(413).send({ error: 'Capture exceeds the storage limit. Try the smaller-capture option.' })
+      }
       throw error
     }
     completedCaptures.set(parsed.data.captureKey, { identityHash, response, userId: user.id })
     pruneCompletedCaptures(Date.now())
     return reply.status(201).send(response)
+    } finally {
+      captureRequestActive = false
+      if (fields?.tempDir !== undefined) await rm(fields.tempDir, { force: true, recursive: true })
+    }
   })
 }
 
 async function collectCaptureFields(request: FastifyRequest): Promise<CaptureFields> {
   const result: CaptureFields = { fileCount: 0 }
   const seen = new Set<string>()
-  for await (const part of request.parts({ limits: { fields: 4, fieldSize: 8_192, fileSize: MAX_PNG_BYTES, files: 1, parts: 5 } })) {
-    if (seen.has(part.fieldname)) throw new CaptureRequestError(400, `Duplicate capture field: ${part.fieldname}.`)
-    seen.add(part.fieldname)
-    if (part.type === 'file') {
-      result.fileCount += 1
-      const bytes = await part.toBuffer()
-      if (part.fieldname !== 'capture' || part.mimetype !== 'image/png') throw new CaptureRequestError(400, 'The capture file must be a PNG.')
-      result.png = bytes
-      continue
+  try {
+    for await (const part of request.parts({ limits: { fields: 4, fieldSize: 8_192, fileSize: OPERATOR_CAPTURE_MAX_BYTES, files: 1, parts: 5 } })) {
+      if (seen.has(part.fieldname)) throw new CaptureRequestError(400, `Duplicate capture field: ${part.fieldname}.`)
+      seen.add(part.fieldname)
+      if (part.type === 'file') {
+        result.fileCount += 1
+        if (part.fieldname !== 'capture' || part.mimetype !== 'image/png') throw new CaptureRequestError(400, 'The capture file must be a PNG.')
+        result.tempDir = await mkdtemp(join(tmpdir(), 'helios-operator-capture-'))
+        await chmod(result.tempDir, 0o700)
+        result.pngPath = join(result.tempDir, 'capture.png')
+        const hash = createHash('sha256')
+        const headerChunks: Buffer[] = []
+        let headerLength = 0
+        let byteLength = 0
+        const inspect = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            byteLength += chunk.byteLength
+            if (byteLength > OPERATOR_CAPTURE_MAX_BYTES) {
+              callback(new CaptureRequestError(413, 'Capture exceeds the 100 MB upload limit. Try the smaller-capture option.'))
+              return
+            }
+            hash.update(chunk)
+            if (headerLength < 33) {
+              const prefix = chunk.subarray(0, 33 - headerLength)
+              headerChunks.push(prefix)
+              headerLength += prefix.byteLength
+            }
+            callback(null, chunk)
+          },
+        })
+        await pipeline(part.file, inspect, createWriteStream(result.pngPath, { flags: 'wx', mode: 0o600 }))
+        if (part.file.truncated) {
+          throw new CaptureRequestError(413, 'Capture exceeds the 100 MB upload limit. Try the smaller-capture option.')
+        }
+        result.pngByteLength = byteLength
+        result.pngHash = hash
+        result.pngHeader = Buffer.concat(headerChunks, headerLength)
+        continue
+      }
+      const value = typeof part.value === 'string' ? part.value : ''
+      if (part.fieldname === 'captureKey') result.captureKey = value
+      else if (part.fieldname === 'captureName') result.captureName = value
+      else if (part.fieldname === 'metadata') result.metadata = value
+      else if (part.fieldname === 'redirectUrl') result.redirectUrl = value
+      else throw new CaptureRequestError(400, `Unknown capture field: ${part.fieldname}.`)
     }
-    const value = typeof part.value === 'string' ? part.value : ''
-    if (part.fieldname === 'captureKey') result.captureKey = value
-    else if (part.fieldname === 'captureName') result.captureName = value
-    else if (part.fieldname === 'metadata') result.metadata = value
-    else if (part.fieldname === 'redirectUrl') result.redirectUrl = value
-    else throw new CaptureRequestError(400, `Unknown capture field: ${part.fieldname}.`)
+    return result
+  } catch (error) {
+    if (result.tempDir !== undefined) await rm(result.tempDir, { force: true, recursive: true })
+    throw error
   }
-  return result
 }
 
 function parseJson(value: string | undefined): unknown {
@@ -190,7 +260,7 @@ function readPngDimensions(bytes: Buffer): { width: number; height: number } | n
   }
   const width = bytes.readUInt32BE(16)
   const height = bytes.readUInt32BE(20)
-  return width > 0 && width <= 12_000 && height > 0 && height <= 12_000 ? { height, width } : null
+  return width > 0 && width <= OPERATOR_CAPTURE_MAX_DIMENSION && height > 0 && height <= OPERATOR_CAPTURE_MAX_DIMENSION ? { height, width } : null
 }
 
 function isAllowedPageUrl(value: string): boolean {
@@ -305,4 +375,5 @@ function formatNewYorkDateTime(value: Date): string {
 export function resetOperatorCaptureStateForTests(): void {
   completedCaptures.clear()
   requestTimes.clear()
+  captureRequestActive = false
 }

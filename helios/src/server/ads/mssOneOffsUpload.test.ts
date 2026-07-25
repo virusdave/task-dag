@@ -1,11 +1,11 @@
 import { createServer } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readlink, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { findMssSlotsByNotePrefix, uploadStaticBundleToMssOneOffs } from './mssOneOffsUpload.js'
+import { findMssSlotsByNotePrefix, MssUploadError, uploadStaticBundleToMssOneOffs } from './mssOneOffsUpload.js'
 
 const tempDirs: string[] = []
 const originalSocket = process.env.MSS_ONE_OFFS_CONTROL_SOCKET
@@ -35,9 +35,11 @@ describe('uploadStaticBundleToMssOneOffs', () => {
       return response(404, { error: 'unexpected' })
     })
     try {
+      const capturePath = join(fixture.tempDir, 'capture.png')
+      await writeFile(capturePath, 'png')
       const result = await uploadStaticBundleToMssOneOffs({
         files: [
-          { path: 'capture.png', bytes: Buffer.from('png'), contentType: 'image/png' },
+          { path: 'capture.png', sourcePath: capturePath, byteLength: 3, contentType: 'image/png' },
           { path: 'index.html', bytes: Buffer.from('ok'), contentType: 'text/html' },
         ],
         note: 'capture',
@@ -77,6 +79,42 @@ describe('uploadStaticBundleToMssOneOffs', () => {
         'PUT /v1/uploads/upload-1/capture.png',
         'DELETE /v1/uploads/upload-1',
       ])
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  it('closes a path-backed source and deletes after an early rejection', async () => {
+    const events: string[] = []
+    const fixture = await startEarlyRejectServer(events)
+    const capturePath = join(fixture.tempDir, 'capture.png')
+    await writeFile(capturePath, Buffer.alloc(8 * 1024 * 1024, 1))
+    try {
+      await expect(uploadStaticBundleToMssOneOffs({
+        files: [{ path: 'capture.png', sourcePath: capturePath, byteLength: 8 * 1024 * 1024, contentType: 'image/png' }],
+        note: 'capture',
+        ttlSeconds: 60,
+      })).rejects.toThrow('disk failed')
+      expect(events).toContain('delete')
+      expect(await openFilePaths()).not.toContain(capturePath)
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  it('preserves a structured slot byte-limit error', async () => {
+    const fixture = await startSocketServer((request) => {
+      if (request.path === '/v1/uploads') return response(400, { code: 'slot_byte_limit', error: 'declared byte limit exceeded' })
+      return response(404, { error: 'unexpected' })
+    })
+    try {
+      const error = await uploadStaticBundleToMssOneOffs({
+        files: [{ path: 'capture.png', bytes: Buffer.from('png'), contentType: 'image/png' }],
+        note: 'capture',
+        ttlSeconds: 60,
+      }).catch((caught: unknown) => caught)
+      expect(error).toBeInstanceOf(MssUploadError)
+      expect((error as MssUploadError).code).toBe('slot_byte_limit')
     } finally {
       await fixture.close()
     }
@@ -157,5 +195,56 @@ async function startSocketServer(handler: (request: { body: Buffer; method: stri
   })
   return {
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+    tempDir: dir,
   }
+}
+
+async function startEarlyRejectServer(events: string[]) {
+  const dir = await mkdtemp(join(tmpdir(), 'helios-mss-test-'))
+  tempDirs.push(dir)
+  const socketPath = join(dir, 'control.sock')
+  process.env.MSS_ONE_OFFS_CONTROL_SOCKET = socketPath
+  const server = createServer((request, response) => {
+    if (request.method === 'PUT') {
+      sendJson(response, 500, { code: 'disk_failed', error: 'disk failed' })
+      request.resume()
+      return
+    }
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      if (request.method === 'POST') {
+        sendJson(response, 201, {
+          complete: false,
+          completed: { bytes: 0, files: 0 },
+          declared: { bytes: 8 * 1024 * 1024, files: 1 },
+          id: 'upload-1',
+        })
+      } else if (request.method === 'DELETE') {
+        events.push('delete')
+        sendJson(response, 200, { deleted: true, id: 'upload-1' })
+      } else {
+        sendJson(response, 404, { error: 'unexpected' })
+      }
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve))
+  return {
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+    tempDir: dir,
+  }
+}
+
+function sendJson(response: import('node:http').ServerResponse, status: number, value: unknown): void {
+  const body = Buffer.from(JSON.stringify(value))
+  response.writeHead(status, { 'content-length': body.byteLength, 'content-type': 'application/json' })
+  response.end(body)
+}
+
+async function openFilePaths(): Promise<string[]> {
+  const descriptors = await readdir('/proc/self/fd')
+  const paths = await Promise.all(descriptors.map((descriptor) =>
+    readlink(`/proc/self/fd/${descriptor}`).catch(() => ''),
+  ))
+  return paths.filter(Boolean)
 }

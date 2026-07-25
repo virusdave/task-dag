@@ -131,6 +131,45 @@ describe('OperatorCapturePanel', () => {
     expect(host.textContent).toContain('Copy link & continue')
   })
 
+  it('offers and performs a smaller capture after an actionable size error', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'Capture exceeds the 100 MB upload limit. Try the smaller-capture option.',
+      }), { status: 413, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(SUCCESS), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    await renderPanel()
+    await act(async () => host.querySelector<HTMLButtonElement>('button:not(:disabled)')?.click())
+    await act(async () => Promise.resolve())
+    expect(host.textContent).toContain('Capture exceeds the 100 MB upload limit')
+    const smaller = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Capture smaller image')
+    expect(smaller).toBeDefined()
+    await act(async () => smaller?.click())
+    await act(async () => Promise.resolve())
+    expect(toBlob).toHaveBeenLastCalledWith(expect.any(HTMLElement), expect.objectContaining({ pixelRatio: 0.5 }))
+    expect(clipboard).toHaveBeenCalledWith(SUCCESS.directUrl)
+  })
+
+  it('keeps the rendered capture for retry when the rate limit is reached', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'Capture limit reached. Try again in a few minutes.',
+    }), { status: 429, headers: { 'Content-Type': 'application/json' } }))
+    await renderPanel()
+    await act(async () => host.querySelector<HTMLButtonElement>('button:not(:disabled)')?.click())
+    await act(async () => Promise.resolve())
+    expect(host.textContent).toContain('Capture limit reached')
+    expect(host.textContent).not.toContain('Capture smaller image')
+    const retry = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Retry upload')
+    await act(async () => retry?.click())
+    await act(async () => Promise.resolve())
+    expect(toBlob).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps an uploaded result usable when browser storage is unavailable', async () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementationOnce(() => {
       throw new DOMException('quota exceeded')

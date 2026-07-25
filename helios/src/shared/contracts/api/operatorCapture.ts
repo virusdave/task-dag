@@ -19,6 +19,12 @@ const ALLOWED_GITHUB_REPOSITORIES = new Set([
   'virusdave/top-level',
 ])
 
+// Decimal 100 MB leaves enough room for the review page and metadata inside
+// mss-one-offs' 100 MiB per-slot persisted-byte allowance.
+export const OPERATOR_CAPTURE_MAX_BYTES = 100_000_000
+export const OPERATOR_CAPTURE_MAX_DIMENSION = 100_000
+export const OPERATOR_CAPTURE_MAX_PIXELS = 100_000_000
+
 export const OperatorCaptureTargetSchema = z.enum(CAPTURE_TARGETS)
 export type OperatorCaptureTarget = z.infer<typeof OperatorCaptureTargetSchema>
 
@@ -27,12 +33,12 @@ export const OperatorCaptureKeySchema = z.string().regex(/^[a-zA-Z0-9_-]{16,100}
 export const OperatorCaptureMetadataSchema = z.object({
   capturedAt: z.iso.datetime(),
   devicePixelRatio: z.number().positive().max(4),
-  height: z.number().int().positive().max(12_000),
+  height: z.number().int().positive().max(OPERATOR_CAPTURE_MAX_DIMENSION),
   pageUrl: z.url().max(2_048),
   renderer: z.string().min(1).max(80),
   viewportHeight: z.number().int().positive().max(12_000),
   viewportWidth: z.number().int().positive().max(12_000),
-  width: z.number().int().positive().max(12_000),
+  width: z.number().int().positive().max(OPERATOR_CAPTURE_MAX_DIMENSION),
 })
 export type OperatorCaptureMetadata = z.infer<typeof OperatorCaptureMetadataSchema>
 

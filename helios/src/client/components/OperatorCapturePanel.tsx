@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  OPERATOR_CAPTURE_MAX_BYTES,
+  OPERATOR_CAPTURE_MAX_PIXELS,
   OperatorCaptureKeySchema,
   OperatorCaptureMetadataSchema,
   OperatorCaptureResponseSchema,
@@ -15,8 +17,6 @@ const CAPTURE_PARAMS = ['capture', 'captureTarget', 'captureName', 'captureKey',
 const CAPTURE_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/u
 const STORAGE_PREFIX = 'helios.operatorCapture.success.'
 const REDIRECT_SECONDS = 5
-const MAX_CAPTURE_BYTES = 8 * 1024 * 1024
-const MAX_CAPTURE_PIXELS = 16_000_000
 
 export type OperatorCaptureQuery = {
   captureKey: string
@@ -111,6 +111,7 @@ export function OperatorCapturePanel() {
   const [seconds, setSeconds] = useState(REDIRECT_SECONDS)
   const [copyConfirmed, setCopyConfirmed] = useState(false)
   const [redirecting, setRedirecting] = useState(false)
+  const [canRetrySmaller, setCanRetrySmaller] = useState(false)
 
   useEffect(() => {
     if (query.mode !== 'capture' || result !== null) return
@@ -133,10 +134,11 @@ export function OperatorCapturePanel() {
     }
   }, [copyConfirmed, redirecting, result])
 
-  const capture = useCallback(async () => {
+  const capture = useCallback(async (scale = 1) => {
     if (query.mode !== 'capture') return
     setBusy(true)
     setError(null)
+    setCanRetrySmaller(false)
     try {
       let artifact = pending
       if (artifact === null) {
@@ -146,17 +148,22 @@ export function OperatorCapturePanel() {
         }
         const target = targets[0]
         const rect = await settleCaptureTarget(target)
-        if (rect.width * rect.height > MAX_CAPTURE_PIXELS) {
-          throw new Error('The page is too large for a safe browser capture.')
+        if (rect.width * rect.height * scale * scale > OPERATOR_CAPTURE_MAX_PIXELS) {
+          setCanRetrySmaller(scale === 1)
+          throw new Error('This page is too large to capture at full resolution.')
         }
         const { toBlob } = await import('html-to-image')
-        const blob = await toBlob(target, { pixelRatio: 1, cacheBust: true })
-        if (blob === null || blob.type !== 'image/png' || blob.size > MAX_CAPTURE_BYTES) {
-          throw new Error('The browser produced an invalid or oversized PNG.')
+        const blob = await toBlob(target, { pixelRatio: scale, cacheBust: true })
+        if (blob === null || blob.type !== 'image/png') {
+          throw new Error('The browser could not produce a valid PNG.')
+        }
+        if (blob.size > OPERATOR_CAPTURE_MAX_BYTES) {
+          setCanRetrySmaller(scale === 1)
+          throw new Error('The capture exceeds 100 MB at full resolution.')
         }
         const metadata = OperatorCaptureMetadataSchema.parse({
           capturedAt: new Date().toISOString(),
-          devicePixelRatio: 1,
+          devicePixelRatio: scale,
           height: rect.height,
           pageUrl: pageUrlWithoutCaptureParams(),
           renderer: 'html-to-image@1.11.13',
@@ -174,7 +181,14 @@ export function OperatorCapturePanel() {
       body.set('metadata', JSON.stringify(artifact.metadata))
       body.set('capture', artifact.blob, `${query.value.captureName}.png`)
       const response = await fetch(buildAppPath('/api/operator-captures'), { method: 'POST', body, credentials: 'same-origin' })
-      if (!response.ok) throw new Error(`Upload failed with status ${response.status}.`)
+      if (!response.ok) {
+        const uploadError = await captureUploadError(response)
+        if (uploadError.canRetrySmaller) {
+          setPending(null)
+          setCanRetrySmaller(true)
+        }
+        throw new Error(uploadError.message)
+      }
       const payload = OperatorCaptureResponseSchema.parse(await response.json())
       setPending(null)
       setResult(payload)
@@ -226,6 +240,7 @@ export function OperatorCapturePanel() {
         {result ? (
           copyConfirmed ? <a className="primary-button like-button" href={result.directUrl} target="_blank" rel="noreferrer">Open image</a> : <button className="primary-button" type="button" onClick={() => void copyAndContinue()}>Copy link &amp; continue</button>
         ) : <button className="primary-button" type="button" disabled={!ready || busy} onClick={() => void capture()}>{pending ? 'Retry upload' : 'Capture & upload'}</button>}
+        {canRetrySmaller && !result ? <button className="primary-button" type="button" disabled={busy} onClick={() => void capture(0.5)}>Capture smaller image</button> : null}
         {result && copyConfirmed && redirecting ? (
           <button type="button" className="ghost-button" onClick={() => setRedirecting(false)}>Stay here</button>
         ) : (
@@ -234,6 +249,21 @@ export function OperatorCapturePanel() {
       </div>
     </aside>
   )
+}
+
+async function captureUploadError(response: Response): Promise<{ canRetrySmaller: boolean; message: string }> {
+  let detail = ''
+  try {
+    const payload = await response.json() as { error?: unknown }
+    if (typeof payload.error === 'string') detail = payload.error
+  } catch {
+    // Fall back to the status-specific guidance below.
+  }
+  const canRetrySmaller = response.status === 413 || /too large|size|dimension/iu.test(detail)
+  if (canRetrySmaller) {
+    return { canRetrySmaller, message: detail || 'The capture is too large to upload. Try a smaller image.' }
+  }
+  return { canRetrySmaller, message: detail || `Upload failed with status ${response.status}. Try again.` }
 }
 
 async function settleCaptureTarget(target: HTMLElement): Promise<{ height: number; width: number }> {

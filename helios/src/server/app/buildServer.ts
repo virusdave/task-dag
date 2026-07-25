@@ -8,6 +8,7 @@ import fastifyStatic from '@fastify/static'
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import { ZodError } from 'zod'
 
+import { OPERATOR_CAPTURE_MAX_BYTES } from '../../shared/contracts/index.js'
 import { getServerEnv } from '../config/env.js'
 import { registerAuthGate } from '../auth/authGate.js'
 import { startAdsDrivePoller, stopAdsDrivePoller } from '../ads/adsDrivePoller.js'
@@ -120,7 +121,7 @@ export async function buildServer() {
     limits: {
       fields: 20,
       fieldSize: 1024 * 1024,
-      fileSize: 12 * 1024 * 1024,
+      fileSize: OPERATOR_CAPTURE_MAX_BYTES,
       files: 1,
     },
   })

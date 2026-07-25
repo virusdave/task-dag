@@ -1,8 +1,11 @@
 import * as crypto from 'node:crypto'
+import { once } from 'node:events'
+import { createReadStream, type ReadStream } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as http from 'node:http'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { pipeline } from 'node:stream/promises'
 
 import { z } from 'zod'
 
@@ -27,7 +30,11 @@ export interface MssUploadResult {
   uploadId: string
 }
 
-export class MssUploadError extends Error {}
+export class MssUploadError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message)
+  }
+}
 
 const UploadStatusSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/),
@@ -46,11 +53,15 @@ const SlotResponseSchema = z.object({
 
 const SlotListSchema = z.object({ slots: z.array(SlotResponseSchema) })
 
-export interface MssStaticFile {
+interface MssStaticFileBase {
   path: string
-  bytes: Buffer
   contentType: string
 }
+
+export type MssStaticFile = MssStaticFileBase & (
+  | { bytes: Buffer; sourcePath?: never; byteLength?: never }
+  | { bytes?: never; sourcePath: string; byteLength: number }
+)
 
 export interface MssStaticUploadResult {
   publicUrl: string
@@ -75,14 +86,14 @@ export async function findMssSlotsByNotePrefix(notePrefix: string): Promise<MssS
     .map((slot) => ({ ...validatedSlotResult(slot), note: slot.note }))
 }
 
-/** Publish an in-memory static bundle through the daemon-owned streaming API. */
+/** Publish a static bundle through the daemon-owned streaming API. */
 export async function uploadStaticBundleToMssOneOffs(args: {
   files: readonly MssStaticFile[]
   note: string
   ttlSeconds: number
 }): Promise<MssStaticUploadResult> {
   const socketPath = process.env.MSS_ONE_OFFS_CONTROL_SOCKET?.trim() || DEFAULT_CONTROL_SOCKET
-  const declaredBytes = args.files.reduce((total, file) => total + file.bytes.byteLength, 0)
+  const declaredBytes = args.files.reduce((total, file) => total + fileByteLength(file), 0)
   const reservation = UploadStatusSchema.parse(await unixSocketRequestJson({
     body: Buffer.from(JSON.stringify({ files: args.files.length, bytes: declaredBytes })),
     contentType: 'application/json',
@@ -96,6 +107,8 @@ export async function uploadStaticBundleToMssOneOffs(args: {
     for (const file of args.files) {
       finalStatus = UploadStatusSchema.parse(await unixSocketRequestJson({
         body: file.bytes,
+        bodyPath: file.sourcePath,
+        bodyLength: fileByteLength(file),
         contentType: file.contentType,
         method: 'PUT',
         path: `/v1/uploads/${reservation.id}/${file.path}`,
@@ -136,11 +149,28 @@ export async function uploadStaticBundleToMssOneOffs(args: {
       : new MssUploadError(`mss-one-offs streaming upload failed: ${(error as Error).message}`)
   } finally {
     if (pendingUploadId !== null) {
-      await unixSocketRequestJson({
-        method: 'DELETE', path: `/v1/uploads/${pendingUploadId}`, socketPath, timeoutMs: 3_000,
-      }).catch(() => undefined)
+      await discardPendingUpload(socketPath, pendingUploadId)
     }
   }
+}
+
+async function discardPendingUpload(socketPath: string, uploadId: string): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await unixSocketRequestJson({
+        method: 'DELETE', path: `/v1/uploads/${uploadId}`, socketPath, timeoutMs: 3_000,
+      })
+      return
+    } catch (error) {
+      if (!(error instanceof MssUploadError) || error.code !== 'upload_busy' || attempt === 3) return
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+}
+
+function fileByteLength(file: MssStaticFile): number {
+  if (file.bytes !== undefined) return file.bytes.byteLength
+  return file.byteLength
 }
 
 function validatedSlotResult(slot: z.infer<typeof SlotResponseSchema>): MssStaticUploadResult {
@@ -266,24 +296,28 @@ function unixSocketRequestJson(args: {
   path: string
   method: 'DELETE' | 'GET' | 'POST' | 'PUT'
   body?: Buffer
+  bodyPath?: string
+  bodyLength?: number
   contentType?: string
   maxResponseBytes?: number
   timeoutMs?: number
 }): Promise<unknown> {
-  return new Promise((resolve, reject) => {
+  let request: http.ClientRequest | undefined
+  let source: ReadStream | undefined
+  let timer: ReturnType<typeof setTimeout>
+  const responsePromise = new Promise<unknown>((resolve, reject) => {
     let settled = false
     const finish = (callback: () => void) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
       callback()
     }
     const headers: Record<string, string> = { host: 'localhost' }
-    if (args.body !== undefined) {
-      headers['content-length'] = String(args.body.byteLength)
+    if (args.body !== undefined || args.bodyPath !== undefined) {
+      headers['content-length'] = String(args.body?.byteLength ?? args.bodyLength)
       headers['content-type'] = args.contentType ?? 'application/octet-stream'
     }
-    const req = http.request(
+    request = http.request(
       { headers, method: args.method, path: args.path, socketPath: args.socketPath },
       (res) => {
         const chunks: Buffer[] = []
@@ -299,7 +333,10 @@ function unixSocketRequestJson(args: {
             return
           }
           if ((res.statusCode ?? 500) >= 400) {
-            finish(() => reject(new MssUploadError(`mss-one-offs ${args.path} returned ${res.statusCode}: ${text.slice(0, 400)}`)))
+            finish(() => reject(new MssUploadError(
+              `mss-one-offs ${args.path} returned ${res.statusCode}: ${text.slice(0, 400)}`,
+              responseErrorCode(text),
+            )))
             return
           }
           try {
@@ -311,12 +348,40 @@ function unixSocketRequestJson(args: {
         res.on('error', (error) => finish(() => reject(new MssUploadError(`mss-one-offs response error: ${error.message}`))))
       },
     )
-    const timer = setTimeout(() => {
-      req.destroy()
+    timer = setTimeout(() => {
       finish(() => reject(new MssUploadError(`mss-one-offs ${args.path} timed out`)))
-    }, args.timeoutMs ?? 15_000)
-    req.on('error', (error) => finish(() => reject(new MssUploadError(`mss-one-offs control socket (${args.socketPath}) unreachable: ${error.message}`))))
-    if (args.body !== undefined) req.write(args.body)
-    req.end()
+      request?.destroy()
+    }, args.timeoutMs ?? (args.bodyPath === undefined ? 15_000 : 120_000))
+    request.on('error', (error) => finish(() => reject(new MssUploadError(`mss-one-offs control socket (${args.socketPath}) unreachable: ${error.message}`))))
   })
+  if (request === undefined) throw new MssUploadError('mss-one-offs request initialization failed')
+  const activeRequest = request
+  const bodyPromise = args.bodyPath !== undefined
+    ? (() => {
+        source = createReadStream(args.bodyPath)
+        const closed = once(activeRequest, 'close')
+        return Promise.all([pipeline(source, activeRequest), closed]).then(() => undefined)
+      })()
+    : (() => {
+        activeRequest.end(args.body)
+        return Promise.resolve()
+      })()
+  return Promise.all([responsePromise, bodyPromise])
+    .then(([response]) => response)
+    .catch(async (error: unknown) => {
+      source?.destroy()
+      activeRequest.destroy()
+      await bodyPromise.catch(() => undefined)
+      throw error
+    })
+    .finally(() => clearTimeout(timer))
+}
+
+function responseErrorCode(text: string): string | undefined {
+  try {
+    const body = JSON.parse(text) as { code?: unknown }
+    return typeof body.code === 'string' ? body.code : undefined
+  } catch {
+    return undefined
+  }
 }
