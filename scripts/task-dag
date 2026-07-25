@@ -58,32 +58,6 @@
 
 set -euo pipefail
 
-# Helper: resolve ref or SHA to full SHA
-resolve_sha() {
-    local ref_or_sha="$1"
-    git rev-parse "$ref_or_sha" 2>/dev/null || {
-        echo "Error: Cannot resolve '$ref_or_sha'" >&2
-        return 1
-    }
-}
-
-# Helper: parse commit message metadata
-parse_commit_metadata() {
-    local sha="$1"
-    git log -1 --format='%B' "$sha"
-}
-
-# Helper: extract field from commit message
-extract_field() {
-    local message="$1"
-    local field="$2"
-    # Missing field -> empty output + SUCCESS. grep exits non-zero when the
-    # field is absent, and under `set -euo pipefail` that non-zero would
-    # otherwise abort any caller that runs this in the main shell (not a
-    # subshell). A missing field is a normal, expected case, so swallow it.
-    echo "$message" | grep "^${field}:" | sed "s/^${field}: *//" | head -1 || true
-}
-
 # Helper: true only for the exact human GitHub comment task dialect used by
 # issue-comment ingestion. These tasks are created specifically to wake the
 # DAG up when an operator replies under a parked/blocked work item, so they
@@ -96,30 +70,6 @@ is_human_comment_task() {
     [ "$(extract_field "$msg" "kind")" = "message" ] &&
     [ "$(extract_field "$msg" "role")" = "human" ] &&
     [ "$(extract_field "$msg" "intent")" = "comment" ]
-}
-
-# Helper: get task title (first line minus "Task: " prefix)
-get_task_title() {
-    local sha="$1"
-    git log -1 --format='%s' "$sha" | sed 's/^Task: *//'
-}
-
-# Helper: get commit parents
-get_parents() {
-    local sha="$1"
-    git rev-list --parents -1 "$sha" | awk '{for(i=2;i<=NF;i++) print $i}'
-}
-
-# Helper: get first parent (breakdown parent)
-get_first_parent() {
-    local sha="$1"
-    get_parents "$sha" | head -1
-}
-
-# Helper: get dependency parents (2nd+)
-get_dep_parents() {
-    local sha="$1"
-    get_parents "$sha" | tail -n +2
 }
 
 # Helper: check if task is completed (appears as non-primary parent in
@@ -206,22 +156,6 @@ print_completion_push_instruction() {
     echo "Completion prepared locally; origin/master and task scheduling refs are unchanged."
     echo "Run exactly:"
     echo "task-dag publish"
-}
-
-# Helper: is <sha> a task commit? Every task commit (epic/task/leaf, and
-# the comment/message/issue-root commits the workflows mint) is created
-# with the canonical EMPTY_TREE (see `breakdown`'s commit-tree call and
-# the cmd_validate "Check 1" invariant). A commit with any other tree is
-# real master/branch history — the boundary of the live task DAG. We use
-# the tree, NOT `merge-base --is-ancestor HEAD`, to detect that boundary:
-# completing one child lands a completion commit that pulls a still-live
-# (possibly blocked) structural parent into HEAD history, so "ancestor of
-# HEAD" is NOT a reliable "no longer a live task" signal, whereas the
-# empty tree is stable for the commit's whole life.
-is_task_commit() {
-    local sha="$1" tree
-    tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || return 1
-    [ "$tree" = "$EMPTY_TREE" ]
 }
 
 # Helper: true iff <subject> uses a Conventional-Commits `type(scope):` prefix,
@@ -8672,6 +8606,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/task-dag.d/source-contract
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/json.sh"
 # shellcheck source=task-dag.d/cas-retry.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/cas-retry.sh"
+# shellcheck source=task-dag.d/git-objects.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh
