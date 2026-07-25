@@ -42,59 +42,6 @@
 # from the main script.
 # ═══════════════════════════════════════════════════════════════════════
 
-# ── Bounded CAS-retry backoff parameters (env-overridable for tests) ──────
-# base starts small (~1s), the ramp is quadratic (base*attempt^2) capped at
-# ~10s, and fresh jitter is added on top of each computed delay. MAX_ATTEMPTS
-# bounds the retry budget so an exhausted contention window FAILS LOUD.
-: "${TASKDAG_CAS_BASE_MS:=1000}"
-: "${TASKDAG_CAS_CAP_MS:=10000}"
-: "${TASKDAG_CAS_JITTER_MS:=250}"
-: "${TASKDAG_CAS_MAX_ATTEMPTS:=8}"
-
-# taskdag_cas_ramp_ms <attempt>: the DETERMINISTIC (jitter-free) component of
-# the backoff for a 1-based retry attempt. A quadratic ramp base*attempt^2,
-# capped at the ~10s cap. Pure + side-effect-free so the ramp shape and cap
-# are unit-testable. Attempt 1 => base (never the cap).
-taskdag_cas_ramp_ms() {
-    local attempt="$1" ramp
-    [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || { echo "Error: taskdag_cas_ramp_ms needs a positive attempt" >&2; return 1; }
-    ramp=$(( TASKDAG_CAS_BASE_MS * attempt * attempt ))
-    [ "$ramp" -gt "$TASKDAG_CAS_CAP_MS" ] && ramp="$TASKDAG_CAS_CAP_MS"
-    printf '%s\n' "$ramp"
-}
-
-# taskdag_cas_jitter_ms: a fresh, uniform random jitter in [0, JITTER_MS].
-# Drawn from $RANDOM each call, so successive calls (de-syncing racing
-# writers) differ. Bounded above by JITTER_MS.
-taskdag_cas_jitter_ms() {
-    if [ "$TASKDAG_CAS_JITTER_MS" -le 0 ]; then printf '0\n'; return 0; fi
-    printf '%s\n' "$(( RANDOM % (TASKDAG_CAS_JITTER_MS + 1) ))"
-}
-
-# taskdag_cas_backoff_ms <attempt>: the full per-attempt delay in ms =
-# (quadratic ramp, capped) + (fresh random jitter). Never starts at the cap.
-taskdag_cas_backoff_ms() {
-    local ramp jitter
-    ramp=$(taskdag_cas_ramp_ms "$1") || return 1
-    jitter=$(taskdag_cas_jitter_ms) || return 1
-    printf '%s\n' "$(( ramp + jitter ))"
-}
-
-# taskdag_cas_sleep <attempt>: sleep the computed backoff for this attempt.
-# Kept separate from the pure computation so tests never actually sleep.
-taskdag_cas_sleep() {
-    local ms secs remaining
-    ms=$(taskdag_cas_backoff_ms "$1") || return 1
-    secs=$(awk -v ms="$ms" 'BEGIN{printf "%.3f", ms/1000}')
-    if [[ "${TASKDAG_RECONCILE_DEADLINE:-}" =~ ^[0-9]+$ ]]; then
-        remaining=$((TASKDAG_RECONCILE_DEADLINE - $(date +%s)))
-        [ "$remaining" -gt 0 ] || return 124
-        timeout --signal=TERM "${remaining}s" sleep "$secs"
-        return $?
-    fi
-    sleep "$secs"
-}
-
 # _taskdag_edge_blob_check <blob>: validate a STORED edge blob exactly as the
 # reader (taskdag_read_edges) does — typed schema:1 structure, the fixed
 # relation/mode pair, and canonical node addresses at rest — and print its

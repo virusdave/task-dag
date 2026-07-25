@@ -52,6 +52,8 @@ done < <(
     # shellcheck source=/dev/null
     source "$LIBDIR/edges.sh"
     # shellcheck source=/dev/null
+    source "$LIBDIR/cas-retry.sh"
+    # shellcheck source=/dev/null
     source "$LIBDIR/edges-write.sh"
 
     r1=$(taskdag_cas_ramp_ms 1); r2=$(taskdag_cas_ramp_ms 2); r3=$(taskdag_cas_ramp_ms 3)
@@ -215,6 +217,8 @@ cexhaust() {
     TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 TASKDAG_CAS_MAX_ATTEMPTS=2
     # shellcheck source=/dev/null
     source "$LIBDIR/edges.sh"
+    # shellcheck source=/dev/null
+    source "$LIBDIR/cas-retry.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/edges-write.sh"
     # Model the pre-activation consumer adapter that the full CLI sources.

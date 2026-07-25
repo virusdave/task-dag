@@ -57,6 +57,7 @@ done < <(
     # shellcheck source=/dev/null
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
+    source "$LIBDIR/cas-retry.sh"
     source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
@@ -342,6 +343,7 @@ cond_out=$(
     # shellcheck source=/dev/null
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
+    source "$LIBDIR/cas-retry.sh"
     source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
@@ -458,6 +460,7 @@ gexhaust() {
     # shellcheck source=/dev/null
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
+    source "$LIBDIR/cas-retry.sh"
     source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"

@@ -74,7 +74,11 @@ unset GITHUB_REPOSITORY
 
 command -v shellcheck >/dev/null 2>&1 && {
     echo "== shellcheck =="
-    shellcheck -S error "$TD" "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
+    shellcheck -S error "$TD" \
+        "$(dirname "$TD")/task-dag.d/source-contract.sh" \
+        "$(dirname "$TD")/task-dag.d/json.sh" \
+        "$(dirname "$TD")/task-dag.d/cas-retry.sh" \
+        "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
         "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
         "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
         "$(dirname "$TD")/task-dag.d/ci-chains.sh" \
@@ -112,6 +116,9 @@ command -v shellcheck >/dev/null 2>&1 && {
 }
 echo "== bash -n =="
 bash -n "$TD" \
+    && bash -n "$(dirname "$TD")/task-dag.d/source-contract.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/json.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/cas-retry.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ci-repair.sh" \

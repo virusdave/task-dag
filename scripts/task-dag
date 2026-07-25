@@ -8670,6 +8670,8 @@ EOF
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/task-dag.d/source-contract.sh"
 # shellcheck source=task-dag.d/json.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/json.sh"
+# shellcheck source=task-dag.d/cas-retry.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/cas-retry.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh
