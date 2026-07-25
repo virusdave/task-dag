@@ -58,6 +58,46 @@ _XREPO_RECONCILE_INDEX_REF=refs/heads/tasks/v1/reconcile-comments-index
 _XREPO_RECONCILE_INDEX_CACHE_REF=refs/taskdag/cache/reconcile-comments-index
 _XREPO_RECONCILE_INDEX_CONTRACT=1
 
+_xrepo_v2_namespaces_present() { # listing
+    grep -Eq $'\trefs/heads/tasks/(delegated|delegated-close)/v2/' <<<"$1"
+}
+
+# Validate the complete v2 declaration/close keyspace before any caller
+# indexes it. A declaration may still be waiting for its close, but a close
+# can never exist without exactly one declaration with the identical key.
+_xrepo_validate_v2_namespace_listing() { # listing
+    local listing=$1 ref key
+    declare -A declarations=() closes=()
+    while IFS=$'\t' read -r _ ref; do
+        case "$ref" in
+            refs/heads/tasks/delegated/v2/*)
+                [[ "$ref" =~ ^refs/heads/tasks/delegated/v2/([0-9a-f]{64})/([0-9a-f]{64})$ ]] || return 2
+                key=${BASH_REMATCH[1]}/${BASH_REMATCH[2]}; [ -z "${declarations[$key]+x}" ] || return 2
+                declarations[$key]=1
+                ;;
+            refs/heads/tasks/delegated-close/v2/*)
+                [[ "$ref" =~ ^refs/heads/tasks/delegated-close/v2/([0-9a-f]{64})/([0-9a-f]{64})$ ]] || return 2
+                key=${BASH_REMATCH[1]}/${BASH_REMATCH[2]}; [ -z "${closes[$key]+x}" ] || return 2
+                closes[$key]=1
+                ;;
+        esac
+    done <<<"$listing"
+    for key in "${!closes[@]}"; do [ -n "${declarations[$key]+x}" ] || return 2; done
+}
+
+_xrepo_reconcile_authority_advertisement() {
+    local listing authority
+    listing=$(git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' \
+        'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 'refs/heads/tasks/delegated-close/v2/*') || return 2
+    if _xrepo_v2_namespaces_present "$listing"; then
+        authority=$(git ls-remote --refs origin refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF") || return 2
+        [ "$(sed '/^$/d' <<<"$authority" | wc -l)" -eq 2 ] || return 2
+        listing+=$'\n'"$authority"
+    fi
+    _xrepo_validate_v2_namespace_listing "$listing" || return 2
+    printf '%s\n' "$listing"
+}
+
 _xrepo_reconcile_checkpoint_store_safe() {
     local git_dir common_dir
     [ -z "${GIT_SHALLOW_FILE:-}" ] && [ -z "${GIT_OBJECT_DIRECTORY:-}" ] \
@@ -130,7 +170,7 @@ _xrepo_reconcile_index_read_one() { # commit output-directory expected-repositor
           (.key|test("^[1-9][0-9]*$")) and (.value|keys)==["close","root"] and
           (.value.close|test("^[0-9a-f]{40}$")) and (.value.root|test("^[0-9a-f]{40}$"))))
     ' "$out/peers.json" >/dev/null || return 2
-    LC_ALL=C awk -F '\t' 'BEGIN{p=""} NF!=2 || $1!~/^[0-9a-f]{40}$/ || $2!~/^refs\/heads\/gh\/comments\/[1-9][0-9]*\/([1-9][0-9]*|manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$/ && $2!~/^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ || (p!="" && $2<=p){exit 1} {p=$2}' "$out/manifest.tsv" || return 2
+    LC_ALL=C awk -F '\t' 'BEGIN{p=""} NF!=2 || $1!~/^[0-9a-f]{40}$/ || $2!~/^refs\/heads\/gh\/comments\/[1-9][0-9]*\/([1-9][0-9]*|manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$/ && $2!~/^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/delegated\/v2\/[0-9a-f]{64}\/[0-9a-f]{64}$/ && $2!~/^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/delegated-close\/v2\/[0-9a-f]{64}\/[0-9a-f]{64}$/ && $2!~/^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ && $2!="refs/heads/master" && $2!="refs/heads/tasks/v1/epics" || (p!="" && $2<=p){exit 1} {p=$2}' "$out/manifest.tsv" || return 2
     awk 'NF!=1 || $0 !~ /^[1-9][0-9]*$/ || $0>2147483647 || seen[$0]++ {exit 1}' "$out/queue.tsv" || return 2
 }
 
@@ -181,7 +221,7 @@ _xrepo_reconcile_index_validate_successor() { # current-dir parent-dir scratch-p
 _xrepo_reconcile_index_validate_generation() { # commit output-directory repository [activation-token]
     local commit=$1 out=$2 repo=$3 token=${4:-}
     _xrepo_reconcile_index_read_one "$commit" "$out" "$repo" || return 2
-    awk -F '\t' '$2 ~ /^refs\/heads\/tasks\/delegated\// {print $2 "\t" $1}' "$out/manifest.tsv" >"$out/manifest-delegations"
+    awk -F '\t' '$2 ~ /^refs\/heads\/tasks\/delegated\/[1-9]/ {print $2 "\t" $1}' "$out/manifest.tsv" >"$out/manifest-delegations"
     jq -r '.delegations|to_entries[]|[.key,.value.oid]|@tsv' "$out/proofs.json" | LC_ALL=C sort >"$out/proof-delegations"
     cmp -s "$out/manifest-delegations" "$out/proof-delegations" || return 2
     [ -z "$token" ] || _xrepo_reconcile_index_validate_activation "$out" "$token"
@@ -219,7 +259,8 @@ _xrepo_reconcile_index_read() { # tip output-directory expected-repository [acti
 
 # Validate only successors of an already authority-reconstructed boundary.
 _xrepo_reconcile_index_validate_cached() { # tip cache-tip output-dir repository activation-token
-    local tip=$1 cache=$2 out=$3 repo=$4 token=$5 commit prior_dir current_dir commits="$out/delta-commits"
+    local tip=$1 cache=$2 out=$3 repo=$4 token=$5 commit prior_dir current_dir commits
+    commits="$out/delta-commits"
     [ -n "$cache" ] && _xrepo_reconcile_index_validate_generation "$cache" "$out/cache" "$repo" "$token" || return 2
     _xrepo_first_parent_is_ancestor . "$cache" "$tip" || return 2
     git rev-list --first-parent --reverse "${cache}..${tip}" >"$commits" || return 2
@@ -242,6 +283,11 @@ _xrepo_reconcile_index_bootstrap_authority() { # index-dir manifest snapshot-git
     printf '%s\n' '{"delegations":{},"version":1}' >"$index/rebuilt-proofs.json"
     while IFS=$'\t' read -r sha ref; do
         case "$ref" in
+            refs/heads/tasks/delegated/v2/*|refs/heads/tasks/delegated-close/v2/*|refs/heads/master|refs/heads/tasks/v1/epics)
+                # v2 is normalized against exact authority during the current
+                # scan. It is deliberately not projected into the legacy v1
+                # proof/peer cache.
+                ;;
             refs/heads/tasks/delegated/*)
                 IFS=/ read -r _ _ _ _ issue owner name peer_issue <<<"$ref"
                 proof=$(GIT_DIR="$snapshot" _xrepo_normalize_delegation "$sha" "$ref" "$repo" "$issue" "$owner/$name" "$peer_issue") || return 2
@@ -1432,13 +1478,185 @@ _xrepo_trailer_present() {
     [ -n "$keys" ]
 }
 
-# Validate one isolated delegated/close snapshot and report whether every
-# delegated child for an issue has a matching strict close fact. The caller
-# supplies a bare GIT_DIR populated from one verified origin advertisement, so
-# this never falls back to stale refs in the working checkout.
-_xrepo_strict_snapshot_status() {
-    local git_dir="$1" top_repo="$2" top_issue="$3"
-    local ref tail owner repo peer sha any=false missing=false
+# Delegation v2 is deliberately read-only. Its identity excludes mutable
+# provider projections (repository names and issue numbers) and frames every
+# immutable tuple component to make concatenation ambiguity impossible.
+_xrepo_declaration_digest_v2() { # parent-repo-node parent-epic peer-repo-node peer-epic operation-id
+    local LC_ALL=C value
+    {
+        printf 'task-dag-delegation-v2\000'
+        for value in "$@"; do printf '%s:%s\000' "${#value}" "$value"; done
+    } | sha256sum | awk '{print $1}'
+}
+
+_xrepo_v2_exact_fields() { # commit field...
+    local commit=$1 field value keys expected
+    shift
+    expected=$(printf '%s\n' "$@" | LC_ALL=C sort)
+    keys=$(git show -s --format='%(trailers:keyonly,separator=%x0A)' "$commit" 2>/dev/null \
+        | sed '/^$/d' | LC_ALL=C sort) || return 2
+    [ "$keys" = "$expected" ] || return 2
+    for field in "$@"; do
+        value=$(_xrepo_exact_trailer "$commit" "$field") || return 2
+        [ -n "$value" ] || return 2
+    done
+}
+
+_xrepo_registry_identity() { # worktree epic-id registry-tip authority-tip; prints record<TAB>binding
+    local wt=$1 epic=$2 registry=$3 authority=$4 record binding
+    record=$(env -u GIT_DIR git -C "$wt" rev-parse --absolute-git-dir) || return 2
+    record=$(GIT_DIR="$record" taskdag_epic_registry_record "$epic" "$registry" "$authority") || return 2
+    binding=$(GIT_DIR="$(env -u GIT_DIR git -C "$wt" rev-parse --absolute-git-dir)" \
+        taskdag_epic_registry_binding "$epic" "$registry" "$authority") || return 2
+    [ "$(jq -cS .projection <<<"$binding")" = "$(jq -cS .descriptor.projection <<<"$record")" ] || return 2
+    printf '%s\t%s\n' "$record" "$binding"
+}
+
+_xrepo_validate_delegation_v2() { # sha ref parent-registry parent-authority peer-registry peer-authority peer-git-dir
+    local sha=$1 ref=$2 parent_registry=$3 parent_authority=$4 peer_registry=${5:-} peer_authority=${6:-} peer_git=${7:-}
+    local parsed parent_digest declaration_digest parent_epic peer_epic parent_repo_id peer_repo_id operation derived
+    local parent_record peer_record peer_repo wt
+    parsed=$(taskdag_parse_delegation_v2_ref "$ref") || return 2
+    IFS=$'\t' read -r parent_digest declaration_digest <<<"$parsed"
+    [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] \
+        && [ "$(git rev-parse "$sha^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] || return 2
+    _xrepo_v2_exact_fields "$sha" Task-Dag-Delegation Parent-Repo Parent-Repo-Node-Id Parent-Epic-ID \
+        Peer-Repo Peer-Repo-Node-Id Peer-Epic-ID Materialisation-Operation-Id Declaration-Digest || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Task-Dag-Delegation)" = v2 ] || return 2
+    parent_epic=$(_xrepo_exact_trailer "$sha" Parent-Epic-ID); peer_epic=$(_xrepo_exact_trailer "$sha" Peer-Epic-ID)
+    [ "$parent_epic" = "epic-v1:$parent_digest" ] || return 2
+    parent_repo_id=$(_xrepo_exact_trailer "$sha" Parent-Repo-Node-Id)
+    peer_repo_id=$(_xrepo_exact_trailer "$sha" Peer-Repo-Node-Id)
+    operation=$(_xrepo_exact_trailer "$sha" Materialisation-Operation-Id)
+    [[ "$operation" =~ ^[0-9a-f]{64}$ ]] || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Declaration-Digest)" = "$declaration_digest" ] || return 2
+    derived=$(_xrepo_declaration_digest_v2 "$parent_repo_id" "$parent_epic" "$peer_repo_id" "$peer_epic" "$operation")
+    [ "$derived" = "$declaration_digest" ] || return 2
+    parent_record=$(taskdag_epic_registry_record "$parent_epic" "$parent_registry" "$parent_authority") || return 2
+    [ "$(git show -s --format='%P' "$sha")" = "$(jq -r .rootCommit <<<"$parent_record")" ] || return 2
+    [ "$(jq -r .descriptor.projection.repositoryId <<<"$parent_record")" = "$parent_repo_id" ] \
+        && [ "$(jq -r .descriptor.projection.repository <<<"$parent_record")" = "$(_xrepo_exact_trailer "$sha" Parent-Repo)" ] || return 2
+    taskdag_epic_registry_binding "$parent_epic" "$parent_registry" "$parent_authority" >/dev/null || return 2
+    [ -n "$parent_registry" ] && [ -n "$parent_authority" ] && [ -n "$peer_registry" ] \
+        && [ -n "$peer_authority" ] && [ -n "$peer_git" ] || return 2
+    peer_repo=$(_xrepo_exact_trailer "$sha" Peer-Repo)
+    peer_record=$(GIT_DIR="$peer_git" taskdag_epic_registry_record "$peer_epic" "$peer_registry" "$peer_authority") || return 2
+    [ "$(jq -r .descriptor.projection.repositoryId <<<"$peer_record")" = "$peer_repo_id" ] \
+        && [ "$(jq -r .descriptor.projection.repository <<<"$peer_record")" = "$peer_repo" ] || return 2
+    GIT_DIR="$peer_git" taskdag_epic_registry_binding "$peer_epic" "$peer_registry" "$peer_authority" >/dev/null || return 2
+}
+
+_xrepo_normalize_delegation_v2() { # oid ref parent-registry parent-authority peer-registry peer-authority [peer-git]
+    local oid=$1 ref=$2 parent_registry=$3 parent_authority=$4 peer_registry=${5:-} peer_authority=${6:-} peer_git=${7:-}
+    local parent_epic peer_epic parent_binding peer_binding peer_repo wt peer_git
+    _xrepo_validate_delegation_v2 "$oid" "$ref" "$parent_registry" "$parent_authority" "$peer_registry" "$peer_authority" "$peer_git" || return 2
+    parent_epic=$(_xrepo_exact_trailer "$oid" Parent-Epic-ID)
+    peer_epic=$(_xrepo_exact_trailer "$oid" Peer-Epic-ID)
+    parent_binding=$(taskdag_epic_registry_binding "$parent_epic" "$parent_registry" "$parent_authority") || return 2
+    peer_repo=$(_xrepo_exact_trailer "$oid" Peer-Repo)
+    [ -n "$peer_git" ] || return 2
+    peer_binding=$(GIT_DIR="$peer_git" taskdag_epic_registry_binding "$peer_epic" "$peer_registry" "$peer_authority") || return 2
+    jq -ncS --arg oid "$oid" --arg ref "$ref" --arg parentEpicId "$parent_epic" --arg peerEpicId "$peer_epic" \
+        --arg parentRepo "$(_xrepo_exact_trailer "$oid" Parent-Repo)" --arg peerRepo "$peer_repo" \
+        --arg parentIssue "$(jq -r .projection.issueNumber <<<"$parent_binding")" \
+        --arg peerIssue "$(jq -r .projection.issueNumber <<<"$peer_binding")" \
+        --arg declarationDigest "$(_xrepo_exact_trailer "$oid" Declaration-Digest)" \
+        --arg operationId "$(_xrepo_exact_trailer "$oid" Materialisation-Operation-Id)" \
+        '{declarationDigest:$declarationDigest,dialect:"v2",oid:$oid,operationId:$operationId,parentEpicId:$parentEpicId,parentIssue:$parentIssue,parentRepo:$parentRepo,peerEpicId:$peerEpicId,peerIssue:$peerIssue,peerRepo:$peerRepo,ref:$ref}'
+}
+
+_xrepo_validate_delegated_close_v2() { # sha ref delegation delegation-ref parent-registry parent-authority peer-registry peer-authority [peer-git]
+    local sha=$1 ref=$2 delegation=$3 delegation_ref=$4 parent_registry=$5 parent_authority=$6 peer_registry=${7:-} peer_authority=${8:-} peer_git=${9:-}
+    local field peer_tip peer_close peer_epic peer_repo wt peer_git
+    peer_repo=$(_xrepo_exact_trailer "$delegation" Peer-Repo) || return 2
+    [ -n "$peer_registry" ] && [ -n "$peer_authority" ] && [ -n "$peer_git" ] || return 2
+    [ "$(taskdag_parse_delegated_close_v2_ref "$ref")" = "$(taskdag_parse_delegation_v2_ref "$delegation_ref")" ] || return 2
+    _xrepo_validate_delegation_v2 "$delegation" "$delegation_ref" "$parent_registry" "$parent_authority" "$peer_registry" "$peer_authority" "$peer_git" || return 2
+    [ "$(git cat-file -t "$sha" 2>/dev/null)" = commit ] \
+        && [ "$(git rev-parse "$sha^{tree}" 2>/dev/null)" = "$(_xrepo_empty_tree)" ] \
+        && [ "$(git show -s --format='%P' "$sha")" = "$delegation" ] || return 2
+    _xrepo_v2_exact_fields "$sha" Task-Dag-Delegated-Close Parent-Repo Parent-Repo-Node-Id Parent-Epic-ID \
+        Peer-Repo Peer-Repo-Node-Id Peer-Epic-ID Materialisation-Operation-Id Declaration-Digest Peer-Tip Peer-Close Peer-Epic || return 2
+    [ "$(_xrepo_exact_trailer "$sha" Task-Dag-Delegated-Close)" = v2 ] || return 2
+    for field in Parent-Repo Parent-Repo-Node-Id Parent-Epic-ID Peer-Repo Peer-Repo-Node-Id Peer-Epic-ID Materialisation-Operation-Id Declaration-Digest; do
+        [ "$(_xrepo_exact_trailer "$sha" "$field")" = "$(_xrepo_exact_trailer "$delegation" "$field")" ] || return 2
+    done
+    peer_tip=$(_xrepo_exact_trailer "$sha" Peer-Tip); peer_close=$(_xrepo_exact_trailer "$sha" Peer-Close)
+    peer_epic=$(_xrepo_exact_trailer "$sha" Peer-Epic); [ "$peer_epic" = "$(_xrepo_exact_trailer "$sha" Peer-Epic-ID)" ] || return 2
+    [[ "$peer_tip" =~ ^[0-9a-f]{40}$ && "$peer_close" =~ ^[0-9a-f]{40}$ ]] || return 2
+    peer_repo=$(_xrepo_exact_trailer "$sha" Peer-Repo)
+    [ -n "$peer_authority" ] && [ "$peer_tip" = "$peer_authority" ] || return 2
+    git --git-dir="$peer_git" rev-list --first-parent "$peer_tip" \
+        | awk -v close_oid="$peer_close" '$0==close_oid{found=1} END{exit !found}' || return 2
+    GIT_DIR="$peer_git" taskdag_parse_epic_close_commit "$peer_close" "$peer_registry" "$peer_authority" \
+        | awk -F '\t' -v epic="$peer_epic" '$1==epic{ok=1} END{exit !ok}'
+}
+
+# Capture the peer authority used by one v2 declaration into an isolated object
+# store. Both immutable registry and mutable master are pinned by one
+# advertisement and checked again after fetching; callers never consult a
+# working checkout's tracking refs.
+_xrepo_capture_v2_peer_snapshot() { # repository output-dir; prints registry<TAB>master<TAB>git-dir
+    local repository=$1 out=$2 wt url advertised registry authority readback
+    wt=$(taskdag_peer_worktree_for "$repository") || return 2
+    url=$(env -u GIT_DIR git -C "$wt" remote get-url origin) || return 2
+    advertised=$(env -u GIT_DIR git -C "$wt" ls-remote --refs "$url" refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF") || return 2
+    registry=$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$advertised")
+    authority=$(awk '$2=="refs/heads/master"{print $1}' <<<"$advertised")
+    [[ "$registry" =~ ^[0-9a-f]{40}$ && "$authority" =~ ^[0-9a-f]{40}$ ]] || return 2
+    rm -rf "$out"; git init -q --bare "$out" && git --git-dir="$out" remote add origin "$url" || return 2
+    git --git-dir="$out" fetch -q --no-tags origin \
+        "+$registry:refs/snapshot/registry" "+$authority:refs/snapshot/master" || return 2
+    [ "$(git --git-dir="$out" rev-parse refs/snapshot/registry)" = "$registry" ] \
+        && [ "$(git --git-dir="$out" rev-parse refs/snapshot/master)" = "$authority" ] || return 2
+    readback=$(env -u GIT_DIR git -C "$wt" ls-remote --refs "$url" refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF") || return 2
+    [ "$advertised" = "$readback" ] || return 2
+    printf '%s\t%s\t%s\n' "$registry" "$authority" "$out"
+}
+
+_xrepo_capture_parent_snapshot() { # issue output-git manifest-file
+    local issue=$1 out=$2 manifest=$3 advertised authority_ad readback oid ref destination has_v2=false
+    local -a refspecs=()
+    advertised=$(git ls-remote --refs origin "refs/heads/tasks/delegated/${issue}/*" \
+        "refs/heads/tasks/delegated-close/v1/${issue}/*" 'refs/heads/tasks/delegated/v2/*' \
+        'refs/heads/tasks/delegated-close/v2/*') || return 2
+    _xrepo_v2_namespaces_present "$advertised" && has_v2=true
+    if [ "$has_v2" = true ]; then
+        authority_ad=$(git ls-remote --refs origin refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF") || return 2
+        [ "$(sed '/^$/d' <<<"$authority_ad" | wc -l)" -eq 2 ] || return 2
+        advertised+=$'\n'"$authority_ad"
+    fi
+    _xrepo_validate_v2_namespace_listing "$advertised" || return 2
+    _xrepo_write_sorted_listing "$advertised" "$manifest"
+    rm -rf "$out"; git init -q --bare "$out" && git --git-dir="$out" remote add origin "$(git remote get-url origin)" || return 2
+    while IFS=$'\t' read -r oid ref; do
+        destination=$ref
+        [ "$ref" != refs/heads/master ] || destination=refs/snapshot/master
+        [ "$ref" != "$TASKDAG_EPIC_REGISTRY_REF" ] || destination=refs/snapshot/registry
+        refspecs+=("+$oid:$destination")
+    done <"$manifest"
+    [ ${#refspecs[@]} -eq 0 ] || git --git-dir="$out" fetch -q --no-tags origin "${refspecs[@]}" || return 2
+    readback=$(git ls-remote --refs origin "refs/heads/tasks/delegated/${issue}/*" \
+        "refs/heads/tasks/delegated-close/v1/${issue}/*" 'refs/heads/tasks/delegated/v2/*' \
+        'refs/heads/tasks/delegated-close/v2/*') || return 2
+    _xrepo_validate_v2_namespace_listing "$readback" || return 2
+    if [ "$has_v2" = true ]; then readback+=$'\n'"$(git ls-remote --refs origin refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF")"; fi
+    _xrepo_write_sorted_listing "$readback" "$manifest.readback"
+    cmp -s "$manifest" "$manifest.readback"
+}
+
+# Normalize and evaluate every obligation in one isolated parent snapshot.
+# v1 remains byte-for-byte optional-authority behavior. Presence of any v2 ref
+# makes exact parent registry/master and exact isolated peer authority mandatory.
+_xrepo_strict_snapshot_status() { # git-dir parent-repo issue [scratch]
+    local git_dir="$1" top_repo="$2" top_issue="$3" scratch=${4:-}
+    local ref tail owner repo peer sha any=false missing=false parent_registry parent_authority
+    local parent_epic proof peer_repo peer_info peer_registry peer_authority peer_git declaration close_ref close_oid rc relevant
+    local parent_record="" candidate_record candidate_parent
+    local v2_listing
+    v2_listing=$(git --git-dir="$git_dir" for-each-ref --format='%(objectname)%09%(refname)' \
+        refs/heads/tasks/delegated/v2/ refs/heads/tasks/delegated-close/v2/) || return 2
+    _xrepo_validate_v2_namespace_listing "$v2_listing" || return 2
     while IFS=$'\t' read -r sha ref; do
         [ -n "$ref" ] || continue
         any=true
@@ -1447,14 +1665,149 @@ _xrepo_strict_snapshot_status() {
         repo="${tail%%/*}"; peer="${tail#*/}"
         [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ && "$repo" =~ ^[A-Za-z0-9_.-]+$ && "$peer" =~ ^[1-9][0-9]*$ ]] || return 2
         GIT_DIR="$git_dir" _xrepo_validate_delegation "$sha" "$top_repo" "$top_issue" "${owner}/${repo}" "$peer" || return 2
-        if ! GIT_DIR="$git_dir" _xrepo_child_satisfied "$top_issue" "${owner}/${repo}/${peer}"; then
-            missing=true
-        fi
+        local satisfied_rc=0
+        GIT_DIR="$git_dir" _xrepo_child_satisfied "$top_issue" "${owner}/${repo}/${peer}" || satisfied_rc=$?
+        [ "$satisfied_rc" -ne 2 ] || return 2
+        [ "$satisfied_rc" -eq 0 ] || missing=true
     done < <(git --git-dir="$git_dir" for-each-ref --format='%(objectname)%09%(refname)' \
         "refs/heads/tasks/delegated/${top_issue}/")
+
+    if git --git-dir="$git_dir" for-each-ref --format='%(refname)' \
+        refs/heads/tasks/delegated/v2/ refs/heads/tasks/delegated-close/v2/ | grep -q .; then
+        [ -n "$scratch" ] || return 2
+        parent_registry=$(git --git-dir="$git_dir" rev-parse refs/snapshot/registry^{commit} 2>/dev/null) || return 2
+        parent_authority=$(git --git-dir="$git_dir" rev-parse refs/snapshot/master^{commit} 2>/dev/null) || return 2
+        while IFS=$'\t' read -r sha ref; do
+            [ -n "$ref" ] || continue
+            parent_epic="epic-v1:$(taskdag_parse_delegation_v2_ref "$ref" | cut -f1)" || return 2
+            relevant=false
+            if [[ "$top_issue" = epic-v1:* ]]; then [ "$parent_epic" = "$top_issue" ] && relevant=true
+            else
+                [ "$(GIT_DIR="$git_dir" taskdag_epic_registry_binding "$parent_epic" "$parent_registry" "$parent_authority" | jq -r .projection.issueNumber)" = "$top_issue" ] && relevant=true
+            fi
+            if [ "$relevant" = true ]; then
+                candidate_record=$(GIT_DIR="$git_dir" taskdag_epic_registry_record "$parent_epic" "$parent_registry" "$parent_authority") || return 2
+                candidate_parent=$(jq -cS '{epicId,kind,rootCommit,projectedIssueNumber:.descriptor.projection.issueNumber}' <<<"$candidate_record") || return 2
+                if [ -n "$parent_record" ] && [ "$parent_record" != "$candidate_parent" ]; then return 2; fi
+                parent_record=$candidate_parent
+            fi
+            peer_repo=$(GIT_DIR="$git_dir" _xrepo_exact_trailer "$sha" Peer-Repo) || return 2
+            peer_info=$(_xrepo_capture_v2_peer_snapshot "$peer_repo" "$scratch/peer-$(printf '%s' "$peer_repo" | sha256sum | cut -d' ' -f1)") || return 2
+            IFS=$'\t' read -r peer_registry peer_authority peer_git <<<"$peer_info"
+            proof=$(GIT_DIR="$git_dir" _xrepo_normalize_delegation_v2 "$sha" "$ref" "$parent_registry" "$parent_authority" "$peer_registry" "$peer_authority" "$peer_git") || return 2
+            declaration=$(jq -r .declarationDigest <<<"$proof")
+            close_ref="refs/heads/tasks/delegated-close/v2/${parent_epic#epic-v1:}/$declaration"
+            if ! close_oid=$(git --git-dir="$git_dir" rev-parse -q --verify "$close_ref^{commit}" 2>/dev/null); then
+                [ "$relevant" = false ] || missing=true
+                continue
+            fi
+            rc=0
+            GIT_DIR="$git_dir" _xrepo_validate_delegated_close_v2 "$close_oid" "$close_ref" "$sha" "$ref" \
+                "$parent_registry" "$parent_authority" "$peer_registry" "$peer_authority" "$peer_git" || rc=$?
+            [ "$rc" -eq 0 ] || return 2
+            [ "$relevant" = false ] || any=true
+        done < <(git --git-dir="$git_dir" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/tasks/delegated/v2/)
+        while IFS=$'\t' read -r _ close_ref; do
+            [ -n "$close_ref" ] || continue
+            declaration=${close_ref#refs/heads/tasks/delegated-close/v2/}
+            git --git-dir="$git_dir" show-ref --verify --quiet \
+                "refs/heads/tasks/delegated/v2/$declaration" || return 2
+        done < <(git --git-dir="$git_dir" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/tasks/delegated-close/v2/)
+    fi
     [ "$any" = true ] || return 2
-    [ "$missing" = false ] || { printf 'waiting\n'; return 0; }
-    printf 'ready\n'
+    jq -ncS --arg status "$([ "$missing" = false ] && printf ready || printf waiting)" \
+        --argjson parent "${parent_record:-null}" '{parent:$parent,status:$status}'
+}
+
+# Select the sole legacy numeric writer route from a strict snapshot.
+# Typed-native roots are reader-ready but writer-gated. Refuse before callers
+# reconcile legacy closes, invoke the legacy ensure helper, author an object,
+# or emit a close. Waiting is valid here: reconciliation may supply its closes.
+_xrepo_legacy_writer_root_from_snapshot() { # snapshot-result issue-number
+    local snapshot=$1 issue=$2 kind projected adoption root
+    jq -e 'type=="object" and keys==["parent","status"] and
+      (.status=="ready" or .status=="waiting") and
+      (.parent==null or
+       (.parent|type=="object" and keys==["epicId","kind","projectedIssueNumber","rootCommit"]))' \
+        <<<"$snapshot" >/dev/null || return 2
+    [[ "$issue" =~ ^[1-9][0-9]*$ ]] || return 2
+    # No typed parent means this is exclusively the v1 numeric namespace.
+    # Its root remains live scheduling state, so callers derive it only after
+    # delegated-close reconciliation through the original ensure path.
+    [ "$(jq -r '.parent == null' <<<"$snapshot")" = false ] || return 0
+    kind=$(jq -r .parent.kind <<<"$snapshot")
+    [ "$kind" != native-epic-v1 ] || return 75
+    [ "$kind" = legacy-adoption-v1 ] || return 2
+    projected=$(jq -r .parent.projectedIssueNumber <<<"$snapshot")
+    root=$(jq -r .parent.rootCommit <<<"$snapshot")
+    [[ "$issue" =~ ^[1-9][0-9]*$ && "$projected" = "$issue" && "$root" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 2
+    # The validated registry record is the authority for adoption identity.
+    # Re-read it from the exact snapshot to prevent projection-only admission.
+    adoption=$(GIT_DIR="${_XREPO_STRICT_SNAPSHOT_GIT_DIR:?}" taskdag_epic_registry_record \
+        "$(jq -r .parent.epicId <<<"$snapshot")" refs/snapshot/registry refs/snapshot/master) || return 2
+    [ "$(jq -r .legacyAdoption.issueNumber <<<"$adoption")" = "$issue" ] \
+        && [ "$(jq -r .rootCommit <<<"$adoption")" = "$root" ] || return 2
+    printf '%s\n' "$root"
+}
+
+_xrepo_apply_ready_snapshot_close() { # snapshot-result issue issue-json snapshot-git
+    local snapshot=$1 issue=$2 issue_json=$3 snapshot_git=$4 root ensured
+    [ "$(jq -r .status <<<"$snapshot")" = ready ] || return 2
+    root=$(_XREPO_STRICT_SNAPSHOT_GIT_DIR="$snapshot_git" \
+        _xrepo_legacy_writer_root_from_snapshot "$snapshot" "$issue") || return $?
+    ensured=$(ISSUE_TITLE="$(jq -r .title "$issue_json")" \
+        ISSUE_AUTHOR="$(jq -r .user.login "$issue_json")" \
+        ISSUE_URL="$(jq -r .html_url "$issue_json")" \
+        ISSUE_BODY="$(jq -r '.body // ""' "$issue_json")" \
+        _xrepo_ensure_issue_epic "$issue") || return $?
+    if [ -n "$root" ]; then [ "$ensured" = "$root" ] || return 2; else root=$ensured; fi
+    _xrepo_watchdog_fence || return 2
+    _XREPO_STRICT_SNAPSHOT_GIT_DIR="$snapshot_git" \
+        taskdag_emit_origin_epic_close "$issue" "$root"
+}
+
+# Gate legacy reconciliation on one exact parent snapshot, then recapture and
+# revalidate after reconciliation before allowing the numeric parent writer.
+_xrepo_converge_completion_issue() { # issue parent-repo
+    local issue=$1 repo=$2 tmp snapshot status root ensured gate_rc
+    tmp=$(mktemp -d) || return 2
+    snapshot="$tmp/parent.git"
+    _xrepo_capture_parent_snapshot "$issue" "$snapshot" "$tmp/manifest" \
+        || { rm -rf "$tmp"; return 2; }
+    status=$(_xrepo_strict_snapshot_status "$snapshot" "$repo" "$issue" "$tmp/peers") \
+        || { rm -rf "$tmp"; return 2; }
+    root=$(_XREPO_STRICT_SNAPSHOT_GIT_DIR="$snapshot" \
+        _xrepo_legacy_writer_root_from_snapshot "$status" "$issue") || {
+        gate_rc=$?; rm -rf "$tmp"; return "$gate_rc";
+    }
+    rm -rf "$tmp"
+
+    _xrepo_reconcile_issue_delegated_closes "$issue" || return 2
+
+    tmp=$(mktemp -d) || return 2
+    snapshot="$tmp/parent.git"
+    _xrepo_capture_parent_snapshot "$issue" "$snapshot" "$tmp/manifest" \
+        || { rm -rf "$tmp"; return 2; }
+    status=$(_xrepo_strict_snapshot_status "$snapshot" "$repo" "$issue" "$tmp/peers") \
+        || { rm -rf "$tmp"; return 2; }
+    root=$(_XREPO_STRICT_SNAPSHOT_GIT_DIR="$snapshot" \
+        _xrepo_legacy_writer_root_from_snapshot "$status" "$issue") || {
+        gate_rc=$?; rm -rf "$tmp"; return "$gate_rc";
+    }
+    if [ "$(jq -r .status <<<"$status")" = ready ]; then
+        ensured=$(_xrepo_ensure_issue_epic "$issue") || { rm -rf "$tmp"; return 2; }
+        if [ -n "$root" ]; then
+            [ "$ensured" = "$root" ] || { rm -rf "$tmp"; return 2; }
+        else
+            root=$ensured
+        fi
+        _xrepo_watchdog_fence || { rm -rf "$tmp"; return 2; }
+        _XREPO_STRICT_SNAPSHOT_GIT_DIR="$snapshot" \
+            taskdag_emit_origin_epic_close "$issue" "$root" || {
+                gate_rc=$?; rm -rf "$tmp"; return "$gate_rc";
+            }
+    fi
+    rm -rf "$tmp"
 }
 
 # cmd_ingest_completion — record a peer-repo Satisfies: as completion
@@ -1711,9 +2064,10 @@ cmd_ingest_completion() {
 
 # Helper: return 0 if delegated child <rest> (= <owner>/<repo>/<peer>)
 # under epic <top_issue> has exact parent-authoritative close evidence.
-_xrepo_child_satisfied() {
-    local top_issue="$1" rest="$2"
+_xrepo_child_satisfied() { # legacy issue owner/repo/issue; v2 is strict-snapshot-only
+    local top_issue="$1" rest="$2" delegation_ref=${3:-}
     local owner="${rest%%/*}" trail="${rest#*/}" repo peer record delegation top_repo
+    [[ "$top_issue" != epic-v1:* ]] || return 2
     repo="${trail%%/*}"; peer="${trail#*/}"
     record=$(git rev-parse -q --verify "refs/heads/tasks/delegated-close/v1/${top_issue}/${owner}/${repo}/${peer}^{commit}" 2>/dev/null) || return 1
     delegation=$(git rev-parse -q --verify "refs/heads/tasks/delegated/${top_issue}/${owner}/${repo}/${peer}^{commit}" 2>/dev/null) || return 2
@@ -1729,41 +2083,60 @@ _xrepo_child_satisfied() {
 _xrepo_epic_status() {
     local top_issue="$1"
 
-    # Ensure we have a complete local view of delegated and strict close refs.
-    git fetch --prune origin \
-        "+refs/heads/tasks/delegated/${top_issue}/*:refs/heads/tasks/delegated/${top_issue}/*" \
-        "+refs/heads/tasks/delegated-close/v1/${top_issue}/*:refs/heads/tasks/delegated-close/v1/${top_issue}/*" \
-        >/dev/null 2>&1 || return 2
+    local v2_advertised
+    v2_advertised=$(git ls-remote --refs origin \
+        'refs/heads/tasks/delegated/v2/*' 'refs/heads/tasks/delegated-close/v2/*') || return 2
+    if [ -z "$v2_advertised" ]; then
+        # Preserve the original v1-only status contract byte-for-byte. In
+        # particular, an epic with no delegations is a successful no-op.
+        git fetch --prune origin \
+            "+refs/heads/tasks/delegated/${top_issue}/*:refs/heads/tasks/delegated/${top_issue}/*" \
+            "+refs/heads/tasks/delegated-close/v1/${top_issue}/*:refs/heads/tasks/delegated-close/v1/${top_issue}/*" \
+            >/dev/null 2>&1 || return 2
 
-    local missing=()
-    local any_delegated="false"
+        local missing=()
+        local any_delegated="false"
 
-    while read -r refname; do
-        any_delegated="true"
-        # refname = refs/heads/tasks/delegated/<top>/<owner>/<repo>/<peer>
-        local rest="${refname#refs/heads/tasks/delegated/${top_issue}/}"
-        # Satisfied? (any completion, or final-phase completion if gated)
-        if ! _xrepo_child_satisfied "$top_issue" "$rest"; then
-            # rest = <owner>/<repo>/<peer>; render as owner/repo#peer
-            local owner repo peer
-            owner="${rest%%/*}"
-            local trail="${rest#*/}"
-            repo="${trail%%/*}"
-            peer="${trail#*/}"
-            missing+=("${owner}/${repo}#${peer}")
+        while read -r refname; do
+            any_delegated="true"
+            local rest="${refname#refs/heads/tasks/delegated/${top_issue}/}"
+            if ! _xrepo_child_satisfied "$top_issue" "$rest"; then
+                local owner repo peer
+                owner="${rest%%/*}"
+                local trail="${rest#*/}"
+                repo="${trail%%/*}"
+                peer="${trail#*/}"
+                missing+=("${owner}/${repo}#${peer}")
+            fi
+        done < <(git for-each-ref --format='%(refname)' \
+            "refs/heads/tasks/delegated/${top_issue}/" 2>/dev/null)
+
+        if [ "$any_delegated" = "false" ]; then
+            _xrepo_log "epic has no delegations: ${top_issue}"
+            return 0
         fi
-    done < <(git for-each-ref --format='%(refname)' \
-        "refs/heads/tasks/delegated/${top_issue}/" 2>/dev/null)
 
-    if [ "$any_delegated" = "false" ]; then
-        _xrepo_log "epic has no delegations: ${top_issue}"
+        if [ ${#missing[@]} -eq 0 ]; then
+            echo "epic ready-to-close: ${top_issue}"
+        else
+            echo "epic still waiting: ${top_issue} missing $(IFS=,; echo "${missing[*]}")"
+        fi
         return 0
     fi
 
-    if [ ${#missing[@]} -eq 0 ]; then
-        echo "epic ready-to-close: ${top_issue}"
-    else
-        echo "epic still waiting: ${top_issue} missing $(IFS=,; echo "${missing[*]}")"
+    # Status uses the same normalized, isolated authority snapshot as close.
+    # Keep the legacy rendering contract while refusing to infer from mutable
+    # tracking refs when v2 obligations exist.
+    local status_tmp status_snapshot status_result
+    status_tmp=$(mktemp -d) || return 2; status_snapshot="$status_tmp/parent.git"
+    _xrepo_capture_parent_snapshot "$top_issue" "$status_snapshot" "$status_tmp/manifest" \
+        || { rm -rf "$status_tmp"; return 2; }
+    status_result=$(_xrepo_strict_snapshot_status "$status_snapshot" \
+        "$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')" "$top_issue" "$status_tmp/peers") \
+        || { rm -rf "$status_tmp"; return 2; }
+    rm -rf "$status_tmp"
+    if [ "$(jq -r .status <<<"$status_result")" = ready ]; then echo "epic ready-to-close: ${top_issue}"
+    else echo "epic still waiting: ${top_issue} missing delegated child obligations"
     fi
 }
 
@@ -2182,14 +2555,7 @@ _xrepo_ingest_observed_comment() {
         fi
     fi
     if [ "$winner_disposition" = completion ] && [ "${_XREPO_DEFER_CONVERGENCE:-false}" != true ]; then
-        local status_line root
-        _xrepo_reconcile_issue_delegated_closes "$issue" || return 2
-        status_line="$(_xrepo_epic_status "$issue" | tail -n1)"
-        if [[ "$status_line" =~ ^epic[[:space:]]ready-to-close: ]]; then
-            root=$(_xrepo_ensure_issue_epic "$issue") || return 2
-            _xrepo_watchdog_fence || return 2
-            taskdag_emit_origin_epic_close "$issue" "$root" || return $?
-        fi
+        _xrepo_converge_completion_issue "$issue" "$repo" || return $?
     fi
 }
 
@@ -2418,7 +2784,14 @@ EOF
                 || { _rc_fail snapshot "" "" "reconciliation index changed during validation"; fatal=true; }
         fi
     fi
-    listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 2>"$tmp/git.err") || snapshot_rc=$?
+    listing=$(timeout "${max_seconds}s" git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*' 'refs/heads/tasks/delegated-close/v2/*' 2>"$tmp/git.err") || snapshot_rc=$?
+    if [ "$snapshot_rc" -eq 0 ] && _xrepo_v2_namespaces_present "$listing"; then
+        local v2_parent_authority
+        v2_parent_authority=$(git ls-remote --refs origin refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF") || snapshot_rc=$?
+        [ "$snapshot_rc" -ne 0 ] || [ "$(sed '/^$/d' <<<"$v2_parent_authority" | wc -l)" -eq 2 ] || snapshot_rc=2
+        [ "$snapshot_rc" -ne 0 ] || listing+=$'\n'"$v2_parent_authority"
+    fi
+    [ "$snapshot_rc" -ne 0 ] || _xrepo_validate_v2_namespace_listing "$listing" || snapshot_rc=2
     if [ "$snapshot_rc" -ne 0 ]; then
         if [ "$snapshot_rc" -eq 124 ]; then terminal_rc=124; _rc_fail snapshot "" "" "time ceiling reached"
         else _rc_fail snapshot "" "" "$(cat "$tmp/git.err")"
@@ -2443,7 +2816,7 @@ EOF
         fi
         awk -F '\t' 'NR==FNR{old[$2]=$1;next} !($2 in old){print}' "$index_dir/manifest.tsv" "$tmp/manifest" >"$tmp/additions"
     else cp "$tmp/manifest" "$tmp/additions"; fi
-    if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
+    if awk 'NF && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated\/v2\/[0-9a-f]{64}\/[0-9a-f]{64}$/ && $2 !~ /^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2 !~ /^refs\/heads\/tasks\/delegated-close\/v2\/[0-9a-f]{64}\/[0-9a-f]{64}$/ && $2 !~ /^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ && $2!="refs/heads/master" && $2!="refs/heads/tasks/v1/epics" {exit 1}' "$tmp/manifest"; then :; else _rc_fail snapshot "" "" "malformed ref in advertised namespace"; fatal=true; fi
     printf '%s\n' "$listing" | awk '$2 ~ /^refs\/heads\/gh\/comments\/[1-9][0-9]*\/[1-9][0-9]*$/ {print $2}' >"$tmp/receipts"
     snapshot_rc=0
     git init -q --bare "$tmp/snapshot.git" && git --git-dir="$tmp/snapshot.git" remote add origin "$(git remote get-url origin)" || snapshot_rc=$?
@@ -2454,6 +2827,15 @@ EOF
     fi
     local snapshot_fetch_manifest="$tmp/additions"
     [ "$cache_bootstrap" = false ] || snapshot_fetch_manifest="$tmp/manifest"
+    if [ "$cache_bootstrap" = false ] && awk -F '\t' '$2 ~ /^refs\/heads\/tasks\/(delegated|delegated-close)\/v2\// {found=1} END{exit !found}' "$tmp/manifest"; then
+        # A close can arrive after its declaration was checkpointed. Fetch the
+        # complete v2 keyspace plus its exact parent authority so semantic pair
+        # validation never trusts namespace pairing or stale local objects.
+        awk -F '\t' '$2 ~ /^refs\/heads\/tasks\/(delegated|delegated-close)\/v2\// || $2=="refs/heads/master" || $2=="refs/heads/tasks/v1/epics"' \
+            "$tmp/manifest" >"$tmp/v2-validation-manifest"
+        cat "$tmp/additions" "$tmp/v2-validation-manifest" | LC_ALL=C sort -t $'\t' -k2,2 -u >"$tmp/snapshot-fetch-manifest"
+        snapshot_fetch_manifest="$tmp/snapshot-fetch-manifest"
+    fi
     if [ "$fatal" = false ] && [ -s "$snapshot_fetch_manifest" ]; then
         snapshot_rc=0
         local -a snapshot_refspecs=(); local addition_sha addition_ref addition_n=0
@@ -2492,7 +2874,7 @@ EOF
         [ -z "${TASKDAG_VALIDATION_WORK_COUNTER:-}" ] || printf 'checkpoint-bootstrap\tauthority\n' >>"$TASKDAG_VALIDATION_WORK_COUNTER"
         if [ "$fatal" = false ]; then
             local bootstrap_listing
-            bootstrap_listing=$(git ls-remote --refs origin "$_XREPO_RECONCILE_INDEX_REF" 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*') \
+            bootstrap_listing=$(_xrepo_reconcile_authority_advertisement; git ls-remote --refs origin "$_XREPO_RECONCILE_INDEX_REF") \
                 || { _rc_fail snapshot "" "" "cannot re-advertise bounded checkpoint authority"; fatal=true; }
             [ "$fatal" = true ] || [ "$(awk -v r="$_XREPO_RECONCILE_INDEX_REF" '$2==r{print $1}' <<<"$bootstrap_listing")" = "$index_old" ] \
                 || { _rc_fail snapshot "" "" "reconciliation index changed during bounded bootstrap"; fatal=true; }
@@ -2518,8 +2900,50 @@ EOF
             jq --arg ref "$ref" --argjson proof "$proof" '.delegations[$ref]=$proof' "$tmp/proofs.json" >"$tmp/proofs.next" \
                 && mv "$tmp/proofs.next" "$tmp/proofs.json" || { _rc_fail snapshot "$delegated_issue" "" "cannot store delegation proof"; fatal=true; break; }
             printf '%s\n' "$delegated_issue" >>"$tmp/converge-issues"
+        elif [[ "$ref" =~ ^refs/heads/tasks/delegated/v2/([0-9a-f]{64})/([0-9a-f]{64})$ ]]; then
+            local v2_parent_registry v2_parent_master v2_peer_repo v2_peer_info v2_peer_registry v2_peer_master v2_peer_git v2_proof v2_issue
+            v2_parent_registry=$(awk -F '\t' -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' "$tmp/manifest")
+            v2_parent_master=$(awk -F '\t' '$2=="refs/heads/master"{print $1}' "$tmp/manifest")
+            v2_peer_repo=$(GIT_DIR="$tmp/snapshot.git" _xrepo_exact_trailer "$sha" Peer-Repo) \
+                || { _rc_fail snapshot "" "" "malformed v2 delegation fact"; fatal=true; break; }
+            v2_peer_info=$(_xrepo_capture_v2_peer_snapshot "$v2_peer_repo" "$tmp/v2-peer-${BASH_REMATCH[2]}.git") \
+                || { _rc_fail snapshot "" "" "indeterminate v2 peer authority"; fatal=true; break; }
+            IFS=$'\t' read -r v2_peer_registry v2_peer_master v2_peer_git <<<"$v2_peer_info"
+            v2_proof=$(GIT_DIR="$tmp/snapshot.git" _xrepo_normalize_delegation_v2 "$sha" "$ref" \
+                "$v2_parent_registry" "$v2_parent_master" "$v2_peer_registry" "$v2_peer_master" "$v2_peer_git") \
+                || { _rc_fail snapshot "" "" "malformed v2 delegation fact"; fatal=true; break; }
+            v2_issue=$(jq -r .parentIssue <<<"$v2_proof")
+            [[ "$v2_issue" =~ ^[1-9][0-9]*$ ]] || { _rc_fail snapshot "" "" "v2 parent projection is malformed"; fatal=true; break; }
+            printf '%s\n' "$v2_issue" >>"$tmp/converge-issues"
         fi
     done <"$validation_manifest"
+    # Validate every present v2 declaration/close pair against the same exact
+    # parent registry/master advertisement captured in this manifest and one
+    # isolated peer registry/master snapshot. Missing closes remain waiting;
+    # orphan closes were rejected by namespace validation above.
+    if [ "$fatal" = false ]; then
+        local pair_parent_registry pair_parent_master pair_peer_repo pair_peer_info
+        local pair_peer_registry pair_peer_master pair_peer_git pair_close_ref pair_close_sha pair_key
+        pair_parent_registry=$(awk -F '\t' -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' "$tmp/manifest")
+        pair_parent_master=$(awk -F '\t' '$2=="refs/heads/master"{print $1}' "$tmp/manifest")
+        while IFS=$'\t' read -r sha ref; do
+            [[ "$ref" =~ ^refs/heads/tasks/delegated/v2/([0-9a-f]{64})/([0-9a-f]{64})$ ]] || continue
+            pair_key="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+            pair_close_ref="refs/heads/tasks/delegated-close/v2/$pair_key"
+            pair_close_sha=$(awk -F '\t' -v r="$pair_close_ref" '$2==r{print $1}' "$tmp/manifest")
+            [ -n "$pair_close_sha" ] || continue
+            pair_peer_repo=$(GIT_DIR="$tmp/snapshot.git" _xrepo_exact_trailer "$sha" Peer-Repo) \
+                || { _rc_fail snapshot "" "" "malformed v2 delegation/close pair"; fatal=true; break; }
+            pair_peer_info=$(_xrepo_capture_v2_peer_snapshot "$pair_peer_repo" "$tmp/v2-pair-peer-${BASH_REMATCH[2]}.git") \
+                || { _rc_fail snapshot "" "" "indeterminate v2 pair peer authority"; fatal=true; break; }
+            IFS=$'\t' read -r pair_peer_registry pair_peer_master pair_peer_git <<<"$pair_peer_info"
+            GIT_DIR="$tmp/snapshot.git" _xrepo_validate_delegated_close_v2 \
+                "$pair_close_sha" "$pair_close_ref" "$sha" "$ref" \
+                "$pair_parent_registry" "$pair_parent_master" \
+                "$pair_peer_registry" "$pair_peer_master" "$pair_peer_git" \
+                || { _rc_fail snapshot "" "" "malformed v2 delegation/close pair"; fatal=true; break; }
+        done <"$tmp/manifest"
+    fi
     # Delegation proofs determine the peer set. Advance each peer cursor once
     # before validating dependent close facts, so indexed operation never
     # falls back to a tip-to-genesis first-parent scan.
@@ -2590,7 +3014,7 @@ EOF
     # the advertisement immediately before the create/advance CAS.
     if [ "$fatal" = false ] && [ "$dry" = false ]; then
         local listing2 index_new push_rc=0
-        listing2=$(git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*') || { _rc_fail index "" "" "cannot re-advertise before index CAS"; fatal=true; }
+        listing2=$(_xrepo_reconcile_authority_advertisement) || { _rc_fail index "" "" "cannot re-advertise before index CAS"; fatal=true; }
         _xrepo_write_sorted_listing "$listing2" "$tmp/manifest2"
         LC_ALL=C sort -t $'\t' -k2,2 "$tmp/manifest2" -o "$tmp/manifest2"
         cmp -s "$tmp/manifest" "$tmp/manifest2" || { _rc_fail index "" "" "coordination refs changed while building index; retry after they settle"; fatal=true; }
@@ -2670,23 +3094,47 @@ EOF
     _rc_fresh_issue_status() {
         local ci="$1"
         local dir="$tmp/converge-${ci}.git" manifest="$tmp/converge-${ci}.manifest" fetched="$tmp/converge-${ci}.fetched"
-        local advertised
+        local advertised has_v2=false oid ref destination
+        local -a exact_refspecs=()
         rm -rf "$dir"
         advertised=$(git ls-remote --refs origin \
-            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*") || return $?
+            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*" \
+            'refs/heads/tasks/delegated/v2/*' 'refs/heads/tasks/delegated-close/v2/*') || return $?
+        _xrepo_v2_namespaces_present "$advertised" && has_v2=true
+        if [ "$has_v2" = true ]; then
+            local authority_ad
+            authority_ad=$(git ls-remote --refs origin refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF") || return $?
+            [ "$(printf '%s\n' "$authority_ad" | sed '/^$/d' | wc -l)" -eq 2 ] || return 2
+            advertised+=$'\n'"$authority_ad"
+        fi
+        _xrepo_validate_v2_namespace_listing "$advertised" || return 2
         _xrepo_write_sorted_listing "$advertised" "$manifest"
         if [ ! -s "$manifest" ]; then printf '%s\n' none; return 0; fi
         git init -q --bare "$dir" && git --git-dir="$dir" remote add origin "$(git remote get-url origin)" || return $?
-        if [ -s "$manifest" ]; then
-            git --git-dir="$dir" fetch -q --no-tags origin \
-                "+refs/heads/tasks/delegated/${ci}/*:refs/heads/tasks/delegated/${ci}/*" \
-                "+refs/heads/tasks/delegated-close/v1/${ci}/*:refs/heads/tasks/delegated-close/v1/${ci}/*" || return $?
-        fi
-        git --git-dir="$dir" for-each-ref --format='%(objectname)%09%(refname)' \
-            "refs/heads/tasks/delegated/${ci}/" "refs/heads/tasks/delegated-close/v1/${ci}/" | LC_ALL=C sort >"$fetched" \
-            || return $?
+        while IFS=$'\t' read -r oid ref; do
+            destination=$ref
+            [ "$ref" != refs/heads/master ] || destination=refs/snapshot/master
+            [ "$ref" != "$TASKDAG_EPIC_REGISTRY_REF" ] || destination=refs/snapshot/registry
+            exact_refspecs+=("+$oid:$destination")
+        done <"$manifest"
+        git --git-dir="$dir" fetch -q --no-tags origin "${exact_refspecs[@]}" || return $?
+        git --git-dir="$dir" for-each-ref --format='%(objectname)%09%(refname)' refs/heads/tasks/delegated/ refs/heads/tasks/delegated-close/ \
+            | LC_ALL=C sort >"$fetched" || return $?
+        [ "$has_v2" = false ] || {
+            printf '%s\t%s\n' "$(git --git-dir="$dir" rev-parse refs/snapshot/master)" refs/heads/master >>"$fetched"
+            printf '%s\t%s\n' "$(git --git-dir="$dir" rev-parse refs/snapshot/registry)" "$TASKDAG_EPIC_REGISTRY_REF" >>"$fetched"
+            LC_ALL=C sort -t $'\t' -k2,2 "$fetched" -o "$fetched"
+        }
         cmp -s "$manifest" "$fetched" || return 2
-        _xrepo_strict_snapshot_status "$dir" "$repo" "$ci"
+        local readback
+        readback=$(git ls-remote --refs origin \
+            "refs/heads/tasks/delegated/${ci}/*" "refs/heads/tasks/delegated-close/v1/${ci}/*" \
+            'refs/heads/tasks/delegated/v2/*' 'refs/heads/tasks/delegated-close/v2/*' \
+            $([ "$has_v2" = true ] && printf '%s ' refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF")) || return 2
+        _xrepo_validate_v2_namespace_listing "$readback" || return 2
+        _xrepo_write_sorted_listing "$readback" "$tmp/converge-${ci}.readback"
+        cmp -s "$manifest" "$tmp/converge-${ci}.readback" || return 2
+        _xrepo_strict_snapshot_status "$dir" "$repo" "$ci" "$tmp/converge-${ci}-peers"
     }
     local retry_queue="$tmp/retry-queue" retry_unvisited="$tmp/retry-unvisited" retry_failed="$tmp/retry-failed"
     : >"$retry_queue"; : >"$retry_unvisited"; : >"$retry_failed"
@@ -2722,9 +3170,27 @@ EOF
             if jq -e '.state == "closed"' "$tmp/issue-${converge_issue}.json" >/dev/null; then
                 continue
             fi
+            # Match immediate completion ingestion: capture and gate the exact
+            # parent identity before reconciliation can create close facts.
+            converge_rc=0; strict_status=$(_rc_fresh_issue_status "$converge_issue") || converge_rc=$?
+            if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
+                terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124
+            elif [ "$converge_rc" -ne 0 ]; then
+                _rc_fail convergence "$converge_issue" "" "cannot obtain a valid pre-reconciliation delegation/completion snapshot"; printf '%s\n' "$converge_issue" >>"$retry_failed"; continue
+            fi
+            [ "$strict_status" != none ] || continue
+            converge_rc=0
+            _XREPO_STRICT_SNAPSHOT_GIT_DIR="$tmp/converge-${converge_issue}.git" \
+                _xrepo_legacy_writer_root_from_snapshot "$strict_status" "$converge_issue" >/dev/null || converge_rc=$?
+            if [ "$converge_rc" -eq 75 ]; then
+                _rc_fail convergence "$converge_issue" "" "typed epic close writer is gated"; printf '%s\n' "$converge_issue" >>"$retry_failed"; continue
+            elif [ "$converge_rc" -ne 0 ]; then
+                _rc_fail convergence "$converge_issue" "" "pre-reconciliation parent identity is malformed"; printf '%s\n' "$converge_issue" >>"$retry_failed"; continue
+            fi
             converge_rc=0
             _XREPO_INDEX_PROOFS_FILE="$tmp/proofs.json" _XREPO_INDEX_PEERS_FILE="$tmp/peers.json" \
-                _xrepo_reconcile_issue_delegated_closes "$converge_issue" || converge_rc=$?
+                _xrepo_reconcile_issue_delegated_closes "$converge_issue" \
+                >"$tmp/reconcile-${converge_issue}.out" || converge_rc=$?
             if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
                 terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124
             elif [ "$converge_rc" -ne 0 ]; then
@@ -2736,25 +3202,15 @@ EOF
             elif [ "$converge_rc" -ne 0 ]; then
                 _rc_fail convergence "$converge_issue" "" "cannot obtain a valid fresh delegation/completion snapshot"; printf '%s\n' "$converge_issue" >>"$retry_failed"; continue
             fi
-            [ "$strict_status" = ready ] || continue
+            [ "$(jq -r .status <<<"$strict_status")" = ready ] || continue
             converge_rc=0
-            root=$(ISSUE_TITLE="$(jq -r .title "$tmp/issue-${converge_issue}.json")" \
-                ISSUE_AUTHOR="$(jq -r .user.login "$tmp/issue-${converge_issue}.json")" \
-                ISSUE_URL="$(jq -r .html_url "$tmp/issue-${converge_issue}.json")" \
-                ISSUE_BODY="$(jq -r '.body // ""' "$tmp/issue-${converge_issue}.json")" \
-                _xrepo_ensure_issue_epic "$converge_issue") || converge_rc=$?
-            if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
+            _xrepo_apply_ready_snapshot_close "$strict_status" "$converge_issue" \
+                "$tmp/issue-${converge_issue}.json" "$tmp/converge-${converge_issue}.git" \
+                >"$tmp/close-${converge_issue}.out" || converge_rc=$?
+            if [ "$converge_rc" -eq 75 ]; then
+                _rc_fail convergence "$converge_issue" "" "typed epic close writer is gated"; printf '%s\n' "$converge_issue" >>"$retry_failed"; continue
+            elif [ "$converge_rc" -eq 124 ] || ! _rc_time; then
                 _rc_timeout convergence "$converge_issue" ""; return 124
-            elif [ "$converge_rc" -ne 0 ]; then
-                _rc_fail convergence "$converge_issue" "" "cannot resolve epic root"; printf '%s\n' "$converge_issue" >>"$retry_failed"; continue
-            fi
-            if ! _xrepo_watchdog_fence; then _rc_fail convergence "$converge_issue" "" "watchdog lease lost"; fatal=true; return 2; fi
-            converge_rc=0
-            _XREPO_STRICT_SNAPSHOT_GIT_DIR="$tmp/converge-${converge_issue}.git" \
-                taskdag_emit_origin_epic_close "$converge_issue" "$root" >"$tmp/close-${converge_issue}.out" \
-                || converge_rc=$?
-            if [ "$converge_rc" -eq 124 ] || ! _rc_time; then
-                terminal_rc=124; _rc_fail convergence "$converge_issue" "" "time ceiling reached"; fatal=true; return 124
             elif [ "$converge_rc" -ne 0 ]; then
                 _rc_fail convergence "$converge_issue" "" "strict epic close failed"; printf '%s\n' "$converge_issue" >>"$retry_failed"
             fi
@@ -2896,7 +3352,7 @@ EOF
     # deliberately leave the queue; failed/deferred work remains durable.
     if [ "$dry" = false ] && [ "$fatal" = false ]; then
         local ack_new ack_rc=0 final_listing
-        final_listing=$(git ls-remote --refs origin 'refs/heads/gh/comments/*' 'refs/heads/tasks/completions/*' 'refs/heads/tasks/delegated/*' 'refs/heads/tasks/delegated-close/v1/*') \
+        final_listing=$(_xrepo_reconcile_authority_advertisement) \
             || { _rc_fail index "" "" "cannot obtain final exact advertisement"; fatal=true; }
         if [ "$fatal" = false ]; then
             _xrepo_write_sorted_listing "$final_listing" "$tmp/final-manifest"
@@ -3024,10 +3480,14 @@ cmd_close_epic() {
 
     # Idempotency requires the exact root-parent + Closes-Epic trailer pair,
     # not a trailer-only match or ordinary completion merge parentage.
-    if epic_already_closed_on "$top_issue" "$epic_sha" "origin/master"; then
-        _xrepo_log "close-epic: epic ${top_issue} already closed on master"
-        return 0
-    fi
+    local close_rc=0
+    epic_already_closed_on "$top_issue" "$epic_sha" "origin/master" || close_rc=$?
+    case "$close_rc" in
+        0) _xrepo_log "close-epic: epic ${top_issue} already closed on master"; return 0 ;;
+        1) ;;
+        2) return 2 ;;
+        *) return 2 ;;
+    esac
 
     # No durable close exists, so creating one still requires the authoritative
     # live pending root. gh/issues preserves identity but is never permission to
@@ -3046,53 +3506,41 @@ cmd_close_epic() {
     # Enumerate delegated children and confirm each has at least one completion.
     # Reconciliation supplies a freshly advertised, isolated snapshot so a
     # delegation created during a long scan cannot be missed at close time.
+    local strict_status writer_root writer_snapshot close_tmp=""
     if [ -n "${_XREPO_STRICT_SNAPSHOT_GIT_DIR:-}" ]; then
-        local strict_status
+        writer_snapshot="$_XREPO_STRICT_SNAPSHOT_GIT_DIR"
         strict_status=$(_xrepo_strict_snapshot_status "$_XREPO_STRICT_SNAPSHOT_GIT_DIR" \
-            "$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')" "$top_issue") || {
+            "$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')" "$top_issue" \
+            "${_XREPO_STRICT_SNAPSHOT_SCRATCH:-${_XREPO_STRICT_SNAPSHOT_GIT_DIR}.peers}") || {
             _xrepo_die "close-epic: strict delegation/completion snapshot is invalid"
             return 2
         }
-        [ "$strict_status" = ready ] || {
+        [ "$(jq -r .status <<<"$strict_status")" = ready ] || {
             _xrepo_die "close-epic: epic ${top_issue} is still waiting in the strict snapshot"
             return 3
         }
     else
-        git fetch --prune origin \
-            "+refs/heads/tasks/delegated/${top_issue}/*:refs/heads/tasks/delegated/${top_issue}/*" \
-            "+refs/heads/tasks/delegated-close/v1/${top_issue}/*:refs/heads/tasks/delegated-close/v1/${top_issue}/*" \
-            >/dev/null 2>&1 || {
-                _xrepo_die "close-epic: cannot refresh strict delegated-close authority"
-                return 2
-            }
-
-        local missing=()
-        local any_delegated="false"
-
-        while read -r refname; do
-            any_delegated="true"
-            local rest="${refname#refs/heads/tasks/delegated/${top_issue}/}"
-            if ! _xrepo_child_satisfied "$top_issue" "$rest"; then
-                local owner repo peer trail
-                owner="${rest%%/*}"
-                trail="${rest#*/}"
-                repo="${trail%%/*}"
-                peer="${trail#*/}"
-                missing+=("${owner}/${repo}#${peer}")
-            fi
-        done < <(git for-each-ref --format='%(refname)' \
-            "refs/heads/tasks/delegated/${top_issue}/" 2>/dev/null)
-
-        if [ "$any_delegated" = "false" ]; then
-            _xrepo_die "close-epic: epic ${top_issue} has no delegated children to gate close on"
-            return 3
-        fi
-
-        if [ ${#missing[@]} -ne 0 ]; then
-            _xrepo_die "close-epic: epic ${top_issue} still waiting on $(IFS=,; echo "${missing[*]}")"
-            return 3
-        fi
+        local close_snapshot close_manifest close_scratch
+        close_tmp=$(mktemp -d) || return 2; close_snapshot="$close_tmp/parent.git"; close_manifest="$close_tmp/manifest"; close_scratch="$close_tmp/peers"
+        _xrepo_capture_parent_snapshot "$top_issue" "$close_snapshot" "$close_manifest" || { rm -rf "$close_tmp"; _xrepo_die "close-epic: cannot capture exact delegation authority"; return 2; }
+        strict_status=$(_xrepo_strict_snapshot_status "$close_snapshot" "$(printf '%s' "$(_xrepo_current_repo)" | tr '[:upper:]' '[:lower:]')" "$top_issue" "$close_scratch") \
+            || { rm -rf "$close_tmp"; _xrepo_die "close-epic: delegation authority is malformed or indeterminate"; return 2; }
+        [ "$(jq -r .status <<<"$strict_status")" = ready ] || { rm -rf "$close_tmp"; _xrepo_die "close-epic: epic ${top_issue} is still waiting in the strict snapshot"; return 3; }
+        writer_snapshot="$close_snapshot"
     fi
+
+    writer_root=$(_XREPO_STRICT_SNAPSHOT_GIT_DIR="$writer_snapshot" \
+        _xrepo_legacy_writer_root_from_snapshot "$strict_status" "$top_issue") || {
+        local gate_rc=$?; [ -z "$close_tmp" ] || rm -rf "$close_tmp"; return "$gate_rc";
+    }
+    # parent:null is the v1-only route; epic_sha is the already refreshed
+    # authoritative numeric pending root at this point.
+    if [ -n "$writer_root" ]; then
+        [ "$writer_root" = "$epic_sha" ] || { [ -z "$close_tmp" ] || rm -rf "$close_tmp"; return 2; }
+    else
+        writer_root=$epic_sha
+    fi
+    [ -z "$close_tmp" ] || rm -rf "$close_tmp"
 
     echo "all delegated children satisfied for $(_xrepo_current_repo)#${top_issue}"
 
@@ -3114,10 +3562,11 @@ cmd_close_epic() {
     # Re-check the exact tip we will parent on: if the close landed before this
     # fetch, observe it here; if it lands after, our push rejects non-FF and a
     # retry observes it. Either case prevents duplicate close facts.
-    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip"; then
-        _xrepo_log "close-epic: epic ${top_issue} already closed on master (concurrent close)"
-        return 0
-    fi
+    close_rc=0; epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip" || close_rc=$?
+    case "$close_rc" in
+        0) _xrepo_log "close-epic: epic ${top_issue} already closed on master (concurrent close)"; return 0 ;;
+        1) ;; 2) return 2 ;; *) return 2 ;;
+    esac
 
     if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
         _xrepo_die "close-epic: child-epic materialisation intent for #${top_issue} is not durably delegated yet"
@@ -3295,10 +3744,12 @@ EOF
     # ── 2. Idempotency: already closed on master (epic-as-parent + trailer)? ──
     # Cheap idempotency short-circuit BEFORE the confirmation prompt so a
     # re-run of an already-closed epic is a silent no-op (never prompts).
-    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_ref"; then
-        _xrepo_log "close-ops-epic: epic #${top_issue} already closed on ${master_ref}; nothing to do."
-        return 0
-    fi
+    local close_rc=0
+    epic_already_closed_on "$top_issue" "$epic_sha" "$master_ref" || close_rc=$?
+    case "$close_rc" in
+        0) _xrepo_log "close-ops-epic: epic #${top_issue} already closed on ${master_ref}; nothing to do."; return 0 ;;
+        1) ;; 2) return 2 ;; *) return 2 ;;
+    esac
 
     # ── 3. Explicit confirmation ────────────────────────────────────────
     # Confirm BEFORE the substantive guards (children / delegated / blocked /
@@ -3402,10 +3853,11 @@ EOF
     # master_tip and is caught here; any close that lands AFTER this fetch
     # makes our push a non-fast-forward rejection that a re-run converges
     # from. Together those two cases guarantee at most one close merge.
-    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip"; then
-        _xrepo_log "close-ops-epic: epic #${top_issue} already closed on master (concurrent close); nothing to do."
-        return 0
-    fi
+    close_rc=0; epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip" || close_rc=$?
+    case "$close_rc" in
+        0) _xrepo_log "close-ops-epic: epic #${top_issue} already closed on master (concurrent close); nothing to do."; return 0 ;;
+        1) ;; 2) return 2 ;; *) return 2 ;;
+    esac
 
     if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
         _xrepo_die "close-ops-epic: child-epic materialisation intent for #${top_issue} is not durably delegated; refusing to close."
@@ -3562,10 +4014,12 @@ EOF
         "+refs/heads/tasks/pending/${top_issue}:refs/heads/tasks/pending/${top_issue}" \
         >/dev/null 2>&1 || true
 
-    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_ref"; then
-        _xrepo_log "close-completed-epic: epic #${top_issue} already closed on ${master_ref}; nothing to do."
-        return 0
-    fi
+    local close_rc=0
+    epic_already_closed_on "$top_issue" "$epic_sha" "$master_ref" || close_rc=$?
+    case "$close_rc" in
+        0) _xrepo_log "close-completed-epic: epic #${top_issue} already closed on ${master_ref}; nothing to do."; return 0 ;;
+        1) ;; 2) return 2 ;; *) return 2 ;;
+    esac
 
     if [ "$assume_yes" != true ]; then
         if [ -t 0 ] && [ -t 1 ]; then
@@ -3647,10 +4101,11 @@ EOF
     local master_tip master_tree
     git fetch --quiet origin '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1 || true
     master_tip="$(git rev-parse --verify origin/master 2>/dev/null || git rev-parse --verify master)"
-    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip"; then
-        _xrepo_log "close-completed-epic: epic #${top_issue} already closed on master (concurrent close); nothing to do."
-        return 0
-    fi
+    close_rc=0; epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip" || close_rc=$?
+    case "$close_rc" in
+        0) _xrepo_log "close-completed-epic: epic #${top_issue} already closed on master (concurrent close); nothing to do."; return 0 ;;
+        1) ;; 2) return 2 ;; *) return 2 ;;
+    esac
     if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
         _xrepo_die "close-completed-epic: child-epic materialisation intent for #${top_issue} is not durably delegated; refusing to close."
         return 3

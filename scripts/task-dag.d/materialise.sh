@@ -28,9 +28,9 @@ _taskdag_materialise_no_duplicate_keys() {
 _taskdag_materialise_sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 _taskdag_materialise_sha256_text() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
 
-# Pure schema-1 protocol for the future cross-repository materialise-and-claim
-# writer. These providers validate/serialize reviewed bytes only; they perform
-# no GitHub, git-object, ref, checkout, or durable-state mutation.
+# Pure reader protocol for the future cross-repository materialise-and-claim
+# writer. Schema 1 remains the byte-stable legacy dialect; schema 2 is dormant
+# validation only. These providers perform no external or durable mutation.
 _taskdag_validate_materialise_claim_declaration_file() { # file
     jq -e '
       def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
@@ -71,6 +71,10 @@ taskdag_serialize_materialise_claim_declaration() {
 }
 
 _taskdag_validate_materialise_target_state_file() { # file
+    if [ "$(jq -r '.schema // 0' "$1")" = 2 ]; then
+        _taskdag_validate_materialise_target_state_v2_file "$1"
+        return
+    fi
     jq -e '
       def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
       def activation: type=="object" and keys==["activationCommit","authorityTip","digest","epoch","guardVersion","minimumCompatibleTaskDagCommit","origin","runtimeCommit","state"] and
@@ -114,6 +118,63 @@ _taskdag_validate_materialise_target_state_file() { # file
         && [[ "$(jq -r .leafCommit "$1")" == "$leaf_ref_suffix"* ]]
 }
 
+_taskdag_materialise_v2_forbidden_identity() { # file
+    jq -e '
+      [paths(scalars) as $p | {key:($p[-1]|tostring),value:getpath($p)}] |
+      all(.[];
+        (.key|test("^(issue(Number|NodeId|Url|Ref)|pendingRef)$";"i")|not) and
+        ((.value|type)!="string" or
+          (.value|test("(^|/)gh/issues/|(^|/)tasks/pending/[0-9]+$|/issues/[0-9]+$";"i")|not)))
+    ' "$1" >/dev/null
+}
+
+_taskdag_validate_materialise_target_state_v2_file() { # file
+    local epic registry master root_ref record descriptor canonical readback_digest leaf_suffix root claim_ref claim leaf claimer host pid
+    declare -F taskdag_epic_root_ref >/dev/null \
+        && declare -F taskdag_canonicalize_epic_root_descriptor >/dev/null \
+        && declare -F taskdag_epic_registry_record >/dev/null \
+        && declare -F taskdag_validate_source_claim >/dev/null || return 1
+    _taskdag_materialise_v2_forbidden_identity "$1" || return 1
+    jq -e '
+      def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+      . as $s | type=="object" and .schema==2 and
+      keys==["advertisementDigest","claimCommit","epicId","leafCommit","leafRef","masterCommit","operationId","readback","registryCommit","rootCommit","rootRef","schema","sourceClaim","status"] and
+      .status=="target-tuple-durable-linkage-pending" and
+      (.operationId|test("^[0-9a-f]{64}$")) and (.advertisementDigest|test("^[0-9a-f]{64}$")) and
+      (.epicId|test("^epic-v1:[0-9a-f]{64}$")) and
+      all(.registryCommit,.masterCommit,.rootCommit,.leafCommit,.claimCommit;oid) and
+      (.sourceClaim|type=="object" and keys==["claimer","host","pid"] and
+        (.claimer|type=="string" and length>0) and (.host|type=="string" and length>0) and
+        (.pid|type=="number" and floor==. and .>0 and .<=9007199254740991)) and
+      (.rootRef|test("^refs/heads/tasks/pending/epic-v1/[0-9a-f]{64}$")) and
+      (.leafRef|test("^refs/heads/tasks/active/[0-9a-f]{7,64}$")) and
+      (.readback|type=="array" and length==2 and .==sort_by(.ref) and
+        .==([$s.rootRef,$s.leafRef]|sort|map(. as $ref | {ref:$ref,oid:(if $ref==$s.rootRef then $s.rootCommit else $s.claimCommit end)})))
+    ' "$1" >/dev/null || return 1
+    epic=$(jq -r .epicId "$1"); registry=$(jq -r .registryCommit "$1"); master=$(jq -r .masterCommit "$1")
+    git cat-file -e "$registry^{commit}" 2>/dev/null && git cat-file -e "$master^{commit}" 2>/dev/null || return 1
+    root_ref=$(taskdag_epic_root_ref "$epic") || return 1
+    [ "$root_ref" = "$(jq -r .rootRef "$1")" ] || return 1
+    record=$(taskdag_epic_registry_record "$epic" "$registry" "$master") || return 1
+    [ "$(jq -r .rootCommit <<<"$record")" = "$(jq -r .rootCommit "$1")" ] || return 1
+    descriptor=$(jq -cS .descriptor <<<"$record") || return 1
+    canonical=$(taskdag_canonicalize_epic_root_descriptor <<<"$descriptor") || return 1
+    [ "$descriptor" = "$canonical" ] || return 1
+    root=$(jq -r .rootCommit "$1"); claim_ref=$(jq -r .leafRef "$1")
+    claim=$(jq -r .claimCommit "$1"); leaf=$(jq -r .leafCommit "$1")
+    git cat-file -e "$root^{commit}" 2>/dev/null && git cat-file -e "$claim^{commit}" 2>/dev/null || return 1
+    [ "$(git rev-parse --verify "$root_ref^{commit}" 2>/dev/null)" = "$root" ] \
+        && [ "$(git rev-parse --verify "$claim_ref^{commit}" 2>/dev/null)" = "$claim" ] || return 1
+    claimer=$(jq -r .sourceClaim.claimer "$1") || return 1
+    host=$(jq -r .sourceClaim.host "$1") || return 1
+    pid=$(jq -r .sourceClaim.pid "$1") || return 1
+    taskdag_validate_source_claim "$claim" "$leaf" "$claimer" "$host" "$pid" || return 1
+    leaf_suffix=$(jq -r .leafRef "$1"); leaf_suffix=${leaf_suffix##*/}
+    [[ "$(jq -r .leafCommit "$1")" == "$leaf_suffix"* ]] || return 1
+    readback_digest=$(jq -cS .readback "$1" | sha256sum | awk '{print $1}') || return 1
+    [ "$readback_digest" = "$(jq -r .advertisementDigest "$1")" ]
+}
+
 taskdag_validate_materialise_target_state() {
     local input; input=$(mktemp) || return 1; cat >"$input"
     taskdag_json_file_is_single_strict "$input" && _taskdag_validate_materialise_target_state_file "$input"
@@ -122,13 +183,18 @@ taskdag_validate_materialise_target_state() {
 
 taskdag_serialize_materialise_target_state() {
     local input; input=$(mktemp) || return 1; cat >"$input"
-    taskdag_json_file_is_single_strict "$input" \
+    [ "$(jq -r '.schema // 0' "$input" 2>/dev/null)" = 1 ] \
+        && taskdag_json_file_is_single_strict "$input" \
         && _taskdag_validate_materialise_target_state_file "$input" \
         && jq -cS . "$input"
     local rc=$?; rm -f "$input"; return "$rc"
 }
 
 _taskdag_validate_materialise_claim_output_file() { # file
+    if [ "$(jq -r '.schema // 0' "$1")" = 2 ]; then
+        _taskdag_validate_materialise_claim_output_v2_file "$1"
+        return
+    fi
     jq -e '
       def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
       def safe: type=="string" and length>0 and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not);
@@ -149,6 +215,47 @@ _taskdag_validate_materialise_claim_output_file() { # file
     ' "$1" >/dev/null
 }
 
+_taskdag_validate_materialise_claim_output_v2_file() { # file
+    local epic registry master root_ref record digest root claim_ref claim task claimer host pid
+    declare -F taskdag_epic_root_ref >/dev/null \
+        && declare -F taskdag_epic_registry_record >/dev/null || return 1
+    _taskdag_materialise_v2_forbidden_identity "$1" || return 1
+    jq -e '
+      def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+      . as $o | type=="object" and .schema==2 and .status=="final" and .durableStage=="final" and
+      keys==["claimCommit","claimedTaskCommit","claimedTaskRef","durableStage","epicId","masterCommit","nextAction","operationId","readback","registryCommit","rootCommit","rootRef","schema","sourceClaim","status"] and
+      (.operationId|test("^[0-9a-f]{64}$")) and (.epicId|test("^epic-v1:[0-9a-f]{64}$")) and
+      all(.registryCommit,.masterCommit,.rootCommit,.claimedTaskCommit,.claimCommit;oid) and
+      (.sourceClaim|type=="object" and keys==["claimer","host","pid"] and
+        (.claimer|type=="string" and length>0) and (.host|type=="string" and length>0) and
+        (.pid|type=="number" and floor==. and .>0)) and
+      (.rootRef|test("^refs/heads/tasks/pending/epic-v1/[0-9a-f]{64}$")) and
+      (.claimedTaskRef|test("^tasks/active/[0-9a-f]{7,64}$")) and
+      (.claimedTaskCommit|startswith($o.claimedTaskRef|split("/")|last)) and
+      (.nextAction|type=="string" and length>0) and
+      (.readback|type=="array" and length==2 and .==sort_by(.ref) and
+        .==([$o.rootRef,("refs/heads/"+$o.claimedTaskRef)]|sort|map(. as $ref | {ref:$ref,oid:(if $ref==$o.rootRef then $o.rootCommit else $o.claimCommit end)})))
+    ' "$1" >/dev/null || return 1
+    epic=$(jq -r .epicId "$1"); registry=$(jq -r .registryCommit "$1"); master=$(jq -r .masterCommit "$1")
+    git cat-file -e "$registry^{commit}" 2>/dev/null && git cat-file -e "$master^{commit}" 2>/dev/null || return 1
+    root_ref=$(taskdag_epic_root_ref "$epic") || return 1
+    [ "$root_ref" = "$(jq -r .rootRef "$1")" ] || return 1
+    record=$(taskdag_epic_registry_record "$epic" "$registry" "$master") || return 1
+    [ "$(jq -r .rootCommit <<<"$record")" = "$(jq -r .rootCommit "$1")" ] || return 1
+    root=$(jq -r .rootCommit "$1"); claim_ref="refs/heads/$(jq -r .claimedTaskRef "$1")"
+    claim=$(jq -r .claimCommit "$1"); task=$(jq -r .claimedTaskCommit "$1")
+    git cat-file -e "$root^{commit}" 2>/dev/null && git cat-file -e "$claim^{commit}" 2>/dev/null || return 1
+    claimer=$(extract_field "$(parse_commit_metadata "$claim")" Claimer) || return 1
+    host=$(extract_field "$(parse_commit_metadata "$claim")" Claimer-Host) || return 1
+    pid=$(extract_field "$(parse_commit_metadata "$claim")" Claimer-PID) || return 1
+    [ "$claimer" = "$(jq -r .sourceClaim.claimer "$1")" ] \
+        && [ "$host" = "$(jq -r .sourceClaim.host "$1")" ] \
+        && [ "$pid" = "$(jq -r .sourceClaim.pid "$1")" ] || return 1
+    taskdag_validate_source_claim "$claim" "$task" "$claimer" "$host" "$pid" || return 1
+    digest=$(jq -cS .readback "$1" | sha256sum | awk '{print $1}') || return 1
+    [ -n "$digest" ]
+}
+
 taskdag_validate_materialise_claim_output() {
     local input; input=$(mktemp) || return 1; cat >"$input"
     taskdag_json_file_is_single_strict "$input" && _taskdag_validate_materialise_claim_output_file "$input"
@@ -157,7 +264,8 @@ taskdag_validate_materialise_claim_output() {
 
 taskdag_serialize_materialise_claim_output() {
     local input; input=$(mktemp) || return 1; cat >"$input"
-    taskdag_json_file_is_single_strict "$input" \
+    [ "$(jq -r '.schema // 0' "$input" 2>/dev/null)" = 1 ] \
+        && taskdag_json_file_is_single_strict "$input" \
         && _taskdag_validate_materialise_claim_output_file "$input" \
         && jq -cS . "$input"
     local rc=$?; rm -f "$input"; return "$rc"

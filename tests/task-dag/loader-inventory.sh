@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh scheduling-fence.sh cross-repo.sh edges-write.sh edges-prune.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-parsing.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh epic-registry.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh scheduling-fence.sh cross-repo.sh edges-write.sh edges-prune.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-parsing.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -177,7 +177,7 @@ if rg -n 'edges-write|cmd_' "$REPO_ROOT/scripts/task-dag.d/reconciliation-core.s
   bad "reconciliation core depends on a writer or command adapter: $(cat "$ROOT/recon-core-cycles")"
 else ok "reconciliation core is independent of edge writers and command adapters"; fi
 
-recon_core_prereqs='taskdag_prepare_child_map_from taskdag_prepare_child_map taskdag_reset_child_map taskdag_normalize_node taskdag_edges_with_facts taskdag_node_done taskdag_load_facts taskdag_current_repo taskdag_sync_root_refs is_task_commit is_task_blocked blocked_structural_ancestor'
+recon_core_prereqs='taskdag_prepare_child_map_from taskdag_prepare_child_map taskdag_reset_child_map taskdag_normalize_node taskdag_edges_with_facts taskdag_node_done taskdag_typed_root_completed_at_tip taskdag_load_facts taskdag_current_repo taskdag_sync_root_refs is_task_commit is_task_blocked blocked_structural_ancestor'
 if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconciliation-core.sh" "$recon_core_prereqs" >/dev/null 2>"$ROOT/recon-core-complete-err"; then
   ok "reconciliation core accepts its complete prerequisite set"
 else bad "reconciliation core rejected its complete prerequisite set: $(cat "$ROOT/recon-core-complete-err")"; fi
@@ -313,7 +313,7 @@ elif grep -q 'requires reconciliation-core.sh to be loaded first' "$ROOT/converg
   ok "graph convergence fails loudly without reconciliation core"
 else bad "graph convergence source-order failure was not actionable"; fi
 
-root_prereqs='taskdag_prepare_child_map taskdag_sync_root_refs taskdag_recon_prepare taskdag_current_repo taskdag_node_complete taskdag_issue_closed_at_tip get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic fetch_task_refs_strict taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard taskdag_materialisation_intents_durable'
+root_prereqs='taskdag_prepare_child_map taskdag_sync_root_refs taskdag_recon_prepare taskdag_current_repo taskdag_node_complete taskdag_root_closed_at_tip get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic fetch_task_refs_strict taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard taskdag_materialisation_intents_durable'
 if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/root-containment.sh" "$root_prereqs" >"$ROOT/root-order-out" 2>"$ROOT/root-order-err"; then
   bad "root containment loaded without Git-object metadata providers"
 elif grep -q 'requires provider for parse_commit_metadata' "$ROOT/root-order-err"; then

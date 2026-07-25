@@ -20,7 +20,10 @@ taskdag_json_file_is_single_strict() {
   taskdag_json_no_duplicate_keys "$1"
 }
 source "$(dirname "$TD")/task-dag.d/git-objects.sh"
+source "$(dirname "$TD")/task-dag.d/task-model.sh"
+source "$(dirname "$TD")/task-dag.d/epic-registry.sh"
 source "$(dirname "$TD")/task-dag.d/child-map.sh"
+source "$(dirname "$TD")/task-dag.d/claim-model.sh"
 source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
 source "$(dirname "$TD")/task-dag.d/github-origin.sh"
 source "$(dirname "$TD")/task-dag.d/materialise-parsing.sh"
@@ -129,6 +132,87 @@ if (
   printf '%s\n' "$final" | taskdag_validate_materialise_claim_output
   printf '%s\n' "$replay" | taskdag_validate_materialise_claim_output
 ) 2>/dev/null; then ok "materialise-and-claim schemas and task plans are strict canonical pure providers"; else bad "materialise-and-claim protocol providers"; fi
+
+# Schema 2 is a dormant reader dialect. Its identity is Epic-ID + canonical
+# root descriptor, bound through the immutable registry; provider projection
+# is optional metadata and no issue-number identity is accepted.
+if (
+  source "$(dirname "$TD")/task-dag.d/materialise.sh"
+  op=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  epic=$(taskdag_epic_id_for_operation R_TARGET "$op")
+  root_ref=$(taskdag_epic_root_ref "$epic")
+  descriptor=$(jq -ncS --arg epic "$epic" --arg op "$op" '{schema:1,epicId:$epic,origin:{kind:"operation",operationId:$op,repositoryId:"R_TARGET"},projection:{issueId:null,issueNumber:null,issueUrl:null,provider:"github",repository:"o/r",repositoryId:"R_TARGET"},task:{author:"worker",description:"",status:"pending",title:"Root",type:"epic"}}')
+  root_commit=$(taskdag_serialize_epic_root_message <<<"$descriptor" | git commit-tree "$EMPTY_TREE")
+  digest=${epic#epic-v1:}
+  record=$(jq -ncS --argjson descriptor "$descriptor" --arg epic "$epic" --arg root "$root_commit" '{descriptor:$descriptor,epicId:$epic,kind:"native-epic-v1",legacyAdoption:null,rootCommit:$root,schema:1}')
+  blob=$(printf '%s\n' "$record" | git hash-object -w --stdin)
+  index=$(mktemp); rm -f "$index"
+  GIT_INDEX_FILE=$index git update-index --add --cacheinfo "100644,$blob,roots/$digest.json"
+  tree=$(GIT_INDEX_FILE=$index git write-tree); rm -f "$index"
+  registry=$(git commit-tree "$tree" -m registry)
+  master=$(git rev-parse HEAD)
+  leaf_message=$(taskdag_serialize_task_message Leaf '' fixture '' pending leaf '')
+  leaf=$(git commit-tree "$EMPTY_TREE" -p "$root_commit" -m "$leaf_message")
+  leaf_ref="refs/heads/tasks/active/${leaf:0:7}"
+  claim=$(build_claim_commit "$leaf" fixture fixture-host 12 '' 123)
+  git update-ref "$root_ref" "$root_commit"
+  git update-ref "$leaf_ref" "$claim"
+  readback=$(jq -ncS --arg rr "$root_ref" --arg root "$root_commit" --arg lr "$leaf_ref" --arg claim "$claim" '[{ref:$rr,oid:$root},{ref:$lr,oid:$claim}]|sort_by(.ref)')
+  advertisement=$(printf '%s\n' "$readback" | sha256sum | awk '{print $1}')
+  state=$(jq -ncS --arg epic "$epic" --arg registry "$registry" --arg master "$master" --arg rootRef "$root_ref" --arg root "$root_commit" --arg leaf "$leaf" --arg leafRef "$leaf_ref" --arg claim "$claim" --argjson readback "$readback" --arg advertisement "$advertisement" '{schema:2,status:"target-tuple-durable-linkage-pending",operationId:("a"*64),epicId:$epic,registryCommit:$registry,masterCommit:$master,rootRef:$rootRef,rootCommit:$root,leafCommit:$leaf,leafRef:$leafRef,claimCommit:$claim,sourceClaim:{claimer:"fixture",host:"fixture-host",pid:123},readback:$readback,advertisementDigest:$advertisement}')
+  output=$(jq -ncS --arg epic "$epic" --arg registry "$registry" --arg master "$master" --arg rootRef "$root_ref" --arg root "$root_commit" --arg leaf "$leaf" --arg claim "$claim" --arg taskRef "tasks/active/${leaf:0:7}" --argjson readback "$readback" '{schema:2,status:"final",durableStage:"final",operationId:("a"*64),epicId:$epic,registryCommit:$registry,masterCommit:$master,rootRef:$rootRef,rootCommit:$root,claimedTaskRef:$taskRef,claimedTaskCommit:$leaf,claimCommit:$claim,sourceClaim:{claimer:"fixture",host:"fixture-host",pid:123},readback:$readback,nextAction:"continue implementation"}')
+  printf '%s\n' "$state" | taskdag_validate_materialise_target_state
+  printf '%s\n' "$output" | taskdag_validate_materialise_claim_output
+  ! printf '%s\n' "$state" | taskdag_serialize_materialise_target_state
+  ! printf '%s\n' "$output" | taskdag_serialize_materialise_claim_output
+
+  bad_record=$(jq -ncS --argjson descriptor "$(jq '.task.title="Other"' <<<"$descriptor")" --arg epic "$epic" --arg root "$root_commit" '{descriptor:$descriptor,epicId:$epic,kind:"native-epic-v1",legacyAdoption:null,rootCommit:$root,schema:1}')
+  bad_blob=$(printf '%s\n' "$bad_record" | git hash-object -w --stdin); bad_index=$(mktemp); rm -f "$bad_index"
+  GIT_INDEX_FILE=$bad_index git update-index --add --cacheinfo "100644,$bad_blob,roots/$digest.json"
+  bad_tree=$(GIT_INDEX_FILE=$bad_index git write-tree); rm -f "$bad_index"; bad_registry=$(git commit-tree "$bad_tree" -m bad-registry)
+  ! jq --arg registry "$bad_registry" '.registryCommit=$registry' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.rootCommit=("9"*40)' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.rootRef="refs/heads/tasks/pending/epic-v1/"+("f"*64)' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.registryCommit=("9"*40)' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.claimCommit=("9"*40)' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.masterCommit=("9"*40)' <<<"$state" | taskdag_validate_materialise_target_state
+  state_for_claim() {
+    local claim_oid=$1 refs digest
+    refs=$(jq -ncS --arg rr "$root_ref" --arg root "$root_commit" --arg lr "$leaf_ref" --arg claim "$claim_oid" '[{ref:$rr,oid:$root},{ref:$lr,oid:$claim}]|sort_by(.ref)')
+    digest=$(printf '%s\n' "$refs" | sha256sum | awk '{print $1}')
+    jq -cS --arg claim "$claim_oid" --argjson refs "$refs" --arg digest "$digest" '.claimCommit=$claim|.readback=$refs|.advertisementDigest=$digest' <<<"$state"
+  }
+  bad_message=$(git commit-tree "$(git rev-parse "$leaf^{tree}")" -p "$leaf" -m 'not a claim')
+  other_blob=$(printf 'other\n' | git hash-object -w --stdin)
+  other_tree=$(printf '100644 blob %s\tother\n' "$other_blob" | git mktree)
+  bad_tree_claim=$(git commit-tree "$other_tree" -p "$leaf" -m "$(git show -s --format=%B "$claim")")
+  other_task=$(git commit-tree "$EMPTY_TREE" -p "$root_commit" -m "$(taskdag_serialize_task_message Other '' fixture '' pending leaf '')")
+  bad_task_claim=$(build_claim_commit "$other_task" fixture fixture-host 12 '' 123)
+  for bad_claim in "$bad_message" "$bad_tree_claim" "$bad_task_claim"; do
+    git update-ref "$leaf_ref" "$bad_claim"
+    ! state_for_claim "$bad_claim" | taskdag_validate_materialise_target_state
+  done
+  git update-ref "$leaf_ref" "$claim"
+  ! jq '.sourceClaim.claimer="other"' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.sourceClaim.host="other-host"' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.sourceClaim.pid=124' <<<"$state" | taskdag_validate_materialise_target_state
+  other_claim=$(build_claim_commit "$leaf" fixture fixture-host 12 other 123)
+  git update-ref "$leaf_ref" "$other_claim"
+  ! printf '%s\n' "$state" | taskdag_validate_materialise_target_state
+  git update-ref "$leaf_ref" "$claim"
+  ! jq '.claimedTaskCommit=("9"*40)' <<<"$output" | taskdag_validate_materialise_claim_output
+  ! jq '.sourceClaim.pid=124' <<<"$output" | taskdag_validate_materialise_claim_output
+  for field in issueNumber issueNodeId issueUrl issueRef; do
+    ! jq --arg field "$field" '.[$field]="forbidden"' <<<"$state" | taskdag_validate_materialise_target_state
+  done
+  ! jq '.nested.issueNumber=12' <<<"$state" | taskdag_validate_materialise_target_state
+  ! jq '.rootRef="refs/heads/gh/issues/12"' <<<"$state" | taskdag_validate_materialise_target_state
+) 2>/dev/null; then ok "schema 2 state/output readers bind Epic-ID, registry, root, and claimed leaf without numeric identity"; else bad "schema 2 materialise-and-claim readers"; fi
+
+if ! rg -n 'schema[^[:alnum:]]*2|\.schema==2' scripts/task-dag.d/materialise-producer.sh scripts/task-dag.d/materialise-reconcile.sh \
+    | grep -Eq 'jq -n|jq -nc|POST|create'; then
+  ok "schema 2 has no public/live materialise producer"
+else bad "schema 2 writer or provider effect is reachable"; fi
 
 # Duplicate declarations coalesce with sorted provenance; declaration and
 # batch order cannot affect IDs or the resulting authority tree.

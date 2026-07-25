@@ -110,9 +110,14 @@ taskdag_emit_origin_epic_close() {
         }
     expected_generation=$(jq -cS '.observed' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT") || return 1
 
-    if epic_already_closed_on "$issue" "$root_sha" "$base"; then
-        return 0
-    fi
+    local close_rc=0
+    epic_already_closed_on "$issue" "$root_sha" "$base" || close_rc=$?
+    case "$close_rc" in
+        0) return 0 ;;
+        1) ;;
+        2) return 2 ;;
+        *) return 2 ;;
+    esac
 
     if ! taskdag_materialisation_intents_durable "$issue" "$root_sha" "$base"; then
         echo "Epic #${issue} has child-epic materialisation intent that is not durable; deferring auto-close." >&2
@@ -464,7 +469,7 @@ EOF
 }
 
 taskdag_push_completed_nodes() {
-    local range="$1" cur commit p issue commits tip
+    local range="$1" cur commit task issue epic_id commits tip parents
     cur=$(taskdag_current_repo) || return 2
     commits=$(git rev-list --reverse --first-parent "$range" 2>/dev/null) || {
         echo "Error: cannot scan pushed range '$range' for completion facts" >&2
@@ -473,21 +478,20 @@ taskdag_push_completed_nodes() {
     while IFS= read -r commit; do
         [ -n "$commit" ] || continue
         tip="$commit"
-        while IFS= read -r p; do
-            [ -n "$p" ] || continue
-            if taskdag_task_completed_at_tip "$tip" "$p"; then
-                printf 'task:%s@%s\t%s\n' "$cur" "$p" "$commit"
-            fi
-        done < <(git show -s --format='%P' "$commit" | cut -d' ' -f2- | tr ' ' '\n')
-        while IFS= read -r issue; do
-            issue="${issue#\#}"
-            [ -n "$issue" ] || continue
-            local root
-            root=$(git rev-parse -q --verify "refs/heads/gh/issues/${issue}^{commit}" 2>/dev/null \
-                || git rev-parse -q --verify "refs/heads/tasks/pending/${issue}^{commit}" 2>/dev/null || true)
-            [ -n "$root" ] && taskdag_issue_closed_at_tip "$tip" "$issue" "$root" \
+        taskdag_load_facts "$tip" || return 2
+        parents=$(git show -s --format='%P' "$commit") || return 2
+        for task in ${parents#* }; do
+            [ "${TASKDAG_TASK_COMPLETION_WITNESSES[$task]:-}" = "$commit" ] \
+                && printf 'task:%s@%s\t%s\n' "$cur" "$task" "$commit"
+        done
+        for issue in "${!TASKDAG_ISSUE_CLOSE_WITNESSES[@]}"; do
+            [ "${TASKDAG_ISSUE_CLOSE_WITNESSES[$issue]}" = "$commit" ] \
                 && printf 'issue:%s#%s\t%s\n' "$cur" "$issue" "$commit"
-        done < <(git show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$commit" | grep -E '^#?[1-9][0-9]*$' || true)
+        done
+        for epic_id in "${!TASKDAG_EPIC_ID_CLOSE_WITNESSES[@]}"; do
+            [ "${TASKDAG_EPIC_ID_CLOSE_WITNESSES[$epic_id]}" = "$commit" ] \
+                && printf 'task:%s@%s\t%s\n' "$cur" "${TASKDAG_EPIC_ID_CLOSE_ROOTS[$epic_id]}" "$commit"
+        done
     done <<< "$commits"
 }
 

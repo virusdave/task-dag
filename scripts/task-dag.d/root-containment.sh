@@ -4,7 +4,7 @@
 
 for prerequisite in parse_commit_metadata extract_field \
     taskdag_prepare_child_map taskdag_sync_root_refs taskdag_recon_prepare \
-    taskdag_current_repo taskdag_node_complete taskdag_issue_closed_at_tip \
+    taskdag_current_repo taskdag_node_complete taskdag_root_closed_at_tip \
     get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic \
     fetch_task_refs_strict \
     taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard \
@@ -87,12 +87,37 @@ epic_has_delegated_children() {
 }
 
 epic_already_closed_on() {
-    local issue="$1" epic_sha="$2" base_ref="$3"
-    taskdag_issue_closed_at_tip "$base_ref" "$issue" "$epic_sha"
+    local locator="$1" epic_sha="$2" base_ref="$3"
+    locator=${locator/epic-v1\//epic-v1:}
+    taskdag_root_closed_at_tip "$base_ref" "$locator" "$epic_sha"
+}
+
+# Typed close production is intentionally gated. Completion commands call this
+# before creating even a dangling commit object, so an unclosed typed root is a
+# side-effect-free rc 75 refusal. A close already on either explicit authority
+# preserves idempotent completion recovery.
+taskdag_typed_root_completion_preflight() { # task [authority-tip]
+    local node=$1 authority=${2:-HEAD} parent locator="" root="" msg close_rc
+    while :; do
+        msg=$(parse_commit_metadata "$node" 2>/dev/null || true)
+        locator=$(extract_field "$msg" Epic-ID 2>/dev/null || true)
+        if [[ "$locator" = epic-v1:* ]]; then root=$node; break; fi
+        parent=$(get_first_parent "$node" 2>/dev/null || true)
+        [ -n "$parent" ] && is_task_commit "$parent" || return 0
+        node=$parent
+    done
+    close_rc=0; epic_already_closed_on "$locator" "$root" "$authority" || close_rc=$?
+    case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
+    if [ "$authority" != HEAD ]; then
+        close_rc=0; epic_already_closed_on "$locator" "$root" HEAD || close_rc=$?
+        case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
+    fi
+    echo "Error: typed root $locator is not closed; typed completion writers remain gated" >&2
+    return 75
 }
 
 maybe_emit_local_epic_close() {
-    local task_sha="$1"
+    local task_sha="$1" close_rc
 
     local root_sha
     root_sha=$(get_first_parent "$task_sha" 2>/dev/null || true)
@@ -113,10 +138,16 @@ maybe_emit_local_epic_close() {
     done
     root_sha=$node
 
-    # Typed roots cannot be encoded by the legacy Closes-Epic trailer. Keep
-    # the writer gate closed until the completion codec child lands, before
-    # creating or moving any close commit.
+    # A typed close already present on either local authority is an idempotent
+    # success. Otherwise keep typed writers closed before any fetch, object
+    # creation, ref update, or origin mutation.
     if [[ "$issue" = epic-v1/* ]]; then
+        close_rc=0; epic_already_closed_on "$issue" "$root_sha" HEAD || close_rc=$?
+        case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
+        if git rev-parse --verify -q origin/master >/dev/null 2>&1; then
+            close_rc=0; epic_already_closed_on "$issue" "$root_sha" origin/master || close_rc=$?
+            case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
+        fi
         printf "${YELLOW}⚠ Epic-ID root %s is complete, but typed close writers remain gated pending external reader rollout and the Closes-Epic-ID codec.${RESET}\n" \
             "${issue/epic-v1\//epic-v1:}" >&2
         return 75
@@ -158,9 +189,11 @@ maybe_emit_local_epic_close() {
     fi
 
     # Don't duplicate an existing close locally or on the synced origin.
-    epic_already_closed_on "$issue" "$root_sha" HEAD && return 0
+    close_rc=0; epic_already_closed_on "$issue" "$root_sha" HEAD || close_rc=$?
+    case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
     if git rev-parse --verify -q origin/master >/dev/null 2>&1; then
-        epic_already_closed_on "$issue" "$root_sha" origin/master && return 0
+        close_rc=0; epic_already_closed_on "$issue" "$root_sha" origin/master || close_rc=$?
+        case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
     fi
     local head_sha head_tree close_msg close_sha
     head_sha=$(git rev-parse HEAD)

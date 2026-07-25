@@ -42,8 +42,16 @@ RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
 # The fact layer scopes done() to the current repo; use the offline seam so
 # no network / gh is needed.
 export TASKDAG_CURRENT_REPO="owner/repo"
+json_escape() { jq -Rs .; }
+taskdag_json_file_is_single_strict() { jq -e . "$1" >/dev/null 2>&1; }
 # shellcheck source=/dev/null
 source "$LIB_DIR/git-objects.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/task-model.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/ref-schema.sh"
+# shellcheck source=/dev/null
+source "$LIB_DIR/epic-registry.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/child-map.sh"
 # shellcheck source=/dev/null
@@ -349,6 +357,117 @@ else
     ok "C8: malformed delegated-close record fails closed"
 fi
 git update-ref refs/heads/tasks/delegated-close/v1/90/Nicponskis/github-worker/901 "$CLOSE_RECORD"
+
+# Delegation v2 is a reader-only dialect over typed Epic-ID registries and
+# typed peer closes. Build both authorities explicitly; no task-dag command is
+# allowed to create any of these fixture refs.
+make_bound_registry() { # repository repository-id issue-id issue-number title
+    local repository=$1 repository_id=$2 issue_id=$3 issue=$4 title=$5 epic descriptor root record binding digest key rb bb idx tree registry
+    epic=$(taskdag_epic_id_for_provider github "$repository_id" "$issue_id")
+    descriptor=$(jq -ncS --arg epic "$epic" --arg repo "$repository" --arg rid "$repository_id" --arg iid "$issue_id" --arg issue "$issue" --arg title "$title" \
+        '{schema:1,epicId:$epic,origin:{issueId:$iid,kind:"provider",provider:"github",repositoryId:$rid},projection:{issueId:$iid,issueNumber:$issue,issueUrl:("https://github.com/"+$repo+"/issues/"+$issue),provider:"github",repository:$repo,repositoryId:$rid},task:{author:"worker",description:"",status:"pending",title:$title,type:"epic"}}')
+    root=$(taskdag_serialize_epic_root_message <<<"$descriptor" | git commit-tree "$EMPTY_TREE" -p HEAD)
+    record=$(jq -ncS --argjson descriptor "$descriptor" --arg epic "$epic" --arg root "$root" '{descriptor:$descriptor,epicId:$epic,kind:"native-epic-v1",legacyAdoption:null,rootCommit:$root,schema:1}')
+    binding=$(jq -ncS --argjson projection "$(jq -c .projection <<<"$descriptor")" --arg epic "$epic" '{epicId:$epic,projection:$projection,schema:1}')
+    rb=$(printf '%s\n' "$record" | git hash-object -w --stdin); bb=$(printf '%s\n' "$binding" | git hash-object -w --stdin)
+    digest=${epic#epic-v1:}; key=$(taskdag_provider_binding_key github "$repository_id" "$issue_id"); idx=$(mktemp); rm -f "$idx"
+    GIT_INDEX_FILE=$idx git update-index --add --cacheinfo "100644,$rb,roots/$digest.json"
+    GIT_INDEX_FILE=$idx git update-index --add --cacheinfo "100644,$bb,bindings/by-epic/$digest.json"
+    GIT_INDEX_FILE=$idx git update-index --add --cacheinfo "100644,$bb,bindings/by-provider/$key.json"
+    tree=$(GIT_INDEX_FILE=$idx git write-tree); rm -f "$idx"; registry=$(git commit-tree "$tree" -m registry)
+    printf '%s\t%s\t%s\n' "$epic" "$root" "$registry"
+}
+
+IFS=$'\t' read -r V2_PARENT_EPIC V2_PARENT_ROOT V2_PARENT_REGISTRY <<<"$(make_bound_registry owner/repo PR_1 PI_90 90 'Typed parent')"
+(
+    cd "$PEER"
+    IFS=$'\t' read -r epic root registry <<<"$(make_bound_registry nicponskis/github-worker RR_1 RI_901 901 'Typed peer')"
+    tip=$(git rev-parse HEAD); close=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p "$tip" -p "$root" -m "Close typed peer
+
+Closes-Epic-ID: $epic")
+    git update-ref refs/heads/master "$close"; git update-ref refs/remotes/origin/master "$close"; git update-ref refs/heads/tasks/v1/epics "$registry"
+    printf '%s\t%s\t%s\t%s\n' "$epic" "$root" "$registry" "$close" >"$ROOT/v2-peer"
+)
+IFS=$'\t' read -r V2_PEER_EPIC V2_PEER_ROOT V2_PEER_REGISTRY V2_PEER_CLOSE <"$ROOT/v2-peer"
+git update-ref refs/heads/tasks/v1/epics "$V2_PARENT_REGISTRY"
+git update-ref refs/remotes/origin/master HEAD
+V2_OPERATION=$(printf '1%.0s' {1..64})
+V2_DIGEST=$(_xrepo_declaration_digest_v2 PR_1 "$V2_PARENT_EPIC" RR_1 "$V2_PEER_EPIC" "$V2_OPERATION")
+V2_PARENT_DIGEST=${V2_PARENT_EPIC#epic-v1:}
+V2_REF="refs/heads/tasks/delegated/v2/$V2_PARENT_DIGEST/$V2_DIGEST"
+V2_CLOSE_REF="refs/heads/tasks/delegated-close/v2/$V2_PARENT_DIGEST/$V2_DIGEST"
+v2_delegation_message() {
+    cat <<EOF
+Typed delegation
+
+Task-Dag-Delegation: v2
+Parent-Repo: owner/repo
+Parent-Repo-Node-Id: PR_1
+Parent-Epic-ID: $V2_PARENT_EPIC
+Peer-Repo: nicponskis/github-worker
+Peer-Repo-Node-Id: RR_1
+Peer-Epic-ID: $V2_PEER_EPIC
+Materialisation-Operation-Id: $V2_OPERATION
+Declaration-Digest: $V2_DIGEST
+EOF
+}
+V2_DELEGATION=$(git commit-tree "$EMPTY_TREE" -p "$V2_PARENT_ROOT" -m "$(v2_delegation_message)")
+v2_close_message() {
+    sed 's/Task-Dag-Delegation: v2/Task-Dag-Delegated-Close: v2/' < <(v2_delegation_message)
+    printf 'Peer-Tip: %s\nPeer-Close: %s\nPeer-Epic: %s\n' "$V2_PEER_CLOSE" "$V2_PEER_CLOSE" "$V2_PEER_EPIC"
+}
+V2_CLOSE=$(git commit-tree "$EMPTY_TREE" -p "$V2_DELEGATION" -m "$(v2_close_message)")
+git update-ref "$V2_REF" "$V2_DELEGATION"; git update-ref "$V2_CLOSE_REF" "$V2_CLOSE"
+if proof=$(_xrepo_normalize_delegation_v2 "$V2_DELEGATION" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git") \
+    && [ "$(jq -r '.dialect+":"+.parentIssue+":"+.peerIssue' <<<"$proof")" = v2:90:901 ] \
+    && _xrepo_validate_delegated_close_v2 "$V2_CLOSE" "$V2_CLOSE_REF" "$V2_DELEGATION" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git"; then
+    ok "C9: v2 delegation normalizes and typed peer close satisfies status"
+else bad "C9: valid v2 delegation or typed close was rejected"; fi
+
+BAD_PATH="refs/heads/tasks/delegated/v2/$V2_PARENT_DIGEST/$(printf 'f%.0s' {1..64})"
+BAD_METADATA=$({ v2_delegation_message; printf '\nUnexpected: value\n'; } | git commit-tree "$EMPTY_TREE" -p "$V2_PARENT_ROOT")
+BAD_PARENT=$(git commit-tree "$EMPTY_TREE" -p HEAD -m "$(v2_delegation_message)")
+BAD_DECLARATION=$(git commit-tree "$EMPTY_TREE" -p "$V2_PARENT_ROOT" -m "$(v2_delegation_message | sed "s/$V2_OPERATION/$(printf '2%.0s' {1..64})/")")
+BAD_CLOSE=$(git commit-tree "$EMPTY_TREE" -p "$V2_DELEGATION" -m "$(v2_close_message | sed "s/Peer-Close: $V2_PEER_CLOSE/Peer-Close: $V2_PARENT_ROOT/")")
+BAD_CLOSE_ROOT=$(git commit-tree "$EMPTY_TREE" -p "$V2_DELEGATION" -m "$(v2_close_message | sed "s/Peer-Epic: $V2_PEER_EPIC/Peer-Epic: $V2_PARENT_EPIC/")")
+BAD_CLOSE_TIP=$(git commit-tree "$EMPTY_TREE" -p "$V2_DELEGATION" -m "$(v2_close_message | sed "s/Peer-Tip: $V2_PEER_CLOSE/Peer-Tip: $V2_PEER_ROOT/")")
+if ! _xrepo_validate_delegation_v2 "$V2_DELEGATION" "$BAD_PATH" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git" >/dev/null 2>&1 \
+    && ! _xrepo_validate_delegation_v2 "$BAD_METADATA" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git" >/dev/null 2>&1 \
+    && ! _xrepo_validate_delegation_v2 "$BAD_PARENT" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git" >/dev/null 2>&1 \
+    && ! _xrepo_validate_delegation_v2 "$BAD_DECLARATION" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git" >/dev/null 2>&1 \
+    && ! _xrepo_validate_delegated_close_v2 "$BAD_CLOSE" "$V2_CLOSE_REF" "$V2_DELEGATION" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git" >/dev/null 2>&1 \
+    && ! _xrepo_validate_delegated_close_v2 "$BAD_CLOSE_ROOT" "$V2_CLOSE_REF" "$V2_DELEGATION" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git" >/dev/null 2>&1 \
+    && ! _xrepo_validate_delegated_close_v2 "$BAD_CLOSE_TIP" "$V2_CLOSE_REF" "$V2_DELEGATION" "$V2_REF" "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" "$PEER/.git" >/dev/null 2>&1; then
+    ok "C10: v2 path, metadata, registry/root, declaration, close/root, and tip mismatches fail closed"
+else bad "C10: malformed v2 delegation or close was accepted"; fi
+
+v2_listing="$V2_DELEGATION"$'\t'"$V2_REF"$'\n'"$V2_CLOSE"$'\t'"$V2_CLOSE_REF"
+close_only_listing="$V2_CLOSE"$'\t'"$V2_CLOSE_REF"
+extra_close_ref="refs/heads/tasks/delegated-close/v2/$V2_PARENT_DIGEST/$(printf 'e%.0s' {1..64})"
+extra_close_listing="$v2_listing"$'\n'"$V2_CLOSE"$'\t'"$extra_close_ref"
+malformed_close_listing="$v2_listing"$'\n'"$V2_CLOSE"$'\t'"refs/heads/tasks/delegated-close/v2/$V2_PARENT_DIGEST/not-a-digest"
+namespace_rcs=true
+for listing in "$close_only_listing" "$extra_close_listing" "$malformed_close_listing"; do
+    rc=0; _xrepo_validate_v2_namespace_listing "$listing" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || namespace_rcs=false
+done
+if [ "$namespace_rcs" = true ] && _xrepo_validate_v2_namespace_listing "$v2_listing"; then
+    ok "C11: close-only, orphan/extra, and malformed v2 close namespaces fail rc2"
+else bad "C11: complete v2 namespace validation did not fail closed"; fi
+
+# Ambient tracking refs deliberately point at valid objects, but v2 readers
+# must still reject a call that omits the explicitly captured peer snapshot.
+ambient_rc=0
+_xrepo_validate_delegated_close_v2 "$V2_CLOSE" "$V2_CLOSE_REF" "$V2_DELEGATION" "$V2_REF" \
+    "$V2_PARENT_REGISTRY" HEAD "$V2_PEER_REGISTRY" "$V2_PEER_CLOSE" >/dev/null 2>&1 || ambient_rc=$?
+[ "$ambient_rc" -eq 2 ] \
+    && ok "C12: stale ambient refs cannot replace explicit v2 snapshot authority" \
+    || bad "C12: v2 close validation accepted ambient authority"
+
+before_v2_refs=$(git for-each-ref --format='%(refname) %(objectname)' refs/heads/tasks/delegated/v2 refs/heads/tasks/delegated-close/v2)
+"$TD" --help >/dev/null
+after_v2_refs=$(git for-each-ref --format='%(refname) %(objectname)' refs/heads/tasks/delegated/v2 refs/heads/tasks/delegated-close/v2)
+[ "$before_v2_refs" = "$after_v2_refs" ] && ok "C13: rejected v2 states emit no close and CLI exposes no v2 writer" || bad "C13: CLI mutated v2 refs"
 
 # ===========================================================================
 # Part D — satisfied(edge) = done(.to), both relations, no aggregation

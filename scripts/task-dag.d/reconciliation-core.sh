@@ -16,6 +16,7 @@ if ! declare -F taskdag_normalize_node >/dev/null; then
     return 2 2>/dev/null || exit 2
 fi
 if ! declare -F taskdag_edges_with_facts >/dev/null || ! declare -F taskdag_node_done >/dev/null \
+    || ! declare -F taskdag_typed_root_completed_at_tip >/dev/null \
     || ! declare -F taskdag_load_facts >/dev/null; then
     echo "Error: reconciliation-core.sh requires facts.sh to be loaded first" >&2
     return 2 2>/dev/null || exit 2
@@ -162,6 +163,16 @@ taskdag__node_complete_impl() {
         task_type="$(taskdag_recon_task_type "$sha")"
         taskdag_recon_has_requires "$node" && has_requires=true || has_requires=false
         if [ -n "$children" ] || [ "$task_type" = epic ]; then is_epic=true; fi
+        # A validated typed root close is the root task node's lifecycle fact;
+        # do not reinterpret it as an ordinary task-completion parent.
+        local typed_root_rc=0
+        taskdag_typed_root_completed_at_tip "$TASKDAG_RECON_FACTS_TIP" "$sha" || typed_root_rc=$?
+        case "$typed_root_rc" in
+            0) return 0 ;;
+            1) ;;
+            2) return 2 ;;
+            *) return 2 ;;
+        esac
     fi
 
     if [ "$is_epic" = false ]; then

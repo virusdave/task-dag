@@ -176,7 +176,7 @@ is_sanctioned_tip_commit() {
 # mid-walk (concurrent claim/complete/drop) yields no lines, so the audit never
 # flaps. The immutable materialisation authority instead fails closed.
 taskdag_ref_violations() {
-    local sha="$1" ref="$2" activation_authority=${3:-} expected_repository=${4:-}
+    local sha="$1" ref="$2" activation_authority=${3:-} expected_repository=${4:-} registry_authority=${5:-}
     local objtype tree rest ns
     objtype=$(git cat-file -t "$sha" 2>/dev/null) || {
         { taskdag_is_materialisation_ref "$ref" || taskdag_is_materialisation_producer_ref "$ref" || taskdag_is_comment_watchdog_ref "$ref" || taskdag_is_activation_ref "$ref" || taskdag_is_reconcile_comments_index_ref "$ref"; } \
@@ -203,6 +203,11 @@ taskdag_ref_violations() {
     # under tasks/v1/* is recognised, so `tasks/v1/junk` still fails below.
     if taskdag_is_graph_ref "$ref"; then
         taskdag_graph_tree_violations "$sha"
+        return 0
+    fi
+    if taskdag_is_epic_registry_ref "$ref"; then
+        taskdag_epic_registry_validate_history "$sha" "$registry_authority" \
+            || echo "✗ ${ref} has malformed, non-linear, or non-append-only epic registry history"
         return 0
     fi
     if taskdag_is_materialisation_ref "$ref"; then
@@ -4275,6 +4280,7 @@ EOF
     # Build the completion merge message (Task-Commit/Issue/URL/Status/
     # Related trailers), then create the merge: first parent == impl base,
     # second parent == task commit. Tree == base tree (an empty merge).
+    taskdag_typed_root_completion_preflight "$task_sha" "$completion_base" || return $?
     local new_message tree new_commit
     new_message=$(build_completion_message "$task_sha" "$old_message")
     tree=$(git rev-parse "$completion_base^{tree}") || return 1
@@ -4556,6 +4562,7 @@ EOF
         return 2
     fi
 
+    taskdag_typed_root_completion_preflight "$task_sha" "$origin_master" || return $?
     local task_msg issue_num issue_url task_title now claimer host msg_file tree new_commit
     task_msg=$(parse_commit_metadata "$task_sha")
     issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
@@ -4845,6 +4852,10 @@ cmd_complete_batch() {
         done
     }
     batch_requirements_satisfied || return $?
+
+    for (( i=0; i<n; i++ )); do
+        taskdag_typed_root_completion_preflight "${task_shas[i]}" "$old_head" || return $?
+    done
 
     # ── graft: walk the chain oldest→newest, replaying each commit and
     #    inserting a completion merge immediately above each impl ──────
@@ -5191,6 +5202,7 @@ Status: completed"
 
 Related: $issue_url"
 
+    taskdag_typed_root_completion_preflight "$task_sha" "$head_sha" || return $?
     local new_commit
     new_commit=$(git commit-tree "$head_tree" -p "$head_sha" -p "$task_sha" -m "$link_message")
     echo "Created retroactive link commit: $new_commit"
@@ -5343,6 +5355,7 @@ EOF
         taskdag_is_comment_watchdog_ref "$ref" && continue
         taskdag_is_activation_ref "$ref" && continue
         taskdag_is_reconcile_comments_index_ref "$ref" && continue
+        taskdag_is_epic_registry_ref "$ref" && continue
         local tree
         tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || continue
         if [ "$tree" != "$EMPTY_TREE" ]; then
@@ -5389,10 +5402,11 @@ EOF
         # sub-namespaces) so a hand-crafted ref at an UNKNOWN path is
         # actually seen and flagged — restricting the snapshot to known
         # namespaces would make the unknown-namespace check dead code.
-        local snapshot line vsha vref out activation_authority expected_repository=""
+        local snapshot line vsha vref out activation_authority registry_authority expected_repository=""
         snapshot=$(git for-each-ref --format='%(objectname) %(refname)' \
             refs/heads/tasks/ refs/heads/gh/)
         activation_authority=$(awk -v ref="$TASKDAG_ACTIVATION_REF" '$2==ref {print $1}' <<<"$snapshot")
+        registry_authority=$(git rev-parse -q --verify refs/heads/master^{commit} 2>/dev/null || true)
         if grep -q " $TASKDAG_MATERIALISATION_REF$" <<<"$snapshot"; then
             expected_repository=$(printf '%s' "$(_xrepo_current_repo_offline 2>/dev/null)" | tr '[:upper:]' '[:lower:]')
             if [ -z "$expected_repository" ]; then
@@ -5402,7 +5416,7 @@ EOF
         fi
         while read -r vsha vref; do
             [ -n "$vsha" ] || continue
-            out=$(taskdag_ref_violations "$vsha" "$vref" "$activation_authority" "$expected_repository")
+            out=$(taskdag_ref_violations "$vsha" "$vref" "$activation_authority" "$expected_repository" "$registry_authority")
             [ -n "$out" ] || continue
             while IFS= read -r line; do
                 errors=$((errors + 1))
@@ -7808,6 +7822,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/cas-retry.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 # shellcheck source=task-dag.d/task-model.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/task-model.sh"
+# shellcheck source=task-dag.d/epic-registry.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/epic-registry.sh"
 # shellcheck source=task-dag.d/child-map.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/child-map.sh"
 # shellcheck source=task-dag.d/claim-model.sh

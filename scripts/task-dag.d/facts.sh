@@ -59,8 +59,13 @@ declare -gA TASKDAG_TASK_COMPLETION_WITNESSES=()
 declare -gA TASKDAG_CLOSED_ISSUES=()
 declare -gA TASKDAG_ISSUE_CLOSE_WITNESSES=()
 declare -gA TASKDAG_ISSUE_CLOSE_ROOTS=()
+declare -gA TASKDAG_CLOSED_EPIC_IDS=()
+# shellcheck disable=SC2034 # consumed by graph-converge.sh after this module loads
+declare -gA TASKDAG_EPIC_ID_CLOSE_WITNESSES=()
+declare -gA TASKDAG_EPIC_ID_CLOSE_ROOTS=()
 TASKDAG_FACTS_TIP_OID=""
 TASKDAG_FACTS_ROOTS_DIGEST=""
+TASKDAG_FACTS_REGISTRY_OID=""
 
 # taskdag_current_repo: the current repo's canonical (lowercased) owner/repo,
 # used to SCOPE done facts (local master is authoritative only for this repo).
@@ -98,22 +103,20 @@ taskdag_resolve_facts_tip() {
 #   2 -> INDETERMINATE: origin unreachable / transport error (fail closed)
 # Updates only the remote-tracking ref, never the checked-out local branch.
 taskdag_sync_master() {
-    local rc
-    git ls-remote --exit-code origin refs/heads/master >/dev/null 2>&1; rc=$?
-    case "$rc" in
-        0)
-            git fetch --quiet --no-tags origin \
-                '+refs/heads/master:refs/remotes/origin/master' 2>/dev/null || return 2
-            return 0
-            ;;
-        2)
-            # origin has no master branch — nothing to sync; local tip stands.
-            return 0
-            ;;
-        *)
-            return 2
-            ;;
-    esac
+    local advertised master_oid="" registry_oid="" tmp_master="refs/task-dag-snapshot/$$/master" tmp_registry="refs/task-dag-snapshot/$$/registry"
+    advertised=$(git ls-remote origin refs/heads/master "$TASKDAG_EPIC_REGISTRY_REF" 2>/dev/null) || return 2
+    master_oid=$(awk '$2=="refs/heads/master"{print $1}' <<<"$advertised")
+    registry_oid=$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$advertised")
+    local -a specs=()
+    [ -z "$master_oid" ] || specs+=("+$master_oid:$tmp_master")
+    [ -z "$registry_oid" ] || specs+=("+$registry_oid:$tmp_registry")
+    if [ ${#specs[@]} -gt 0 ]; then git fetch --quiet --no-tags --atomic origin "${specs[@]}" || return 2; fi
+    {
+        [ -z "$master_oid" ] || printf 'update refs/remotes/origin/master %s\n' "$master_oid"
+        if [ -n "$registry_oid" ]; then printf 'update %s %s\n' "$TASKDAG_EPIC_REGISTRY_REF" "$registry_oid"
+        elif git show-ref --verify --quiet "$TASKDAG_EPIC_REGISTRY_REF"; then printf 'delete %s\n' "$TASKDAG_EPIC_REGISTRY_REF"; fi
+        printf 'delete %s\ndelete %s\n' "$tmp_master" "$tmp_registry"
+    } | git update-ref --stdin 2>/dev/null || return 2
 }
 
 # taskdag__scan_closed_issues <tip>: emit (one per line) every issue number N
@@ -123,15 +126,17 @@ taskdag_sync_master() {
 # --merges (the close commit shape). Only positive decimals are accepted.
 taskdag__scan_closed_issues() {
     local tip="$1"
-    local commit first root parents issue expected_root commit_tree first_tree trailers history
+    local commit first root parents issue expected_root commit_tree first_tree trailers history keys
     history=$(git rev-list --first-parent --parents "$tip" 2>/dev/null) || return 2
     while IFS=' ' read -r commit first root parents; do
         [ -n "$commit" ] && [ -n "$first" ] && [ -n "$root" ] && [ -z "$parents" ] || continue
         commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null) || return 2
         first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null) || return 2
         [ "$commit_tree" = "$first_tree" ] || continue
+        keys=$(git show -s --format='%(trailers:keyonly,separator=%x0A)' "$commit" 2>/dev/null) || return 2
+        [ "$(grep -cx 'Closes-Epic' <<<"$keys")" -eq 1 ] || continue
+        [ "$(grep -cx 'Closes-Epic-ID' <<<"$keys")" -eq 0 ] || continue
         trailers=$(git show -s --format='%(trailers:key=Closes-Epic,valueonly,separator=%x0A)' "$commit" 2>/dev/null) || return 2
-        [ "$(printf '%s\n' "$trailers" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || continue
         issue="${trailers#\#}"
         [[ "$issue" =~ ^[1-9][0-9]*$ ]] || continue
         local root_rc=0
@@ -169,14 +174,24 @@ taskdag_issue_roots_digest() {
 # tip, ONCE per resolved tip OID (idempotent memoization). Re-derives if the
 # tip has moved. Returns non-zero (2) only if no tip can be resolved.
 taskdag_load_facts() {
-    local want_oid roots_digest
+    local want_oid roots_digest registry_oid
     want_oid=$(taskdag_resolve_facts_tip "${1:-}") || {
         echo "Error: cannot resolve a master/HEAD tip to derive done/satisfied facts" >&2
         return 2
     }
     roots_digest=$(taskdag_issue_roots_digest) || return 2
+    local registry_rc=0
+    registry_oid=$(taskdag_epic_registry_tip 2>/dev/null) || registry_rc=$?
+    [ "$registry_rc" -eq 0 ] || [ "$registry_rc" -eq 1 ] || return 2
+    if [ -n "$registry_oid" ]; then
+        taskdag_epic_registry_validate_history "$registry_oid" "$want_oid" || {
+            echo "Error: malformed Epic-ID registry authority" >&2
+            return 2
+        }
+    fi
     if [ -n "$TASKDAG_FACTS_TIP_OID" ] && [ "$want_oid" = "$TASKDAG_FACTS_TIP_OID" ] \
-        && [ "$roots_digest" = "$TASKDAG_FACTS_ROOTS_DIGEST" ]; then
+        && [ "$roots_digest" = "$TASKDAG_FACTS_ROOTS_DIGEST" ] \
+        && [ "$registry_oid" = "$TASKDAG_FACTS_REGISTRY_OID" ]; then
         return 0
     fi
 
@@ -184,17 +199,21 @@ taskdag_load_facts() {
     # mistake empty or partially populated arrays for the prior generation.
     TASKDAG_FACTS_TIP_OID=""
     TASKDAG_FACTS_ROOTS_DIGEST=""
+    TASKDAG_FACTS_REGISTRY_OID=""
     TASKDAG_DONE_TASKS=()
     TASKDAG_TASK_COMPLETION_WITNESSES=()
     TASKDAG_CLOSED_ISSUES=()
     TASKDAG_ISSUE_CLOSE_WITNESSES=()
     TASKDAG_ISSUE_CLOSE_ROOTS=()
+    TASKDAG_CLOSED_EPIC_IDS=()
+    TASKDAG_EPIC_ID_CLOSE_WITNESSES=()
+    TASKDAG_EPIC_ID_CLOSE_ROOTS=()
 
     # done-set: non-primary empty-tree task parents of tree-equal commits on
     # master's first-parent spine. Walking arbitrary ancestry would encounter
     # task commits themselves and falsely mark their structural/dependency
     # parents done. Build once so each done() query remains O(1).
-    local commit first rest commit_tree first_tree task_tree scan
+    local commit first rest commit_tree first_tree task_tree scan close_keys
     scan=$(git rev-list --first-parent --parents "$want_oid" 2>/dev/null) || return 2
     while read -r commit first rest; do
         [ -n "$commit" ] && [ -n "$first" ] && [ -n "$rest" ] || continue
@@ -206,6 +225,11 @@ taskdag_load_facts() {
         commit_tree=$(git rev-parse "$commit^{tree}" 2>/dev/null) || return 2
         first_tree=$(git rev-parse "$first^{tree}" 2>/dev/null) || return 2
         [ "$commit_tree" = "$first_tree" ] || continue
+        # Epic close merges are root lifecycle witnesses, never ordinary task
+        # completions. Do not infer root completion from their second-parent
+        # shape, even when the close trailer or registry is malformed.
+        close_keys=$(git show -s --format='%(trailers:keyonly,separator=%x0A)' "$commit" 2>/dev/null) || return 2
+        ! grep -Eq '^Closes-Epic(-ID)?$' <<<"$close_keys" || continue
         task_tree=$(git rev-parse "$rest^{tree}" 2>/dev/null) || return 2
         [ "$task_tree" = "$EMPTY_TREE" ] || continue
         TASKDAG_DONE_TASKS["$rest"]=1
@@ -223,8 +247,32 @@ taskdag_load_facts() {
         fi
     done <<<"$close_scan"
 
+    # Scan typed close KEYS independently of registry-ref existence. A key is
+    # an assertion of the typed dialect, so absent/malformed authority or an
+    # invalid close is indeterminate rather than an open root (and must never
+    # fall through to generic task completion).
+    local typed_line epic_id typed_rc keys typed_key_count
+    while read -r commit _; do
+        keys=$(git show -s --format='%(trailers:keyonly,separator=%x0A)' "$commit" 2>/dev/null) || return 2
+        typed_key_count=$(grep -cx 'Closes-Epic-ID' <<<"$keys")
+        [ "$typed_key_count" -gt 0 ] || continue
+        [ "$typed_key_count" -eq 1 ] && [ -n "$registry_oid" ] || return 2
+        typed_rc=0
+        typed_line=$(taskdag_parse_epic_close_commit "$commit" "$registry_oid" "$want_oid" 2>/dev/null) || typed_rc=$?
+        case "$typed_rc" in
+            0) ;;
+            1|2) return 2 ;;
+            *) return 2 ;;
+        esac
+        IFS=$'\t' read -r epic_id witness root <<<"$typed_line"
+        TASKDAG_CLOSED_EPIC_IDS["$epic_id"]=1
+        TASKDAG_EPIC_ID_CLOSE_WITNESSES["$epic_id"]="$witness"
+        TASKDAG_EPIC_ID_CLOSE_ROOTS["$epic_id"]="$root"
+    done <<<"$scan"
+
     TASKDAG_FACTS_TIP_OID="$want_oid"
     TASKDAG_FACTS_ROOTS_DIGEST="$roots_digest"
+    TASKDAG_FACTS_REGISTRY_OID="$registry_oid"
     return 0
 }
 
@@ -244,6 +292,10 @@ taskdag_node_done() {
         task:*)
             rest="${node#task:}"; or="${rest%@*}"; ref="${rest##*@}"
             [ "$or" = "$cur" ] || return 1                      # foreign repo
+            local epic_id
+            for epic_id in "${!TASKDAG_EPIC_ID_CLOSE_ROOTS[@]}"; do
+                [ "${TASKDAG_EPIC_ID_CLOSE_ROOTS[$epic_id]}" = "$ref" ] && return 0
+            done
             [ -n "${TASKDAG_DONE_TASKS[$ref]:-}" ] || return 1
             # A done task node MUST be an empty-tree task commit: excludes an
             # implementation SHA that only appeared as a first parent.
@@ -296,6 +348,45 @@ taskdag_issue_closed_at_tip() {
     taskdag_load_facts "$tip" || return 2
     [ -n "${TASKDAG_ISSUE_CLOSE_WITNESSES[$issue]:-}" ] || return 1
     [ "${TASKDAG_ISSUE_CLOSE_ROOTS[$issue]:-}" = "$root" ]
+}
+
+taskdag_epic_id_closed_at_tip() { # tip epic-id [root]
+    local tip=$1 epic_id=$2 expected_root=${3:-} record
+    [[ "$epic_id" =~ ^epic-v1:[0-9a-f]{64}$ ]] || return 2
+    taskdag_load_facts "$tip" || return 2
+    [ -n "${TASKDAG_CLOSED_EPIC_IDS[$epic_id]:-}" ] || return 1
+    if [ -n "$expected_root" ]; then
+        [ "${TASKDAG_EPIC_ID_CLOSE_ROOTS[$epic_id]}" = "$expected_root" ] || return 2
+    else
+        record=$(taskdag_epic_registry_record "$epic_id" "$TASKDAG_FACTS_REGISTRY_OID" "$tip") || return 2
+        [ "${TASKDAG_EPIC_ID_CLOSE_ROOTS[$epic_id]}" = "$(jq -r .rootCommit <<<"$record")" ] || return 2
+    fi
+}
+
+# taskdag_root_closed_at_tip <tip> <locator> <root>: dual root-lifecycle
+# predicate. Return 0 only for a validated matching close, 1 for open, and 2
+# for malformed/indeterminate authority. Callers must preserve rc 2.
+taskdag_root_closed_at_tip() {
+    local tip=$1 locator=$2 root=$3
+    case "$locator" in
+        epic-v1:[0-9a-f]*)
+            [[ "$locator" =~ ^epic-v1:[0-9a-f]{64}$ ]] || return 2
+            taskdag_epic_id_closed_at_tip "$tip" "$locator" "$root"
+            ;;
+        *)
+            [[ "$locator" =~ ^[1-9][0-9]*$ ]] || return 2
+            taskdag_issue_closed_at_tip "$tip" "$locator" "$root"
+            ;;
+    esac
+}
+
+taskdag_typed_root_completed_at_tip() { # tip root
+    local tip=$1 root=$2 epic_id
+    taskdag_load_facts "$tip" || return 2
+    for epic_id in "${!TASKDAG_EPIC_ID_CLOSE_ROOTS[@]}"; do
+        [ "${TASKDAG_EPIC_ID_CLOSE_ROOTS[$epic_id]}" = "$root" ] && return 0
+    done
+    return 1
 }
 
 # taskdag_edges_with_facts [--no-fetch] [--tip <commit>]: read the active edge

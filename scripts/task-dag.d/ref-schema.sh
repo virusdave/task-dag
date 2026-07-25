@@ -17,6 +17,24 @@ TASKDAG_GRAPH_REF="refs/heads/tasks/v1/graph"
 TASKDAG_RECONCILE_COMMENTS_INDEX_REF="refs/heads/tasks/v1/reconcile-comments-index"
 TASKDAG_MAILBOX_REF_GLOB="refs/heads/tasks/v1/mailbox"
 
+taskdag_parse_delegation_v2_ref() { # ref; prints parent-digest<TAB>declaration-digest
+    local ref=${1#refs/heads/}
+    if [[ "$ref" =~ ^tasks/delegated/v2/([0-9a-f]{64})/([0-9a-f]{64})$ ]]; then
+        printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
+taskdag_parse_delegated_close_v2_ref() { # ref; prints parent-digest<TAB>declaration-digest
+    local ref=${1#refs/heads/}
+    if [[ "$ref" =~ ^tasks/delegated-close/v2/([0-9a-f]{64})/([0-9a-f]{64})$ ]]; then
+        printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
 taskdag_is_reconcile_comments_index_ref() {
     case "$1" in
         refs/heads/tasks/v1/reconcile-comments-index|tasks/v1/reconcile-comments-index) return 0 ;;

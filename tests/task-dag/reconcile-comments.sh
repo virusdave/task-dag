@@ -19,6 +19,7 @@ git init -q "$tmp/work"
 git -C "$tmp/work" remote add origin "$tmp/origin.git"
 git -C "$tmp/work" config user.name test
 git -C "$tmp/work" config user.email test@example.com
+git -C "$tmp/work" config taskdag.current-repo acme/widgets
 empty=$(git -C "$tmp/work" hash-object -t tree /dev/null)
 classify() {
   local issue=$1 body=$2 result
@@ -29,6 +30,8 @@ classify() {
 source "$(dirname "$TD")/task-dag.d/cross-repo.sh"
 source "$(dirname "$TD")/task-dag.d/materialise-parsing.sh"
 source "$(dirname "$TD")/task-dag.d/materialise-intent.sh"
+taskdag_json_no_duplicate_keys() { jq empty "$1"; }
+taskdag_json_file_is_single_strict() { jq empty "$1"; }
 source "$(dirname "$TD")/task-dag.d/materialise.sh"
 printf '%s\n' '{"lease":{"holder":"fixture","fence":1},"cycle":"fixture-cycle"}' >"$tmp/watchdog-token"
 taskdag_comment_watchdog_check_file() { [ "$1" = "$tmp/watchdog-token" ] && [ "$2" -eq 510 ]; }
@@ -103,6 +106,18 @@ record=$(printf '%s\n' 'Record delegated close' '' 'Task-Dag-Delegated-Close: v1
   | git -C "$tmp/work" commit-tree "$empty" -p "$delegation")
 (cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$record" "$delegation" \
   acme/widgets 99 peer/repo 2)
+git -C "$tmp/work" push -q origin \
+  "$delegation:refs/heads/tasks/delegated/99/peer/repo/2" \
+  "$record:refs/heads/tasks/delegated-close/v1/99/peer/repo/2"
+status_no_delegation=$(cd "$tmp/work" && _xrepo_epic_status 98 2>&1)
+[ "$status_no_delegation" = '[task-dag] epic has no delegations: 98' ]
+status_v1_complete=$(cd "$tmp/work" && _xrepo_epic_status 99 2>&1)
+[ "$status_v1_complete" = 'epic ready-to-close: 99' ]
+git --git-dir="$tmp/origin.git" update-ref -d refs/heads/tasks/delegated-close/v1/99/peer/repo/2
+status_v1_missing=$(cd "$tmp/work" && _xrepo_epic_status 99 2>&1)
+[ "$status_v1_missing" = 'epic still waiting: 99 missing peer/repo#2' ]
+git --git-dir="$tmp/origin.git" update-ref -d refs/heads/tasks/delegated/99/peer/repo/2
+git -C "$tmp/work" update-ref -d refs/heads/tasks/delegated/99/peer/repo/2
 empty_legacy_marker=$(printf '%s\n' "$(git -C "$tmp/work" show -s --format=%B "$record")" 'Legacy-Delegation:' \
   | git -C "$tmp/work" commit-tree "$empty" -p "$delegation")
 ! (cd "$tmp/work" && _xrepo_validate_delegated_close_v1 "$empty_legacy_marker" "$delegation" \
@@ -318,6 +333,18 @@ git -C "$tmp/work" update-ref -d "refs/replace/$clarification"
 bad_index=$(printf 'Malformed index successor\n' | git -C "$tmp/work" commit-tree \
     "$(git --git-dir="$tmp/origin.git" rev-parse "$index_tip^{tree}")" -p "$index_tip" -p "$clarification")
 ! (cd "$tmp/work" && _xrepo_reconcile_index_read "$bad_index" "$tmp/bad-index" acme/widgets "")
+# Persisted manifests accept only complete delegated-close ref names. A valid
+# v1 fixture with a suffix must not pass by matching a path prefix.
+malformed_manifest_tree="$tmp/malformed-manifest-tree"
+git -C "$tmp/work" archive "$index_tip" | tar -x -C "$tmp" --transform='s,^,malformed-manifest-tree/,'
+printf '%s\t%s\n' "$clarification" 'refs/heads/tasks/delegated-close/v1/1/acme/peer/2/suffix' \
+  >>"$malformed_manifest_tree/manifest.tsv"
+LC_ALL=C sort -t $'\t' -k2,2 "$malformed_manifest_tree/manifest.tsv" -o "$malformed_manifest_tree/manifest.tsv"
+malformed_index=$(git -C "$tmp/work" add --all --dry-run >/dev/null 2>&1; \
+  idx=$(mktemp); rm -f "$idx"; \
+  while IFS= read -r path; do blob=$(git -C "$tmp/work" hash-object -w "$malformed_manifest_tree/$path"); GIT_INDEX_FILE=$idx git -C "$tmp/work" update-index --add --cacheinfo "100644,$blob,$path"; done < <(find "$malformed_manifest_tree" -type f -printf '%P\n'); \
+  tree=$(GIT_INDEX_FILE=$idx git -C "$tmp/work" write-tree); rm -f "$idx"; git -C "$tmp/work" commit-tree "$tree" -p "$index_tip" -m malformed)
+! (cd "$tmp/work" && _xrepo_reconcile_index_read_one "$malformed_index" "$tmp/malformed-index" acme/widgets)
 # Canonical manifests remain valid when the caller's locale sorts numeric ref
 # components differently. This shape reproduces the production join failure:
 # the current generation adds issue 1 ahead of persisted issues 10, 2, and 20.
@@ -557,6 +584,164 @@ jq -e 'length==6 and all(.[];.old=="") and ([.[].ref]|sort==. and length==(uniqu
   || assert_fixture false "batch update payload must be sorted, unique, and create-only"
 assert_fixture "$([ "$(cat "$batch/applied")" -eq 3 ] && echo true || echo false)" "three-comment batch applied count must equal three"
 assert_fixture "$([ "$(jq -r '[.[].new]|unique|length' "$batch/payload")" -eq 6 ] && echo true || echo false)" "three comments must create three unique receipts and three unique effects"
+
+# A ready typed snapshot is still reader-only. The gate must fire before any
+# legacy root lookup/writer and therefore cannot even leave a dangling object.
+writer_gate="$tmp/writer-gate"; mkdir "$writer_gate"
+jq -nc '{title:"Writer gate",body:"",html_url:"https://example.invalid/91",user:{login:"alice"}}' >"$writer_gate/issue.json"
+native_snapshot=$(jq -ncS --arg epic "epic-v1:$(printf 'a%.0s' {1..64})" --arg root "$batch_root_31" \
+  '{status:"ready",parent:{epicId:$epic,kind:"native-epic-v1",rootCommit:$root,projectedIssueNumber:"91"}}')
+before_objects=$(git -C "$tmp/work" count-objects -v); before_refs=$(git -C "$tmp/work" for-each-ref --format='%(refname) %(objectname)')
+set +e
+(cd "$tmp/work" && \
+  _xrepo_ensure_issue_epic() { assert_fixture false "native writer gate called legacy ensure"; } && \
+  taskdag_emit_origin_epic_close() { assert_fixture false "native writer gate called legacy close writer"; } && \
+  _xrepo_apply_ready_snapshot_close "$native_snapshot" 91 "$writer_gate/issue.json" "$tmp/work/.git")
+native_rc=$?
+set -e
+after_objects=$(git -C "$tmp/work" count-objects -v); after_refs=$(git -C "$tmp/work" for-each-ref --format='%(refname) %(objectname)')
+assert_fixture "$([ "$native_rc" -eq 75 ] && [ "$before_objects" = "$after_objects" ] && [ "$before_refs" = "$after_refs" ] && echo true || echo false)" \
+  "native ready snapshot must return writer-gated rc 75 without object/ref mutation"
+
+# Completion convergence must perform the identity gate before the legacy
+# reconciler, then recapture and revalidate so an adoption race fails closed.
+converge_gate="$tmp/converge-gate"; mkdir "$converge_gate"
+printf '0\n' >"$converge_gate/captures"; : >"$converge_gate/calls"
+set +e
+(cd "$tmp/work" && \
+  _xrepo_capture_parent_snapshot() { :; } && \
+  _xrepo_strict_snapshot_status() { printf '%s\n' "$native_snapshot"; } && \
+  _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
+  _xrepo_ensure_issue_epic() { printf 'ensure\n' >>"$converge_gate/calls"; } && \
+  taskdag_emit_origin_epic_close() { printf 'close\n' >>"$converge_gate/calls"; } && \
+  _xrepo_converge_completion_issue 91 acme/widgets)
+native_converge_rc=$?
+set -e
+assert_fixture "$([ "$native_converge_rc" -eq 75 ] && [ ! -s "$converge_gate/calls" ] && echo true || echo false)" \
+  "native completion gate must return 75 before reconcile or legacy writers"
+
+malformed_snapshot='{"parent":{"kind":"legacy-adoption-v1"},"status":"ready"}'
+before_objects=$(git -C "$tmp/work" count-objects -v); before_refs=$(git -C "$tmp/work" for-each-ref --format='%(refname) %(objectname)')
+set +e
+(cd "$tmp/work" && \
+  _xrepo_capture_parent_snapshot() { :; } && \
+  _xrepo_strict_snapshot_status() { printf '%s\n' "$malformed_snapshot"; } && \
+  _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
+  _xrepo_converge_completion_issue 91 acme/widgets)
+malformed_converge_rc=$?
+set -e
+after_objects=$(git -C "$tmp/work" count-objects -v); after_refs=$(git -C "$tmp/work" for-each-ref --format='%(refname) %(objectname)')
+assert_fixture "$([ "$malformed_converge_rc" -eq 2 ] && [ ! -s "$converge_gate/calls" ] && [ "$before_objects" = "$after_objects" ] && [ "$before_refs" = "$after_refs" ] && echo true || echo false)" \
+  "malformed completion gate must return rc 2 before reconcile or object/ref mutation"
+
+# A v1-only parent has no typed registry record. It follows the original
+# numeric completion flow, deriving the live root after reconciliation.
+v1_snapshot='{"parent":null,"status":"ready"}'
+: >"$converge_gate/calls"; printf '0\n' >"$converge_gate/captures"
+(cd "$tmp/work" && \
+  _xrepo_capture_parent_snapshot() { n=$(cat "$converge_gate/captures"); printf '%s\n' "$((n+1))" >"$converge_gate/captures"; } && \
+  _xrepo_strict_snapshot_status() { printf '%s\n' "$v1_snapshot"; } && \
+  _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
+  _xrepo_ensure_issue_epic() { printf 'ensure\n' >>"$converge_gate/calls"; printf '%s\n' "$batch_root_31"; } && \
+  _xrepo_watchdog_fence() { printf 'fence\n' >>"$converge_gate/calls"; } && \
+  taskdag_emit_origin_epic_close() { printf 'close:%s:%s\n' "$1" "$2" >>"$converge_gate/calls"; } && \
+  _xrepo_converge_completion_issue 91 acme/widgets) \
+  || assert_fixture false "v1-only completion must retain numeric convergence"
+assert_fixture "$([ "$(cat "$converge_gate/captures")" -eq 2 ] && [ "$(cat "$converge_gate/calls")" = $'reconcile\nensure\nfence\nclose:91:'"$batch_root_31" ] && echo true || echo false)" \
+  "v1-only completion must reconcile before deriving and closing its numeric root"
+
+adoption_snapshot=$(jq -ncS --arg epic "epic-v1:$(printf 'b%.0s' {1..64})" --arg root "$batch_root_31" \
+  '{status:"ready",parent:{epicId:$epic,kind:"legacy-adoption-v1",rootCommit:$root,projectedIssueNumber:"91"}}')
+(cd "$tmp/work" && \
+  taskdag_epic_registry_record() { jq -ncS --arg root "$batch_root_31" '{legacyAdoption:{issueNumber:"91"},rootCommit:$root}'; } && \
+  _xrepo_ensure_issue_epic() { [ "$1" = 91 ] && printf '%s\n' "$batch_root_31"; } && \
+  _xrepo_watchdog_fence() { :; } && \
+  taskdag_emit_origin_epic_close() { [ "$1" = 91 ] && [ "$2" = "$batch_root_31" ]; } && \
+  _xrepo_apply_ready_snapshot_close "$adoption_snapshot" 91 "$writer_gate/issue.json" "$tmp/work/.git") \
+  || assert_fixture false "matching legacy adoption must reach the numeric writer"
+if (cd "$tmp/work" && \
+  taskdag_epic_registry_record() { jq -ncS --arg root "$batch_root_31" '{legacyAdoption:{issueNumber:"92"},rootCommit:$root}'; } && \
+  _xrepo_ensure_issue_epic() { assert_fixture false "mismatched adoption called legacy ensure"; } && \
+  taskdag_emit_origin_epic_close() { assert_fixture false "mismatched adoption called legacy writer"; } && \
+  _xrepo_apply_ready_snapshot_close "$adoption_snapshot" 91 "$writer_gate/issue.json" "$tmp/work/.git"); then
+  assert_fixture false "mismatched legacy adoption must fail before writers"
+fi
+
+: >"$converge_gate/calls"; printf '0\n' >"$converge_gate/captures"
+set +e
+(cd "$tmp/work" && \
+  taskdag_epic_registry_record() { jq -ncS --arg root "$batch_root_31" '{legacyAdoption:{issueNumber:"91"},rootCommit:$root}'; } && \
+  _xrepo_capture_parent_snapshot() { n=$(cat "$converge_gate/captures"); printf '%s\n' "$((n+1))" >"$converge_gate/captures"; } && \
+  _xrepo_strict_snapshot_status() { [ "$(cat "$converge_gate/captures")" -eq 1 ] && printf '%s\n' "$adoption_snapshot" || printf '%s\n' "$native_snapshot"; } && \
+  _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
+  _xrepo_ensure_issue_epic() { printf 'ensure\n' >>"$converge_gate/calls"; } && \
+  taskdag_emit_origin_epic_close() { printf 'close\n' >>"$converge_gate/calls"; } && \
+  _xrepo_converge_completion_issue 91 acme/widgets)
+adoption_race_rc=$?
+set -e
+assert_fixture "$([ "$adoption_race_rc" -eq 75 ] && [ "$(cat "$converge_gate/captures")" -eq 2 ] && [ "$(cat "$converge_gate/calls")" = reconcile ] && echo true || echo false)" \
+  "post-reconcile adoption recapture race must fail closed before parent writers"
+
+# Exercise the reconciler's actual queued batch loop, not only the immediate
+# completion helper above. Extract the nested function verbatim and provide
+# the same boundary seams its enclosing command supplies.
+batch_converge="$tmp/batch-converge"; mkdir "$batch_converge"
+sed -n '/^    _rc_converge_issues() {/,/^    # Durable completion receipts/p' \
+  "$(dirname "$TD")/task-dag.d/cross-repo.sh" | sed '$d' >"$batch_converge/function"
+# shellcheck disable=SC1090
+source "$batch_converge/function"
+dry=false; fatal=false; terminal_rc=0; deferred=0; repo=acme/widgets
+retry_unvisited="$batch_converge/retry-unvisited"
+retry_failed="$batch_converge/retry-failed"
+: >"$retry_unvisited"; : >"$retry_failed"; : >"$batch_converge/calls"
+_rc_convergence_time() { :; }
+_rc_time() { :; }
+_rc_fail() { printf 'fail:%s:%s\n' "$1" "$2" >>"$batch_converge/calls"; }
+_rc_timeout() { assert_fixture false "batch convergence unexpectedly timed out"; }
+_rc_api() {
+  local number=${1##*/}
+  jq -nc --argjson number "$number" '{number:$number,state:"open",title:"Queued convergence",body:"",html_url:("https://example.invalid/"+($number|tostring)),user:{login:"alice"}}' >"$tmp/body"
+}
+_xrepo_reconcile_issue_delegated_closes() { printf 'reconcile:%s\n' "$1" >>"$batch_converge/calls"; }
+_xrepo_ensure_issue_epic() { printf 'ensure:%s\n' "$1" >>"$batch_converge/calls"; printf '%s\n' "$batch_root_31"; }
+_xrepo_watchdog_fence() { printf 'fence\n' >>"$batch_converge/calls"; }
+taskdag_emit_origin_epic_close() { printf 'close:%s:%s\n' "$1" "$2" >>"$batch_converge/calls"; }
+taskdag_epic_registry_record() { jq -ncS --arg root "$batch_root_31" '{legacyAdoption:{issueNumber:"94"},rootCommit:$root}'; }
+
+# Mixed native and malformed authority must reject each item before the
+# delegated-close reconciler, object creation, or ref movement.
+printf '%s\n' 91 92 >"$batch_converge/issues"
+printf '0\n' >"$batch_converge/captures"
+_rc_fresh_issue_status() {
+  [ "$1" = 91 ] && printf '%s\n' "$native_snapshot" || printf '%s\n' "$malformed_snapshot"
+}
+before_objects=$(git -C "$tmp/work" count-objects -v); before_refs=$(git -C "$tmp/work" for-each-ref --format='%(refname) %(objectname)')
+_rc_converge_issues "$batch_converge/issues"
+after_objects=$(git -C "$tmp/work" count-objects -v); after_refs=$(git -C "$tmp/work" for-each-ref --format='%(refname) %(objectname)')
+assert_fixture "$([ "$(cat "$batch_converge/calls")" = $'fail:convergence:91\nfail:convergence:92' ] && [ "$before_objects" = "$after_objects" ] && [ "$before_refs" = "$after_refs" ] && echo true || echo false)" \
+  "queued native/malformed authority must cause zero delegated-close, object, or ref mutation"
+
+# parent:null remains the legacy v1 route through both captures and the
+# parent writer.
+: >"$batch_converge/calls"; : >"$retry_failed"; printf '93\n' >"$batch_converge/issues"
+_rc_fresh_issue_status() { printf '%s\n' "$v1_snapshot"; }
+_rc_converge_issues "$batch_converge/issues"
+assert_fixture "$([ "$(cat "$batch_converge/calls")" = $'reconcile:93\nensure:93\nfence\nclose:93:'"$batch_root_31" ] && echo true || echo false)" \
+  "queued parent:null v1 authority must still reconcile and close"
+
+# If a legacy adoption becomes native between the pre- and post-reconcile
+# captures, the second capture gates the parent writer.
+: >"$batch_converge/calls"; : >"$retry_failed"; printf '94\n' >"$batch_converge/issues"; printf '0\n' >"$batch_converge/captures"
+batch_adoption_snapshot=$(jq -cS '.parent.projectedIssueNumber="94"' <<<"$adoption_snapshot")
+_rc_fresh_issue_status() {
+  local captures
+  captures=$(cat "$batch_converge/captures")
+  printf '%s\n' "$((captures+1))" >"$batch_converge/captures"
+  [ "$captures" -eq 0 ] && printf '%s\n' "$batch_adoption_snapshot" || printf '%s\n' "$native_snapshot"
+}
+_rc_converge_issues "$batch_converge/issues"
+assert_fixture "$([ "$(cat "$batch_converge/calls")" = $'reconcile:94\nfail:convergence:94' ] && echo true || echo false)" \
+  "queued adoption-to-native transition must block the parent writer"
 
 # Prepared child-map state, rather than a changed post-prepare observation,
 # governs acceptance. A mismatching prepared root fails before fence/push.

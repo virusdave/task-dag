@@ -35,6 +35,20 @@ disabled, malformed, stale, shallow or uncertain authority fails closed.
 
 ## Immutable materialisation reservations (disabled-state schema 1)
 
+The dormant materialise-and-claim reader also accepts target-state and final
+output schema 2. Its identity is provider-independent: `epicId`, the exact
+`taskdag_epic_root_ref(epicId)`, the root commit and canonical descriptor bound
+through explicit immutable `registryCommit` and `masterCommit` authorities,
+plus exact claimed-leaf ref/commit readback. The final form also binds the
+claim's exact claimer, host, and process ID to the canonical immutable claim
+validator. Readers resolve only these supplied object IDs, never ambient
+mutable refs. Provider projection is registry-derived metadata, not identity.
+Schema 2 rejects issue numbers, issue node IDs, issue URLs, issue refs,
+`gh/issues` refs, and numeric pending-root identity. No public command produces
+schema 2, performs a GitHub write for it, or changes schema 1 serialization.
+Reservation, census and import schemas 1 through 3 remain immutable legacy
+evidence and are outside this reader dialect.
+
 ### Reviewed legacy census import
 
 Legacy import is partitioned by current repository identity. The global,
@@ -698,6 +712,35 @@ and preserve the typed identity before the activation-fenced root minter or a
 public writer is enabled. GitHub issue/comment creation and Actions are
 eventual projection/wake paths only and never task authority.
 
+The reader-only epic registry is `refs/heads/tasks/v1/epics`. It is a
+zero-parent genesis followed only by single-parent, append-only commits. Every
+entry is a canonical JSON plus LF root record at `roots/<epic-digest>.json`.
+An unbound operation root has no binding. A bound projection has a distinct
+canonical `{schema:1,epicId,projection}` blob, byte-identical at
+`bindings/by-epic/<epic-digest>.json` and a domain-separated, length-framed
+`bindings/by-provider/<provider-binding-key>.json`. Native records bind the
+strict root descriptor, Epic-ID, and exact root commit. The strict validator
+rejects noncanonical blobs, unexpected paths or modes, replacement/deletion,
+orphan bindings, projection disagreement, and non-bijective provider
+bindings. Registry mutation remains deliberately unavailable.
+
+Legacy-adoption roots additionally bind exactly the legacy issue number,
+`gh/issues/<N>` ref, and `tasks/pending/<N>` ref. Their empty-tree root,
+non-task parent, canonical legacy task message, issue URL and provider
+projection must agree exactly. The issue ref always names the root. The pending
+ref either still names it, or is absent only after the exact legacy close fact
+for that issue/root appears on the current authority master.
+
+Typed completion is the exact two-parent, first-parent-history, tree-equal
+merge shape with exactly one `Closes-Epic-ID: epic-v1:<64-lowercase-hex>`
+trailer, no `Closes-Epic:` trailer, and a second parent equal to the registry's
+declared root. Mixed closes are invalid. Facts cache this typed witness by both
+authority-tip and registry OID, so deleting the pending ref does not erase a
+completion. An epic-close merge is never inferred to be an ordinary task
+completion merely because its second parent is an empty-tree root. The typed
+close codec is currently read-only; all close writers remain legacy-only or
+return the established gated status before mutation.
+
 Explicit `--no-fetch` operations use only a previously observed local
 activation, graph, facts, and task refs. A nested offline helper may reuse its
 enclosing operation's just-observed pre-activation absence, but standalone
@@ -944,3 +987,28 @@ supported version into one semantic representation, and compare those semantic
 forms rather than wire JSON. Proof envelopes remain v1. Any future v2 writer
 must retain v1 reader and migration fixtures alongside semantic-equivalence
 tests; introducing v2 is not an implicit license to remove v1 replay.
+# Delegation v2 read contract
+
+`tasks/delegated/v2/<parent-epic-digest>/<declaration-digest>` and the
+corresponding `tasks/delegated-close/v2/...` namespace are strict read-only
+formats. Both path components are lowercase 64-hex digests. Readers validate
+empty trees, exact parentage and metadata, both Epic-ID registry bindings, and
+the domain-separated length-framed declaration identity. Close readers use the
+typed Epic-ID close codec. No command writes either v2 namespace; all existing
+delegation, materialisation, and close reconciliation writers remain v1.
+
+Every reconciliation and close decision advertises v2 delegation and close
+refs together. If either v2 namespace is present, that same manifest must also
+contain the exact parent `tasks/v1/epics` registry and `master` authority, and
+every present close must have exactly one declaration and validate against it.
+Declarations without closes are valid waiting obligations; orphan or extra
+closes and malformed declarations or closes are indeterminate corruption.
+Readers fetch advertised object IDs into isolated stores, capture each peer's
+registry and `master` in the same way, normalize the declaration once, and
+compare a second advertisement before accepting it. Missing authority,
+malformed declarations or closes, and advertisement/readback races are
+indeterminate failures. An absent v2 close leaves its declaration waiting and
+cannot satisfy it. Thus a
+v2 child can neither disappear behind its numeric issue projection nor permit
+the projected parent to close. With no v2 refs, registry and `master` remain
+absent from the manifest and the v1 bytes and behavior are unchanged.
