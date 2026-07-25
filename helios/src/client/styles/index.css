@@ -36,6 +36,39 @@
   --shadow: 0 10px 30px rgba(51, 31, 8, 0.08);
 }
 
+.operator-capture-panel {
+  position: fixed;
+  z-index: 1100;
+  right: 1rem;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  left: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  max-width: 760px;
+  margin-inline: auto;
+  padding: 0.8rem 1rem;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  background: #fffdfa;
+  box-shadow: 0 12px 40px rgba(51, 31, 8, 0.24);
+}
+.operator-capture-panel--invalid { border-color: var(--danger); }
+.operator-capture-status { display: grid; gap: 0.2rem; min-width: 0; }
+.operator-capture-status span { color: var(--text-muted-strong); font-size: 0.85rem; }
+.operator-capture-status label { display: grid; gap: 0.2rem; font-size: 0.8rem; font-weight: 700; }
+.operator-capture-status input { min-width: min(420px, 60vw); }
+.operator-capture-error { color: var(--danger) !important; font-weight: 700; }
+.operator-capture-actions { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+.operator-capture-actions > * { min-height: 44px; }
+@media (max-width: 600px) {
+  .operator-capture-panel { align-items: stretch; flex-direction: column; gap: 0.65rem; bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px)); right: 0.5rem; left: 0.5rem; padding: 0.75rem; }
+  .operator-capture-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .operator-capture-actions > * { text-align: center; }
+  .operator-capture-status input { width: 100%; min-width: 0; }
+}
+
 /* ===========================================================================
  * Canonical Pricing Ladder Styles
  * Injected from helios/src/shared/ui/pricing-ladder/style.ts

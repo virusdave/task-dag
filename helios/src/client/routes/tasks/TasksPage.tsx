@@ -40,7 +40,7 @@ export function TasksPage() {
   }
 
   return (
-    <section>
+    <section data-helios-capture-target="tasks-overview" data-helios-capture-ready={String(!epicsQ.loading && !activityQ.loading)}>
       <div className="page-header">
         <div>
           <p className="eyebrow">Operations · Tasks</p>

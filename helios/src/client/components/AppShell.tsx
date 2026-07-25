@@ -19,6 +19,7 @@ import { SCHEDULING_SIDEBAR_SUBTREE } from '../routes/scheduling/schedulingSideb
 import { SCREENS_SIDEBAR_SUBTREE } from '../routes/screens/screensSidebar.js'
 import { TASKS_SIDEBAR_SUBTREE } from '../routes/tasks/tasksSidebar.js'
 import { AgentWasteReviewReminder } from './AgentWasteReviewReminder.js'
+import { OperatorCapturePanel } from './OperatorCapturePanel.js'
 import { Pill } from './Pill.js'
 import { SidebarNavProvider, useSidebarNav } from './SidebarNavContext.js'
 import { TreeNav, type TreeNavNode } from './TreeNav.js'
@@ -461,6 +462,7 @@ function AppShellInner() {
   const session = useLoaderData() as SessionEnvelope
   const navigate = useNavigate()
   const location = useLocation()
+  const isCaptureMode = new URLSearchParams(location.search).has('capture')
   usePageTitle()
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') {
@@ -628,6 +630,7 @@ function AppShellInner() {
         nothing otherwise, so it's safe to mount unconditionally here.
       */}
       <AgentWasteReviewReminder />
+      <OperatorCapturePanel />
       <div className={`layout-grid${isSidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
         {isSidebarCollapsed ? null : <PrimarySidebar />}
         <main className="content-panel">
@@ -644,7 +647,7 @@ function AppShellInner() {
         returning to the page-top from deep in a long list lands on
         a familiar fully-expanded shell).
       */}
-      {showScrollTopChip ? (
+      {showScrollTopChip && !isCaptureMode ? (
         <button
           type="button"
           className="scroll-top-chip"

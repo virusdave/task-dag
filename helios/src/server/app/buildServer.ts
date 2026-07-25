@@ -54,6 +54,7 @@ import { registerMetricAnnotationsRoutes } from '../routes/metricAnnotations.js'
 import { registerMetricsRoutes } from '../routes/metrics.js'
 import { registerBedrockModelConfigRoutes } from '../routes/bedrockModelConfig.js'
 import { registerMetricsDefaultsRoutes } from '../routes/metricsDefaults.js'
+import { registerOperatorCaptureRoutes } from '../routes/operatorCaptures.js'
 import { registerTargetTrackingRoutes } from '../routes/targetTracking.js'
 import { registerTimeOfDayRoutes } from '../routes/timeOfDay.js'
 import { registerCatalogPurchaseSellThroughRoutes } from '../routes/catalogPurchaseSellThrough.js'
@@ -307,6 +308,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerMetricAnnotationsRoutes(server)
   await registerMetricsRoutes(server)
   await registerMetricsDefaultsRoutes(server)
+  await registerOperatorCaptureRoutes(server)
   await registerBedrockModelConfigRoutes(server)
   await registerTargetTrackingRoutes(server)
   await registerTimeOfDayRoutes(server)

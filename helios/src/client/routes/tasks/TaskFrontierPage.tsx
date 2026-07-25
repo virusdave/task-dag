@@ -167,7 +167,7 @@ export function TaskFrontierPage() {
   ]
 
   return (
-    <section>
+    <section data-helios-capture-target="tasks-queue" data-helios-capture-ready={String(!loading)}>
       <div className="page-header">
         <div>
           <p className="eyebrow">Operations · Tasks</p>

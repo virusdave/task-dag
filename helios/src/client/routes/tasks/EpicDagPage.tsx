@@ -47,7 +47,7 @@ export function EpicDagPage() {
 
   if (loading && !data) {
     return (
-      <section>
+      <section data-helios-capture-target="task-plan" data-helios-capture-ready="false">
         <div className="page-header">
           <h2>Epic DAG</h2>
         </div>
@@ -58,7 +58,7 @@ export function EpicDagPage() {
 
   if ((error && !data) || !data) {
     return (
-      <section>
+      <section data-helios-capture-target="task-plan" data-helios-capture-ready="true">
         <div className="page-header">
           <h2>Epic DAG</h2>
         </div>
@@ -71,7 +71,7 @@ export function EpicDagPage() {
   }
 
   return (
-    <section>
+    <section data-helios-capture-target="task-plan" data-helios-capture-ready="true">
       <div className="page-header">
         <div>
           <p className="eyebrow">Operations · Epic</p>
