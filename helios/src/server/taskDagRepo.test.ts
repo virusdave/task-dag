@@ -287,6 +287,22 @@ describe('taskDagRepo indexer', () => {
     expect(() => parseTaskDagReposConfig('repo url enforce foo@{bar\n')).toThrow(/repair branch/)
     expect(() => parseTaskDagReposConfig('repo url enforce foo.\n')).toThrow(/repair branch/)
   })
+
+  it('rejects the automation-only fallback in production', async () => {
+    const nodeEnv = process.env.NODE_ENV
+    try {
+      process.env.NODE_ENV = 'production'
+      delete process.env.HELIOS_TASK_DAG_REPOS_FILE
+      __resetTaskDagMirrorForTests()
+      await expect(initTaskDagMirror()).rejects.toThrow(
+        'HELIOS_TASK_DAG_REPOS_FILE is required in production',
+      )
+    } finally {
+      if (nodeEnv == null) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = nodeEnv
+      __resetTaskDagMirrorForTests()
+    }
+  })
 })
 
 async function frontierByTitle(substr: string) {

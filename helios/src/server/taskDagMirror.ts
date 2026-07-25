@@ -6,9 +6,10 @@
  * `HELIOS_TASK_DAG_MIRROR_ROOT`, and uses the aliases/keys in
  * `HELIOS_TASK_DAG_SSH_CONFIG`. Local development may map registry names
  * to absolute checkouts with `HELIOS_TASK_DAG_LOCAL_PATHS_FILE` (two
- * whitespace-delimited fields per line). Without a registry file, the
- * legacy automation-only REPO_URL, LOCAL_DIR, DEPLOY_KEY, and
- * AUTOMATION_REPO_PATH settings remain supported.
+ * whitespace-delimited fields per line). Production requires the registry
+ * file so a missing deployment setting cannot silently reduce task pages to
+ * automation-only data. Local development retains the legacy REPO_URL,
+ * LOCAL_DIR, DEPLOY_KEY, and AUTOMATION_REPO_PATH settings.
  */
 import { execFile, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -139,6 +140,9 @@ function resolveConfigs(): SourceConfig[] {
       if (!configs.some((config) => config.repository === repository)) throw new Error(`Unknown local task repository '${repository}'`)
     }
     return configs.map((config) => ({ ...config, localPath: paths.get(config.repository) }))
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('HELIOS_TASK_DAG_REPOS_FILE is required in production')
   }
   const localPath = envStr('AUTOMATION_REPO_PATH') ?? undefined
   return [{
