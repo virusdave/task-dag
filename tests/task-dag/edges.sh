@@ -31,6 +31,8 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 TASKDAG_GRAPH_REF="refs/heads/tasks/v1/graph"
 RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
 # shellcheck source=/dev/null
+source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
+# shellcheck source=/dev/null
 source "$EDGES_LIB"
 
 # ===========================================================================

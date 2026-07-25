@@ -52,6 +52,8 @@ while IFS= read -r line; do
     esac
 done < <(
     # shellcheck source=/dev/null
+    source "$LIBDIR/repository-identity.sh"
+    # shellcheck source=/dev/null
     source "$LIBDIR/edges.sh"
     blob=$(taskdag_tombstone_blob "task:owner/repo@$FORTY" "issue:owner/repo#1" requires all 4242 wit1)
     if printf '%s' "$blob" | jq -e '.schema==1 and .tombstone==true

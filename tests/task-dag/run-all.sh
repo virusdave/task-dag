@@ -81,6 +81,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/git-objects.sh" \
         "$(dirname "$TD")/task-dag.d/task-model.sh" \
         "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
+        "$(dirname "$TD")/task-dag.d/repository-identity.sh" \
         "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
         "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
         "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
@@ -125,6 +126,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/git-objects.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/task-model.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/repository-identity.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/semantic-migration.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ci-repair.sh" \

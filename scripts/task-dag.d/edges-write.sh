@@ -610,10 +610,6 @@ _cmd_dep_drop() {
 # to enforce that the edge's FROM node belongs to THIS repo — the graph index
 # branch is per-repo and _cmd_dep_add stamps origin.repo-id from the FROM
 # node's repo, so a foreign-FROM edge would be misfiled + never derivable.
-taskdag_wrapper_owner_repo() {
-    local n="${1#*:}"; n="${n%%@*}"; n="${n%%#*}"; printf '%s' "$n"
-}
-
 # Command: supersede — thin wrapper minting ONE `satisfies` edge (issue #13
 # north-star). `supersede <node> --by <byNode>` records that <node> is
 # fulfilled by <byNode>'s completion: complete(<node>) short-circuits true
@@ -681,7 +677,7 @@ EOF
     # (and the same precondition gates --dry-run so it validates the real
     # write's contract).
     local cur from_or
-    from_or=$(taskdag_wrapper_owner_repo "$cnode")
+    from_or=$(taskdag_node_repo "$cnode")
     cur=$(taskdag_current_repo) || {
         echo "Error: supersede cannot determine the current repo to validate FROM ownership; set TASKDAG_CURRENT_REPO or 'git config taskdag.current-repo owner/repo'" >&2
         return 2

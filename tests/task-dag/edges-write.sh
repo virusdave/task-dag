@@ -50,6 +50,7 @@ while IFS= read -r line; do
 done < <(
     TASKDAG_CAS_BASE_MS=1000 TASKDAG_CAS_CAP_MS=10000 TASKDAG_CAS_JITTER_MS=250
     # shellcheck source=/dev/null
+    source "$LIBDIR/repository-identity.sh"
     source "$LIBDIR/edges.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
@@ -216,6 +217,7 @@ fi
 cexhaust() {
     TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 TASKDAG_CAS_MAX_ATTEMPTS=2
     # shellcheck source=/dev/null
+    source "$LIBDIR/repository-identity.sh"
     source "$LIBDIR/edges.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"

@@ -1,5 +1,10 @@
 # shellcheck shell=bash
 # ═══════════════════════════════════════════════════════════════════════
+
+if ! declare -F taskdag_current_repo >/dev/null; then
+    echo "Error: facts.sh requires repository-identity.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
 # task-dag DERIVED FACTS: strict completion and close witnesses
 #
 # This module is the sole derivation of durable completion/close witnesses,
@@ -66,20 +71,6 @@ TASKDAG_FACTS_ROOTS_DIGEST=""
 #   3. _xrepo_current_repo  (the cross-repo helper: gh, else origin URL)
 # Prints the canonical owner/repo; returns non-zero if it cannot be resolved
 # (fail loud — done facts must never be silently mis-scoped).
-taskdag_current_repo() {
-    local r=""
-    if [ -n "${TASKDAG_CURRENT_REPO:-}" ]; then
-        r="$TASKDAG_CURRENT_REPO"
-    else
-        r=$(git config --get taskdag.current-repo 2>/dev/null || true)
-        if [ -z "$r" ] && declare -F _xrepo_current_repo >/dev/null 2>&1; then
-            r=$(_xrepo_current_repo 2>/dev/null || true)
-        fi
-    fi
-    [ -n "$r" ] || return 1
-    taskdag_norm_owner_repo "$r"
-}
-
 # taskdag_resolve_facts_tip: print the OID of the tip whose completion
 # history defines the facts. Prefers origin/master (the shared source of
 # truth) over the local master branch over HEAD. Returns non-zero if none

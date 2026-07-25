@@ -73,6 +73,11 @@
 #     detectable (path/content mismatch — the reader flags it).
 # ═══════════════════════════════════════════════════════════════════════
 
+if ! declare -F taskdag_normalize_node >/dev/null; then
+    echo "Error: edges.sh requires repository-identity.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 # taskdag_sha256_hex: read stdin, print its lowercase sha256 hex digest.
 # Prefers sha256sum (coreutils, canonical on NixOS); falls back to
 # `shasum -a 256`. Fails loud if neither is present (an edge-id must never
@@ -90,46 +95,10 @@ taskdag_sha256_hex() {
 
 # taskdag_norm_owner_repo <owner/repo>: validate + lowercase an owner/repo
 # pair. Prints the canonical form; returns non-zero on a malformed value.
-taskdag_norm_owner_repo() {
-    local or="$1"
-    or=$(printf '%s' "$or" | tr '[:upper:]' '[:lower:]')
-    if [[ "$or" =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]]; then
-        printf '%s\n' "$or"
-    else
-        return 1
-    fi
-}
-
 # taskdag_normalize_node <node>: validate + canonicalize a node address.
 # Prints the canonical node (owner/repo case-folded) or returns non-zero.
 #   task:<owner>/<repo>@<40|64 lowercase hex>
 #   issue:<owner>/<repo>#<decimal, no leading zero, > 0>
-taskdag_normalize_node() {
-    local node="$1" kind rest or ref cor
-    case "$node" in
-        task:*) kind=task; rest="${node#task:}" ;;
-        issue:*) kind=issue; rest="${node#issue:}" ;;
-        *) return 1 ;;
-    esac
-    case "$kind" in
-        task)
-            or="${rest%@*}"; ref="${rest##*@}"
-            [ "$or" != "$rest" ] || return 1       # required '@'
-            ref=$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')
-            [[ "$ref" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || return 1
-            cor=$(taskdag_norm_owner_repo "$or") || return 1
-            printf 'task:%s@%s\n' "$cor" "$ref"
-            ;;
-        issue)
-            or="${rest%#*}"; ref="${rest##*#}"
-            [ "$or" != "$rest" ] || return 1       # required '#'
-            [[ "$ref" =~ ^[1-9][0-9]*$ ]] || return 1
-            cor=$(taskdag_norm_owner_repo "$or") || return 1
-            printf 'issue:%s#%s\n' "$cor" "$ref"
-            ;;
-    esac
-}
-
 # taskdag_relation_mode_ok <relation> <mode>: 0 iff the pair is a permitted
 # combination (requires⇒all, satisfies⇒any). OR-deps are out of scope.
 taskdag_relation_mode_ok() {
@@ -248,12 +217,6 @@ _taskdag_tombstone_edge_id() {
 # git config keeps middle dots/slashes in the subsection and takes only the
 # final `.id` as the key, so `taskdag.<owner>/<repo>.id` is well-formed even
 # for names containing dots (e.g. foo.github.io).
-taskdag_repo_config_key() {
-    local cor
-    cor=$(taskdag_norm_owner_repo "$1") || return 1
-    printf 'taskdag.%s.id\n' "$cor"
-}
-
 # taskdag_repo_numeric_id <owner/repo>: resolve the STABLE numeric GitHub
 # repository id (databaseId) — the identity that survives a rename/move, so
 # an edge's origin.repo-id is never orphaned by an owner/name change.
@@ -266,27 +229,6 @@ taskdag_repo_config_key() {
 #   2. live `gh api repos/<owner>/<repo> --jq .id`.
 # Prints the id; returns non-zero if it cannot be resolved (fail loud — a
 # missing repo id must never be papered over).
-taskdag_repo_numeric_id() {
-    local cor key cached id
-    cor=$(taskdag_norm_owner_repo "$1") || { echo "Error: malformed owner/repo: $1" >&2; return 1; }
-    key=$(taskdag_repo_config_key "$cor") || return 1
-    cached=$(git config --get "$key" 2>/dev/null || true)
-    if [ -n "$cached" ]; then
-        if [[ "$cached" =~ ^[1-9][0-9]*$ ]]; then
-            printf '%s\n' "$cached"; return 0
-        fi
-        echo "Error: cached repo-id for ${cor} is not a positive integer: ${cached}" >&2
-        return 1
-    fi
-    command -v gh >/dev/null 2>&1 || { echo "Error: cannot resolve repo-id for ${cor}: gh unavailable and no ${key} override set" >&2; return 1; }
-    id=$(gh api "repos/${cor}" --jq .id 2>/dev/null || true)
-    if [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
-        printf '%s\n' "$id"; return 0
-    fi
-    echo "Error: could not resolve numeric repo-id for ${cor} via gh" >&2
-    return 1
-}
-
 # taskdag_sync_graph_ref: TRI-STATE sync of the graph index branch from
 # origin, so the reader never confuses "no edges yet" with "couldn't reach
 # origin" (a false-empty active set would silently break a future resolver).

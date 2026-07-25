@@ -77,6 +77,11 @@
 # colors from the main script.
 # ═══════════════════════════════════════════════════════════════════════
 
+if ! declare -F taskdag_remote_owner_repo >/dev/null; then
+    echo "Error: mailbox.sh requires repository-identity.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 : "${EMPTY_TREE:=4b825dc642cb6eb9a060e54bf8d69288fbee4904}"
 
 # taskdag_mailbox_kind_ok <kind>: 0 iff <kind> is a recognised message kind.
@@ -215,26 +220,6 @@ taskdag_mailbox_witness_trailer() {
 #   3. parse an ssh/https GitHub URL (git@host:owner/repo / https://host/owner/repo)
 # A filesystem-path remote with no override is NOT resolvable (returns 1) —
 # a mis-addressed cross-repo delivery must fail loud, not guess.
-taskdag_remote_owner_repo() {
-    local remote="$1" override raw
-    override=$(git config --get "taskdag.remote-repo.${remote}" 2>/dev/null || true)
-    if [ -n "$override" ]; then
-        taskdag_norm_owner_repo "$override"; return
-    fi
-    if [ "$remote" = origin ]; then
-        taskdag_current_repo && return 0
-    fi
-    raw=$(git config --get "remote.${remote}.url" 2>/dev/null || true)
-    [ -n "$raw" ] || raw="$remote"
-    raw="${raw%.git}"
-    case "$raw" in
-        *@*:*) raw="${raw#*:}" ;;
-        *://*) raw="${raw#*://}"; raw="${raw#*/}" ;;
-        *) return 1 ;;
-    esac
-    taskdag_norm_owner_repo "$raw"
-}
-
 # taskdag_mailbox_sync_shard <remote> <shard>: TRI-STATE sync of ONE shard
 # ref from <remote>, mirroring taskdag_sync_graph_ref so a writer never
 # CASes against a false-empty shard:

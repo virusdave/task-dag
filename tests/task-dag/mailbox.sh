@@ -53,6 +53,7 @@ while IFS= read -r line; do
     esac
 done < <(
     # shellcheck source=/dev/null
+    source "$LIBDIR/repository-identity.sh"
     source "$LIBDIR/edges.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/facts.sh"
@@ -252,6 +253,7 @@ cat > "$ROOT/fold.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 # shellcheck source=/dev/null
+source "$LIBDIR/repository-identity.sh"
 source "$LIBDIR/edges.sh"
 source "$LIBDIR/mailbox.sh"
 GREEN='' BLUE='' RESET=''
@@ -339,6 +341,7 @@ fi
 cond_before=$("$TD" mailbox list --json --no-fetch 2>/dev/null | jq 'length')
 cond_out=$(
     # shellcheck source=/dev/null
+    source "$LIBDIR/repository-identity.sh"
     source "$LIBDIR/edges.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/facts.sh"
@@ -456,6 +459,7 @@ WIT3=$(printf '3%.0s' {1..40})   # a witness NOT enqueued anywhere else
 gexhaust() {
     TASKDAG_CAS_BASE_MS=0 TASKDAG_CAS_CAP_MS=0 TASKDAG_CAS_JITTER_MS=0 TASKDAG_CAS_MAX_ATTEMPTS=2
     # shellcheck source=/dev/null
+    source "$LIBDIR/repository-identity.sh"
     source "$LIBDIR/edges.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/facts.sh"

@@ -15,16 +15,12 @@
 # and master history stay the authoritative state.
 # ═══════════════════════════════════════════════════════════════════════
 
-TASKDAG_GRAPH_CONVERGE_CLI="$TASKDAG_ENTRYPOINT"
+if ! declare -F taskdag_node_repo >/dev/null; then
+    echo "Error: graph-converge.sh requires repository-identity.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
 
-taskdag_node_repo() {
-    local node="$1" rest
-    node=$(taskdag_normalize_node "$node") || return 1
-    rest="${node#*:}"
-    rest="${rest%%@*}"
-    rest="${rest%%#*}"
-    printf '%s\n' "$rest"
-}
+TASKDAG_GRAPH_CONVERGE_CLI="$TASKDAG_ENTRYPOINT"
 
 taskdag_peer_path_config_key() {
     local repo

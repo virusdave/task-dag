@@ -8338,6 +8338,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/task-model.sh"
 # shellcheck source=task-dag.d/ref-schema.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/ref-schema.sh"
+# shellcheck source=task-dag.d/repository-identity.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh
