@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import dagre from 'dagre'
 import { Pill } from '../../components/Pill.js'
@@ -6,8 +6,11 @@ import {
   fetchTaskJson,
   usePolledData,
   SourceBanner,
+  DataStatus,
+  sourceFromError,
   TaskUnavailable,
   TaskCard,
+  statusLabel,
   githubIssueUrl,
   type DagResult,
   type TaskNode,
@@ -22,12 +25,14 @@ interface LayoutNode {
 }
 
 const STATUS_COLOR: Record<string, string> = {
+  ready: '#16a34a',
   done: '#22c55e',
   'in-progress': '#f59e0b',
   blocked: '#ef4444',
   pending: '#6b7280',
 }
 const STATUS_FILL: Record<string, string> = {
+  ready: '#bbf7d0',
   done: '#dcfce7',
   'in-progress': '#fef3c7',
   blocked: '#fee2e2',
@@ -39,7 +44,7 @@ export function EpicDagPage() {
   const [view, setView] = useState<'list' | 'graph'>('list')
   const [selected, setSelected] = useState<TaskNode | null>(null)
 
-  const { data, error, loading, refresh } = usePolledData<DagResult>(
+  const { data, error, loading, refreshing, refresh } = usePolledData<DagResult>(
     () => fetchTaskJson<DagResult>(`/api/tasks/repositories/${repository}/epics/${id}/dag`),
     [id, repository],
     30_000,
@@ -49,7 +54,7 @@ export function EpicDagPage() {
     return (
       <section data-helios-capture-target="task-plan" data-helios-capture-ready="false">
         <div className="page-header">
-          <h2>Epic DAG</h2>
+          <h2>Task plan</h2>
         </div>
         <p>Loading...</p>
       </section>
@@ -60,7 +65,7 @@ export function EpicDagPage() {
     return (
       <section data-helios-capture-target="task-plan" data-helios-capture-ready="true">
         <div className="page-header">
-          <h2>Epic DAG</h2>
+          <h2>Task plan</h2>
         </div>
         <TaskUnavailable error={error} onRetry={refresh} />
         <p className="subtle-copy" style={{ marginTop: '1rem' }}>
@@ -70,13 +75,15 @@ export function EpicDagPage() {
     )
   }
 
+  const taskData = withoutEpicNodes(data)
+
   return (
-    <section data-helios-capture-target="task-plan" data-helios-capture-ready="true">
+    <section className="task-page" data-helios-capture-target="task-plan" data-helios-capture-ready="true">
       <div className="page-header">
         <div>
-          <p className="eyebrow">Operations · Epic</p>
           <p className="subtle-copy">{data.epic.repository}</p>
-          <h2>{data.epic.title}</h2>
+          <h2>Task plan</h2>
+          <p>{data.epic.title}</p>
           {data.epic.issueNumber != null && (
             <p className="subtle-copy">
               <a
@@ -86,32 +93,39 @@ export function EpicDagPage() {
               >
                 Issue #{data.epic.issueNumber}
               </a>{' '}
-              · {data.summary.totalTasks} tasks
+              · {taskData.summary.totalTasks} tasks
             </p>
           )}
         </div>
       </div>
 
-      <SourceBanner source={data.source} onRefresh={refresh} />
+      <SourceBanner source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
 
       <div className="task-summary-row">
-        {(['done', 'in-progress', 'blocked', 'pending'] as const).map((s) => (
+        {([
+          ['ready', 'Ready', '#22c55e'],
+          ['in-progress', 'In progress', STATUS_COLOR['in-progress']],
+          ['blocked', 'Blocked', STATUS_COLOR.blocked],
+          ['waiting', 'Waiting', STATUS_COLOR.pending],
+          ['done', 'Done', STATUS_COLOR.done],
+        ] as const).map(([status, label, color]) => (
           <div
-            key={s}
+            key={status}
             className="task-summary-stat"
-            style={{ borderColor: STATUS_COLOR[s] }}
+            style={{ borderColor: color }}
           >
-            <span className="task-summary-value">{data.summary.statusCounts[s] ?? 0}</span>
-            <span className="task-summary-label">{s.replace('-', ' ')}</span>
+            <span className="task-summary-value">{taskData.summary.statusCounts[status] ?? 0}</span>
+            <span className="task-summary-label">{label}</span>
           </div>
         ))}
       </div>
 
-      <div className="task-control-actions" style={{ marginBottom: '1rem' }}>
+      <div className="task-control-actions" style={{ marginBottom: '1rem' }} role="group" aria-label="Task plan view">
         <button
           type="button"
           className={`task-chip${view === 'list' ? ' task-chip--active' : ''}`}
           onClick={() => setView('list')}
+          aria-pressed={view === 'list'}
         >
           List
         </button>
@@ -119,19 +133,20 @@ export function EpicDagPage() {
           type="button"
           className={`task-chip${view === 'graph' ? ' task-chip--active' : ''}`}
           onClick={() => setView('graph')}
+          aria-pressed={view === 'graph'}
         >
-          Graph
+          Dependency graph
         </button>
         {data.epic.issueNumber != null ? (
           <Link
-            to={`/tasks/frontier?repository=${data.epic.repository}&issue=${data.epic.issueNumber}`}
+            to={`/tasks/frontier?repository=${data.epic.repository}&issue=${data.epic.issueNumber}&status=ready`}
             className="task-link-button"
           >
-            Frontier for issue #{data.epic.issueNumber}
+            View ready tasks
           </Link>
         ) : (
           <Link to="/tasks/frontier" className="task-link-button">
-            All frontier
+            Task queue
           </Link>
         )}
         {data.epic.issueNumber != null && (
@@ -150,14 +165,12 @@ export function EpicDagPage() {
       </div>
 
       {view === 'list' ? (
-        <DagListView data={data} />
+        <DagListView data={taskData} />
       ) : (
-        <DagGraphView data={data} selected={selected} onSelect={setSelected} />
+        <DagGraphView data={taskData} selected={selected} onSelect={setSelected} />
       )}
+      <DataStatus source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
 
-      <p className="subtle-copy" style={{ marginTop: '1.5rem' }}>
-        <Link to="/tasks">Back to task management</Link>
-      </p>
     </section>
   )
 }
@@ -210,6 +223,10 @@ function DagGraphView({
   onSelect: (n: TaskNode | null) => void
 }) {
   const layout = useMemo(() => layoutDag(data), [data])
+  const selectedPanelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (selected) selectedPanelRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
   if (layout.nodes.length === 0) {
     return (
       <article className="mini-card">
@@ -230,9 +247,13 @@ function DagGraphView({
 
   return (
     <>
-      <p className="subtle-copy" style={{ marginBottom: '0.5rem' }}>
-        Scroll to pan. Tap a node to inspect it.
-      </p>
+      <details className="task-graph-help">
+        <summary>How to read this graph</summary>
+        <p>
+          Solid arrows show a task broken into smaller tasks. Dashed arrows show prerequisites;
+          the arrow points to the task that must wait.
+        </p>
+      </details>
       <div className="task-graph-wrap">
         <svg
           viewBox={viewBox}
@@ -273,6 +294,7 @@ function DagGraphView({
           })}
           {layout.nodes.map((ln) => {
             const isSel = selected?.sha === ln.node.sha
+            const visualStatus = graphStatusKey(ln.node)
             return (
               <g
                 key={ln.node.sha}
@@ -286,33 +308,30 @@ function DagGraphView({
                 }}
                 role="button"
                 tabIndex={0}
-                aria-label={`${ln.node.title} (${ln.node.type}, ${ln.node.status})`}
+                aria-label={`${ln.node.title} (${statusLabel(ln.node)})`}
                 style={{ cursor: 'pointer' }}
               >
                 <rect
                   width={ln.width}
                   height={ln.height}
-                  fill={STATUS_FILL[ln.node.status] ?? '#f3f4f6'}
-                  stroke={isSel ? '#3b82f6' : STATUS_COLOR[ln.node.status] ?? '#6b7280'}
+                  fill={STATUS_FILL[visualStatus] ?? '#f3f4f6'}
+                  stroke={isSel ? '#3b82f6' : STATUS_COLOR[visualStatus] ?? '#6b7280'}
                   strokeWidth={isSel ? 3 : 2}
                   rx="6"
                 />
                 <text x={ln.width / 2} y={ln.height / 2 - 8} textAnchor="middle" style={{ fontSize: '11px', fontWeight: 600, fill: '#111' }}>
                   {ln.node.title.length > 26 ? ln.node.title.slice(0, 26) + '…' : ln.node.title}
                 </text>
-                <text x={ln.width / 2} y={ln.height / 2 + 10} textAnchor="middle" style={{ fontSize: '10px', fill: STATUS_COLOR[ln.node.status] ?? '#6b7280' }}>
-                  {ln.node.type} · {ln.node.status}
+                <text x={ln.width / 2} y={ln.height / 2 + 10} textAnchor="middle" style={{ fontSize: '10px', fill: STATUS_COLOR[visualStatus] ?? '#6b7280' }}>
+                  {statusLabel(ln.node)}
                 </text>
               </g>
             )
           })}
         </svg>
       </div>
-      <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
-        Solid arrow = breakdown (parent → child); dashed = dependency (prerequisite → dependent).
-      </p>
       {selected && (
-        <div style={{ marginTop: '1rem' }}>
+        <div ref={selectedPanelRef} style={{ marginTop: '1rem' }}>
           <div className="inline-row" style={{ justifyContent: 'space-between' }}>
             <strong>Selected task</strong>
             <button type="button" className="task-link-button" onClick={() => onSelect(null)}>
@@ -325,13 +344,31 @@ function DagGraphView({
         </div>
       )}
       <div className="inline-row wrap-row" style={{ marginTop: '0.75rem', gap: '0.5rem' }}>
+        <Pill tone="success">Ready</Pill>
         <Pill tone="success">Done</Pill>
         <Pill tone="warning">In progress</Pill>
         <Pill tone="danger">Blocked</Pill>
-        <Pill tone="muted">Pending</Pill>
+        <Pill tone="muted">Waiting</Pill>
       </div>
     </>
   )
+}
+
+export function graphStatusKey(task: Pick<TaskNode, 'status' | 'isReady'>): string {
+  return task.isReady ? 'ready' : task.status
+}
+
+export function withoutEpicNodes(data: DagResult): DagResult {
+  const nodes = data.nodes.filter((node) => node.type !== 'epic')
+  const ids = new Set(nodes.map((node) => node.sha))
+  const statusCounts = Object.fromEntries(
+    [
+      ['ready', nodes.filter((node) => node.isReady).length],
+      ['waiting', nodes.filter((node) => node.status === 'pending' && !node.isReady).length],
+      ...['done', 'in-progress', 'blocked'].map((status) => [status, nodes.filter((node) => node.status === status).length] as const),
+    ],
+  )
+  return { ...data, nodes, edges: data.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)), summary: { totalTasks: nodes.length, statusCounts } }
 }
 
 function layoutDag(data: DagResult): { nodes: LayoutNode[] } {

@@ -95,7 +95,7 @@ git_show_cached() {
 
 require_cached_text() {
   local path="$1" label="$2" needle="$3" content="$4"
-  if ! printf '%s\n' "$content" | grep -Fq -- "$needle"; then
+  if ! grep -Fq -- "$needle" <<< "$content"; then
     note "FAIL: $path is missing required gate: $label ($needle)"
     fail=1
   fi

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { Pill } from '../../components/Pill.js'
 
 // --- shared types (mirror server/taskDagRepo.ts) ---------------------------
@@ -166,10 +166,11 @@ export function usePolledData<T>(
   loader: () => Promise<T>,
   deps: unknown[],
   intervalMs = 30_000,
-): { data: T | null; error: Error | null; loading: boolean; refresh: () => void } {
+): { data: T | null; error: Error | null; loading: boolean; refreshing: boolean; refresh: () => void } {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<Error | null>(null)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [tick, setTick] = useState(0)
   const loaderRef = useRef(loader)
   loaderRef.current = loader
@@ -177,6 +178,7 @@ export function usePolledData<T>(
   useEffect(() => {
     let cancelled = false
     async function run() {
+      if (!cancelled) setRefreshing(true)
       try {
         const result = await loaderRef.current()
         if (!cancelled) {
@@ -186,7 +188,10 @@ export function usePolledData<T>(
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err : new Error('Unknown error'))
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+          setRefreshing(false)
+        }
       }
     }
     run()
@@ -198,7 +203,7 @@ export function usePolledData<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, tick, intervalMs])
 
-  return { data, error, loading, refresh: () => setTick((t) => t + 1) }
+  return { data, error, loading, refreshing, refresh: () => setTick((t) => t + 1) }
 }
 
 // --- formatting / links ----------------------------------------------------
@@ -211,8 +216,11 @@ export function statusTone(status: TaskStatus): 'success' | 'warning' | 'danger'
 }
 
 export function statusLabel(t: Pick<TaskNode, 'status' | 'isReady'>): string {
-  if (t.status === 'pending' && t.isReady) return 'ready'
-  return t.status
+  if (t.status === 'pending' && t.isReady) return 'Ready'
+  if (t.status === 'in-progress') return 'In progress'
+  if (t.status === 'blocked') return 'Blocked'
+  if (t.status === 'done') return 'Done'
+  return 'Waiting'
 }
 
 export function formatAge(ms: number | null): string {
@@ -236,33 +244,66 @@ export function githubCommitUrl(sha: string, repository?: string): string | unde
 
 // --- shared components -----------------------------------------------------
 
+export function TaskLocalNav() {
+  const { pathname } = useLocation()
+  return (
+    <nav className="task-local-nav" aria-label="Task views">
+      <Link to="/tasks" aria-current={pathname === '/tasks' ? 'page' : undefined}>Overview</Link>
+      <Link to="/tasks/frontier" aria-current={pathname === '/tasks/frontier' ? 'page' : undefined}>Task queue</Link>
+    </nav>
+  )
+}
+
 export function SourceBanner({
   source,
   onRefresh,
+  refreshing = false,
 }: {
   source: TaskDagSourceStatus | undefined
   onRefresh?: () => void
+  refreshing?: boolean
 }) {
-  if (!source) return null
+  if (!source || (source.coverage === 'complete' && source.lastError == null)) return null
   const stale = source.lastError != null && source.available
   const failed = source.repositories.filter((repository) => !repository.available)
   return (
     <div className={`task-source-banner${stale ? ' task-source-banner--stale' : ''}`}>
       <span>
         {source.coverage === 'partial'
-          ? `Partial task coverage. Unavailable: ${failed.map((repository) => repository.repository).join(', ')}.`
+          ? `Results are incomplete. Helios could not read: ${failed.map((repository) => repository.repository).join(', ')}.`
           : stale
-          ? `Showing cached task DAG. Last refresh failed; last good refresh ${formatAge(
+          ? `Task data may be out of date. Last successful refresh ${formatAge(
               source.lastSuccessAtMs,
             )}.`
-          : `Task DAG refreshed ${formatAge(source.lastSuccessAtMs)}`}
+          : 'Some task data is currently unavailable.'}
       </span>
       {onRefresh && (
-        <button type="button" className="task-link-button" onClick={onRefresh}>
-          Refresh
+        <button type="button" className="task-link-button" onClick={onRefresh} disabled={refreshing}>
+          {refreshing ? 'Refreshing…' : 'Refresh data'}
         </button>
       )}
     </div>
+  )
+}
+
+export function DataStatus({
+  source,
+  onRefresh,
+  refreshing = false,
+}: {
+  source: TaskDagSourceStatus | undefined
+  onRefresh: () => void
+  refreshing?: boolean
+}) {
+  if (!source) return null
+  return (
+    <details className="task-data-status">
+      <summary>Data status</summary>
+      <p>Updated {formatAge(source.lastSuccessAtMs)} from {source.repositories.length} repositories.</p>
+      <button type="button" className="task-link-button" onClick={onRefresh} disabled={refreshing}>
+        {refreshing ? 'Refreshing…' : 'Refresh data'}
+      </button>
+    </details>
   )
 }
 
@@ -297,18 +338,14 @@ export function TaskUnavailable({
   return (
     <article className="mini-card">
       <header>
-        <strong>{isUnavailable ? 'Task DAG is temporarily unavailable' : 'Could not load task data'}</strong>
+        <strong>{isUnavailable ? 'Task data is unavailable' : 'Could not load task data'}</strong>
       </header>
       <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
         {isUnavailable
-          ? 'Helios could not refresh its git mirror of the task DAG. This usually clears within a minute.'
+          ? 'Helios cannot read the task repositories right now.'
           : (error?.message ?? 'Unknown error')}
       </p>
       <SourceDiagnostics source={source} />
-      <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
-        Task state lives in git refs; query it directly with{' '}
-        <code>scripts/task-dag frontier</code>.
-      </p>
       {onRetry && (
         <div className="inline-row wrap-row module-card-links" style={{ marginTop: '1rem' }}>
           <button type="button" className="task-link-button" onClick={onRetry}>
@@ -347,38 +384,16 @@ export function CopyButton({
   )
 }
 
-export function CopyShaButton({ sha }: { sha: string }) {
-  return <CopyButton value={sha} label="Copy SHA" />
-}
-
-/** The CLI command an operator would run next for a task, or null. */
-export function nextCommandFor(task: Pick<TaskNode, 'shortSha' | 'isReady' | 'isActive' | 'isBlocked' | 'status'>): {
-  command: string
-  label: string
-} | null {
-  if (task.status === 'done') return null
-  if (task.isReady) {
-    return { command: `scripts/task-dag claim ${task.shortSha}`, label: 'Copy claim command' }
-  }
-  if (task.isActive) {
-    return { command: `scripts/task-dag release ${task.shortSha}`, label: 'Copy release command' }
-  }
-  return null
-}
-
 export function StatusBadge({ task }: { task: Pick<TaskNode, 'status' | 'isReady'> }) {
   const label = statusLabel(task)
-  const tone = label === 'ready' ? 'success' : statusTone(task.status)
+  const tone = label === 'Ready' ? 'success' : statusTone(task.status)
   return <Pill tone={tone}>{label}</Pill>
 }
 
 /**
- * Compact, reusable task row used on the frontier, epic DAG and detail
- * pages. Links to the task detail page; surfaces the next useful actions
- * (open issue, copy sha) inline.
+ * Compact, reusable task row for queue, plan, and relationship views.
  */
 export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?: boolean }) {
-  const nextCmd = nextCommandFor(task)
   return (
     <article className="task-card">
       <div className="task-card-main">
@@ -386,14 +401,10 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
           {task.title}
         </Link>
         <div className="task-card-badges">
-          <Pill tone="muted">{task.repository}</Pill>
           <StatusBadge task={task} />
-          {task.isActive && <Pill tone="warning">claimed</Pill>}
           {task.dependencies.length > 0 && (
             <Pill tone={task.dependenciesMet ? 'success' : 'muted'}>
-              {`${task.dependencies.length} dep${task.dependencies.length === 1 ? '' : 's'}${
-                task.dependenciesMet ? ' met' : ''
-              }`}
+              {`${task.dependencies.length} prerequisite${task.dependencies.length === 1 ? '' : 's'}`}
             </Pill>
           )}
           {task.breakdownChildren.length > 0 && (
@@ -402,7 +413,7 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
         </div>
       </div>
       <div className="task-card-meta">
-        <code className="task-card-sha">{task.shortSha}</code>
+        <span>{task.repository}</span>
         {showEpic && task.epicIssueNumber != null && (
           <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`} className="task-card-epic">
             {`#${task.epicIssueNumber} ${task.epicTitle ?? ''}`.trim()}
@@ -410,12 +421,8 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
         )}
       </div>
       <div className="task-card-actions">
-        {nextCmd && (
-          <CopyButton value={nextCmd.command} label={nextCmd.label} copiedLabel="Copied command" />
-        )}
-        <Link to={`/tasks/${task.repository}/task/${task.sha}`}>Inspect</Link>
         {task.epicIssueNumber != null && (
-          <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>DAG</Link>
+          <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>Task plan</Link>
         )}
         {task.githubUrl ? (
           <a href={task.githubUrl} target="_blank" rel="noopener noreferrer">
@@ -426,7 +433,6 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
             GitHub
           </a>
         ) : null}
-        <CopyShaButton sha={task.sha} />
       </div>
     </article>
   )

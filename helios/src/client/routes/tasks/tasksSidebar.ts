@@ -14,7 +14,7 @@ export const TASKS_SIDEBAR_SUBTREE: TreeNavNode[] = [
   {
     kind: 'leaf',
     navKey: 'tasks.frontier',
-    label: 'Frontier',
+    label: 'Task queue',
     to: '/tasks/frontier',
   },
 ]

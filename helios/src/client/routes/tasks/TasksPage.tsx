@@ -4,7 +4,10 @@ import {
   fetchTaskJson,
   usePolledData,
   SourceBanner,
+  DataStatus,
+  TaskLocalNav,
   TaskUnavailable,
+  sourceFromError,
   githubIssueUrl,
   type EpicsView,
 } from './taskShared.js'
@@ -32,6 +35,12 @@ export function TasksPage() {
 
   const loading = epicsQ.loading && activityQ.loading && !epicsQ.data && !activityQ.data
   const fatal = epicsQ.error && !epicsQ.data
+  const refreshing = epicsQ.refreshing || activityQ.refreshing
+  const source =
+    sourceFromError(activityQ.error) ??
+    sourceFromError(epicsQ.error) ??
+    activityQ.data?.source ??
+    epicsQ.data?.source
 
   const completionTone = (pct: number): 'success' | 'warning' | 'muted' => {
     if (pct >= 0.8) return 'success'
@@ -40,19 +49,15 @@ export function TasksPage() {
   }
 
   return (
-    <section data-helios-capture-target="tasks-overview" data-helios-capture-ready={String(!epicsQ.loading && !activityQ.loading)}>
+    <section className="task-page" data-helios-capture-target="tasks-overview" data-helios-capture-ready={String(!epicsQ.loading && !activityQ.loading)}>
       <div className="page-header">
-        <div>
-          <p className="eyebrow">Operations · Tasks</p>
-          <h2>Task management</h2>
-          <p className="subtle-copy">
-            Git-DAG epics and the frontier of leaf tasks across parallel agentic development.
-          </p>
-        </div>
+        <h2>Tasks</h2>
       </div>
+      <TaskLocalNav />
 
       <SourceBanner
-        source={activityQ.data?.source ?? epicsQ.data?.source}
+        source={source}
+        refreshing={refreshing}
         onRefresh={() => {
           epicsQ.refresh()
           activityQ.refresh()
@@ -61,24 +66,13 @@ export function TasksPage() {
 
       {activityQ.data && (
         <div className="task-summary-row">
-          <Stat label="Ready" value={activityQ.data.readyTasks} tone="success" />
-          <Stat label="Active" value={activityQ.data.activeTasks} tone="warning" />
-          <Stat label="Blocked" value={activityQ.data.blockedTasks} tone="danger" />
-          <Stat label="Frontier" value={activityQ.data.totalFrontier} tone="muted" />
-          <Stat label="Epics" value={activityQ.data.totalEpics} tone="muted" />
+          <Link to="/tasks/frontier?status=ready"><Stat label="Ready" value={activityQ.data.readyTasks} tone="success" /></Link>
+          <Link to="/tasks/frontier?status=active"><Stat label="In progress" value={activityQ.data.activeTasks} tone="warning" /></Link>
+          <Link to="/tasks/frontier?status=blocked"><Stat label="Blocked" value={activityQ.data.blockedTasks} tone="danger" /></Link>
         </div>
       )}
 
-      <div className="inline-row wrap-row module-card-links" style={{ marginBottom: '1.5rem' }}>
-        <Link to="/tasks/frontier">Open the frontier</Link>
-      </div>
-
-      <div className="page-header">
-        <div>
-          <p className="eyebrow">Epics</p>
-          <h2>Current development efforts</h2>
-        </div>
-      </div>
+      <h3 className="task-section-title">Work by issue</h3>
 
       {loading ? (
         <p>Loading...</p>
@@ -86,7 +80,7 @@ export function TasksPage() {
         <TaskUnavailable error={epicsQ.error} onRetry={epicsQ.refresh} />
       ) : (epicsQ.data?.epics.length ?? 0) === 0 ? (
         <article className="mini-card">
-          <p className="subtle-copy">No epics with active tasks. Open a GitHub issue to start one.</p>
+          <p className="subtle-copy">No active task plans across the available repositories.</p>
         </article>
       ) : (
         <div className="review-grid">
@@ -109,15 +103,12 @@ export function TasksPage() {
                     </p>
                   )}
                 </div>
-                <Pill tone={completionTone(epic.completionPct)}>
-                  {`${Math.round(epic.completionPct * 100)}%`}
-                </Pill>
+                <Pill tone={completionTone(epic.completionPct)}>{`${epic.statusCounts.done ?? 0} of ${epic.totalTasks} complete`}</Pill>
               </header>
 
               <div className="stacked-list compact-stack" style={{ marginTop: '0.75rem' }}>
-                <Row label="Tasks" value={epic.totalTasks} />
-                <Row label="Ready" value={epic.readyCount} />
-                <Row label="Active" value={epic.activeCount} />
+                {epic.readyCount > 0 && <Row label="Ready" value={epic.readyCount} />}
+                {epic.activeCount > 0 && <Row label="In progress" value={epic.activeCount} />}
                 {epic.blockedCount > 0 && <Row label="Blocked" value={epic.blockedCount} />}
               </div>
 
@@ -125,15 +116,25 @@ export function TasksPage() {
                 className="inline-row wrap-row module-card-links"
                 style={{ marginTop: '1rem' }}
               >
-                {epic.issueNumber != null && <Link to={`/tasks/${epic.repository}/epic/${epic.issueNumber}`}>View DAG</Link>}
+                {epic.issueNumber != null && <Link to={`/tasks/${epic.repository}/epic/${epic.issueNumber}`}>View task plan</Link>}
                 {epic.issueNumber != null && (
-                  <Link to={`/tasks/frontier?repository=${epic.repository}&issue=${epic.issueNumber}`}>Frontier tasks</Link>
+                  <Link to={`/tasks/frontier?repository=${epic.repository}&issue=${epic.issueNumber}${epic.readyCount > 0 ? '&status=ready' : ''}`}>
+                    {epic.readyCount > 0
+                      ? `View ${epic.readyCount} ready task${epic.readyCount === 1 ? '' : 's'}`
+                      : `View ${epic.frontierCount} queued task${epic.frontierCount === 1 ? '' : 's'}`}
+                  </Link>
                 )}
+                {epic.issueNumber != null && <a href={epic.githubUrl ?? githubIssueUrl(epic.issueNumber, epic.githubRepository)} target="_blank" rel="noopener noreferrer">GitHub issue</a>}
               </div>
             </article>
           ))}
         </div>
       )}
+      <DataStatus
+        source={source}
+        onRefresh={() => { epicsQ.refresh(); activityQ.refresh() }}
+        refreshing={refreshing}
+      />
     </section>
   )
 }

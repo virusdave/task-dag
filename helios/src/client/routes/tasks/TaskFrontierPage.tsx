@@ -1,10 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Pill } from '../../components/Pill.js'
 import {
   fetchTaskJson,
   usePolledData,
   SourceBanner,
+  DataStatus,
+  TaskLocalNav,
+  sourceFromError,
   TaskUnavailable,
   TaskCard,
   type FrontierGroup,
@@ -56,6 +59,15 @@ function matchesStatus(task: TaskNode, filter: StatusFilter): boolean {
   }
 }
 
+export function taskMatchesSearch(task: TaskNode, needle: string): boolean {
+  return (
+    task.title.toLowerCase().includes(needle) ||
+    task.repository.toLowerCase().includes(needle) ||
+    task.sha.startsWith(needle) ||
+    (task.issueNumber != null && String(task.issueNumber).includes(needle))
+  )
+}
+
 function groupKeyOf(g: FrontierGroup): string {
   const repository = g.epic?.repository ?? g.tasks[0]?.repository ?? 'unknown'
   return g.epic?.issueNumber != null ? `${repository}:issue:${g.epic.issueNumber}` : `${repository}:${g.epic?.sha ?? 'none'}`
@@ -78,8 +90,9 @@ export function TaskFrontierPage() {
   const statusFilter = parseStatus(searchParams.get('status'))
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed())
+  const expandedForFilterRef = useRef<string | null>(null)
 
-  const { data, error, loading, refresh } = usePolledData<FrontierView>(
+  const { data, error, loading, refreshing, refresh } = usePolledData<FrontierView>(
     () => {
       const params = new URLSearchParams()
       if (issueFilter) params.set('issue', issueFilter)
@@ -103,14 +116,15 @@ export function TaskFrontierPage() {
         const tasks = g.tasks.filter((t) => {
           if (statusFilter !== 'all' && !matchesStatus(t, statusFilter)) return false
           if (groupMatches) return true
-          return (
-            t.title.toLowerCase().includes(needle) ||
-            t.repository.toLowerCase().includes(needle) ||
-            t.sha.startsWith(needle) ||
-            (t.issueNumber != null && String(t.issueNumber).includes(needle))
-          )
+          return taskMatchesSearch(t, needle)
         })
-        return { ...g, tasks, counts: visibleCounts(tasks) }
+        return {
+          ...g,
+          tasks,
+          counts: visibleCounts(tasks),
+          totalTasks: g.tasks.length,
+          waitingCount: tasks.filter((task) => task.status === 'pending' && !task.isReady).length,
+        }
       })
       .filter((g) => g.tasks.length > 0)
   }, [data, search, statusFilter])
@@ -135,6 +149,27 @@ export function TaskFrontierPage() {
   }
 
   const hasActiveFilters = statusFilter !== 'all' || search.trim() !== '' || issueFilter !== '' || repositoryFilter !== ''
+  const filterKey = `${statusFilter}\u0000${search.trim()}\u0000${repositoryFilter}\u0000${issueFilter}`
+
+  useEffect(() => {
+    if (!hasActiveFilters) {
+      expandedForFilterRef.current = filterKey
+      return
+    }
+    if (filteredGroups.length === 0 || expandedForFilterRef.current === filterKey) return
+    expandedForFilterRef.current = filterKey
+    setCollapsed((previous) => {
+      const next = new Set(previous)
+      let changed = false
+      for (const group of filteredGroups) {
+        changed = next.delete(groupKeyOf(group)) || changed
+      }
+      if (!changed) return previous
+      saveCollapsed(next)
+      return next
+    })
+  }, [filterKey, filteredGroups, hasActiveFilters])
+
   const clearFilters = () => {
     setSearch('')
     setSearchParams(new URLSearchParams(), { replace: true })
@@ -156,78 +191,72 @@ export function TaskFrontierPage() {
     saveCollapsed(next)
   }
 
-  const summary = data?.summary
   const statusOptions: { key: StatusFilter; label: string; count?: number }[] = [
     { key: 'all', label: 'All', count: chipCounts.all },
     { key: 'ready', label: 'Ready', count: chipCounts.ready },
-    { key: 'active', label: 'Active', count: chipCounts.active },
+    { key: 'active', label: 'In progress', count: chipCounts.active },
     { key: 'blocked', label: 'Blocked', count: chipCounts.blocked },
-    { key: 'pending', label: 'Pending', count: chipCounts.pending },
+    { key: 'pending', label: 'Waiting', count: chipCounts.pending },
     { key: 'done', label: 'Done', count: chipCounts.done },
   ]
 
   return (
-    <section data-helios-capture-target="tasks-queue" data-helios-capture-ready={String(!loading)}>
+    <section className="task-page" data-helios-capture-target="tasks-queue" data-helios-capture-ready={String(!loading)}>
       <div className="page-header">
-        <div>
-          <p className="eyebrow">Operations · Tasks</p>
-          <h2>Task Frontier</h2>
-          <p className="subtle-copy">
-            Leaf-level tasks ready for an agent or developer to pick up, grouped by issue.
-          </p>
-        </div>
+        <h2>Task queue</h2>
       </div>
+      <TaskLocalNav />
 
-      <SourceBanner source={data?.source} onRefresh={refresh} />
+      <SourceBanner source={sourceFromError(error) ?? data?.source} onRefresh={refresh} refreshing={refreshing} />
 
-      {summary && (
-        <div className="task-summary-row">
-          <SummaryStat label="Ready" value={summary.ready} tone="success" />
-          <SummaryStat label="Active" value={summary.active} tone="warning" />
-          <SummaryStat label="Blocked" value={summary.blocked} tone="danger" />
-          <SummaryStat label="Total" value={summary.totalFrontier} tone="muted" />
-          <SummaryStat label="Issues" value={summary.epicCount} tone="muted" />
-        </div>
+      {(issueFilter || repositoryFilter) && (
+        <p className="task-scope">
+          Showing {repositoryFilter || 'all repositories'}{issueFilter ? ` · Issue #${issueFilter}` : ''}.{' '}
+          <Link to="/tasks/frontier">Clear scope</Link>
+        </p>
       )}
 
       <div className="task-controls">
         <input
           type="search"
           className="task-search"
-          placeholder="Search repository, title, SHA, or issue #"
+          placeholder="Search tasks, issues, or repositories"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          aria-label="Search frontier tasks"
+          aria-label="Search tasks"
         />
-        <div className="task-chip-row">
+        <div className="task-chip-row" role="group" aria-label="Filter tasks by status">
           {statusOptions.map((opt) => (
             <button
               key={opt.key}
               type="button"
               className={`task-chip${statusFilter === opt.key ? ' task-chip--active' : ''}`}
               onClick={() => setStatus(opt.key)}
+              aria-pressed={statusFilter === opt.key}
             >
               {opt.label}
               {opt.count != null ? ` (${opt.count})` : ''}
             </button>
           ))}
         </div>
-        <div className="task-control-actions">
+        <details className="task-view-options">
+          <summary>View options</summary>
+          <div className="task-control-actions">
           <button type="button" className="task-link-button" onClick={() => setAllCollapsed(false)}>
             Expand all
           </button>
           <button type="button" className="task-link-button" onClick={() => setAllCollapsed(true)}>
             Collapse all
           </button>
-        </div>
+          </div>
+        </details>
       </div>
 
-      {(issueFilter || repositoryFilter) && (
-        <p className="subtle-copy" style={{ marginBottom: '1rem' }}>
-          Filtered to {repositoryFilter || 'all repositories'}{issueFilter ? ` issue #${issueFilter}` : ''}.{' '}
-          <Link to="/tasks/frontier">Clear</Link>
-        </p>
-      )}
+      <p className="task-result-summary" aria-live="polite">
+        {filteredGroups.reduce((count, group) => count + group.tasks.length, 0)}{' '}
+        {hasActiveFilters ? 'matching ' : ''}tasks across {filteredGroups.length}{' '}
+        {filteredGroups.length === 1 ? 'group' : 'groups'}
+      </p>
 
       {loading && !data ? (
         <p>Loading...</p>
@@ -246,8 +275,7 @@ export function TaskFrontierPage() {
             </>
           ) : (
             <p className="subtle-copy">
-              No frontier tasks right now. Frontier tasks are leaf-level work an agent can claim;
-              when there are none, every open task is either claimed, blocked, or complete.
+              The task queue is empty. No work is ready, in progress, blocked, or waiting.
             </p>
           )}
         </article>
@@ -265,29 +293,36 @@ export function TaskFrontierPage() {
               >
                 <summary className="task-group-summary">
                   <span className="task-group-title">
-                    <span className="task-group-issue">{group.epic?.repository ?? group.tasks[0]?.repository}</span>
+                    {group.epic?.title ?? 'Tasks without an issue'}
+                    <span className="task-group-context">{group.epic?.repository ?? group.tasks[0]?.repository}
                     {group.epic?.issueNumber != null ? (
-                      <span className="task-group-issue">#{group.epic.issueNumber}</span>
-                    ) : null}
-                    {group.epic?.title ?? 'Tasks without an epic'}
+                      <> · Issue #{group.epic.issueNumber}</>
+                    ) : null}</span>
                   </span>
                   <span className="task-group-counts">
                     {group.counts.ready > 0 && (
                       <Pill tone="success">{`${group.counts.ready} ready`}</Pill>
                     )}
                     {group.counts.active > 0 && (
-                      <Pill tone="warning">{`${group.counts.active} active`}</Pill>
+                      <Pill tone="warning">{`${group.counts.active} in progress`}</Pill>
                     )}
                     {group.counts.blocked > 0 && (
                       <Pill tone="danger">{`${group.counts.blocked} blocked`}</Pill>
                     )}
-                    <Pill tone="muted">{`${group.tasks.length} shown`}</Pill>
+                    {group.waitingCount > 0 && (
+                      <Pill tone="muted">{`${group.waitingCount} waiting`}</Pill>
+                    )}
+                    <Pill tone="muted">
+                      {hasActiveFilters && group.tasks.length !== group.totalTasks
+                        ? `${group.tasks.length} shown`
+                        : `${group.tasks.length} task${group.tasks.length === 1 ? '' : 's'}`}
+                    </Pill>
                   </span>
                 </summary>
                 <div className="task-group-body">
                   <div className="task-group-links">
                     {group.epic?.issueNumber != null && (
-                      <Link to={`/tasks/${group.epic.repository}/epic/${group.epic.issueNumber}`}>View DAG</Link>
+                      <Link to={`/tasks/${group.epic.repository}/epic/${group.epic.issueNumber}`}>Task plan</Link>
                     )}
                     {group.epic?.githubUrl ? (
                       <a href={group.epic.githubUrl} target="_blank" rel="noopener noreferrer">
@@ -305,26 +340,7 @@ export function TaskFrontierPage() {
         </div>
       )}
 
-      <p className="subtle-copy" style={{ marginTop: '1.5rem' }}>
-        <Link to="/tasks">Task overview and epics</Link>
-      </p>
+      <DataStatus source={sourceFromError(error) ?? data?.source} onRefresh={refresh} refreshing={refreshing} />
     </section>
-  )
-}
-
-function SummaryStat({
-  label,
-  value,
-  tone,
-}: {
-  label: string
-  value: number
-  tone: 'success' | 'warning' | 'danger' | 'muted'
-}) {
-  return (
-    <div className={`task-summary-stat task-summary-stat--${tone}`}>
-      <span className="task-summary-value">{value}</span>
-      <span className="task-summary-label">{label}</span>
-    </div>
   )
 }

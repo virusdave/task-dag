@@ -2588,15 +2588,12 @@ pre {
   padding-top: 0.55rem;
 }
 
-/* Floating "Top" chip — only appears on mobile, only after the page
- * has scrolled at least one viewport down (visibility is driven from
- * AppShell). Used to be a "Show nav" affordance, but reviewers on long
- * pending-purchase / pricing pages benefit more from a one-tap return
- * to the top (which also re-expands the nav for them) than from a
- * dedicated nav-reopener that requires extra scrolling-back-up. */
+/* Floating mobile return-to-top control; AppShell drives visibility from
+ * the top sentinel and preserves the current navigation state. */
 .scroll-top-chip {
   display: none;
 }
+.top-sentinel { position: absolute; width: 1px; height: 1px; pointer-events: none; }
 
 @media (max-width: 960px) {
   .scroll-top-chip {
@@ -2618,6 +2615,7 @@ pre {
     cursor: pointer;
     /* Make sure tap target is big enough for thumbs. */
     min-height: 44px;
+    min-width: 44px;
   }
 
   .scroll-top-chip:active {
@@ -11111,6 +11109,31 @@ span.metric-chart-legend-item {
 .task-link-button:hover {
   color: var(--accent-strong);
 }
+.task-link-button:focus-visible,
+.task-chip:focus-visible,
+.task-local-nav a:focus-visible,
+.task-group-summary:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.task-local-nav {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+.task-local-nav a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.75rem;
+  border-radius: 999px;
+}
+.task-local-nav a[aria-current='page'] { background: var(--accent-muted); font-weight: 700; }
+.task-data-status { margin-top: 1.5rem; color: var(--text-muted-strong); }
+.task-data-status summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
+.task-data-status p { margin: 0 0 0.5rem; }
+.task-scope { margin: 0 0 0.75rem; color: var(--text-muted-strong); }
+.task-page .page-header { margin-bottom: 0.5rem; }
 
 .task-summary-row {
   display: grid;
@@ -11150,6 +11173,7 @@ span.metric-chart-legend-item {
 }
 .task-search {
   width: 100%;
+  min-height: 44px;
   padding: 0.55rem 0.7rem;
   border: 1px solid var(--control-border);
   border-radius: 8px;
@@ -11163,6 +11187,7 @@ span.metric-chart-legend-item {
   gap: 0.4rem;
   align-items: center;
 }
+.task-chip-row { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; }
 .task-chip {
   padding: 0.35rem 0.7rem;
   border: 1px solid var(--control-border);
@@ -11171,6 +11196,8 @@ span.metric-chart-legend-item {
   cursor: pointer;
   font-size: 0.8125rem;
   color: var(--text-muted-strong);
+  min-height: 44px;
+  flex: 0 0 auto;
 }
 .task-chip--active {
   background: var(--accent);
@@ -11214,6 +11241,9 @@ span.metric-chart-legend-item {
   flex: 1 1 12rem;
   min-width: 0;
 }
+.task-group-context { display: block; margin-top: 0.2rem; color: var(--text-muted); font-size: 0.8125rem; font-weight: 400; }
+.task-result-summary { margin: -0.5rem 0 0.75rem; color: var(--text-muted); font-size: 0.8125rem; }
+.task-view-options summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
 .task-group-issue {
   color: var(--accent);
   margin-right: 0.4rem;
@@ -11256,7 +11286,7 @@ span.metric-chart-legend-item {
 .task-card-title {
   font-weight: 600;
   line-height: 1.3;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .task-card-badges {
   display: flex;
@@ -11290,6 +11320,14 @@ span.metric-chart-legend-item {
   align-items: center;
   font-size: 0.875rem;
 }
+.task-card-actions a, .task-card-actions button, .task-group-links a, .task-nav-row a,
+.task-page .module-card-links a, .task-page .module-card-links button {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+.task-technical-details { margin-bottom: 1.5rem; }
+.task-technical-details > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
 
 .task-section-title {
   font-size: 1rem;
@@ -11325,7 +11363,10 @@ span.metric-chart-legend-item {
   padding: 0.75rem;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
+  max-height: min(70vh, 760px);
 }
+.task-graph-help { margin-bottom: 0.5rem; }
+.task-graph-help summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
 
 .task-graph-wrap svg g[role='button']:focus-visible rect {
   stroke: #3b82f6;
@@ -11361,6 +11402,15 @@ span.metric-chart-legend-item {
     justify-content: space-between;
   }
   .task-card-main .task-card-badges { flex: 0 0 auto; }
+}
+
+@media (max-width: 960px) {
+  .task-page .review-grid { grid-template-columns: minmax(0, 1fr); }
+  .task-controls { min-width: 0; }
+  .task-group-summary { align-items: flex-start; }
+  .task-group-counts { width: 100%; padding-left: 1.25rem; }
+  .task-page .mini-card,
+  .task-page .task-group-title { overflow-wrap: anywhere; }
 }
 
 /* ---- Time of day (metrics tab) ---- */

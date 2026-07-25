@@ -1,15 +1,14 @@
 import { Link, useParams } from 'react-router-dom'
-import { Pill } from '../../components/Pill.js'
 import {
   fetchTaskJson,
   usePolledData,
   SourceBanner,
+  DataStatus,
+  sourceFromError,
   TaskUnavailable,
   StatusBadge,
-  CopyShaButton,
   CopyButton,
   TaskCard,
-  nextCommandFor,
   githubCommitUrl,
   githubIssueUrl,
   type TaskDetail,
@@ -18,7 +17,7 @@ import {
 
 export function TaskDetailPage() {
   const { sha, repository = 'automation' } = useParams<{ sha: string; repository?: string }>()
-  const { data, error, loading, refresh } = usePolledData<TaskDetail>(
+  const { data, error, loading, refreshing, refresh } = usePolledData<TaskDetail>(
     () => fetchTaskJson<TaskDetail>(`/api/tasks/repositories/${repository}/tasks/${sha}`),
     [sha, repository],
     30_000,
@@ -43,44 +42,35 @@ export function TaskDetailPage() {
         </div>
         <TaskUnavailable error={error} onRetry={refresh} />
         <p className="subtle-copy" style={{ marginTop: '1rem' }}>
-          <Link to="/tasks/frontier">Back to the frontier</Link>
+          <Link to="/tasks/frontier">Back to the task queue</Link>
         </p>
       </section>
     )
   }
 
   const { task } = data
-  const nextCmd = nextCommandFor(task)
-
   return (
-    <section data-helios-capture-target="task-detail" data-helios-capture-ready="true">
+    <section className="task-page" data-helios-capture-target="task-detail" data-helios-capture-ready="true">
       <div className="page-header">
         <div>
-          <p className="eyebrow">Operations · Task</p>
           <p className="subtle-copy">{task.repository}</p>
           <h2>{task.title}</h2>
           <div className="task-card-badges" style={{ marginTop: '0.5rem' }}>
             <StatusBadge task={task} />
-            <Pill tone="muted">{task.type}</Pill>
-            {task.isActive && <Pill tone="warning">claimed</Pill>}
-            {task.isBlocked && <Pill tone="danger">blocked</Pill>}
           </div>
         </div>
       </div>
 
-      <SourceBanner source={data.source} onRefresh={refresh} />
+      <SourceBanner source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
 
       <div className="inline-row wrap-row module-card-links task-nav-row">
-        {nextCmd && (
-          <CopyButton value={nextCmd.command} label={nextCmd.label} copiedLabel="Copied command" />
-        )}
-        <Link to="/tasks/frontier">All frontier</Link>
+        <Link to="/tasks/frontier">Task queue</Link>
         {task.epicIssueNumber != null && (
           <>
             <Link to={`/tasks/frontier?repository=${task.repository}&issue=${task.epicIssueNumber}`}>
-              Frontier for issue #{task.epicIssueNumber}
+              Tasks for this issue
             </Link>
-            <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>Epic DAG</Link>
+            <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>Task plan</Link>
           </>
         )}
         {task.issueNumber != null && (
@@ -94,17 +84,14 @@ export function TaskDetailPage() {
         )}
       </div>
 
-      <div className="review-grid" style={{ marginBottom: '1.5rem' }}>
-        <article className="mini-card">
-          <header>
-            <strong>Overview</strong>
-          </header>
+      <details className="mini-card task-technical-details">
+          <summary>Technical details</summary>
           <div className="stacked-list compact-stack" style={{ marginTop: '0.5rem' }}>
             <div className="mini-card-row">
-              <span>SHA</span>
+              <span>Task ID</span>
               <span className="inline-row" style={{ gap: '0.5rem' }}>
                 <code>{task.shortSha}</code>
-                <CopyShaButton sha={task.sha} />
+                <CopyButton value={task.sha} label="Copy task ID" />
               </span>
             </div>
             {task.issueNumber != null && (
@@ -125,35 +112,8 @@ export function TaskDetailPage() {
                 <span>{task.author}</span>
               </div>
             )}
-            <div className="mini-card-row">
-              <span>Dependencies</span>
-              <span>
-                {task.dependencies.length === 0
-                  ? 'none'
-                  : `${task.dependencies.length} (${task.dependenciesMet ? 'all met' : 'unmet'})`}
-              </span>
-            </div>
           </div>
-          <div className="inline-row wrap-row module-card-links" style={{ marginTop: '1rem' }}>
-            {task.epicIssueNumber != null && (
-              <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>View epic DAG</Link>
-            )}
-            {task.githubUrl ? (
-              <a href={task.githubUrl} target="_blank" rel="noopener noreferrer">
-                Open on GitHub
-              </a>
-            ) : task.issueNumber != null ? (
-              <a href={githubIssueUrl(task.issueNumber, task.githubRepository)} target="_blank" rel="noopener noreferrer">
-                Open issue on GitHub
-              </a>
-            ) : null}
-          </div>
-        </article>
-
-        <article className="mini-card">
-          <header>
-            <strong>Git refs</strong>
-          </header>
+          <strong>References</strong>
           {task.refs.length === 0 ? (
             <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
               No refs currently point at this task.
@@ -183,68 +143,23 @@ export function TaskDetailPage() {
               </ul>
             </>
           )}
-        </article>
-      </div>
+      </details>
 
-      <RelatedSection title="Parent task" tasks={data.parent ? [data.parent] : []} emptyHint="This task has no parent (it is an epic or a root)." />
+      <RelatedSection title="Part of" tasks={data.parent ? [data.parent] : []} />
       <RelatedSection
-        title="Dependencies (must complete first)"
+        title="Must finish first"
         tasks={data.dependencies}
-        emptyHint="No upstream dependencies."
         showStatusEmoji
       />
       <RelatedSection
-        title="Dependents (waiting on this task)"
+        title="Work waiting on this task"
         tasks={data.dependents}
-        emptyHint="Nothing depends on this task yet."
       />
       <RelatedSection
-        title="Subtasks (breakdown children)"
+        title="Subtasks"
         tasks={data.children}
-        emptyHint="No breakdown children."
       />
-
-      <article className="mini-card" style={{ marginTop: '1.5rem' }}>
-        <header>
-          <strong>task-dag CLI</strong>
-        </header>
-        <ul className="task-ref-list" style={{ marginTop: '0.5rem' }}>
-          <li>
-            <code>scripts/task-dag show {task.shortSha}</code>
-          </li>
-          <li>
-            <code>scripts/task-dag deps {task.shortSha} --check-complete</code>
-          </li>
-          {task.isReady && (
-            <li>
-              <code>scripts/task-dag claim {task.shortSha}</code>
-            </li>
-          )}
-          {task.isActive && (
-            <li>
-              <code>scripts/task-dag release {task.shortSha}</code>
-            </li>
-          )}
-          {task.isFrontier && task.status !== 'done' && (
-            <li>
-              <code>scripts/task-dag complete {task.shortSha}</code>
-            </li>
-          )}
-          {task.isBlocked ? (
-            <li>
-              <code>scripts/task-dag unblock {task.shortSha}</code>
-            </li>
-          ) : (
-            <li>
-              <code>scripts/task-dag block {task.shortSha} --reason="..."</code>
-            </li>
-          )}
-        </ul>
-      </article>
-
-      <p className="subtle-copy" style={{ marginTop: '1.5rem' }}>
-        <Link to="/tasks/frontier">Back to the frontier</Link>
-      </p>
+      <DataStatus source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
     </section>
   )
 }
@@ -252,20 +167,16 @@ export function TaskDetailPage() {
 function RelatedSection({
   title,
   tasks,
-  emptyHint,
   showStatusEmoji = false,
 }: {
   title: string
   tasks: TaskNode[]
-  emptyHint: string
   showStatusEmoji?: boolean
 }) {
+  if (tasks.length === 0) return null
   return (
     <div style={{ marginBottom: '1.25rem' }}>
       <h3 className="task-section-title">{title}</h3>
-      {tasks.length === 0 ? (
-        <p className="subtle-copy">{emptyHint}</p>
-      ) : (
         <div className="task-group-body">
           {tasks.map((t) => (
             <div key={`${t.repository}:${t.sha}`} className="task-related-row">
@@ -278,7 +189,6 @@ function RelatedSection({
             </div>
           ))}
         </div>
-      )}
     </div>
   )
 }

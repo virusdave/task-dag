@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { MetricGrantKey, Role } from '../../shared/contracts/domain/auth.js'
 import type { SessionEnvelope } from '../../shared/contracts/index.js'
 import { getPermissionsForRole } from '../../shared/domain/permissions.js'
-import { buildPrimarySidebarNodes } from './AppShell.js'
+import { buildPrimarySidebarNodes, shouldShowTopChip, topScrollBehavior } from './AppShell.js'
 import type { TreeNavNode } from './TreeNav.js'
 
 // Admin-gated navbar entry for the agent-waste review queue (issue #57).
@@ -117,5 +117,18 @@ describe('buildPrimarySidebarNodes — low-inventory site navigation', () => {
     const nodes = buildPrimarySidebarNodes({}, viewerWithMetricGrants([]))
     expect(findByNavKey(nodes, 'catalog.low-inventory.bronx')).toBeUndefined()
     expect(findByNavKey(nodes, 'catalog.low-inventory.midtown')).toBeUndefined()
+  })
+})
+
+describe('mobile Top chip behavior', () => {
+  it('appears as soon as the top sentinel leaves the viewport, only on mobile', () => {
+    expect(shouldShowTopChip(-1, true)).toBe(true)
+    expect(shouldShowTopChip(0, true)).toBe(false)
+    expect(shouldShowTopChip(-1, false)).toBe(false)
+  })
+
+  it('uses instant scrolling for reduced motion', () => {
+    expect(topScrollBehavior(true)).toBe('auto')
+    expect(topScrollBehavior(false)).toBe('smooth')
   })
 })
