@@ -58,20 +58,6 @@
 
 set -euo pipefail
 
-# Helper: true only for the exact human GitHub comment task dialect used by
-# issue-comment ingestion. These tasks are created specifically to wake the
-# DAG up when an operator replies under a parked/blocked work item, so they
-# must remain dispatchable even if their structural parent is blocked. Keep
-# this fail-closed: ordinary task children, bot/system messages, and malformed
-# messages still inherit structural blocks.
-is_human_comment_task() {
-    local sha="$1" msg
-    msg=$(parse_commit_metadata "$sha" 2>/dev/null) || return 1
-    [ "$(extract_field "$msg" "kind")" = "message" ] &&
-    [ "$(extract_field "$msg" "role")" = "human" ] &&
-    [ "$(extract_field "$msg" "intent")" = "comment" ]
-}
-
 # Helper: check if task is completed (appears as non-primary parent in
 # HEAD history). Uses EXACT parent-field matching, not a substring grep:
 # a substring match would (a) false-positive when a short SHA is a prefix
@@ -1205,25 +1191,6 @@ _release_our_root_claim() {
     # — no longer ours) both mean our claim is gone: success. Still at our
     # claim commit means the delete did not take: failure.
     [ "$now" != "$claim_commit" ]
-}
-
-# Helper: true iff <sha> is SHAPED like a top-level epic root, independent
-# of whether tasks/pending/<N> can be confirmed on origin. A canonical root
-# (from create-task-commit.sh) is `Type: epic` and parented on real
-# repository history; a breakdown-created CHILD epic is `Type: epic` but
-# parented on another empty-tree TASK commit. So: epic + first parent is
-# NOT a task commit ⇒ root-shaped. Used to FAIL CLOSED when origin can't
-# confirm pending identity but the commit could still be a live root.
-task_is_root_shaped_epic() {
-    local sha="$1" type first
-    type=$(extract_field "$(parse_commit_metadata "$sha")" "Type" 2>/dev/null || true)
-    [ "$type" = epic ] || return 1
-    first=$(get_first_parent "$sha" 2>/dev/null || true)
-    # Parented on a task commit ⇒ child/intermediate epic, not a root.
-    if [ -n "$first" ] && is_task_commit "$first"; then
-        return 1
-    fi
-    return 0
 }
 
 # Helper: classify whether <sha> is the epic-root (pending) commit for its
@@ -8608,6 +8575,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/json.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/cas-retry.sh"
 # shellcheck source=task-dag.d/git-objects.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
+# shellcheck source=task-dag.d/task-model.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/task-model.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh
