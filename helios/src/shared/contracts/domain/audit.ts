@@ -165,6 +165,7 @@ export const AuditEventTypeSchema = z.enum([
   // rules/DB_PERFORMANCE.md step 7). `.requested` is emitted by the enqueue
   // API (leaf 6); the worker emits `.started` before psql runs and exactly
   // one terminal `.succeeded` / `.failed`.
+  'db.migration.apply.requested',
   'db.migration.apply.started',
   'db.migration.apply.succeeded',
   'db.migration.apply.failed',

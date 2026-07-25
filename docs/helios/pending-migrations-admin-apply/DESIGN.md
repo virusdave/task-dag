@@ -6,6 +6,24 @@ design + Oracle review for a web-triggered production schema mutation. It fixes
 the mechanism (A: enqueue a job) and the gating/safety model so the
 implementation leaves can proceed. It does **not** itself mutate prod.
 
+## Intentional exceptional authorization
+
+The Oracle-approved apply flow remains the default and uses only a current
+artifact-bound blessing. An administrator may instead deliberately select the
+separate action `FORCE WITHOUT REVIEW APPROVAL` when the registered artifact is
+safely resolvable but its review approval is missing or stale. This exception
+waives only Oracle review approval. It does not waive admin authentication,
+exact artifact review and digest binding, live-pending verification, queue and
+worker actor revalidation, serialization, hardened `psql`, crash protection,
+the live sentinel, or immutable audit records.
+
+The exceptional request is bound to target `helios-production`, the current
+artifact closure digest, the migration id, a separate acknowledgement, and the
+exact action phrase. Current approval makes the exceptional path ineligible.
+Unknown or unresolvable artifacts also remain ineligible. The worker records no
+blessing reference or transaction mode for a forced attempt, so a stale
+blessing can never appear to authorize it.
+
 > Scope note: this doc is the deliverable of the epic's first (design) task.
 > The remaining tasks (see [Task decomposition](#task-decomposition-oracle-reviewed-split)
 > below: lifecycle schema, runtime artifact plumbing, worker apply engine,
@@ -172,11 +190,13 @@ erases. B is heavier for no added benefit here.
    client-guards and hides "Apply Now" for non-admins (defense in depth; the
    server is the real gate). Mutating `/api/*` already passes the origin/CSRF
    gate in `buildServer.ts`.
-2. **Oracle-blessing + artifact digest is a hard prerequisite.** "Apply Now"
-   is disabled unless the registry entry has a complete `blessing` **and** the
-   runtime-recomputed artifact-closure digest matches `blessing.artifactSha256`.
-   The apply endpoint AND the worker both re-check and refuse (`409` / terminal
-   failure) otherwise. Oracle blessing ≠ approval.
+2. **Oracle blessing + artifact digest is the ordinary prerequisite.** "Apply
+   Now" is disabled unless the registry entry has a complete `blessing` and the
+   runtime-recomputed artifact-closure digest matches
+   `blessing.artifactSha256`. The separately named force endpoint is the sole
+   narrow exception described above. It binds the current resolvable artifact
+   and preserves every safeguard other than review approval. Oracle blessing
+   is not operator approval.
 3. **Operator approval = the admin click, server-validated.** The UI requires
    type-to-confirm; the POST body carries `confirmMigrationId` and the server
    rejects unless it exactly equals the path `:id`. The endpoint records
@@ -254,6 +274,11 @@ erases. B is heavier for no added benefit here.
   pending; enqueues the URGENT job; returns `{ jobId }`. `409` if not eligible,
   changed, or already applied; the dedupe index means a repeat click while one
   is in flight returns the in-flight `jobId`.
+- `POST /api/admin/pending-migrations/:id/force-apply` accepts only the exact
+  exceptional action, acknowledgement, migration id, production target, and
+  current artifact digest. It rejects current approval, unavailable artifacts,
+  changed digests, non-admin actors, and already-applied migrations before
+  atomically enqueueing and auditing the full authorization snapshot.
 - Live progress reuses the existing `GET /api/jobs/:jobId`.
 - Optional (nice-to-have): `POST /api/admin/pending-migrations/:id/preflight`
   — validates eligibility, artifact digest, psql availability, and advisory-lock

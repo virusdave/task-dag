@@ -3,6 +3,17 @@ import type { z } from 'zod'
 
 import { buildAppPath, getCurrentInAppReturnTo } from './paths.js'
 
+export class HttpResponseError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly payload: unknown,
+  ) {
+    super(message)
+    this.name = 'HttpResponseError'
+  }
+}
+
 export async function loadJson<TSchema extends z.ZodType>(
   path: string,
   schema: TSchema,
@@ -27,8 +38,19 @@ export async function loadJson<TSchema extends z.ZodType>(
   }
 
   if (!response.ok) {
+    const structuredResponse = response.clone()
     const errorPayload = await maybeReadErrorPayload(response)
-    throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+    let structuredPayload: unknown = null
+    try {
+      structuredPayload = await structuredResponse.json()
+    } catch {
+      // Plain-text and HTML errors retain their existing message below.
+    }
+    throw new HttpResponseError(
+      errorPayload ?? `${response.status} ${response.statusText}`,
+      response.status,
+      structuredPayload,
+    )
   }
 
   if (response.status === 204) {

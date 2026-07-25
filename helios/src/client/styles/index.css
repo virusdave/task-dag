@@ -737,6 +737,31 @@ pre {
   flex: 0 0 auto;
 }
 
+.migration-exceptional-action select,
+.migration-exceptional-panel input:not([type='checkbox']) {
+  display: block;
+  width: 100%;
+  margin-top: 0.6rem;
+}
+
+.migration-exceptional-panel {
+  margin-top: 0.75rem;
+  padding: 0.9rem;
+  border: 1px solid var(--danger-border, #b42318);
+  border-radius: 0.5rem;
+}
+
+@media (max-width: 640px) {
+  .migration-exceptional-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .migration-exceptional-controls > * {
+    width: 100%;
+  }
+}
+
 .user-chip {
   padding: 0.6rem 0.85rem;
   border-radius: 999px;

@@ -6,9 +6,9 @@
 // "Gating / safety model" + canon rules/DB_PERFORMANCE.md steps 3–7.
 //
 // Guarantees:
-//   - Runs ONLY a registered, Oracle-blessed migration whose deployed
-//     artifact-closure digest still matches the blessing AND the enqueue-time
-//     payload digest. Any mismatch is refused (terminal).
+//   - Runs only a registered migration whose exact deployed artifact is bound
+//     either to current Oracle approval or to the narrow, fully audited admin
+//     force authorization. Any mode, digest, or current-admin mismatch fails.
 //   - Takes a session-level `pg_try_advisory_lock` on a dedicated pool client
 //     held for the whole psql lifetime, so two applies can never race the
 //     schema even if a lease is reclaimed mid-run.
@@ -116,7 +116,7 @@ export interface ApplyMigrationParams {
   migrationId: string
   requestedByUserId: number
   confirmMigrationId: string
-  blessingArtifactSha256: string
+  authorization: DbMigrationApplyJobPayload['authorization']
 }
 
 /** Terminal, non-retryable failure — psql may have run; require a fresh click. */
@@ -141,7 +141,7 @@ export async function runDbMigrationApplyJob(
     migrationId: payload.migrationId,
     requestedByUserId: payload.requestedByUserId,
     confirmMigrationId: payload.confirmMigrationId,
-    blessingArtifactSha256: payload.blessingArtifactSha256,
+    authorization: payload.authorization,
   })
 }
 
@@ -154,7 +154,7 @@ export async function applyMigrationAttempt(
   deps: ApplyMigrationDeps,
   params: ApplyMigrationParams,
 ): Promise<void> {
-  const { jobId, migrationId, requestedByUserId, confirmMigrationId, blessingArtifactSha256 } =
+  const { jobId, migrationId, requestedByUserId, confirmMigrationId, authorization } =
     params
   const deployedBuildId = deps.deployedBuildId()
 
@@ -175,6 +175,44 @@ export async function applyMigrationAttempt(
 
   let lockAcquired = false
   try {
+    const requester = await client.query<{
+      queue_user_id: number | null
+      active: boolean | null
+      role: string | null
+    }>(
+      `select jq.requested_by_user_id as queue_user_id, u.active, u.role
+         from job_queue jq left join users u on u.id = jq.requested_by_user_id
+        where jq.id = $1`,
+      [jobId],
+    )
+    const auth = requester.rows[0]
+    if (
+      !auth ||
+      auth.queue_user_id !== requestedByUserId ||
+      auth.active !== true ||
+      auth.role !== 'admin'
+    ) {
+      await recordTerminalAndAudit(deps, client, {
+        params,
+        state: 'failed',
+        eligibility: null,
+        attemptRequestedByUserId: auth?.queue_user_id ?? null,
+        auditActor: { actorType: 'system', actorUserId: null },
+        auditExtra: {
+          authorizationRejected: true,
+          authoritativeQueueUserId: auth?.queue_user_id ?? null,
+          authoritativeQueueUserActive: auth?.active ?? null,
+          authoritativeQueueUserRole: auth?.role ?? null,
+        },
+        deployedBuildId,
+        psqlPath: null,
+        advisoryLockAcquired: null,
+        errorMessage: 'Requester is not the same current active admin recorded on the queue row.',
+      })
+      throw new TerminalMigrationApplyError(
+        'Refusing migration apply: requester authorization is no longer valid.',
+      )
+    }
     // (A) Type-to-confirm — defense in depth (the server enforces it too).
     if (confirmMigrationId !== migrationId) {
       await recordTerminalAndAudit(deps, client, {
@@ -191,9 +229,16 @@ export async function applyMigrationAttempt(
       )
     }
 
-    // (B) Static eligibility: registered + blessed + deployed digest matches.
+    // (B) Static eligibility and mode-specific authorization.
     const eligibility = deps.resolveEligibility(migrationId)
-    if (!eligibility.eligible) {
+    const forceAllowed =
+      !eligibility.eligible &&
+      (eligibility.reason === 'not-blessed' || eligibility.reason === 'digest-mismatch')
+    if (authorization.mode === 'oracle-approved' ? !eligibility.eligible : !forceAllowed) {
+      const reason = eligibility.eligible ? 'currently-approved' : eligibility.reason
+      const detail = eligibility.eligible
+        ? 'Force is forbidden for a currently approved artifact.'
+        : eligibility.detail
       await recordTerminalAndAudit(deps, client, {
         params,
         state: 'failed',
@@ -201,15 +246,25 @@ export async function applyMigrationAttempt(
         deployedBuildId,
         psqlPath: null,
         advisoryLockAcquired: null,
-        errorMessage: `ineligible (${eligibility.reason}): ${eligibility.detail}`,
+        errorMessage: `ineligible (${reason}): ${detail}`,
       })
       throw new TerminalMigrationApplyError(
-        `Refusing apply of ${migrationId}: ${eligibility.reason} — ${eligibility.detail}`,
+        `Refusing apply of ${migrationId}: ${reason}: ${detail}`,
       )
     }
+    const artifact = eligibility.artifact
+    if (artifact === null) {
+      throw new TerminalMigrationApplyError(
+        `Refusing apply of ${migrationId}: artifact unavailable.`,
+      )
+    }
+    const ordinaryBlessing =
+      authorization.mode === 'oracle-approved' && eligibility.eligible
+        ? eligibility.blessing
+        : null
 
     // (C) The enqueue-time payload digest must still equal the reviewed unit.
-    if (blessingArtifactSha256 !== eligibility.artifact.sha256) {
+    if (authorization.artifactSha256 !== artifact.sha256) {
       await recordTerminalAndAudit(deps, client, {
         params,
         state: 'failed',
@@ -218,8 +273,8 @@ export async function applyMigrationAttempt(
         psqlPath: null,
         advisoryLockAcquired: null,
         errorMessage:
-          `payload blessingArtifactSha256 ${blessingArtifactSha256} does not match the ` +
-          `deployed artifact digest ${eligibility.artifact.sha256}.`,
+          `payload artifactSha256 ${authorization.artifactSha256} does not match the ` +
+          `deployed artifact digest ${artifact.sha256}.`,
       })
       throw new TerminalMigrationApplyError(
         `Refusing apply of ${migrationId}: payload digest does not match deployed artifact.`,
@@ -256,7 +311,7 @@ export async function applyMigrationAttempt(
         psqlPath: psqlBin,
         advisoryLockAcquired: false,
         errorMessage: 'Migration-apply advisory lock is held by another apply; backing off.',
-        auditEventType: null, // benign back-off — recorded on the attempt row only
+        auditEventType: 'db.migration.apply.failed',
       })
       throw new RetryableWorkerError(
         'Another migration apply holds the exclusive advisory lock; deferring.',
@@ -322,7 +377,7 @@ export async function applyMigrationAttempt(
     // (G) Insert the `running` attempt row BEFORE psql launches.
     const redactedCommand = buildRedactedCommand(
       psqlBin,
-      eligibility.artifact.main.absPath,
+      artifact.main.absPath,
       applicationName(migrationId, jobId),
     )
     const attemptId = await insertMigrationApplyAttempt(client, {
@@ -330,13 +385,13 @@ export async function applyMigrationAttempt(
       jobId,
       requestedByUserId,
       confirmMigrationId,
-      blessingRef: eligibility.blessing.ref,
-      artifactSha256: eligibility.artifact.sha256,
+      blessingRef: ordinaryBlessing?.ref ?? null,
+      artifactSha256: artifact.sha256,
       deployedBuildId,
       psqlPath: psqlBin,
       psqlVersion: null,
       redactedCommand,
-      transactionMode: eligibility.blessing.transactionMode,
+      transactionMode: ordinaryBlessing?.transactionMode ?? null,
       advisoryLockAcquired: true,
       sentinelBefore: null,
       sentinelAfter: null,
@@ -357,9 +412,9 @@ export async function applyMigrationAttempt(
       module: 'config',
       payload: auditPayload(params, {
         attemptId,
-        blessingRef: eligibility.blessing.ref,
-        artifactSha256: eligibility.artifact.sha256,
-        transactionMode: eligibility.blessing.transactionMode,
+        blessingRef: ordinaryBlessing?.ref ?? null,
+        artifactSha256: artifact.sha256,
+        transactionMode: ordinaryBlessing?.transactionMode ?? null,
       }),
       requestId: null,
       undoPayload: null,
@@ -391,8 +446,8 @@ export async function applyMigrationAttempt(
     const { env: pgEnv, redactValues } = deps.buildPgEnv()
     const psqlResult = await deps.runPsql({
       psqlBin,
-      mainFileAbsPath: eligibility.artifact.main.absPath,
-      cwd: eligibility.artifact.migrationsRoot,
+      mainFileAbsPath: artifact.main.absPath,
+      cwd: artifact.migrationsRoot,
       applicationName: applicationName(migrationId, jobId),
       pgEnv,
       redactValues,
@@ -482,6 +537,10 @@ interface RecordTerminalInput {
   sentinelBefore?: boolean | null
   sentinelAfter?: boolean | null
   errorMessage: string | null
+  /** Authoritative queue actor for payload/queue authorization mismatches. */
+  attemptRequestedByUserId?: number | null
+  /** System attribution is required when the payload's claimed actor is rejected. */
+  auditActor?: { actorType: 'system' | 'user'; actorUserId: number | null }
   /**
    * Audit event to emit, or `null` to skip (benign back-off). Defaults to
    * `db.migration.apply.failed` for `failed`.
@@ -496,12 +555,16 @@ async function recordTerminalAndAudit(
   input: RecordTerminalInput,
 ): Promise<void> {
   const { params, eligibility } = input
-  const blessing = eligibility?.blessing ?? null
+  const blessing =
+    params.authorization.mode === 'oracle-approved' ? eligibility?.blessing ?? null : null
   const artifact = eligibility?.artifact ?? null
   const attemptId = await insertMigrationApplyAttempt(client, {
     migrationId: params.migrationId,
     jobId: params.jobId,
-    requestedByUserId: params.requestedByUserId,
+    requestedByUserId:
+      input.attemptRequestedByUserId === undefined
+        ? params.requestedByUserId
+        : input.attemptRequestedByUserId,
     confirmMigrationId: params.confirmMigrationId,
     blessingRef: blessing?.ref ?? null,
     artifactSha256: artifact?.sha256 ?? null,
@@ -535,7 +598,7 @@ async function recordTerminalAndAudit(
     state: input.state,
     error: input.errorMessage,
     ...(input.auditExtra ?? {}),
-  })
+  }, input.auditActor)
 }
 
 async function auditTerminal(
@@ -545,10 +608,14 @@ async function auditTerminal(
   attemptId: string,
   eventType: AuditEventType,
   extra: Record<string, JsonValue>,
-): Promise<void> {
-  await deps.appendAuditEvent(client, {
+  actor: { actorType: 'system' | 'user'; actorUserId: number | null } = {
     actorType: params.requestedByUserId > 0 ? 'user' : 'system',
     actorUserId: params.requestedByUserId > 0 ? params.requestedByUserId : null,
+  },
+): Promise<void> {
+  await deps.appendAuditEvent(client, {
+    actorType: actor.actorType,
+    actorUserId: actor.actorUserId,
     entityId: attemptId,
     entityType: 'migration_apply_attempt',
     eventType,
@@ -567,6 +634,7 @@ function auditPayload(
     migrationId: params.migrationId,
     jobId: params.jobId,
     requestedByUserId: params.requestedByUserId,
+    authorization: params.authorization,
     ...extra,
   }
 }

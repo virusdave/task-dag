@@ -2,14 +2,17 @@ import type { FastifyInstance } from 'fastify'
 
 import {
   AdminPendingMigrationApplyRequestSchema,
+  AdminPendingMigrationForceApplyRequestSchema,
   AdminPendingMigrationApplyResponseSchema,
   AdminPendingMigrationDetailsResponseSchema,
   AdminPendingMigrationsResponseSchema,
   type AdminPendingMigrationRow,
 } from '../../shared/contracts/index.js'
+import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { MigrationArtifactError, readMigrationArtifactForReview } from '../db/migrationArtifacts.js'
 import { getPool } from '../db/pool.js'
+import { withTransaction } from '../db/tx.js'
 import {
   resolveMigrationApplyEligibility,
   type MigrationApplyEligibility,
@@ -24,7 +27,7 @@ import {
   getLatestMigrationApplyAttemptsByMigrationIds,
   type LatestMigrationApplyAttempt,
 } from '../db/queries/migrationApplyAttemptsQueries.js'
-import { enqueueJob, JOB_PRIORITY_URGENT } from '../jobs/enqueueJob.js'
+import { enqueueJobExactActive, JOB_PRIORITY_URGENT } from '../jobs/enqueueJob.js'
 
 function operatorEligibilityDetail(eligibility: MigrationApplyEligibility): string | null {
   if (eligibility.eligible) {
@@ -53,6 +56,13 @@ function buildAdminRow(
   const { migrationId, label } = sentinel
   const eligibility = resolveMigrationApplyEligibility(migrationId)
   const blessing = eligibility.blessing
+  const reviewApprovalState = eligibility.eligible
+    ? ('current' as const)
+    : eligibility.reason === 'artifact-unresolvable' || eligibility.reason === 'unknown-migration-id'
+      ? ('artifact-unavailable' as const)
+      : eligibility.reason === 'not-blessed'
+        ? ('missing' as const)
+        : ('stale' as const)
   return {
     migrationId,
     label,
@@ -75,6 +85,11 @@ function buildAdminRow(
           },
     artifactDigestMatch: eligibility.eligible,
     artifactSha256: eligibility.artifact?.sha256 ?? null,
+    reviewApprovalState,
+    forceEligible:
+      sentinelState === 'pending' &&
+      !eligibility.eligible &&
+      (eligibility.reason === 'not-blessed' || eligibility.reason === 'digest-mismatch'),
     lastAttempt,
   }
 }
@@ -248,22 +263,138 @@ export async function registerPendingMigrationsAdminRoutes(
     // live apply per migration — a repeat click returns the in-flight id. The
     // concurrency key serializes applies fleet-wide so two migrations never
     // race the schema at once.
-    const jobId = await enqueueJob(pool, {
-      jobType: 'db.migration.apply',
-      module: 'config',
-      payload: {
-        migrationId,
+    const authorization = {
+      mode: 'oracle-approved' as const,
+      artifactSha256: eligibility.artifact.sha256,
+    }
+    const result = await withTransaction(async (client) => {
+      const enqueue = await enqueueJobExactActive(client, {
+        jobType: 'db.migration.apply',
+        module: 'config',
+        payload: {
+          migrationId,
+          requestedByUserId: actor.id,
+          confirmMigrationId,
+          authorization,
+        },
+        priority: JOB_PRIORITY_URGENT,
+        dedupeKey: `migration-apply:${migrationId}`,
+        concurrencyKey: 'migration-apply',
         requestedByUserId: actor.id,
-        confirmMigrationId,
-        blessingArtifactSha256: eligibility.blessing.artifactSha256,
-      },
-      priority: JOB_PRIORITY_URGENT,
-      dedupeKey: `migration-apply:${migrationId}`,
-      concurrencyKey: 'migration-apply',
-      requestedByUserId: actor.id,
-      scope: null,
+        scope: null,
+      })
+      if (!enqueue.inserted && !enqueue.exactPayload) {
+        return enqueue
+      }
+      if (enqueue.inserted) {
+        await appendAuditEvent(client, {
+          actorType: 'user',
+          actorUserId: actor.id,
+          entityType: 'job',
+          entityId: String(enqueue.jobId),
+          eventType: 'db.migration.apply.requested',
+          module: 'config',
+          scope: null,
+          requestId: request.id,
+          payload: { migrationId, requestedByUserId: actor.id, confirmMigrationId, authorization },
+          undoPayload: null,
+        })
+      }
+      return enqueue
     })
+    if (!result.inserted && !result.exactPayload) {
+      return reply.status(409).send({
+        error: 'A different apply request is already active.',
+        existingJobId: result.jobId,
+      })
+    }
 
-    return reply.send(AdminPendingMigrationApplyResponseSchema.parse({ jobId }))
+    return reply.send(AdminPendingMigrationApplyResponseSchema.parse({ jobId: result.jobId }))
+  })
+
+  server.post('/api/admin/pending-migrations/:id/force-apply', async (request, reply) => {
+    const actor = await requireSessionUser(request, reply, 'admin')
+    if (!actor) {
+      return
+    }
+    const migrationId = (request.params as { id: string }).id
+    const body = AdminPendingMigrationForceApplyRequestSchema.parse(request.body)
+    if (body.confirmMigrationId !== migrationId) {
+      return reply.status(400).send({ error: 'confirmMigrationId does not match the migration id.' })
+    }
+    const eligibility = resolveMigrationApplyEligibility(migrationId)
+    if (!eligibility.eligible && eligibility.reason === 'unknown-migration-id') {
+      return reply.status(404).send({ error: operatorEligibilityDetail(eligibility) })
+    }
+    if (eligibility.eligible || eligibility.reason === 'artifact-unresolvable') {
+      return reply.status(409).send({
+        error: eligibility.eligible
+          ? 'This artifact has current review approval; use Apply Now.'
+          : operatorEligibilityDetail(eligibility),
+      })
+    }
+    const artifact = eligibility.artifact
+    if (artifact === null) {
+      return reply.status(409).send({ error: 'The artifact is unavailable.' })
+    }
+    if (body.expectedArtifactSha256 !== artifact.sha256) {
+      return reply.status(409).send({ error: 'The deployed artifact changed. Refresh and review it again.' })
+    }
+    const pool = getPool()
+    if (await isMigrationAppliedLive(pool, migrationId)) {
+      return reply.status(409).send({ error: `Migration ${migrationId} is already applied; nothing to do.` })
+    }
+    const authorization = {
+      mode: 'force-without-review' as const,
+      artifactSha256: artifact.sha256,
+      action: body.action,
+      confirmationPhrase: body.confirmationPhrase,
+      target: body.target,
+      acknowledgedWithoutReview: body.acknowledgedWithoutReview,
+    }
+    const result = await withTransaction(async (client) => {
+      const enqueue = await enqueueJobExactActive(client, {
+        jobType: 'db.migration.apply',
+        module: 'config',
+        priority: JOB_PRIORITY_URGENT,
+        dedupeKey: `migration-apply:${migrationId}`,
+        concurrencyKey: 'migration-apply',
+        requestedByUserId: actor.id,
+        scope: null,
+        payload: {
+          migrationId,
+          requestedByUserId: actor.id,
+          confirmMigrationId: body.confirmMigrationId,
+          authorization,
+        },
+      })
+      if (enqueue.inserted) {
+        await appendAuditEvent(client, {
+          actorType: 'user',
+          actorUserId: actor.id,
+          entityType: 'job',
+          entityId: String(enqueue.jobId),
+          eventType: 'db.migration.apply.requested',
+          module: 'config',
+          scope: null,
+          requestId: request.id,
+          payload: {
+            migrationId,
+            requestedByUserId: actor.id,
+            confirmMigrationId: body.confirmMigrationId,
+            authorization,
+          },
+          undoPayload: null,
+        })
+      }
+      return enqueue
+    })
+    if (!result.inserted && !result.exactPayload) {
+      return reply.status(409).send({
+        error: 'A different apply request is already active.',
+        existingJobId: result.jobId,
+      })
+    }
+    return reply.send(AdminPendingMigrationApplyResponseSchema.parse({ jobId: result.jobId }))
   })
 }

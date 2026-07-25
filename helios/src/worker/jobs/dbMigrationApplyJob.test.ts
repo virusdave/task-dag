@@ -32,6 +32,7 @@ interface FakeAttemptRow {
   id: string
   migration_id: string
   job_id: number | null
+  requested_by_user_id: number | null
   state: string
   sentinel_before: boolean | null
   sentinel_after: boolean | null
@@ -40,6 +41,8 @@ interface FakeAttemptRow {
   psql_exit_code: number | null
   psql_signal: string | null
   finished_at: string | null
+  blessing_ref?: string | null
+  transaction_mode?: string | null
 }
 
 /**
@@ -54,8 +57,12 @@ class FakeClient {
   lockCalls = 0
   unlockCalls = 0
   released = false
+  queueAuth = { queue_user_id: 7 as number | null, active: true as boolean | null, role: 'admin' as string | null }
 
   async query<T>(text: string, values: unknown[] = []): Promise<{ rows: T[]; rowCount: number }> {
+    if (text.includes('from job_queue jq left join users')) {
+      return { rows: [this.queueAuth as unknown as T], rowCount: 1 }
+    }
     if (text.includes('pg_try_advisory_lock')) {
       this.lockCalls += 1
       return { rows: [{ locked: this.lockAvailable } as unknown as T], rowCount: 1 }
@@ -71,6 +78,7 @@ class FakeClient {
         id,
         migration_id: String(values[0]),
         job_id: values[1] as number | null,
+        requested_by_user_id: values[2] as number | null,
         sentinel_before: (values[12] ?? null) as boolean | null,
         sentinel_after: (values[13] ?? null) as boolean | null,
         psql_exit_code: (values[14] ?? null) as number | null,
@@ -79,6 +87,8 @@ class FakeClient {
         advisory_lock_acquired: (values[11] ?? null) as boolean | null,
         state: String(values[19]),
         finished_at: finished ? 'now' : null,
+        blessing_ref: values[4] as string | null,
+        transaction_mode: values[10] as string | null,
       }
       this.rows.set(id, row)
       return { rows: [{ id } as unknown as T], rowCount: 1 }
@@ -199,6 +209,7 @@ interface HarnessOptions {
   sentinelSequence?: boolean[]
   psqlResult?: PsqlRunResult
   seedClient?: (client: FakeClient) => void
+  queueAuth?: FakeClient['queueAuth']
 }
 
 interface Harness {
@@ -213,6 +224,7 @@ interface Harness {
 function makeHarness(options: HarnessOptions = {}): Harness {
   const client = new FakeClient()
   client.lockAvailable = options.lockAvailable ?? true
+  if (options.queueAuth) client.queueAuth = options.queueAuth
   options.seedClient?.(client)
 
   const sentinelSequence = [...(options.sentinelSequence ?? [])]
@@ -256,8 +268,19 @@ function params(overrides: Partial<ApplyMigrationParams> = {}): ApplyMigrationPa
     migrationId: MIGRATION_ID,
     requestedByUserId: 7,
     confirmMigrationId: MIGRATION_ID,
-    blessingArtifactSha256: DIGEST,
+    authorization: { mode: 'oracle-approved', artifactSha256: DIGEST },
     ...overrides,
+  }
+}
+
+function forceAuthorization(artifactSha256 = DIGEST): ApplyMigrationParams['authorization'] {
+  return {
+    mode: 'force-without-review',
+    artifactSha256,
+    action: 'FORCE WITHOUT REVIEW APPROVAL',
+    confirmationPhrase: 'FORCE WITHOUT REVIEW APPROVAL',
+    target: 'helios-production',
+    acknowledgedWithoutReview: true,
   }
 }
 
@@ -281,6 +304,48 @@ describe('applyMigrationAttempt — happy path', () => {
       'db.migration.apply.started',
       'db.migration.apply.succeeded',
     ])
+  })
+
+  it('executes a missing-review artifact only with force authorization and audits the snapshot', async () => {
+    const h = makeHarness({
+      eligibility: {
+        eligible: false,
+        migrationId: MIGRATION_ID,
+        reason: 'not-blessed',
+        detail: 'missing review',
+        blessing: null,
+        artifact: artifact(),
+      },
+      sentinelSequence: [false, true],
+    })
+    const authorization = forceAuthorization()
+    await applyMigrationAttempt(h.deps, params({ authorization }))
+    expect(h.runPsql).toHaveBeenCalledTimes(1)
+    expect(h.client.only()).toMatchObject({ blessing_ref: null, transaction_mode: null })
+    expect(h.audit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ payload: expect.objectContaining({ authorization }) }),
+    )
+  })
+
+  it('never records a stale blessing as authorization for a forced artifact', async () => {
+    const staleBlessing = { ...blessing(), artifactSha256: 'b'.repeat(64) }
+    const h = makeHarness({
+      eligibility: {
+        eligible: false,
+        migrationId: MIGRATION_ID,
+        reason: 'digest-mismatch',
+        detail: 'stale review',
+        blessing: staleBlessing,
+        artifact: artifact(),
+      },
+      sentinelSequence: [false, true],
+    })
+
+    await applyMigrationAttempt(h.deps, params({ authorization: forceAuthorization() }))
+
+    expect(h.runPsql).toHaveBeenCalledTimes(1)
+    expect(h.client.only()).toMatchObject({ blessing_ref: null, transaction_mode: null })
   })
 })
 
@@ -347,10 +412,51 @@ describe('applyMigrationAttempt — advisory lock contention is retryable', () =
     // Lock was never acquired, so nothing to unlock.
     expect(h.client.unlockCalls).toBe(0)
     expect(h.invalidate).toHaveBeenCalledTimes(1)
+    expect(h.audit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        eventType: 'db.migration.apply.failed',
+        payload: expect.objectContaining({ authorization: params().authorization }),
+      }),
+    )
   })
 })
 
 describe('applyMigrationAttempt — ineligibility is terminal', () => {
+  it.each([
+    [{ queue_user_id: 8, active: true, role: 'admin' }, 'mismatched'],
+    [{ queue_user_id: 7, active: false, role: 'admin' }, 'deactivated'],
+    [{ queue_user_id: 7, active: true, role: 'viewer' }, 'revoked'],
+  ])('rejects a %s current requester before psql', async (queueAuth) => {
+    const h = makeHarness({ queueAuth })
+    await expect(applyMigrationAttempt(h.deps, params())).rejects.toThrow(/authorization/i)
+    expect(h.runPsql).not.toHaveBeenCalled()
+    expect(h.client.lockCalls).toBe(0)
+    expect(h.client.only().requested_by_user_id).toBe(queueAuth.queue_user_id)
+    expect(h.audit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorType: 'system',
+        actorUserId: null,
+        payload: expect.objectContaining({
+          requestedByUserId: 7,
+          authorizationRejected: true,
+          authoritativeQueueUserId: queueAuth.queue_user_id,
+          authoritativeQueueUserActive: queueAuth.active,
+          authoritativeQueueUserRole: queueAuth.role,
+        }),
+      }),
+    )
+  })
+
+  it('blocks force when the artifact now has current approval', async () => {
+    const h = makeHarness()
+    await expect(
+      applyMigrationAttempt(h.deps, params({ authorization: forceAuthorization() })),
+    ).rejects.toThrow(/currently-approved/i)
+    expect(h.runPsql).not.toHaveBeenCalled()
+  })
+
   it('refuses an unblessed migration without running psql', async () => {
     const ineligible: MigrationApplyEligibility = {
       eligible: false,
@@ -358,7 +464,7 @@ describe('applyMigrationAttempt — ineligibility is terminal', () => {
       reason: 'not-blessed',
       detail: 'no blessing',
       blessing: null,
-      artifact: null,
+      artifact: artifact(),
     }
     const h = makeHarness({ eligibility: ineligible })
     await expect(applyMigrationAttempt(h.deps, params())).rejects.not.toBeInstanceOf(RetryableWorkerError)
@@ -371,10 +477,30 @@ describe('applyMigrationAttempt — ineligibility is terminal', () => {
   it('refuses when the payload digest does not match the deployed artifact', async () => {
     const h = makeHarness()
     await expect(
-      applyMigrationAttempt(h.deps, params({ blessingArtifactSha256: 'b'.repeat(64) })),
+      applyMigrationAttempt(h.deps, params({ authorization: { mode: 'oracle-approved', artifactSha256: 'b'.repeat(64) } })),
     ).rejects.toThrow(/digest/i)
     expect(h.runPsql).not.toHaveBeenCalled()
     expect(h.client.only().state).toBe('failed')
+  })
+
+  it('refuses a forced artifact when its enqueue-time digest no longer matches', async () => {
+    const h = makeHarness({
+      eligibility: {
+        eligible: false,
+        migrationId: MIGRATION_ID,
+        reason: 'not-blessed',
+        detail: 'missing review',
+        blessing: null,
+        artifact: artifact(),
+      },
+    })
+    await expect(
+      applyMigrationAttempt(
+        h.deps,
+        params({ authorization: forceAuthorization('b'.repeat(64)) }),
+      ),
+    ).rejects.toThrow(/digest/i)
+    expect(h.runPsql).not.toHaveBeenCalled()
   })
 
   it('refuses when confirmMigrationId does not match', async () => {
@@ -412,6 +538,7 @@ describe('applyMigrationAttempt — crash-recovery guard', () => {
           id,
           migration_id: MIGRATION_ID,
           job_id: 42,
+          requested_by_user_id: 7,
           state: 'running',
           sentinel_before: null,
           sentinel_after: null,
@@ -439,6 +566,7 @@ describe('applyMigrationAttempt — crash-recovery guard', () => {
           id,
           migration_id: MIGRATION_ID,
           job_id: 42,
+          requested_by_user_id: 7,
           state: 'failed',
           sentinel_before: false,
           sentinel_after: false,
@@ -463,6 +591,7 @@ describe('applyMigrationAttempt — crash-recovery guard', () => {
           id,
           migration_id: MIGRATION_ID,
           job_id: 42,
+          requested_by_user_id: 7,
           state: 'failed',
           sentinel_before: null,
           sentinel_after: null,
@@ -489,6 +618,7 @@ describe('applyMigrationAttempt — crash-recovery guard', () => {
           id,
           migration_id: MIGRATION_ID,
           job_id: 42,
+          requested_by_user_id: 7,
           state: 'running',
           sentinel_before: null,
           sentinel_after: null,

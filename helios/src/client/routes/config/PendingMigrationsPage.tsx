@@ -17,16 +17,20 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, Navigate, useParams, useRouteLoaderData } from 'react-router-dom'
 
 import {
+  AdminPendingMigrationApplyConflictSchema,
   AdminPendingMigrationApplyResponseSchema,
   AdminPendingMigrationDetailsResponseSchema,
   AdminPendingMigrationsResponseSchema,
+  FORCE_WITHOUT_REVIEW_ACKNOWLEDGEMENT,
+  FORCE_WITHOUT_REVIEW_APPROVAL,
+  HELIOS_PRODUCTION_TARGET,
   buildHeliosModulePath,
   type AdminPendingMigrationRow,
   type AdminPendingMigrationDetailsResponse,
   type AdminPendingMigrationsResponse,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
-import { loadJson, mutateJson } from '../../app/fetchJson.js'
+import { HttpResponseError, loadJson, mutateJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus } from '../../app/jobPolling.js'
 import { nyShortDateTime } from '../../app/nyTime.js'
 import { Pill } from '../../components/Pill.js'
@@ -39,12 +43,21 @@ import {
   eligibilityLabel,
   eligibilityTone,
   initialRowApplyState,
+  isRowInFlight,
   resumableJobId,
   type RowApplyState,
 } from './pendingMigrationsAdminShared.js'
 
 const LIST_PATH = '/api/admin/pending-migrations'
 const POLL_INTERVAL_MS = 1500
+
+interface ForceApplyState {
+  action: string
+  acknowledged: boolean
+  migrationId: string
+  phrase: string
+  artifactSha256: string
+}
 
 async function loadPendingMigrations(): Promise<AdminPendingMigrationsResponse> {
   return loadJson(LIST_PATH, AdminPendingMigrationsResponseSchema)
@@ -67,6 +80,24 @@ function formatTimestamp(iso: string | null): string {
   return Number.isNaN(ms) ? iso : nyShortDateTime(ms)
 }
 
+function failedApplyState(cause: unknown, fallback: string): RowApplyState {
+  const conflict =
+    cause instanceof HttpResponseError
+      ? AdminPendingMigrationApplyConflictSchema.safeParse(cause.payload)
+      : null
+  return {
+    phase: 'error',
+    jobId: conflict?.success ? conflict.data.existingJobId : null,
+    jobStatus: null,
+    error:
+      conflict?.success === true
+        ? conflict.data.error
+        : cause instanceof Error
+          ? cause.message
+          : fallback,
+  }
+}
+
 export function PendingMigrationsPage() {
   useRegisterConfigSidebarSubtree()
   const session = useRouteLoaderData('root') as SessionEnvelope | undefined
@@ -79,6 +110,7 @@ export function PendingMigrationsPage() {
   // Per-row apply lifecycle + the type-to-confirm input value, keyed by id.
   const [applyStates, setApplyStates] = useState<Record<string, RowApplyState>>({})
   const [confirmText, setConfirmText] = useState<Record<string, string>>({})
+  const [forceState, setForceState] = useState<Record<string, ForceApplyState>>({})
 
   // Mounted flag so in-flight polls/fetches don't setState after unmount.
   const mountedRef = useRef(true)
@@ -195,6 +227,24 @@ export function PendingMigrationsPage() {
     }
   }, [data, pollApplyJob, setRowApply])
 
+  // Ceremony state is valid only while the exact row and digest remain
+  // continuously observed. Remove it rather than making stale state merely
+  // inaccessible, so a removed row or reverted digest can never revive it.
+  useEffect(() => {
+    if (data === null) return
+    const currentDigests = new Map(
+      data.migrations.map((row) => [row.migrationId, row.artifactSha256]),
+    )
+    setForceState((previous) => {
+      const retained = Object.entries(previous).filter(
+        ([migrationId, state]) => currentDigests.get(migrationId) === state.artifactSha256,
+      )
+      return retained.length === Object.keys(previous).length
+        ? previous
+        : Object.fromEntries(retained)
+    })
+  }, [data])
+
   const handleApply = useCallback(
     async (row: AdminPendingMigrationRow) => {
       const typed = confirmText[row.migrationId] ?? ''
@@ -230,15 +280,72 @@ export function PendingMigrationsPage() {
         if (!mountedRef.current) {
           return
         }
-        setRowApply(row.migrationId, {
-          phase: 'error',
-          jobId: null,
-          jobStatus: null,
-          error: cause instanceof Error ? cause.message : 'Failed to enqueue the apply job.',
-        })
+        setRowApply(
+          row.migrationId,
+          failedApplyState(cause, 'Failed to enqueue the apply job.'),
+        )
       }
     },
     [confirmText, pollApplyJob, setRowApply],
+  )
+
+  const handleForceApply = useCallback(
+    async (row: AdminPendingMigrationRow) => {
+      if (row.artifactSha256 === null) return
+      const force = forceState[row.migrationId]
+      if (
+        !force ||
+        force.artifactSha256 !== row.artifactSha256 ||
+        force.action !== FORCE_WITHOUT_REVIEW_APPROVAL ||
+        !force.acknowledged ||
+        force.migrationId !== row.migrationId ||
+        force.phrase !== FORCE_WITHOUT_REVIEW_APPROVAL
+      ) return
+      setRowApply(row.migrationId, {
+        phase: 'submitting',
+        jobId: null,
+        jobStatus: null,
+        error: null,
+      })
+      try {
+        const response = await mutateJson(
+          `${LIST_PATH}/${encodeURIComponent(row.migrationId)}/force-apply`,
+          AdminPendingMigrationApplyResponseSchema,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              action: FORCE_WITHOUT_REVIEW_APPROVAL,
+              confirmationPhrase: force.phrase,
+              target: HELIOS_PRODUCTION_TARGET,
+              confirmMigrationId: force.migrationId,
+              acknowledgedWithoutReview: force.acknowledged,
+              expectedArtifactSha256: row.artifactSha256,
+            }),
+          },
+        )
+        if (!mountedRef.current) return
+        setForceState((previous) => {
+          const next = { ...previous }
+          delete next[row.migrationId]
+          return next
+        })
+        setRowApply(row.migrationId, {
+          phase: 'polling',
+          jobId: response.jobId,
+          jobStatus: null,
+          error: null,
+        })
+        pollApplyJob(row.migrationId, response.jobId)
+      } catch (cause) {
+        if (!mountedRef.current) return
+        setRowApply(
+          row.migrationId,
+          failedApplyState(cause, 'Failed to enqueue the exceptional apply job.'),
+        )
+      }
+    },
+    [forceState, pollApplyJob, setRowApply],
   )
 
   // Route-level admin guard (defense-in-depth; the server APIs are
@@ -304,6 +411,22 @@ export function PendingMigrationsPage() {
                 ? null
                 : 'Type the migration id to confirm.'
             const statusLine = applyStatusLine(row, apply)
+            const force = forceState[row.migrationId] ?? {
+              action: '',
+              acknowledged: false,
+              migrationId: '',
+              phrase: '',
+              artifactSha256: row.artifactSha256 ?? '',
+            }
+            const setForce = (next: ForceApplyState) => setForceState((previous) => ({
+              ...previous,
+              [row.migrationId]: next,
+            }))
+            const forceConfirmed =
+              force.action === FORCE_WITHOUT_REVIEW_APPROVAL &&
+              force.acknowledged &&
+              force.migrationId === row.migrationId &&
+              force.phrase === FORCE_WITHOUT_REVIEW_APPROVAL
 
             return (
               <article className="history-card" id={row.migrationId} key={row.migrationId}>
@@ -338,7 +461,8 @@ export function PendingMigrationsPage() {
                   </p>
                 ) : (
                   <p className="subtle-copy" style={{ marginTop: 6 }}>
-                    No Oracle blessing recorded in the registry. Apply is disabled until one lands.
+                    No Oracle blessing is recorded. The ordinary apply path is disabled. An exceptional
+                    admin action is available only after reviewing and confirming this exact artifact.
                   </p>
                 )}
 
@@ -376,6 +500,74 @@ export function PendingMigrationsPage() {
                     <code style={{ overflowWrap: 'anywhere' }}>{row.artifactSha256}</code>
                   ) : null}
                 </div>
+
+                {row.forceEligible ? (
+                  <details className="migration-exceptional-action" style={{ marginTop: 12 }}>
+                    <summary>Exceptional action</summary>
+                    <select
+                      aria-label="Exceptional action"
+                      value={force.action}
+                      onChange={(event) => setForce({ ...force, action: event.target.value })}
+                    >
+                      <option value="">Choose an exceptional action...</option>
+                      <option value={FORCE_WITHOUT_REVIEW_APPROVAL}>
+                        {FORCE_WITHOUT_REVIEW_APPROVAL}
+                      </option>
+                    </select>
+                    {force.action === FORCE_WITHOUT_REVIEW_APPROVAL ? (
+                      <div className="migration-exceptional-panel">
+                        <p><strong>Target: Helios production database</strong></p>
+                        <p className="subtle-copy">
+                          The review link and exact current digest immediately above define the
+                          artifact this authorization applies to.
+                        </p>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={force.acknowledged}
+                            onChange={(event) => setForce({
+                              ...force, acknowledged: event.target.checked,
+                            })}
+                          />{' '}
+                          {FORCE_WITHOUT_REVIEW_ACKNOWLEDGEMENT}
+                        </label>
+                        <input
+                          aria-label="Confirm migration ID for exceptional action"
+                          value={force.migrationId}
+                          onChange={(event) => setForce({ ...force, migrationId: event.target.value })}
+                          placeholder={`Type ${row.migrationId}`}
+                        />
+                        <input
+                          aria-label="Confirm exceptional action phrase"
+                          value={force.phrase}
+                          onChange={(event) => setForce({ ...force, phrase: event.target.value })}
+                          placeholder={`Type ${FORCE_WITHOUT_REVIEW_APPROVAL}`}
+                        />
+                        <div className="inline-row migration-exceptional-controls">
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => setForceState((previous) => {
+                              const next = { ...previous }
+                              delete next[row.migrationId]
+                              return next
+                            })}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            className="danger-button"
+                            disabled={!forceConfirmed || isRowInFlight(row, apply)}
+                            onClick={() => void handleForceApply(row)}
+                          >
+                            {FORCE_WITHOUT_REVIEW_APPROVAL}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </details>
+                ) : null}
 
                 <div className="filter-row" style={{ marginTop: 10, flexWrap: 'wrap' }}>
                   <input
@@ -443,7 +635,8 @@ export function PendingMigrationsPage() {
             <strong>not yet applied</strong> against the production database. Applying is{' '}
             <strong>admin-only</strong> and requires the migration to carry an Oracle blessing in the
             committed registry whose recorded artifact digest still matches the deployed{' '}
-            <code>.sql</code> closure (both APIs re-check this live and fail closed).
+            <code>.sql</code> closure. This remains the default path. A separately selected exceptional
+            action can waive only review approval for the exact displayed artifact and production target.
           </p>
           <p>
             <strong>Apply Now</strong> does not run SQL in the browser or the web tier. It enqueues an
@@ -575,8 +768,8 @@ export function PendingMigrationDetailsPage() {
         <div className="history-card" style={{ marginTop: 8 }}>
           {explanation.status === 'unavailable' ? (
             <p className="subtle-copy">
-              No digest-bound, Oracle-reviewed explanation is available; this migration cannot be
-              applied from Helios.
+              No current digest-bound Oracle review is available. Ordinary apply is unavailable.
+              The exceptional flow exists only on the pending list after reviewing the exact artifact.
             </p>
           ) : (
             <>

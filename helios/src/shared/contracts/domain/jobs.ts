@@ -1,5 +1,10 @@
 import { z } from 'zod'
 
+import {
+  FORCE_WITHOUT_REVIEW_APPROVAL,
+  HELIOS_PRODUCTION_TARGET,
+} from './migrationApplyAuthorization.js'
+
 import { JsonValueSchema } from '../common/json.js'
 import { HeliosModuleCodeSchema, HeliosModuleScopeSchema } from './modules.js'
 import { ScopeKindSchema, ScopeRefSchema } from './scopeRef.js'
@@ -442,17 +447,29 @@ export type InventoryLifecycleAdvanceJobPayload = z.infer<
  *  - `confirmMigrationId`  — the type-to-confirm value; the worker refuses
  *                            unless it exactly equals `migrationId` (matches
  *                            the server-side check, defense in depth).
- *  - `blessingArtifactSha256` — the artifact-closure digest captured from the
- *                            registry blessing at enqueue time; the worker
- *                            refuses unless the live re-resolved digest AND the
- *                            registry blessing both still equal it.
+ *  - `authorization`       — ordinary Oracle approval or the narrow exceptional
+ *                            authorization, always bound to the enqueue-time
+ *                            artifact digest and revalidated by the worker.
  */
 export const DbMigrationApplyJobPayloadSchema = z.object({
   migrationId: z.string().min(1),
   requestedByUserId: z.number().int().positive(),
   confirmMigrationId: z.string().min(1),
-  blessingArtifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
-})
+  authorization: z.discriminatedUnion('mode', [
+    z.object({
+      mode: z.literal('oracle-approved'),
+      artifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    }).strict(),
+    z.object({
+      mode: z.literal('force-without-review'),
+      artifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      action: z.literal(FORCE_WITHOUT_REVIEW_APPROVAL),
+      confirmationPhrase: z.literal(FORCE_WITHOUT_REVIEW_APPROVAL),
+      target: z.literal(HELIOS_PRODUCTION_TARGET),
+      acknowledgedWithoutReview: z.literal(true),
+    }).strict(),
+  ]),
+}).strict()
 export type DbMigrationApplyJobPayload = z.infer<typeof DbMigrationApplyJobPayloadSchema>
 
 /**

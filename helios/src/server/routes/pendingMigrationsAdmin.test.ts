@@ -32,6 +32,7 @@ const mockState = vi.hoisted(() => ({
   // POST-apply mocks (leaf 6).
   appliedLiveById: new Map<string, boolean>(),
   enqueuedJobId: 4242,
+  enqueueResult: null as null | { inserted: boolean; jobId: number; exactPayload?: boolean },
 }))
 
 vi.mock('../auth/requireSession.js', () => ({
@@ -97,9 +98,14 @@ vi.mock('../db/migrationArtifacts.js', () => {
 })
 
 vi.mock('../jobs/enqueueJob.js', () => ({
-  enqueueJob: vi.fn(async () => mockState.enqueuedJobId),
+  enqueueJobExactActive: vi.fn(async () => mockState.enqueueResult ?? ({
+    inserted: true, jobId: mockState.enqueuedJobId,
+  })),
   JOB_PRIORITY_URGENT: 1000,
 }))
+
+vi.mock('../db/tx.js', () => ({ withTransaction: vi.fn(async (run: (db: unknown) => Promise<unknown>) => run({})) }))
+vi.mock('../audit/appendAuditEvent.js', () => ({ appendAuditEvent: vi.fn(async () => 1) }))
 
 vi.mock('../db/queries/migrationApplyAttemptsQueries.js', () => ({
   getLatestMigrationApplyAttemptsByMigrationIds: vi.fn(async () => mockState.attempts),
@@ -131,7 +137,8 @@ import {
 import { MigrationArtifactError, readMigrationArtifactForReview } from '../db/migrationArtifacts.js'
 import { getLatestMigrationApplyAttemptsByMigrationIds } from '../db/queries/migrationApplyAttemptsQueries.js'
 import { resolveMigrationApplyEligibility } from '../db/migrationApplyEligibility.js'
-import { enqueueJob } from '../jobs/enqueueJob.js'
+import { enqueueJobExactActive as enqueueJob } from '../jobs/enqueueJob.js'
+import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 
 let server: FastifyInstance
 
@@ -146,6 +153,7 @@ beforeEach(async () => {
   mockState.reviews = new Map()
   mockState.appliedLiveById = new Map()
   mockState.enqueuedJobId = 4242
+  mockState.enqueueResult = null
   server = Fastify()
   // Mirror buildServer.ts's global ZodError -> 400 handler so a malformed body
   // is rejected exactly as it is in production (a bare Fastify would 500).
@@ -235,6 +243,8 @@ describe('GET /api/admin/pending-migrations body', () => {
       },
       artifactDigestMatch: true,
       artifactSha256: 'a'.repeat(64),
+      reviewApprovalState: 'current',
+      forceEligible: false,
       lastAttempt: {
         jobId: 42,
         state: 'failed',
@@ -327,12 +337,29 @@ function setEligible(migrationId: string, artifactSha256 = 'a'.repeat(64)): void
 }
 
 const APPLY_URL = (id: string) => `/api/admin/pending-migrations/${id}/apply`
+const FORCE_APPLY_URL = (id: string) => `/api/admin/pending-migrations/${id}/force-apply`
 const DETAILS_URL = (id: string) => `/api/admin/pending-migrations/${id}/details`
 const EXPECTED_ARTIFACT_SHA = 'a'.repeat(64)
 const applyPayload = (confirmMigrationId: string, expectedArtifactSha256 = EXPECTED_ARTIFACT_SHA) => ({
   confirmMigrationId,
   expectedArtifactSha256,
 })
+const forcePayload = (migrationId: string) => ({
+  action: 'FORCE WITHOUT REVIEW APPROVAL',
+  confirmationPhrase: 'FORCE WITHOUT REVIEW APPROVAL',
+  target: 'helios-production',
+  confirmMigrationId: migrationId,
+  acknowledgedWithoutReview: true,
+  expectedArtifactSha256: EXPECTED_ARTIFACT_SHA,
+})
+
+function setMissingReview(migrationId: string): void {
+  mockState.sentinels.set(migrationId, { migrationId, label: migrationId })
+  mockState.eligibilityById.set(migrationId, {
+    eligible: false, migrationId, reason: 'not-blessed', detail: 'missing', blessing: null,
+    artifact: { sha256: EXPECTED_ARTIFACT_SHA },
+  } as unknown as MigrationApplyEligibility)
+}
 
 describe('GET /api/admin/pending-migrations/:id/details', () => {
   it('rejects before reading registry, database, or artifact state', async () => {
@@ -525,13 +552,23 @@ describe('POST /api/admin/pending-migrations/:id/apply auth gate', () => {
         migrationId: '097_litalerts_parse_feedback',
         requestedByUserId: 7,
         confirmMigrationId: '097_litalerts_parse_feedback',
-        blessingArtifactSha256: 'a'.repeat(64),
+        authorization: { mode: 'oracle-approved', artifactSha256: 'a'.repeat(64) },
       },
     })
   })
 })
 
 describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
+  it('rejects a mixed force field on the strict ordinary endpoint', async () => {
+    setEligible('097_x')
+    const res = await server.inject({
+      method: 'POST', url: APPLY_URL('097_x'),
+      payload: { ...applyPayload('097_x'), action: 'FORCE WITHOUT REVIEW APPROVAL' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(enqueueJob).not.toHaveBeenCalled()
+  })
+
   it('rejects a confirmMigrationId mismatch with 400 and never enqueues', async () => {
     setEligible('097_x')
     const res = await server.inject({
@@ -671,5 +708,121 @@ describe('POST /api/admin/pending-migrations/:id/apply validation', () => {
     expect(res.json().error).toContain('changed after it was reviewed')
     expect(isMigrationAppliedLive).not.toHaveBeenCalled()
     expect(enqueueJob).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/admin/pending-migrations/:id/force-apply', () => {
+  it('rejects a non-admin before reading protected state', async () => {
+    mockState.role = 'approver'
+    const res = await server.inject({ method: 'POST', url: FORCE_APPLY_URL('097_x'), payload: forcePayload('097_x') })
+    expect(res.statusCode).toBe(403)
+    expect(resolveMigrationApplyEligibility).not.toHaveBeenCalled()
+    expect(isMigrationAppliedLive).not.toHaveBeenCalled()
+  })
+
+  it('rejects partial ceremony', async () => {
+    setMissingReview('097_x')
+    const res = await server.inject({ method: 'POST', url: FORCE_APPLY_URL('097_x'), payload: { action: 'FORCE WITHOUT REVIEW APPROVAL' } })
+    expect(res.statusCode).toBe(400)
+    expect(enqueueJob).not.toHaveBeenCalled()
+  })
+
+  it('enqueues a separately authorized missing-review artifact', async () => {
+    mockState.userId = 7
+    setMissingReview('097_x')
+    const res = await server.inject({ method: 'POST', url: FORCE_APPLY_URL('097_x'), payload: forcePayload('097_x') })
+    expect(res.statusCode).toBe(200)
+    const [, input] = (enqueueJob as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]
+    expect(input).toMatchObject({ payload: { authorization: {
+      mode: 'force-without-review', artifactSha256: EXPECTED_ARTIFACT_SHA,
+      action: 'FORCE WITHOUT REVIEW APPROVAL', confirmationPhrase: 'FORCE WITHOUT REVIEW APPROVAL',
+      target: 'helios-production', acknowledgedWithoutReview: true,
+    } } })
+    expect(appendAuditEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      eventType: 'db.migration.apply.requested',
+      payload: expect.objectContaining({ authorization: input.payload.authorization }),
+    }))
+  })
+
+  it.each([
+    ['unknown-migration-id', 404, null],
+    ['artifact-unresolvable', 409, null],
+  ])('rejects %s', async (reason, statusCode, artifact) => {
+    mockState.eligibilityById.set('097_x', {
+      eligible: false, migrationId: '097_x', reason, detail: reason,
+      blessing: null, artifact,
+    } as unknown as MigrationApplyEligibility)
+    const res = await server.inject({ method: 'POST', url: FORCE_APPLY_URL('097_x'), payload: forcePayload('097_x') })
+    expect(res.statusCode).toBe(statusCode)
+    expect(enqueueJob).not.toHaveBeenCalled()
+  })
+
+  it('rejects current approval without enqueueing or auditing', async () => {
+    setEligible('097_x')
+    const res = await server.inject({
+      method: 'POST',
+      url: FORCE_APPLY_URL('097_x'),
+      payload: forcePayload('097_x'),
+    })
+    expect(res.statusCode).toBe(409)
+    expect(enqueueJob).not.toHaveBeenCalled()
+    expect(appendAuditEvent).not.toHaveBeenCalled()
+  })
+
+  it('rejects the wrong exact migration ID without enqueueing or auditing', async () => {
+    setMissingReview('097_x')
+    const res = await server.inject({
+      method: 'POST',
+      url: FORCE_APPLY_URL('097_x'),
+      payload: forcePayload('wrong'),
+    })
+    expect(res.statusCode).toBe(400)
+    expect(enqueueJob).not.toHaveBeenCalled()
+    expect(appendAuditEvent).not.toHaveBeenCalled()
+  })
+
+  it('rejects artifact digest drift without enqueueing or auditing', async () => {
+    setMissingReview('097_x')
+    const res = await server.inject({
+      method: 'POST',
+      url: FORCE_APPLY_URL('097_x'),
+      payload: { ...forcePayload('097_x'), expectedArtifactSha256: 'b'.repeat(64) },
+    })
+    expect(res.statusCode).toBe(409)
+    expect(enqueueJob).not.toHaveBeenCalled()
+    expect(appendAuditEvent).not.toHaveBeenCalled()
+  })
+
+  it('rejects an already-applied migration without enqueueing or auditing', async () => {
+    setMissingReview('097_x')
+    mockState.appliedLiveById.set('097_x', true)
+    const res = await server.inject({
+      method: 'POST',
+      url: FORCE_APPLY_URL('097_x'),
+      payload: forcePayload('097_x'),
+    })
+    expect(res.statusCode).toBe(409)
+    expect(enqueueJob).not.toHaveBeenCalled()
+    expect(appendAuditEvent).not.toHaveBeenCalled()
+  })
+
+  it('accepts stale digest-mismatch approval for the current artifact', async () => {
+    mockState.eligibilityById.set('097_x', {
+      eligible: false, migrationId: '097_x', reason: 'digest-mismatch', detail: 'stale',
+      blessing: { ref: 'old', reviewedSha: 'old', artifactSha256: 'b'.repeat(64),
+        transactionMode: 'transactional', operatorExplanation: 'old' },
+      artifact: { sha256: EXPECTED_ARTIFACT_SHA },
+    } as unknown as MigrationApplyEligibility)
+    const res = await server.inject({ method: 'POST', url: FORCE_APPLY_URL('097_x'), payload: forcePayload('097_x') })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('returns an exact active conflict without a second requested audit', async () => {
+    setMissingReview('097_x')
+    mockState.enqueueResult = { inserted: false, jobId: 88, exactPayload: false }
+    const res = await server.inject({ method: 'POST', url: FORCE_APPLY_URL('097_x'), payload: forcePayload('097_x') })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().existingJobId).toBe(88)
+    expect(appendAuditEvent).not.toHaveBeenCalled()
   })
 })

@@ -1,5 +1,10 @@
 import { z } from 'zod'
 
+import {
+  FORCE_WITHOUT_REVIEW_APPROVAL,
+  HELIOS_PRODUCTION_TARGET,
+} from '../domain/migrationApplyAuthorization.js'
+
 // Admin pending-migrations page API contracts (automation#62, leaf 5).
 //
 // Backs GET /api/admin/pending-migrations — the admin-only list the SPA
@@ -84,6 +89,8 @@ export const AdminPendingMigrationRowSchema = z.object({
   // Current deployed closure digest when it resolved, else null. Apply binds
   // the operator's request to this exact value and rejects a later deploy.
   artifactSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  reviewApprovalState: z.enum(['current', 'missing', 'stale', 'artifact-unavailable']),
+  forceEligible: z.boolean(),
   lastAttempt: AdminPendingMigrationAttemptSchema.nullable(),
 })
 export type AdminPendingMigrationRow = z.infer<typeof AdminPendingMigrationRowSchema>
@@ -103,9 +110,21 @@ export type AdminPendingMigrationsResponse = z.infer<
 export const AdminPendingMigrationApplyRequestSchema = z.object({
   confirmMigrationId: z.string().min(1),
   expectedArtifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
-})
+}).strict()
 export type AdminPendingMigrationApplyRequest = z.infer<
   typeof AdminPendingMigrationApplyRequestSchema
+>
+
+export const AdminPendingMigrationForceApplyRequestSchema = z.object({
+  action: z.literal(FORCE_WITHOUT_REVIEW_APPROVAL),
+  confirmationPhrase: z.literal(FORCE_WITHOUT_REVIEW_APPROVAL),
+  target: z.literal(HELIOS_PRODUCTION_TARGET),
+  confirmMigrationId: z.string().min(1),
+  acknowledgedWithoutReview: z.literal(true),
+  expectedArtifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict()
+export type AdminPendingMigrationForceApplyRequest = z.infer<
+  typeof AdminPendingMigrationForceApplyRequestSchema
 >
 
 // On success the endpoint returns the enqueued (or in-flight, deduped) urgent
@@ -116,6 +135,14 @@ export const AdminPendingMigrationApplyResponseSchema = z.object({
 })
 export type AdminPendingMigrationApplyResponse = z.infer<
   typeof AdminPendingMigrationApplyResponseSchema
+>
+
+export const AdminPendingMigrationApplyConflictSchema = z.object({
+  error: z.string().min(1),
+  existingJobId: z.number().int(),
+})
+export type AdminPendingMigrationApplyConflict = z.infer<
+  typeof AdminPendingMigrationApplyConflictSchema
 >
 
 export const AdminPendingMigrationArtifactFileSchema = z.object({

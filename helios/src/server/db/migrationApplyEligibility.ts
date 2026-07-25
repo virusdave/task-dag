@@ -45,20 +45,38 @@ export interface MigrationApplyEligibilityEligible {
   readonly artifact: ResolvedMigrationArtifact
 }
 
-export interface MigrationApplyEligibilityIneligible {
+export interface MigrationApplyEligibilityUnknownOrUnresolvable {
   readonly eligible: false
   readonly migrationId: string
-  readonly reason: MigrationApplyIneligibleReason
+  readonly reason: 'unknown-migration-id' | 'artifact-unresolvable'
   /** Human-readable detail for surfacing to the operator / attempt record. */
   readonly detail: string
   /** Present when the artifact resolved but some later check failed. */
   readonly blessing: MigrationBlessing | null
-  readonly artifact: ResolvedMigrationArtifact | null
+  readonly artifact: null
+}
+export interface MigrationApplyEligibilityNotBlessed {
+  readonly eligible: false
+  readonly migrationId: string
+  readonly reason: 'not-blessed'
+  readonly detail: string
+  readonly blessing: null
+  readonly artifact: ResolvedMigrationArtifact
+}
+export interface MigrationApplyEligibilityDigestMismatch {
+  readonly eligible: false
+  readonly migrationId: string
+  readonly reason: 'digest-mismatch'
+  readonly detail: string
+  readonly blessing: MigrationBlessing
+  readonly artifact: ResolvedMigrationArtifact
 }
 
 export type MigrationApplyEligibility =
   | MigrationApplyEligibilityEligible
-  | MigrationApplyEligibilityIneligible
+  | MigrationApplyEligibilityUnknownOrUnresolvable
+  | MigrationApplyEligibilityNotBlessed
+  | MigrationApplyEligibilityDigestMismatch
 
 /**
  * Compute the static (registry + artifact) apply-eligibility of a migration.
@@ -83,19 +101,6 @@ export function resolveMigrationApplyEligibility(
   }
 
   const blessing = sentinel.blessing ?? null
-  if (blessing === null) {
-    return {
-      eligible: false,
-      migrationId,
-      reason: 'not-blessed',
-      detail:
-        `Migration ${migrationId} has no Oracle blessing in the registry; ` +
-        'it is not apply-eligible until a blessing is recorded.',
-      blessing: null,
-      artifact: null,
-    }
-  }
-
   let artifact: ResolvedMigrationArtifact
   try {
     artifact = resolveMigrationArtifact(migrationId, options)
@@ -123,6 +128,17 @@ export function resolveMigrationApplyEligibility(
       detail,
       blessing,
       artifact: null,
+    }
+  }
+
+  if (blessing === null) {
+    return {
+      eligible: false,
+      migrationId,
+      reason: 'not-blessed',
+      detail: `Migration ${migrationId} has no Oracle blessing in the registry.`,
+      blessing: null,
+      artifact,
     }
   }
 
