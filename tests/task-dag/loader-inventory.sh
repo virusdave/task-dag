@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+expected=(source-contract.sh json.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -52,6 +52,24 @@ if bash "$REPO_ROOT/scripts/task-dag.d/source-contract.sh" >"$ROOT/executed-out"
 elif grep -q 'must be loaded by the task-dag entrypoint' "$ROOT/executed-err"; then
   ok "source contract direct execution fails loudly"
 else bad "source contract direct-execution failure was not actionable"; fi
+
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/json.sh" >"$ROOT/json-order-out" 2>"$ROOT/json-order-err"; then
+  bad "JSON foundation loaded without its source-contract prerequisite"
+elif grep -q 'requires source-contract.sh to be loaded first' "$ROOT/json-order-err"; then
+  ok "JSON foundation fails loudly when loaded out of order"
+else bad "JSON foundation source-order failure was not actionable"; fi
+
+cat >"$ROOT/json-wrapper" <<EOF
+#!/usr/bin/env bash
+TASKDAG_SCRIPT_DIR='$REPO_ROOT/scripts'
+TASKDAG_ENTRYPOINT='$REPO_ROOT/scripts/task-dag'
+source '$REPO_ROOT/scripts/task-dag.d/json.sh'
+EOF
+if bash "$ROOT/json-wrapper" >"$ROOT/json-wrapper-out" 2>"$ROOT/json-wrapper-err"; then
+  bad "JSON foundation accepted a non-entrypoint wrapper"
+elif grep -q 'must be loaded by the task-dag entrypoint' "$ROOT/json-wrapper-err"; then
+  ok "JSON foundation rejects a forged wrapper caller"
+else bad "JSON foundation wrapper failure was not actionable"; fi
 
 # Source from an unrelated peer CWD. The loaded graph module must capture the
 # canonical absolute CLI; exercise the exact helper-generation/subprocess path

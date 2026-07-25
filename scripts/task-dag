@@ -7221,71 +7221,6 @@ cmd_unblock() {
     return 4
 }
 
-# Helper: emit a JSON string literal (with surrounding quotes) for an
-# arbitrary value, escaped per RFC 8259. Prefers jq when present (handles
-# every control char); falls back to pure-bash escaping of the cases the
-# blocked-meta overlay can actually contain. Used so `blocked --json` is
-# safe for a dashboard to consume without reparsing commit bodies.
-json_escape() {
-    local s="$1"
-    if command -v jq >/dev/null 2>&1; then
-        printf '%s' "$s" | jq -Rs .
-        return
-    fi
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\t'/\\t}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\n'/\\n}"
-    printf '"%s"' "$s"
-}
-
-# Helper: emit a JSON string for a non-empty value, else the literal null.
-json_str_or_null() {
-    if [ -n "$1" ]; then json_escape "$1"; else printf 'null'; fi
-}
-
-# Helper: emit a bare JSON integer iff the value is all digits, else null.
-# Fields like `issue` and `claimerPid` come from commit/ref metadata; a
-# malformed value (e.g. `Issue: #41abc`) must NOT be interpolated raw or it
-# recreates the "invalid JSON -> dispatcher skips the whole repo" outage.
-json_int_or_null() {
-    if [[ "${1:-}" =~ ^(0|[1-9][0-9]*)$ ]]; then printf '%s' "$1"; else printf 'null'; fi
-}
-
-# Helper: emit a bare JSON number (integer or decimal) iff well-formed,
-# else null. Used for metadata like `ttlHours`. Rejects leading-zero
-# forms (e.g. 007, 01.5) that jq tolerates but strict JSON parsers reject.
-json_number_or_null() {
-    if [[ "${1:-}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi
-}
-
-# Helper: read newline-separated raw values on stdin and emit a compact
-# JSON array of escaped strings ([] when empty). `awk NF` drops blank
-# lines so an empty input yields [] rather than the [""] the old
-# hand-rolled `while read` + trailing-comma-strip produced.
-json_str_array() {
-    awk 'NF' | { command -v jq >/dev/null 2>&1 \
-        && jq -R . | jq -sc . \
-        || { printf '['; local first=1 line; while IFS= read -r line; do
-                 [ "$first" = 1 ] || printf ','; first=0; json_escape "$line";
-             done; printf ']'; }; }
-}
-
-# Preflight guard for commands whose --json result objects are emitted with
-# direct `jq -nc` (claim/release/claim-root/release-root/reap/breakdown/
-# validate). Those emitters have NO pure-bash fallback, and several run
-# AFTER a push / update-ref side effect — so a missing jq would otherwise
-# complete the git mutation and then die 127 mid-emit. Call this right after
-# argument parsing (before any side effect) when --json is requested so we
-# fail LOUD and early instead.
-require_jq_for_json() {
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "Error: jq is required for --json output" >&2
-        return 1
-    fi
-}
-
 # Command: blocked - list parked (blocked) tasks
 cmd_blocked() {
     local json=false issue_filter="" do_fetch=true kind_filter=""
@@ -8733,6 +8668,8 @@ EOF
 # never source one another; this runtime entrypoint owns the complete order.
 # shellcheck source=task-dag.d/source-contract.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/task-dag.d/source-contract.sh"
+# shellcheck source=task-dag.d/json.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/json.sh"
 # shellcheck source=task-dag.d/activation-fleet.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
 # shellcheck source=task-dag.d/activation.sh
