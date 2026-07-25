@@ -221,8 +221,8 @@ if bash -c 'for n in $2; do eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "
   ok "edge writer accepts its complete prerequisite set"
 else bad "edge writer rejected its complete prerequisite set: $(cat "$ROOT/writer-complete-err")"; fi
 
-prune_prereqs='taskdag_read_edges taskdag_sync_graph_ref taskdag_sync_master taskdag_edge_prunable taskdag_consumer_prepare _taskdag_graph_edge_tuple _taskdag_graph_cas _taskdag_graph_has_path taskdag_dep_help _cmd_dep_add _cmd_dep_drop'
-prune_globals='TASKDAG_GRAPH_REF=refs/heads/tasks/v1/graph BLUE= BOLD= RESET='
+prune_prereqs='taskdag_read_edges taskdag_sync_graph_ref taskdag_sync_master taskdag_edge_prunable taskdag_consumer_prepare _taskdag_graph_edge_tuple _taskdag_graph_cas _taskdag_graph_has_path taskdag_dep_help'
+prune_globals='TASKDAG_GRAPH_REF=refs/heads/tasks/v1/graph GREEN= BLUE= BOLD= RESET='
 if bash -c 'for n in $2; do [ "$n" = _taskdag_graph_cas ] || eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/edges-prune.sh" "$prune_prereqs" "$prune_globals" >"$ROOT/prune-order-out" 2>"$ROOT/prune-order-err"; then
   bad "edge pruner loaded without graph writer primitives"
 elif grep -q 'requires provider _taskdag_graph_cas' "$ROOT/prune-order-err"; then
@@ -236,6 +236,37 @@ else bad "edge pruner rejected its complete prerequisite set: $(cat "$ROOT/prune
 if rg -n '_taskdag_edge_prunable|_cmd_dep_prune' "$REPO_ROOT/scripts/task-dag.d/edges-write.sh" >"$ROOT/writer-reverse-deps"; then
   bad "edge writer retains a reverse dependency: $(cat "$ROOT/writer-reverse-deps")"
 else ok "edge writer has no reverse dependency on the edge pruner"; fi
+
+mailbox_prereqs='taskdag_normalize_node taskdag_norm_owner_repo taskdag_sha256_hex taskdag_repo_numeric_id taskdag_remote_owner_repo taskdag_current_repo taskdag_cas_sleep'
+mailbox_globals='TASKDAG_CAS_MAX_ATTEMPTS=8 EMPTY_TREE=fixture GREEN= BLUE= BOLD= RESET='
+if bash -c 'for n in $2; do [ "$n" = taskdag_cas_sleep ] || eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/mailbox.sh" "$mailbox_prereqs" "$mailbox_globals" >"$ROOT/mailbox-order-out" 2>"$ROOT/mailbox-order-err"; then
+  bad "mailbox loaded without its CAS retry provider"
+elif grep -q 'requires provider taskdag_cas_sleep' "$ROOT/mailbox-order-err"; then
+  ok "mailbox fails loudly without a direct prerequisite"
+else bad "mailbox prerequisite failure was not actionable"; fi
+
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/mailbox.sh" "$mailbox_prereqs" "$mailbox_globals" >/dev/null 2>"$ROOT/mailbox-complete-err"; then
+  ok "mailbox accepts its complete prerequisite set"
+else bad "mailbox rejected its complete prerequisite set: $(cat "$ROOT/mailbox-complete-err")"; fi
+
+legacy_prereqs='parse_commit_metadata extract_field get_first_parent is_task_commit has_blocked_meta read_blocked_meta_field fetch_task_refs taskdag_current_repo taskdag_normalize_node taskdag_node_repo taskdag_repo_numeric_id taskdag_edge_id taskdag_dep_add'
+legacy_globals='EMPTY_TREE=fixture BLUE= RESET='
+if bash -c 'for n in $2; do [ "$n" = taskdag_dep_add ] || eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/legacy-edges.sh" "$legacy_prereqs" "$legacy_globals" >"$ROOT/legacy-order-out" 2>"$ROOT/legacy-order-err"; then
+  bad "legacy edge bridge loaded without its domain writer"
+elif grep -q 'requires provider taskdag_dep_add' "$ROOT/legacy-order-err"; then
+  ok "legacy edge bridge fails loudly without a direct prerequisite"
+else bad "legacy edge bridge prerequisite failure was not actionable"; fi
+
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; eval "$3"; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/legacy-edges.sh" "$legacy_prereqs" "$legacy_globals" >/dev/null 2>"$ROOT/legacy-complete-err"; then
+  ok "legacy edge bridge accepts its complete prerequisite set"
+else bad "legacy edge bridge rejected its complete prerequisite set: $(cat "$ROOT/legacy-complete-err")"; fi
+
+if rg -n '_cmd_dep_(add|drop)|^[[:space:]]*(source|\.)[[:space:]]|^[[:space:]]*:[[:space:]]+"\$\{[A-Z0-9_]+:=' \
+    "$REPO_ROOT/scripts/task-dag.d/edges-prune.sh" \
+    "$REPO_ROOT/scripts/task-dag.d/mailbox.sh" \
+    "$REPO_ROOT/scripts/task-dag.d/legacy-edges.sh" >"$ROOT/graph-leaf-cycles"; then
+  bad "graph leaf module retains a command-adapter, nested-source, or fallback-global dependency: $(cat "$ROOT/graph-leaf-cycles")"
+else ok "graph leaf modules have no command-adapter, nested-source, or fallback-global dependencies"; fi
 
 if bash -c 'taskdag_node_complete(){ :; }; taskdag_leaf_ready(){ :; }; taskdag_normalize_node(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconcile.sh" >"$ROOT/reconcile-core-out" 2>"$ROOT/reconcile-core-err"; then
   bad "reconcile loaded without reconciliation preparation"

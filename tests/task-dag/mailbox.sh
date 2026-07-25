@@ -251,11 +251,14 @@ FOLDLOG="$ROOT/fold.log"
 cat > "$ROOT/fold.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+EMPTY_TREE="$EMPTY_TREE"
+TASKDAG_CAS_MAX_ATTEMPTS=8
+GREEN='' BLUE='' BOLD='' RESET=''
 # shellcheck source=/dev/null
 source "$LIBDIR/repository-identity.sh"
 source "$LIBDIR/edges.sh"
+source "$LIBDIR/cas-retry.sh"
 source "$LIBDIR/mailbox.sh"
-GREEN='' BLUE='' RESET=''
 printf '%s\t%s\t%s\t%s\t%s\t%s\n' \\
   "\${TASKDAG_MAILBOX_MESSAGE_ID}" "\${TASKDAG_MAILBOX_KIND}" \\
   "\${TASKDAG_MAILBOX_NODE}" "\${TASKDAG_MAILBOX_WITNESS}" \\

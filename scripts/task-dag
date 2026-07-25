@@ -6924,6 +6924,22 @@ EOF
     return 0
 }
 
+# Command: dep — compose the edge writer and pruning adapters in the runtime
+# entrypoint, after their provider modules have loaded. Keeping this thin
+# command adapter here prevents either graph leaf module from depending on
+# another module's command adapter.
+cmd_dep() {
+    local sub="${1:-}"
+    [ $# -gt 0 ] && shift
+    case "$sub" in
+        add) _cmd_dep_add "$@" ;;
+        drop) _cmd_dep_drop "$@" ;;
+        prune) _cmd_dep_prune "$@" ;;
+        ""|--help|-h) taskdag_dep_help ;;
+        *) echo "Error: unknown 'dep' subcommand: $sub (expected add|drop|prune)" >&2; return 2 ;;
+    esac
+}
+
 # Main dispatch
 main() {
     if [ $# -eq 0 ]; then

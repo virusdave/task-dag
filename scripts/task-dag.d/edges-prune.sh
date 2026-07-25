@@ -16,8 +16,9 @@
 # tombstone blob serializer + reader masking live in edges.sh.
 #
 # Relies on the edge reader, fact-backed prunability, semantic preparation,
-# and the graph mutation primitives in edges-write.sh. This module is loaded
-# after the writer and owns the final `dep` command composition point.
+# and the graph mutation primitives in edges-write.sh. The entrypoint composes
+# this module's pruning adapter with the writer's add/drop adapters only after
+# both provider modules have loaded.
 #
 # Scope boundary: this module PRUNES prunable edges; it does NOT decide what
 # a completion TRIGGERS (the reconciler / supersede / mailbox siblings do). In
@@ -29,13 +30,13 @@
 
 for prerequisite in taskdag_read_edges taskdag_sync_graph_ref taskdag_sync_master \
     taskdag_edge_prunable taskdag_consumer_prepare _taskdag_graph_edge_tuple \
-    _taskdag_graph_cas _taskdag_graph_has_path taskdag_dep_help _cmd_dep_add _cmd_dep_drop; do
+    _taskdag_graph_cas _taskdag_graph_has_path taskdag_dep_help; do
     if ! declare -F "$prerequisite" >/dev/null; then
         echo "Error: edges-prune.sh requires provider $prerequisite to be loaded first" >&2
         return 2 2>/dev/null || exit 2
     fi
 done
-for prerequisite in TASKDAG_GRAPH_REF BLUE BOLD RESET; do
+for prerequisite in TASKDAG_GRAPH_REF GREEN BLUE BOLD RESET; do
     if ! declare -p "$prerequisite" >/dev/null 2>&1; then
         echo "Error: edges-prune.sh requires global $prerequisite to be initialized first" >&2
         return 2 2>/dev/null || exit 2
@@ -137,18 +138,4 @@ _cmd_dep_prune() {
         [ "$do_fetch" = false ] && args+=(--no-fetch)
         taskdag_prune_satisfied "${args[@]}"
     fi
-}
-
-# Command: dep — compose the edge writer and pruning adapters only after both
-# provider modules have loaded, keeping their dependency direction acyclic.
-cmd_dep() {
-    local sub="${1:-}"
-    [ $# -gt 0 ] && shift
-    case "$sub" in
-        add) _cmd_dep_add "$@" ;;
-        drop) _cmd_dep_drop "$@" ;;
-        prune) _cmd_dep_prune "$@" ;;
-        ""|--help|-h) taskdag_dep_help ;;
-        *) echo "Error: unknown 'dep' subcommand: $sub (expected add|drop|prune)" >&2; return 2 ;;
-    esac
 }

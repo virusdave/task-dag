@@ -70,19 +70,25 @@
 #   the fold command via TASKDAG_MAILBOX_* env; the fold stamps the trailer
 #   with taskdag_mailbox_witness_trailer.
 #
-# Relies on the data-model helpers in edges.sh (taskdag_normalize_node,
-# taskdag_norm_owner_repo, taskdag_sha256_hex, taskdag_repo_numeric_id), the
-# bounded backoff in cas-retry.sh (taskdag_cas_* / TASKDAG_CAS_*), the
-# current-repo seam in facts.sh (taskdag_current_repo), and EMPTY_TREE /
-# colors from the main script.
+# Relies on repository identity, edge hashing, bounded CAS retry, and the
+# runtime-owned empty-tree/output globals. Every direct provider is checked
+# below so source order cannot silently change mailbox behavior.
 # ═══════════════════════════════════════════════════════════════════════
 
-if ! declare -F taskdag_remote_owner_repo >/dev/null; then
-    echo "Error: mailbox.sh requires repository-identity.sh to be loaded first" >&2
-    return 2 2>/dev/null || exit 2
-fi
-
-: "${EMPTY_TREE:=4b825dc642cb6eb9a060e54bf8d69288fbee4904}"
+for prerequisite in taskdag_normalize_node taskdag_norm_owner_repo taskdag_sha256_hex \
+    taskdag_repo_numeric_id taskdag_remote_owner_repo taskdag_current_repo taskdag_cas_sleep; do
+    if ! declare -F "$prerequisite" >/dev/null; then
+        echo "Error: mailbox.sh requires provider $prerequisite to be loaded first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+for prerequisite in TASKDAG_CAS_MAX_ATTEMPTS EMPTY_TREE GREEN BLUE BOLD RESET; do
+    if ! declare -p "$prerequisite" >/dev/null 2>&1; then
+        echo "Error: mailbox.sh requires global $prerequisite to be initialized first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+unset prerequisite
 
 # taskdag_mailbox_kind_ok <kind>: 0 iff <kind> is a recognised message kind.
 # Schema v1 has exactly one kind (a completion hint); an unknown kind fails

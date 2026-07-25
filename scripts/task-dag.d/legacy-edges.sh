@@ -1,17 +1,30 @@
 # shellcheck shell=bash
-if ! declare -F has_blocked_meta >/dev/null || ! declare -F read_blocked_meta_field >/dev/null; then
-    echo "Error: legacy-edges.sh requires blocked-core.sh to be loaded first" >&2
-    return 2 2>/dev/null || exit 2
-fi
-
 # ═══════════════════════════════════════════════════════════════════════
 # task-dag LEGACY DEPENDENCY ENCODING → edge migration (issue #13)
 #
 # One-time/back-compat bridge for dependency semantics that predate the
 # bounded graph index. It scans the current task refs/history and backfills
-# machine-readable edges into refs/heads/tasks/v1/graph via the normal
-# direct-CAS `dep add` writer. It never hand-edits the graph tree.
+# machine-readable edges into refs/heads/tasks/v1/graph via the domain-level
+# direct-CAS writer. It never hand-edits the graph tree or calls a command
+# adapter. Every direct provider is checked so source order fails loudly.
 # ═══════════════════════════════════════════════════════════════════════
+
+for prerequisite in parse_commit_metadata extract_field get_first_parent is_task_commit \
+    has_blocked_meta read_blocked_meta_field fetch_task_refs taskdag_current_repo \
+    taskdag_normalize_node taskdag_node_repo taskdag_repo_numeric_id taskdag_edge_id \
+    taskdag_dep_add; do
+    if ! declare -F "$prerequisite" >/dev/null; then
+        echo "Error: legacy-edges.sh requires provider $prerequisite to be loaded first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+for prerequisite in EMPTY_TREE BLUE RESET; do
+    if ! declare -p "$prerequisite" >/dev/null 2>&1; then
+        echo "Error: legacy-edges.sh requires global $prerequisite to be initialized first" >&2
+        return 2 2>/dev/null || exit 2
+    fi
+done
+unset prerequisite
 
 taskdag_legacy_edge_nodes_from_text() {
     grep -Eo '(task|issue):[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(@[A-Fa-f0-9]{40}|@[A-Fa-f0-9]{64}|#[1-9][0-9]*)' <<<"$1" || true
@@ -135,7 +148,7 @@ EOF
         fetch_task_refs
     fi
 
-    local rows row from to rel witness source eid rc=0 count=0
+    local rows row from to rel witness source eid mode from_repo repo_id rc=0 count=0
     rows=$(taskdag_legacy_edges_rows) || return $?
 
     if [ "$json" = true ]; then
@@ -160,8 +173,13 @@ EOF
             printf '%s\t%s\t%s\t%s\n' "$rel" "$from" "$to" "$source"
             continue
         fi
-        _cmd_dep_add --from "$from" --to "$to" --relation "$rel" --witness "$witness" \
-            --reason "legacy edge migration: ${source}" || rc=1
+        from=$(taskdag_normalize_node "$from") || { rc=1; continue; }
+        to=$(taskdag_normalize_node "$to") || { rc=1; continue; }
+        from_repo=$(taskdag_node_repo "$from") || { rc=1; continue; }
+        repo_id=$(taskdag_repo_numeric_id "$from_repo") || { rc=1; continue; }
+        [ "$rel" = satisfies ] && mode=any || mode=all
+        taskdag_dep_add "$from" "$to" "$rel" "$mode" "$repo_id" "$witness" \
+            "legacy edge migration: ${source}" || rc=1
     done <<<"$rows"
     [ "$dry_run" = true ] && printf "${BLUE}• Would migrate %d legacy edge(s)${RESET}\n" "$count" >&2
     return "$rc"
