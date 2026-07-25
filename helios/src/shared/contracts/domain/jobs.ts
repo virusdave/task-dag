@@ -29,6 +29,7 @@ export const JobTypeSchema = z.enum([
   'catalog.sync.discover_orphan_groups',
   'catalog.pending_purchases.generate',
   'catalog.pending_purchases.apply',
+  'catalog.pending_purchases.queue_reprice',
   'catalog.pending_purchases.import_json',
   'catalog.pending_purchases.extract_hint_facts',
   'catalog.pending_purchases.refine',
@@ -296,13 +297,21 @@ export type CatalogPendingPurchasesGenerateJobPayload = z.infer<typeof CatalogPe
 export const CatalogPendingPurchasesApplyJobPayloadSchema = z.object({
   pendingPurchaseApplyRequestId: z.number().int().positive(),
   requestedByUserId: z.number().int().positive().nullable().optional(),
-  // C7 optional post-apply refresh: when true, the apply job drops every
-  // product it CREATED this run onto the Lit Alerts market-data refresh queue
-  // (best-effort) so the pricing reviewer has fresh competitor evidence for the
-  // brand-new SKUs. Default false keeps current behavior.
+  // Retained for old producers. Created products are always refreshed and
+  // repriced; an explicit false cannot opt out of that safety invariant.
   enqueueMarketRefreshForCreatedProducts: z.boolean().default(false),
 })
 export type CatalogPendingPurchasesApplyJobPayload = z.infer<typeof CatalogPendingPurchasesApplyJobPayloadSchema>
+
+export const CatalogPendingPurchasesQueueRepriceJobPayloadSchema = z.object({
+  createdProducts: z.array(z.object({
+    productId: z.number().int().positive(),
+    rowId: z.number().int().positive(),
+  })).min(1),
+  pendingPurchaseApplyRequestId: z.number().int().positive(),
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+})
+export type CatalogPendingPurchasesQueueRepriceJobPayload = z.infer<typeof CatalogPendingPurchasesQueueRepriceJobPayloadSchema>
 
 export const CatalogPendingPurchasesRefineJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),

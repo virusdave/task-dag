@@ -4,6 +4,7 @@ import type { QueryResultRow } from 'pg'
 import { z } from 'zod'
 
 import type { CatalogPendingPurchasesApplyJobPayload, JsonValue } from '../../shared/contracts/index.js'
+import { PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE } from '../../shared/domain/pendingPurchasePricing.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { getPool, type Queryable } from '../../server/db/pool.js'
 import {
@@ -12,6 +13,7 @@ import {
   updatePendingPurchaseParseRuleFeedback,
 } from '../../server/db/queries/pendingPurchaseParserQueries.js'
 import { withTransaction } from '../../server/db/tx.js'
+import { enqueueJob } from '../../server/jobs/enqueueJob.js'
 import { findDescriptionMedicalClaimIssues, normalizeDescriptionText } from '../catalog/liveState.js'
 import { getWorkerEnv } from '../config/env.js'
 import { downloadValidatedImageAsset, UnsupportedImageFormatError } from '../pendingPurchases/imageSafety.js'
@@ -23,11 +25,13 @@ import {
 } from '../pendingPurchases/reuseDriftGuard.js'
 import { enqueueMarketRefreshForProducts } from '../litalerts/enqueueMarketRefresh.js'
 import { looksLikeSweedDeadScreenError } from './screensCarouselHelpers.js'
-import { RetryableWorkerError } from '../runtime/errors.js'
+import { DependencyUnavailableWorkerError, RetryableWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { callSweedRpcForDealer, readSweedDealerContext } from '../sweed/client.js'
 
 const ALLOWED_SALE_TYPE_ID = 1
+
+export { PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE }
 const SUBCATEGORY_ALIASES = new Map<string, string>([
   ['vapes:disposable', 'All In One / Disposable'],
 ])
@@ -212,6 +216,27 @@ interface AppliedImageSkip {
   message: string
 }
 
+const CREATED_SKU_CHECKPOINT_KEY = 'pendingPurchaseCreatedSku'
+const CreatedSkuCheckpointSchema = z.object({
+  appliedPrice: z.literal(PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE),
+  createdAt: z.string().datetime(),
+  groupId: z.number().int().positive().optional(),
+  phase: z.enum(['group_create_pending', 'group_created', 'product_create_pending', 'product_created']),
+  productId: z.number().int().positive().optional(),
+  repriceRequired: z.literal(true),
+  requestId: z.number().int().positive(),
+  rowId: z.number().int().positive(),
+})
+type CreatedSkuCheckpoint = z.infer<typeof CreatedSkuCheckpointSchema>
+
+export function mayIssueCreatedSkuAdd(
+  kind: 'group' | 'product',
+  checkpoint: Pick<CreatedSkuCheckpoint, 'phase'> | null,
+): boolean {
+  if (kind === 'group') return checkpoint === null
+  return checkpoint === null || checkpoint.phase === 'group_created'
+}
+
 // Cap the stored/displayed image-skip message so a pathological error object
 // cannot bloat the summary JSON row.
 const MAX_IMAGE_SKIP_MESSAGE_LENGTH = 400
@@ -273,6 +298,7 @@ interface StateDictionaries {
 interface LoadedPendingPurchaseRow {
   actionType: string
   catalogAction: string
+  createdSkuCheckpoint: CreatedSkuCheckpoint | null
   distributorProductId: string
   distributorProductName: string
   effectivePrimaryImageUrl: string | null
@@ -507,9 +533,11 @@ async function runPendingPurchaseApplyJob(
   const dictionaries = await loadStateDictionaries(env.sweedStateDealerId)
   const rows = await listPendingPurchaseApplyRows(applyRequest)
 
-  // C7 optional post-apply refresh: collect the products this run CREATES so we
-  // can drop them onto the market-data refresh queue once after the loop.
-  const createdProductIds: number[] = []
+  // Collect every product this request created, including rows durably marked
+  // applied by an earlier attempt, so retries cannot strand follow-up work.
+  const createdProductIds: number[] = rows.flatMap((row) => readCreatedProductId(row.last_apply_summary_json))
+  const createdProducts = rows.flatMap((row) => readCreatedProductId(row.last_apply_summary_json)
+    .map((productId) => ({ productId, rowId: row.id })))
 
   for (const rowRecord of rows) {
     if (rowRecord.last_apply_status === 'applied') {
@@ -526,11 +554,18 @@ async function runPendingPurchaseApplyJob(
       subcategory: row.expectedSubcategory,
     })
     try {
-      const rowSummary = await applyPendingPurchaseRow(row, env.sweedStateDealerId, dictionaries, context.id)
+      const rowSummary = await applyPendingPurchaseRow(
+        row,
+        payload.pendingPurchaseApplyRequestId,
+        env.sweedStateDealerId,
+        dictionaries,
+        context.id,
+      )
       await markPendingPurchaseRowApplied(row, payload.pendingPurchaseApplyRequestId, rowSummary)
       const createdProductId = (rowSummary as { createdProductId?: number | null }).createdProductId ?? null
       if (typeof createdProductId === 'number' && Number.isInteger(createdProductId) && createdProductId > 0) {
         createdProductIds.push(createdProductId)
+        createdProducts.push({ productId: createdProductId, rowId: row.rowId })
       }
       await appendApplyJobProgressLog(context.id, `Row ${row.rowId} applied`, {
         rowId: row.rowId,
@@ -556,11 +591,47 @@ async function runPendingPurchaseApplyJob(
     }
   }
 
-  const requestSummary = await finalizePendingPurchaseApplyRequest(
-    context,
-    applyRequest,
-    stateDealerContext,
-  )
+  if (createdProductIds.length > 0) {
+    const uniqueCreatedProductIds = [...new Set(createdProductIds)]
+    try {
+      await enqueueMarketRefreshForProducts(uniqueCreatedProductIds, {
+        trigger: { kind: 'pending-purchase', pendingPurchaseRowId: applyRequest.packet_id },
+        priority: 10,
+        requestedByUserId: payload.requestedByUserId ?? null,
+      })
+      await withTransaction(async (db) => {
+        const repriceJobId = await enqueueJob(db, {
+          dedupeKey: `catalog.pending_purchases.queue_reprice:${payload.pendingPurchaseApplyRequestId}`,
+          jobType: 'catalog.pending_purchases.queue_reprice',
+          module: 'catalog',
+          payload: {
+            createdProducts: [...new Map(createdProducts.map((item) => [item.rowId, item])).values()],
+            pendingPurchaseApplyRequestId: payload.pendingPurchaseApplyRequestId,
+            requestedByUserId: payload.requestedByUserId ?? null,
+          },
+          requestedByUserId: payload.requestedByUserId ?? null,
+        })
+        await db.query(
+          `update pending_purchase_rows
+           set last_apply_summary_json = jsonb_set(
+                 last_apply_summary_json,
+                 '{pendingPurchaseCreatedSku,repriceQueueJobId}',
+                 to_jsonb($2::bigint),
+                 true
+               ),
+               updated_at = now()
+           where id = any($1::bigint[])`,
+          [[...new Set(createdProducts.map((item) => item.rowId))], repriceJobId],
+        )
+      })
+    } catch (error) {
+      throw new RetryableWorkerError(
+        `Created products are durable but mandatory repricing follow-up could not be queued: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  const requestSummary = await finalizePendingPurchaseApplyRequest(context, applyRequest, stateDealerContext)
 
   await withTransaction(async (db) => {
     await appendAuditEvent(db, {
@@ -589,31 +660,6 @@ async function runPendingPurchaseApplyJob(
     })
   })
 
-  // C7 optional post-apply refresh. When the request opted in, drop every
-  // product this run created onto the Lit Alerts market-data refresh queue so
-  // the pricing reviewer has fresh competitor evidence for the brand-new SKUs.
-  // Best-effort: a refresh-enqueue hiccup must never turn an otherwise-applied
-  // run into a failure (and it runs once, after the per-row writes are durable,
-  // never inside a row's apply path). The helper dedupes within a 5-minute
-  // window.
-  if (payload.enqueueMarketRefreshForCreatedProducts === true && createdProductIds.length > 0) {
-    const uniqueCreatedProductIds = [...new Set(createdProductIds)]
-    try {
-      await enqueueMarketRefreshForProducts(uniqueCreatedProductIds, {
-        trigger: { kind: 'pending-purchase', pendingPurchaseRowId: applyRequest.packet_id },
-        priority: 10,
-        requestedByUserId: payload.requestedByUserId ?? null,
-      })
-      await appendApplyJobProgressLog(context.id, 'Enqueued post-apply market refresh for created products', {
-        productIds: uniqueCreatedProductIds,
-      })
-    } catch (enqueueError) {
-      console.warn(
-        `[applyPendingPurchaseRequestJob] post-apply market refresh enqueue failed for request ${payload.pendingPurchaseApplyRequestId}: ${enqueueError instanceof Error ? enqueueError.message : enqueueError}`,
-      )
-    }
-  }
-
   // Job-level success requires every approved/selected row to have been
   // applied. If any row failed or was blocked, surface that as a job failure
   // so the worker run shows up as `failed` (with `last_error` describing
@@ -629,6 +675,7 @@ async function runPendingPurchaseApplyJob(
 
 async function applyPendingPurchaseRow(
   row: LoadedPendingPurchaseRow,
+  applyRequestId: number,
   stateDealerId: number,
   dictionaries: StateDictionaries,
   jobId: number,
@@ -705,9 +752,11 @@ async function applyPendingPurchaseRow(
   const preserveLinkedVariantIdentity = row.reuseProductIdOverridePresent && row.reuseProductId !== null
 
   let createdBlobId: string | null = null
+  const checkpointCreatedAt = row.createdSkuCheckpoint?.createdAt ?? new Date().toISOString()
+  const reconcileCheckpointedProduct = row.createdSkuCheckpoint?.phase === 'product_create_pending'
   let imageSkip: AppliedImageSkip | null = null
-  let createdGroupId: number | null = null
-  let createdProductId: number | null = null
+  let createdGroupId: number | null = row.createdSkuCheckpoint?.groupId ?? null
+  let createdProductId: number | null = row.createdSkuCheckpoint?.productId ?? null
   let product: z.infer<typeof ProductSummarySchema> | null = null
   let group: z.infer<typeof ProductGroupDetailSchema> | null = null
   try {
@@ -732,6 +781,24 @@ async function applyPendingPurchaseRow(
       group = null
     } else {
       throw fetchError
+    }
+  }
+  if (row.createdSkuCheckpoint && row.createdSkuCheckpoint.groupId === undefined) {
+    throw new DependencyUnavailableWorkerError(
+      `The outcome of Sweed group creation for pending-purchase row ${row.rowId} is unknown; refusing to create a duplicate group.`,
+      { delayMs: 5 * 60 * 1000 },
+    )
+  }
+  if (row.createdSkuCheckpoint?.groupId) {
+    group = ProductGroupDetailSchema.parse(
+      await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: row.createdSkuCheckpoint.groupId }),
+    )
+    if (row.createdSkuCheckpoint.productId) {
+      const resumed = await waitForProductInGroup(stateDealerId, group.id, row.createdSkuCheckpoint.productId)
+      group = resumed.group
+      product = resumed.product
+    } else {
+      product = null
     }
   }
   const groupBefore = group ? summarizeGroup(group) : null
@@ -775,7 +842,7 @@ async function applyPendingPurchaseRow(
       })
     }
     const brand = await ensureBrand(stateDealerId, dictionaries, requireNonEmptyString(row.targetBrand, 'target brand'))
-    const productPrice = requirePendingPurchasePrice(row)
+    const productPrice = PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE
     if (row.effectivePrimaryImageUrl) {
       // Image attachment is NON-FATAL by operator directive: it is better to
       // create the product without an image (so the inventory can go on sale
@@ -816,17 +883,31 @@ async function applyPendingPurchaseRow(
       name: groupName,
       subcategoryId: categoryContext.subcategory?.id,
     }
-    const groupResult = z.object({ id: z.coerce.number().int() }).passthrough().parse(
-      await callSweedRpcForDealer(stateDealerId, 'store.product.group.add', groupAddPayload),
-    )
-    createdGroupId = groupResult.id
-    await logMutation('store.product.group.add', {
-      groupId: createdGroupId,
-      name: groupName,
-      brandId: brand.id,
-      categoryId: categoryContext.category.id,
-      subcategoryId: categoryContext.subcategory?.id ?? null,
-    })
+    if (createdGroupId === null) {
+      if (!mayIssueCreatedSkuAdd('group', row.createdSkuCheckpoint)) {
+        throw new DependencyUnavailableWorkerError(`Refusing to repeat Sweed group creation for pending-purchase row ${row.rowId}.`)
+      }
+      await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+        createdAt: checkpointCreatedAt,
+        phase: 'group_create_pending',
+      })
+      const groupResult = z.object({ id: z.coerce.number().int() }).passthrough().parse(
+        await callSweedRpcForDealer(stateDealerId, 'store.product.group.add', groupAddPayload),
+      )
+      createdGroupId = groupResult.id
+      await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+        createdAt: checkpointCreatedAt,
+        groupId: createdGroupId,
+        phase: 'group_created',
+      })
+      await logMutation('store.product.group.add', {
+        groupId: createdGroupId,
+        name: groupName,
+        brandId: brand.id,
+        categoryId: categoryContext.category.id,
+        subcategoryId: categoryContext.subcategory?.id ?? null,
+      })
+    }
     group = ProductGroupDetailSchema.parse(
       await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: createdGroupId }),
     )
@@ -843,10 +924,34 @@ async function applyPendingPurchaseRow(
       tab: row.targetVariantTab ?? '',
       ...cannabinoidPayload,
     }
-    const productResult = z.object({ id: z.coerce.number().int() }).passthrough().parse(
-      await callSweedRpcForDealer(stateDealerId, 'store.product.add', productAddPayload),
-    )
-    createdProductId = productResult.id
+    const reconciledProduct = reconcileCheckpointedProduct
+      ? await reconcileCheckpointedGroupProduct(stateDealerId, createdGroupId, productAddPayload)
+      : null
+    if (reconciledProduct) {
+      createdProductId = reconciledProduct.id
+    } else {
+      if (!mayIssueCreatedSkuAdd('product', row.createdSkuCheckpoint)) {
+        throw new DependencyUnavailableWorkerError(
+          `The outcome of Sweed product creation for pending-purchase row ${row.rowId} is still unknown; refusing to create a duplicate product.`,
+          { delayMs: 5 * 60 * 1000 },
+        )
+      }
+      await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+        createdAt: checkpointCreatedAt,
+        groupId: createdGroupId,
+        phase: 'product_create_pending',
+      })
+      const productResult = z.object({ id: z.coerce.number().int() }).passthrough().parse(
+        await callSweedRpcForDealer(stateDealerId, 'store.product.add', productAddPayload),
+      )
+      createdProductId = productResult.id
+    }
+    await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+      createdAt: checkpointCreatedAt,
+      groupId: createdGroupId,
+      phase: 'product_created',
+      productId: createdProductId,
+    })
     await logMutation('store.product.add', {
       productId: createdProductId,
       groupId: createdGroupId,
@@ -896,7 +1001,10 @@ async function applyPendingPurchaseRow(
     })
   }
 
-  const productEditPayload = buildProductEditPayload(product, row, dictionaries, { preserveIdentity: preserveLinkedVariantIdentity })
+  const productEditPayload = buildProductEditPayload(product, row, dictionaries, {
+    preserveIdentity: preserveLinkedVariantIdentity,
+    preservePrice: createdProductId !== null,
+  })
   if (Object.keys(productEditPayload).length > 1) {
     await callSweedRpcForDealer(stateDealerId, 'store.product.edit', productEditPayload)
     await logMutation('store.product.edit', {
@@ -953,6 +1061,11 @@ async function applyPendingPurchaseRow(
     createdBlobId,
     createdGroupId,
     createdProductId,
+    ...(createdProductId !== null ? {
+      appliedPrice: PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE,
+      repriceRequired: true,
+      repriceState: 'pending_queue',
+    } : {}),
     distributorLink,
     distributorName: distributor.distributorName,
     distributorProductId: row.distributorProductId,
@@ -1139,7 +1252,7 @@ function buildProductEditPayload(
   product: z.infer<typeof ProductSummarySchema>,
   row: LoadedPendingPurchaseRow,
   dictionaries: StateDictionaries,
-  options: { preserveIdentity: boolean } = { preserveIdentity: false },
+  options: { preserveIdentity: boolean; preservePrice?: boolean } = { preserveIdentity: false },
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = { id: product.id }
 
@@ -1170,7 +1283,7 @@ function buildProductEditPayload(
     }
   }
 
-  if (typeof row.effectiveProposedPrice === 'number' && Math.abs((product.price ?? 0) - row.effectiveProposedPrice) >= 0.01) {
+  if (!options.preservePrice && typeof row.effectiveProposedPrice === 'number' && Math.abs((product.price ?? 0) - row.effectiveProposedPrice) >= 0.01) {
     payload.price = row.effectiveProposedPrice
   }
   if ((product.allowedSaleType?.id ?? null) !== ALLOWED_SALE_TYPE_ID) {
@@ -1452,6 +1565,54 @@ async function waitForProductInGroup(
   throw new RetryableWorkerError(`Product ${productId} never appeared under group ${groupId} after apply.`)
 }
 
+async function reconcileCheckpointedGroupProduct(
+  stateDealerId: number,
+  groupId: number,
+  expected: { packOfSize: number; price: number; sizeId: number; tab: string },
+): Promise<z.infer<typeof ProductSummarySchema> | null> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const group = ProductGroupDetailSchema.parse(
+      await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: groupId }),
+    )
+    const matches = group.products.filter((candidate) =>
+      candidate.packOfSize === expected.packOfSize
+      && candidate.price === expected.price
+      && candidate.size?.id === expected.sizeId
+      && (candidate.tab ?? '') === expected.tab,
+    )
+    if (matches.length > 1) {
+      throw new Error(`Checkpointed group ${groupId} contains multiple products matching the pending-purchase SKU.`)
+    }
+    if (matches.length === 1) return matches[0]!
+    if (attempt < 9) await delay(400)
+  }
+  return null
+}
+
+async function persistCreatedSkuCheckpoint(
+  rowId: number,
+  requestId: number,
+  ids: { createdAt: string; groupId?: number; phase: CreatedSkuCheckpoint['phase']; productId?: number },
+): Promise<void> {
+  const checkpoint = CreatedSkuCheckpointSchema.parse({
+    appliedPrice: PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE,
+    ...ids,
+    repriceRequired: true,
+    requestId,
+    rowId,
+  })
+  const result = await getPool().query(
+    `update pending_purchase_rows
+     set last_apply_summary_json = jsonb_set(last_apply_summary_json, $3::text[], $4::jsonb, true),
+         updated_at = now()
+     where id = $1 and last_apply_request_id = $2`,
+    [rowId, requestId, [CREATED_SKU_CHECKPOINT_KEY], JSON.stringify(checkpoint)],
+  )
+  if (result.rowCount !== 1) {
+    throw new Error(`Pending-purchase row ${rowId} no longer matches apply request ${requestId}.`)
+  }
+}
+
 async function uploadImage(url: string): Promise<string> {
   const imageAsset = await downloadValidatedImageAsset({
     timeoutMs: getWorkerEnv().sweedRequestTimeoutMs,
@@ -1608,6 +1769,7 @@ function loadPendingPurchaseRow(row: PendingPurchaseApplyWorkRow): LoadedPending
   return {
     actionType: row.action_type,
     catalogAction: row.catalog_action,
+    createdSkuCheckpoint: readCreatedSkuCheckpoint(row.last_apply_summary_json, row.id, row.last_apply_request_id),
     distributorProductId: row.distributor_product_id,
     distributorProductName: row.distributor_product_name,
     effectivePrimaryImageUrl: row.edited_primary_image_url ?? row.primary_image_url,
@@ -1739,7 +1901,7 @@ async function markPendingPurchaseRowApplied(
         update pending_purchase_rows
         set last_apply_status = 'applied',
             last_apply_error = null,
-            last_apply_summary_json = $3::jsonb,
+            last_apply_summary_json = last_apply_summary_json || $3::jsonb,
             applied_at = now(),
             version = version + 1,
             updated_at = now()
@@ -1769,7 +1931,7 @@ async function markPendingPurchaseRowFailed(
         update pending_purchase_rows
         set last_apply_status = $3,
             last_apply_error = $4,
-            last_apply_summary_json = $5::jsonb,
+            last_apply_summary_json = last_apply_summary_json || $5::jsonb,
             version = version + 1,
             updated_at = now()
         where id = $1
@@ -1932,7 +2094,8 @@ async function finalizePendingPurchaseApplyRequestAfterCrash(
         update pending_purchase_rows
         set last_apply_status = 'failed',
             last_apply_error = $2,
-            last_apply_summary_json = jsonb_build_object('status', 'failed', 'summaryText', $2),
+            last_apply_summary_json = last_apply_summary_json
+              || jsonb_build_object('status', 'failed', 'summaryText', $2),
             version = version + 1,
             updated_at = now()
         where last_apply_request_id = $1
@@ -2151,6 +2314,22 @@ function summaryRowHasImageSkip(summary: JsonValue): boolean {
     return false
   }
   return imageUpload.status === 'skipped'
+}
+
+function readCreatedProductId(summary: JsonValue): number[] {
+  if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) return []
+  const checkpoint = CreatedSkuCheckpointSchema.safeParse(summary[CREATED_SKU_CHECKPOINT_KEY])
+  if (checkpoint.success && checkpoint.data.productId) return [checkpoint.data.productId]
+  const value = summary.createdProductId
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? [value] : []
+}
+
+function readCreatedSkuCheckpoint(summary: JsonValue, rowId: number, _requestId: number | null): CreatedSkuCheckpoint | null {
+  if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) return null
+  const parsed = CreatedSkuCheckpointSchema.safeParse(summary[CREATED_SKU_CHECKPOINT_KEY])
+  if (!parsed.success) return null
+  if (parsed.data.rowId !== rowId) return null
+  return parsed.data
 }
 
 function buildAppliedRowSummary(

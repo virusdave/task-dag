@@ -70,6 +70,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
 
   // --- system pool: HTTP-only, LLM, imports, schedulers, utilities ---
   'catalog.pending_purchases.import_json': { pool: 'system', requiresSweedSession: false },
+  'catalog.pending_purchases.queue_reprice': { pool: 'system', requiresSweedSession: false },
   // Hint-fact extraction (C3): Postgres + optional Mantle/Bedrock only; it
   // must NOT occupy the Sweed session pool.
   'catalog.pending_purchases.extract_hint_facts': { pool: 'system', requiresSweedSession: false },

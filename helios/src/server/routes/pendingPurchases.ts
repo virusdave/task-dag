@@ -36,6 +36,7 @@ import {
   UpdatePendingPurchaseHintBundleBodySchema,
   PendingPurchaseListQuerySchema,
   PendingPurchaseListResponseSchema,
+  PendingPurchaseRepriceDebtResponseSchema,
   PendingPurchaseRowRouteParamsSchema,
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
@@ -58,6 +59,7 @@ import {
   listPendingPurchasePacketListPage,
   listPendingPurchaseRows,
 } from '../db/queries/pendingPurchaseQueries.js'
+import { getPendingPurchaseRepriceDebt } from '../db/queries/pendingPurchaseRepriceDebtQueries.js'
 import {
   assertBaseRowsMatchSnapshot,
   assertPendingPurchasePacketApplyable,
@@ -132,6 +134,12 @@ interface JobIdRow extends QueryResultRow {
 }
 
 export async function registerPendingPurchaseRoutes(server: FastifyInstance): Promise<void> {
+  server.get('/api/catalog/pending-purchases/reprice-debt', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+    return reply.send(PendingPurchaseRepriceDebtResponseSchema.parse(await getPendingPurchaseRepriceDebt(getPool())))
+  })
+
   server.get('/api/catalog/pending-purchases', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'viewer')
     if (!user) {
@@ -628,7 +636,9 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
               last_apply_request_id = null,
               last_apply_status = 'not_requested',
               last_apply_error = null,
-              last_apply_summary_json = '{}'::jsonb,
+              last_apply_summary_json = jsonb_strip_nulls(jsonb_build_object(
+                'pendingPurchaseCreatedSku', last_apply_summary_json->'pendingPurchaseCreatedSku'
+              )),
               version = $7,
               updated_at = now()
           where id = $1
@@ -765,7 +775,9 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
                 last_apply_request_id = null,
                 last_apply_status = 'not_requested',
                 last_apply_error = null,
-                last_apply_summary_json = '{}'::jsonb,
+                last_apply_summary_json = jsonb_strip_nulls(jsonb_build_object(
+                  'pendingPurchaseCreatedSku', last_apply_summary_json->'pendingPurchaseCreatedSku'
+                )),
                 version = $4,
                 updated_at = now()
             where id = $1
@@ -912,7 +924,9 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           set last_apply_request_id = $2,
               last_apply_status = 'queued',
               last_apply_error = null,
-              last_apply_summary_json = '{}'::jsonb,
+              last_apply_summary_json = jsonb_strip_nulls(jsonb_build_object(
+                'pendingPurchaseCreatedSku', last_apply_summary_json->'pendingPurchaseCreatedSku'
+              )),
               version = version + 1,
               updated_at = now()
           where id = any($1::bigint[])
@@ -1045,7 +1059,9 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
                 last_apply_request_id = null,
                 last_apply_status = 'not_requested',
                 last_apply_error = null,
-                last_apply_summary_json = '{}'::jsonb,
+                last_apply_summary_json = jsonb_strip_nulls(jsonb_build_object(
+                  'pendingPurchaseCreatedSku', last_apply_summary_json->'pendingPurchaseCreatedSku'
+                )),
                 version = r.version + 1,
                 updated_at = now()
             from jsonb_to_recordset($1::jsonb) as v(id bigint, edited_structured_fields jsonb)

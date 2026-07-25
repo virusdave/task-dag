@@ -1111,6 +1111,30 @@ pre {
   max-width: 100%;
 }
 
+.pp-reprice-debt-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid #d79a22;
+  border-radius: 0.55rem;
+  background: #fff4d6;
+  color: #513500;
+}
+
+.pp-reprice-debt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-left: auto;
+}
+
+.pp-reprice-debt-warning a {
+  color: #513500;
+  font-weight: 700;
+}
+
 .pp-header {
   display: flex;
   flex-wrap: wrap;
@@ -2668,6 +2692,17 @@ pre {
 
   .bulk-action-controls {
     width: 100%;
+  }
+
+  .pp-reprice-debt-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .pp-reprice-debt-warning a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
   }
 
   .runtime-status-item {

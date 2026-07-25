@@ -196,6 +196,20 @@ export const PendingPurchaseListResponseSchema = z.object({
 })
 export type PendingPurchaseListResponse = z.infer<typeof PendingPurchaseListResponseSchema>
 
+/** A created SKU should remain at the sentinel for no longer than this. */
+export const PENDING_PURCHASE_REPRICE_DEBT_THRESHOLD_MINUTES = 30
+export const PendingPurchaseRepriceDebtResponseSchema = z.object({
+  count: z.number().int().min(0),
+  incompleteCreationCount: z.number().int().min(0),
+  oldestAgeMinutes: z.number().min(0).nullable(),
+  overdue: z.boolean(),
+  productIds: z.array(z.number().int().positive()).max(100),
+  proposalBatchIds: z.array(z.number().int().positive()).max(100),
+  recoveryJobIds: z.array(z.number().int().positive()).max(100),
+  thresholdMinutes: z.literal(PENDING_PURCHASE_REPRICE_DEBT_THRESHOLD_MINUTES),
+})
+export type PendingPurchaseRepriceDebtResponse = z.infer<typeof PendingPurchaseRepriceDebtResponseSchema>
+
 export const QueuePendingPurchasePacketImportRequestSchema = z.object({
   filePath: z.string().trim().min(1).max(4096),
   reason: z.string().trim().max(500).nullable().optional(),

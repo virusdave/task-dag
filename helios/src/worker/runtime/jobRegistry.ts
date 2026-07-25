@@ -1,6 +1,7 @@
 import {
   CatalogMaintenanceUploadGroupImageJobPayloadSchema,
   CatalogPendingPurchasesApplyJobPayloadSchema,
+  CatalogPendingPurchasesQueueRepriceJobPayloadSchema,
   CatalogPendingPurchasesGenerateJobPayloadSchema,
   CatalogPendingPurchasesImportJobPayloadSchema,
   CatalogPendingPurchasesExtractHintFactsJobPayloadSchema,
@@ -60,6 +61,7 @@ import { runGenerateDescriptionBatchJob } from '../jobs/generateDescriptionBatch
 import { runGeneratePricingBatchJob } from '../jobs/generatePricingBatchJob.js'
 import { runCatalogMaintenanceUploadGroupImageJob } from '../jobs/catalogMaintenanceUploadGroupImageJob.js'
 import { runCatalogPendingPurchasesApplyJob } from '../jobs/applyPendingPurchaseRequestJob.js'
+import { runCatalogPendingPurchasesQueueRepriceJob } from '../jobs/queuePendingPurchaseRepriceJob.js'
 import { runCatalogPendingPurchasesGenerateJob } from '../jobs/generatePendingPurchasePacketJob.js'
 import { runCatalogReviewRerunRowJob } from '../jobs/catalogReviewRerunRowJob.js'
 import { runCatalogPendingPurchasesImportJob } from '../jobs/importPendingPurchasePacketJob.js'
@@ -138,6 +140,12 @@ const handlers: Record<JobType, JobHandler> = {
   },
   'catalog.pending_purchases.apply': async (context) => {
     await runCatalogPendingPurchasesApplyJob(context, CatalogPendingPurchasesApplyJobPayloadSchema.parse(context.payload))
+  },
+  'catalog.pending_purchases.queue_reprice': async (context) => {
+    await runCatalogPendingPurchasesQueueRepriceJob(
+      context,
+      CatalogPendingPurchasesQueueRepriceJobPayloadSchema.parse(context.payload),
+    )
   },
   'catalog.pending_purchases.generate': async (context) => {
     await runCatalogPendingPurchasesGenerateJob(context, CatalogPendingPurchasesGenerateJobPayloadSchema.parse(context.payload))

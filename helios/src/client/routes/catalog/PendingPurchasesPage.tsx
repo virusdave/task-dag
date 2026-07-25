@@ -13,6 +13,7 @@ import {
   PendingPurchaseHintBundleDetailResponseSchema,
   PendingPurchaseHintDocumentAddResponseSchema,
   PendingPurchaseListResponseSchema,
+  PendingPurchaseRepriceDebtResponseSchema,
   PendingPurchaseRefinementHistoryResponseSchema,
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
@@ -27,6 +28,7 @@ import {
   type EditedStructuredFields,
   type JobStatusResponse,
   type PendingPurchaseListResponse,
+  type PendingPurchaseRepriceDebtResponse,
   type PendingPurchaseHintDocumentRecord,
   type PendingPurchaseMarketListing,
   type PendingPurchasePacketListItem,
@@ -267,11 +269,36 @@ export function PendingPurchasesPage() {
   const [isRefining, setIsRefining] = useState(false)
   const [isSwitchingRevision, setIsSwitchingRevision] = useState(false)
   const [selectedRowIds, setSelectedRowIds] = useState<number[]>([])
+  const [repriceDebt, setRepriceDebt] = useState<PendingPurchaseRepriceDebtResponse | null>(null)
+  const [repriceDebtError, setRepriceDebtError] = useState(false)
 
   const canApprove = session.permissions.canApprove
   const isAdmin = session.user?.role === 'admin'
   const mode = data.mode
   const filters = data.filters
+
+  useEffect(() => {
+    if (!isAdmin) return
+    let active = true
+    let timer: number | undefined
+    const refresh = async (): Promise<void> => {
+      try {
+        const result = await loadJson('/api/catalog/pending-purchases/reprice-debt', PendingPurchaseRepriceDebtResponseSchema)
+        if (!active) return
+        setRepriceDebt(result)
+        setRepriceDebtError(false)
+      } catch {
+        if (active) setRepriceDebtError(true)
+      } finally {
+        if (active) timer = window.setTimeout(() => void refresh(), 60_000)
+      }
+    }
+    void refresh()
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [isAdmin])
 
   // Keep the sidebar-subtree registration but as a leaf only; the deep
   // packet/site/category/brand hierarchy that used to live in the catalog
@@ -822,6 +849,39 @@ export function PendingPurchasesPage() {
           {isAdmin ? <a className="ghost-button" href="#pp-admin">Admin</a> : null}
         </div>
       </header>
+
+      {isAdmin && repriceDebtError && !repriceDebt?.overdue ? (
+        <div className="pp-reprice-debt-warning" role="alert">
+          <strong>Repricing safety status is unavailable.</strong>{' '}
+          Retrying automatically; refresh before applying more pending purchases.
+        </div>
+      ) : null}
+
+      {isAdmin && repriceDebt?.overdue ? (
+        <div className="pp-reprice-debt-warning" role="alert">
+          <strong>
+            {repriceDebt.incompleteCreationCount > 0
+              ? `${repriceDebt.incompleteCreationCount} catalog creation ${repriceDebt.incompleteCreationCount === 1 ? 'attempt needs' : 'attempts need'} recovery`
+              : `${repriceDebt.count} created SKU${repriceDebt.count === 1 ? ' still needs' : 's still need'} pricing`}
+          </strong>
+          {repriceDebt.incompleteCreationCount > 0 && repriceDebt.count > repriceDebt.incompleteCreationCount
+            ? ` · ${repriceDebt.count - repriceDebt.incompleteCreationCount} created SKU${repriceDebt.count - repriceDebt.incompleteCreationCount === 1 ? ' still needs' : 's still need'} pricing.`
+            : null}
+          {' · '}oldest {Math.ceil(repriceDebt.oldestAgeMinutes ?? 0)} minutes.
+          {repriceDebtError ? ' Status refresh failed; showing the last known debt. Retrying automatically.' : null}
+          <span className="pp-reprice-debt-actions">
+            {repriceDebt.proposalBatchIds.map((batchId) => (
+              <Link key={batchId} to={`/pricing/review?batchId=${batchId}&approvalStatus=pending`}>
+                Review batch {batchId}
+              </Link>
+            ))}
+            {repriceDebt.recoveryJobIds.map((jobId) => <Link key={jobId} to={`/jobs/${jobId}`}>Open recovery job {jobId}</Link>)}
+            {repriceDebt.proposalBatchIds.length === 0 && repriceDebt.recoveryJobIds.length === 0
+              ? <Link to="/jobs">Check catalog jobs</Link>
+              : null}
+          </span>
+        </div>
+      ) : null}
 
       {isAdmin ? (
         <details className="pp-generate-packet-top" open>
