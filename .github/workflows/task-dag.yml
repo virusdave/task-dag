@@ -54,6 +54,8 @@ jobs:
     permissions:
       contents: write
       issues: write
+    with:
+      ref: master
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}
       # automation can originate cross-repo child epics via `materialise` and
@@ -108,14 +110,15 @@ jobs:
   # the same two App secrets to create the peer-repo issue). No-op on
   # trailer-free pushes. See virusdave/task-dag:docs/MIGRATION.md.
   materialise:
-    if: ${{ github.event_name == 'push' }}
-    uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@master
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    uses: virusdave/task-dag/.github/workflows/materialise-child-epic.yml@32ed52f56e6fb64029b1015afe0e9b726bf63d95
     permissions:
       contents: write
       issues: write
     with:
-      base_sha: ${{ github.event.before }}
-      head_sha: ${{ github.sha }}
+      base_sha: ${{ github.event_name == 'push' && github.event.before || '' }}
+      head_sha: ${{ github.event_name == 'push' && github.sha || '' }}
+      ref: 32ed52f56e6fb64029b1015afe0e9b726bf63d95
     secrets:
       app_id: ${{ secrets.TASK_DAG_APP_ID }}
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
