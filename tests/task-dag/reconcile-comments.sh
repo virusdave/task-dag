@@ -8,6 +8,7 @@ source "$(dirname "$TD")/task-dag.d/claim-model.sh"
 source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
 source "$(dirname "$TD")/task-dag.d/github-origin.sh"
 source "$(dirname "$TD")/task-dag.d/blocked-core.sh"
+taskdag_consumer_prepare() { :; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 git init -q --bare "$tmp/origin.git"
 git init -q "$tmp/work"

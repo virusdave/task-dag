@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh reconciliation-core.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh cross-repo.sh edges-prune.sh edges-write.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -182,11 +182,22 @@ if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/
   ok "reconciliation core accepts its complete prerequisite set"
 else bad "reconciliation core rejected its complete prerequisite set: $(cat "$ROOT/recon-core-complete-err")"; fi
 
-if bash -c 'taskdag_sync_root_refs(){ :; }; taskdag_prepare_child_map_from(){ :; }; is_task_blocked(){ :; }; blocked_structural_ancestor(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconcile.sh" >"$ROOT/reconcile-core-out" 2>"$ROOT/reconcile-core-err"; then
-  bad "reconcile consumer loaded without reconciliation core"
-elif grep -q 'requires reconciliation-core.sh to be loaded first' "$ROOT/reconcile-core-err"; then
-  ok "reconcile consumer fails loudly without reconciliation core"
-else bad "reconcile consumer source-order failure was not actionable"; fi
+consumer_prereqs='taskdag_activation_validate_history _taskdag_activation_fetch_authority _taskdag_activation_authority_token _taskdag_activation_runtime_commit taskdag_cas_sleep taskdag_capture_child_map_refs taskdag_reset_child_map taskdag_recon_prepare taskdag_sha256_hex'
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/semantic-consumer.sh" "$consumer_prereqs" >/dev/null 2>"$ROOT/consumer-complete-err"; then
+  ok "semantic consumer accepts its complete prerequisite set"
+else bad "semantic consumer rejected its complete prerequisite set: $(cat "$ROOT/consumer-complete-err")"; fi
+
+if bash -c 'is_task_blocked(){ :; }; blocked_structural_ancestor(){ :; }; taskdag_node_complete(){ :; }; taskdag_leaf_ready(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconcile.sh" >"$ROOT/reconcile-consumer-out" 2>"$ROOT/reconcile-consumer-err"; then
+  bad "reconcile loaded without semantic consumer"
+elif grep -q 'requires semantic-consumer.sh to be loaded first' "$ROOT/reconcile-consumer-err"; then
+  ok "reconcile fails loudly without semantic consumer"
+else bad "reconcile semantic-consumer failure was not actionable"; fi
+
+if bash -c 'remote_ref_sha_checked(){ :; }; is_task_blocked(){ :; }; read_blocked_meta_field(){ :; }; claim_is_dead(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/cross-repo.sh" >"$ROOT/cross-consumer-out" 2>"$ROOT/cross-consumer-err"; then
+  bad "early production consumer loaded without semantic consumer"
+elif grep -q 'requires semantic-consumer.sh to be loaded first' "$ROOT/cross-consumer-err"; then
+  ok "early production consumer fails loudly without semantic consumer"
+else bad "early production semantic-consumer failure was not actionable"; fi
 
 if bash -c 'taskdag_node_repo(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/graph-converge.sh" >"$ROOT/converge-core-out" 2>"$ROOT/converge-core-err"; then
   bad "graph convergence loaded without reconciliation core"

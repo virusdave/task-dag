@@ -58,6 +58,7 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/blocked-core.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
+taskdag_consumer_prepare() { :; }
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/cross-repo.sh"
 registry_id=$(_taskdag_activation_registry_id "$ROOT/registry")
 jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" \

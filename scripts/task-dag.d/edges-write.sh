@@ -42,6 +42,11 @@
 # from the main script.
 # ═══════════════════════════════════════════════════════════════════════
 
+if ! declare -F taskdag_consumer_prepare >/dev/null; then
+    echo "Error: edges-write.sh requires semantic-consumer.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 # _taskdag_edge_blob_check <blob>: validate a STORED edge blob exactly as the
 # reader (taskdag_read_edges) does — typed schema:1 structure, the fixed
 # relation/mode pair, and canonical node addresses at rest — and print its

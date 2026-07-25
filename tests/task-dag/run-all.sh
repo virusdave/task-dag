@@ -93,6 +93,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/edges.sh" \
         "$(dirname "$TD")/task-dag.d/facts.sh" \
         "$(dirname "$TD")/task-dag.d/reconciliation-core.sh" \
+        "$(dirname "$TD")/task-dag.d/semantic-consumer.sh" \
         "$(dirname "$TD")/task-dag.d/edges-write.sh" \
         "$(dirname "$TD")/task-dag.d/reconcile.sh" \
         "$(dirname "$TD")/task-dag.d/graph-converge.sh" \
@@ -144,6 +145,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/edges.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/facts.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/reconciliation-core.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/semantic-consumer.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/edges-write.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/reconcile.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/graph-converge.sh" \

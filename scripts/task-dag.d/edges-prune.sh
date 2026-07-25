@@ -28,6 +28,11 @@
 # still-needed supersede signal.
 # ═══════════════════════════════════════════════════════════════════════
 
+if ! declare -F taskdag_consumer_prepare >/dev/null; then
+    echo "Error: edges-prune.sh requires semantic-consumer.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+
 # _taskdag_edge_prunable <relation> <from> <to>: 0 iff removing this edge is
 # backed by a DURABLE master completion witness (so re-deriving the graph from
 # master would reconfirm the same active set — a plain prune loses nothing):

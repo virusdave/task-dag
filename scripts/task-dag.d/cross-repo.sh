@@ -25,6 +25,10 @@ if ! declare -F claim_is_dead >/dev/null; then
     echo "Error: cross-repo.sh requires claim-model.sh to be loaded first" >&2
     return 2 2>/dev/null || exit 2
 fi
+if ! declare -F taskdag_consumer_prepare >/dev/null; then
+    echo "Error: cross-repo.sh requires semantic-consumer.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
 
 # Resolve this module's directory once, at source time (cwd is still the
 # invocation dir and BASH_SOURCE is the path task-dag sourced us with), so

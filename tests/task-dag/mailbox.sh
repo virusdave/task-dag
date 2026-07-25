@@ -59,6 +59,7 @@ done < <(
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
+    taskdag_consumer_prepare() { :; }
     source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
@@ -347,6 +348,7 @@ cond_out=$(
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
+    taskdag_consumer_prepare() { :; }
     source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
@@ -465,6 +467,7 @@ gexhaust() {
     source "$LIBDIR/facts.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/cas-retry.sh"
+    taskdag_consumer_prepare() { :; }
     source "$LIBDIR/edges-write.sh"
     # shellcheck source=/dev/null
     source "$LIBDIR/mailbox.sh"
