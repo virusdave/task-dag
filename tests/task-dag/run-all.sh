@@ -125,7 +125,8 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$here/validate-closed-issue-audit.sh" "$here/context-cmd.sh" \
         "$here/wrappers.sh" "$here/caller-workflow-preflight.sh" \
         "$here/install-completion-order-hook.sh" "$here/reconcile-comments.sh" \
-        "$here/consumer-cutover.sh" "$here/loader-inventory.sh" || exit 1
+        "$here/consumer-cutover.sh" "$here/loader-inventory.sh" \
+        "$here/epic-id-protocol.sh" || exit 1
 }
 echo "== bash -n =="
 bash -n "$TD" \
@@ -173,10 +174,12 @@ bash -n "$TD" \
     && bash -n "$here/install-completion-order-hook.sh" \
     && bash -n "$here/reconcile-comments.sh" \
     && bash -n "$here/consumer-cutover.sh" \
-    && bash -n "$here/loader-inventory.sh" || exit 1
+    && bash -n "$here/loader-inventory.sh" \
+    && bash -n "$here/epic-id-protocol.sh" || exit 1
 
 parallel_tests=(
     loader-inventory.sh
+    epic-id-protocol.sh
     reconcile.sh
     complete-safety.sh
     materialise-census.sh

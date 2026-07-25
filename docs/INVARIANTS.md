@@ -636,6 +636,62 @@ publishes the second generation. Create-only leases and authoritative readback
 make concurrent or ambiguously acknowledged retries converge; a disabled epoch
 rejects the first generation before any remote semantic effect.
 
+### Epic-ID v1 protocol and reader-first rollout
+
+Epic-ID is the provider-independent lifecycle identity for new epics. Its
+public text form is `epic-v1:<64-lowercase-hex>`. The digest input is a
+domain-separated, NUL-delimited sequence whose values are individually framed
+as `<decimal UTF-8-byte-length>:<value>\0`:
+
+- operation origin: domain `operation`, immutable source repository node ID,
+  durable operation ID;
+- provider origin: domain `provider`, lowercase provider kind, immutable
+  repository node ID, immutable issue node ID.
+
+The hash preamble is exactly `task-dag-epic-id-v1\0<domain>\0`. Issue number,
+issue URL, repository name, and title/body are never identity inputs. This
+prevents issue transfer or mutable display metadata from rotating the epic and
+prevents ambiguous concatenations from colliding.
+
+The typed root descriptor is canonical strict JSON schema 1:
+
+- top-level keys are exactly `epicId`, `origin`, `projection`, `schema`, and
+  `task`;
+- `origin` is exactly one of operation
+  (`kind`, `operationId`, `repositoryId`) or provider
+  (`issueId`, `kind`, `provider`, `repositoryId`), and its values MUST
+  re-derive `epicId`;
+- `projection` always names the desired provider, repository name, and
+  immutable repository node ID. Its `issueId`, `issueNumber`, and `issueUrl`
+  are either all null (task-first, not yet bound) or all populated. A
+  provider-origin root is populated and binds the exact same provider,
+  repository node ID, and issue node ID as its origin;
+- `task` contains immutable `title`, `author`, `description`, `Status:
+  pending`, and `Type: epic` values.
+
+A populated issue number is a canonical positive-decimal JSON string, never a
+JSON number. This preserves arbitrarily large provider values without IEEE-754
+rounding or exponent aliases. Header values and issue URLs reject every control
+byte; descriptions allow line feed and tab but reject all other control bytes
+and every reserved protocol header at the start of a line. This prevents
+distinct descriptors from collapsing to identical Bash-serialized commit
+messages and prevents a body from injecting identity metadata.
+
+The canonical new root ref is
+`tasks/pending/epic-v1/<64-lowercase-hex>`. The dual-read root-ref codec maps
+that path and legacy `tasks/pending/<positive-issue-number>` paths into one
+typed descriptor without treating one identity as the other. The new root
+message is `Epic-Root-Format: 1`, carries the complete immutable origin and
+desired projection metadata, and has no required `Issue:` field. Legacy root
+message bytes remain unchanged.
+
+This protocol lands reader/codec-first. At this stage no command may publish
+an Epic-ID root. Scheduling, claims, breakdown, completion, graph/delegation,
+cleanup, external dispatch, and compatibility-fence readers must all accept
+and preserve the typed identity before the activation-fenced root minter or a
+public writer is enabled. GitHub issue/comment creation and Actions are
+eventual projection/wake paths only and never task authority.
+
 Explicit `--no-fetch` operations use only a previously observed local
 activation, graph, facts, and task refs. A nested offline helper may reuse its
 enclosing operation's just-observed pre-activation absence, but standalone

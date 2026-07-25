@@ -32,6 +32,166 @@ task_is_root_shaped_epic() {
     return 0
 }
 
+# Epic-ID v1 is provider-independent and hashes one explicitly framed origin.
+# The prefix is part of the public identity; callers must never treat the raw
+# digest as an interchangeable identifier. These helpers are pure and do not
+# create objects or refs.
+_taskdag_epic_id_v1() { # domain component...
+    local LC_ALL=C domain=$1 value
+    shift
+    {
+        printf 'task-dag-epic-id-v1\000%s\000' "$domain"
+        for value in "$@"; do printf '%s:%s\000' "${#value}" "$value"; done
+    } | sha256sum | awk '{print "epic-v1:" $1}'
+}
+
+_taskdag_epic_opaque_id_valid() {
+    [ -n "$1" ] && [[ "$1" =~ ^[A-Za-z0-9._:+/=@-]+$ ]]
+}
+
+taskdag_epic_id_for_operation() { # source-repository-node-id durable-operation-id
+    local repository_id=$1 operation_id=$2
+    _taskdag_epic_opaque_id_valid "$repository_id" || return 1
+    [[ "$operation_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+    _taskdag_epic_id_v1 operation "$repository_id" "$operation_id"
+}
+
+taskdag_epic_id_for_provider() { # provider repository-node-id issue-node-id
+    local provider=$1 repository_id=$2 issue_id=$3
+    [[ "$provider" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    _taskdag_epic_opaque_id_valid "$repository_id" || return 1
+    _taskdag_epic_opaque_id_valid "$issue_id" || return 1
+    _taskdag_epic_id_v1 provider "$provider" "$repository_id" "$issue_id"
+}
+
+taskdag_epic_root_ref() { # epic-v1:<digest>
+    [[ "$1" =~ ^epic-v1:([0-9a-f]{64})$ ]] || return 1
+    printf 'refs/heads/tasks/pending/epic-v1/%s\n' "${BASH_REMATCH[1]}"
+}
+
+# Decode both root-ref dialects into one typed descriptor. Accepting the new
+# path here does not enable it: no writer invokes this codec until the reader
+# rollout and activation-fenced writer gate land.
+taskdag_parse_epic_root_ref() { # full-ref
+    local ref=$1 number digest
+    case "$ref" in
+        refs/heads/tasks/pending/[1-9]*)
+            number=${ref#refs/heads/tasks/pending/}
+            [[ "$number" =~ ^[1-9][0-9]*$ ]] || return 1
+            jq -ncS --arg ref "$ref" --arg issueNumber "$number" \
+                '{dialect:"legacy-issue-v0",epicId:null,issueNumber:$issueNumber,ref:$ref,schema:1}'
+            ;;
+        refs/heads/tasks/pending/epic-v1/*)
+            digest=${ref#refs/heads/tasks/pending/epic-v1/}
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+            jq -ncS --arg ref "$ref" --arg epicId "epic-v1:$digest" \
+                '{dialect:"epic-v1",epicId:$epicId,issueNumber:null,ref:$ref,schema:1}'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Validate and emit the canonical JSON form of an Epic-ID root descriptor.
+# Issue binding is all-or-nothing. Provider-origin roots are necessarily bound
+# to the same immutable provider tuple; operation-origin roots may begin with
+# an unbound desired projection. The root's desired projection survives a
+# projector outage without a separate queue or intent record.
+taskdag_canonicalize_epic_root_descriptor() {
+    local input expected actual kind repository_id operation_id provider issue_id
+    input=$(mktemp) || return 1
+    cat >"$input" || { rm -f "$input"; return 1; }
+    taskdag_json_file_is_single_strict "$input" || { rm -f "$input"; return 1; }
+    jq -e '
+      . as $root |
+      type=="object" and keys==["epicId","origin","projection","schema","task"] and .schema==1 and
+      (.epicId|type=="string" and test("^epic-v1:[0-9a-f]{64}$")) and
+      (.task|type=="object" and keys==["author","description","status","title","type"] and
+        (.title|type=="string" and length>0 and (test("[[:cntrl:]]")|not)) and
+        (.author|type=="string" and (test("[[:cntrl:]]")|not)) and
+        (.description|type=="string" and
+          ((gsub("[\\n\\t]";"")|test("[[:cntrl:]]"))|not) and
+          (test("(?m)^(Task|Epic-Root-Format|Epic-ID|Epic-Origin-Kind|Epic-Origin-Provider|Epic-Origin-Repository-ID|Epic-Origin-Operation-ID|Epic-Origin-Issue-ID|Author|Status|Type|Projection-Provider|Projection-Repository|Projection-Repository-ID|Projection-Issue-ID|Projection-Issue-Number|Projection-URL):")|not)) and
+        .status=="pending" and .type=="epic") and
+      (.projection|type=="object" and keys==["issueId","issueNumber","issueUrl","provider","repository","repositoryId"] and
+        (.provider|type=="string" and test("^[a-z0-9][a-z0-9-]*$")) and
+        (.repository|type=="string" and test("^[a-z0-9._-]+/[a-z0-9._-]+$")) and
+        (.repositoryId|type=="string" and test("^[A-Za-z0-9._:+/=@-]+$")) and
+        (((.issueId==null) and (.issueNumber==null) and (.issueUrl==null)) or
+         ((.issueId|type=="string" and test("^[A-Za-z0-9._:+/=@-]+$")) and
+          (.issueNumber|type=="string" and test("^[1-9][0-9]*$")) and
+          (.issueUrl|type=="string" and test("^https://[^\\r\\n]+$") and
+            (test("[[:cntrl:]]")|not))))) and
+      ((.origin|type=="object" and keys==["kind","operationId","repositoryId"] and
+          .kind=="operation" and (.operationId|test("^[0-9a-f]{64}$")) and
+          (.repositoryId|test("^[A-Za-z0-9._:+/=@-]+$"))) or
+       (.origin|type=="object" and keys==["issueId","kind","provider","repositoryId"] and
+          .kind=="provider" and (.provider|test("^[a-z0-9][a-z0-9-]*$")) and
+          (.repositoryId|test("^[A-Za-z0-9._:+/=@-]+$")) and
+          (.issueId|test("^[A-Za-z0-9._:+/=@-]+$")) and
+          .provider==$root.projection.provider and .repositoryId==$root.projection.repositoryId and
+          .issueId==$root.projection.issueId))' "$input" >/dev/null \
+        || { rm -f "$input"; return 1; }
+    kind=$(jq -r .origin.kind "$input")
+    repository_id=$(jq -r .origin.repositoryId "$input")
+    if [ "$kind" = operation ]; then
+        operation_id=$(jq -r .origin.operationId "$input")
+        expected=$(taskdag_epic_id_for_operation "$repository_id" "$operation_id") \
+            || { rm -f "$input"; return 1; }
+    else
+        provider=$(jq -r .origin.provider "$input")
+        issue_id=$(jq -r .origin.issueId "$input")
+        expected=$(taskdag_epic_id_for_provider "$provider" "$repository_id" "$issue_id") \
+            || { rm -f "$input"; return 1; }
+    fi
+    actual=$(jq -r .epicId "$input")
+    [ "$actual" = "$expected" ] || { rm -f "$input"; return 1; }
+    jq -cS . "$input"
+    local rc=$?; rm -f "$input"; return "$rc"
+}
+
+# Canonical message bytes for the new dialect. This is deliberately a pure
+# serializer in the protocol landing; no command invokes it to mint a commit.
+taskdag_serialize_epic_root_message() {
+    local descriptor kind title author description epic_id provider repository_id operation_id issue_id
+    local projection_provider projection_repository projection_repository_id projection_issue_number projection_url
+    descriptor=$(taskdag_canonicalize_epic_root_descriptor) || return 1
+    kind=$(jq -er .origin.kind <<<"$descriptor") || return 1
+    title=$(jq -er .task.title <<<"$descriptor") || return 1
+    author=$(jq -er '.task.author|strings' <<<"$descriptor") || return 1
+    description=$(jq -ej '.task.description+"\u0001"' <<<"$descriptor") || return 1
+    description=${description%$'\1'}
+    epic_id=$(jq -er .epicId <<<"$descriptor") || return 1
+    repository_id=$(jq -er .origin.repositoryId <<<"$descriptor") || return 1
+    projection_provider=$(jq -er .projection.provider <<<"$descriptor") || return 1
+    projection_repository=$(jq -er .projection.repository <<<"$descriptor") || return 1
+    projection_repository_id=$(jq -er .projection.repositoryId <<<"$descriptor") || return 1
+
+    printf 'Task: %s\n\nEpic-Root-Format: 1\nEpic-ID: %s\nEpic-Origin-Kind: %s\n' "$title" "$epic_id" "$kind" \
+        || return 1
+    if [ "$kind" = operation ]; then
+        operation_id=$(jq -er .origin.operationId <<<"$descriptor") || return 1
+        printf 'Epic-Origin-Repository-ID: %s\nEpic-Origin-Operation-ID: %s\n' "$repository_id" "$operation_id" \
+            || return 1
+    else
+        provider=$(jq -er .origin.provider <<<"$descriptor") || return 1
+        issue_id=$(jq -er .origin.issueId <<<"$descriptor") || return 1
+        printf 'Epic-Origin-Provider: %s\nEpic-Origin-Repository-ID: %s\nEpic-Origin-Issue-ID: %s\n' \
+            "$provider" "$repository_id" "$issue_id" || return 1
+    fi
+    printf 'Author: %s\nStatus: pending\nType: epic\nProjection-Provider: %s\nProjection-Repository: %s\nProjection-Repository-ID: %s\n' \
+        "$author" "$projection_provider" "$projection_repository" "$projection_repository_id" || return 1
+    local projection_unbound
+    projection_unbound=$(jq -r '.projection.issueId==null' <<<"$descriptor") || return 1
+    if [ "$projection_unbound" = false ]; then
+        issue_id=$(jq -er .projection.issueId <<<"$descriptor") || return 1
+        projection_issue_number=$(jq -er .projection.issueNumber <<<"$descriptor") || return 1
+        projection_url=$(jq -er .projection.issueUrl <<<"$descriptor") || return 1
+        printf 'Projection-Issue-ID: %s\nProjection-Issue-Number: %s\nProjection-URL: %s\n' \
+            "$issue_id" "$projection_issue_number" "$projection_url" || return 1
+    fi
+    [ -z "$description" ] || printf '\n%s\n' "$description" || return 1
+}
+
 # Canonical task message serialization shared by issue roots and breakdown
 # leaves. Optional metadata is represented explicitly by empty arguments; the
 # resulting bytes retain the existing task format.
