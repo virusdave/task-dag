@@ -1,9 +1,6 @@
 # shellcheck shell=bash
 # Canonical immutable materialisation reservation protocol (schema 1).
 
-# shellcheck source=materialise-intent.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/materialise-intent.sh"
-
 TASKDAG_MATERIALISATION_REF="refs/heads/tasks/v1/materialisation"
 TASKDAG_MATERIALISATION_MAX_SPEC=2097152
 TASKDAG_MATERIALISATION_MAX_BODY=1048576

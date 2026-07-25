@@ -48,7 +48,11 @@ registry_commit=1111111111111111111111111111111111111111
 registry_blob=2222222222222222222222222222222222222222
 registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
 printf '%s\n' "$registry" >"$ROOT/registry"
-TASKDAG_SCRIPT_DIR=$(dirname "$TD"); source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"; source "$TASKDAG_SCRIPT_DIR/task-dag.d/cross-repo.sh"
+TASKDAG_SCRIPT_DIR=$(dirname "$TD")
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/cross-repo.sh"
 registry_id=$(_taskdag_activation_registry_id "$ROOT/registry")
 jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" \
   '{actor:"fixture",authoritativeTimestamp:"2026-07-18T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/enabled"

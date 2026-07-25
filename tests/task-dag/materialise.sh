@@ -2,6 +2,7 @@
 set -uo pipefail
 TD="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}"
 TD="$(cd "$(dirname "$TD")" && pwd)/$(basename "$TD")"
+source "$(dirname "$TD")/task-dag.d/materialise-intent.sh"
 ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 pass=0; fail=0

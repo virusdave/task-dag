@@ -11,7 +11,7 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 if python3 "$REPO_ROOT/scripts/task-dag-inventory.py" --check; then
   ok "committed provider/consumer inventory is current"
 else bad "generated inventory is stale"; fi
-if grep -q '^| `resolve_sha` | `scripts/task-dag:91` |' "$REPO_ROOT/docs/task-dag-function-inventory.md" \
+if grep -Eq '^\| `resolve_sha` \| `scripts/task-dag:[0-9]+` \|' "$REPO_ROOT/docs/task-dag-function-inventory.md" \
   && grep -q '^| `TASKDAG_GRAPH_CONVERGE_CLI` |' "$REPO_ROOT/docs/task-dag-function-inventory.md" \
   && ! grep -Eq '^\| `(BEGIN|END|if)` \|' "$REPO_ROOT/docs/task-dag-function-inventory.md"; then
   ok "inventory distinguishes Bash providers from embedded-language blocks"
@@ -24,15 +24,11 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-early=(semantic-migration.sh materialise.sh materialise-census-capture.sh materialise-producer.sh materialise-reconcile.sh activation.sh)
-if [ "${direct[*]:0:${#early[@]}}" = "${early[*]}" ]; then
-  ok "six explicit early loads retain their order"
-else bad "early source order changed: ${direct[*]}"; fi
-glob=("$REPO_ROOT"/scripts/task-dag.d/*.sh); expected=(); for f in "${glob[@]}"; do expected+=("${f##*/}"); done
-tail=("${direct[@]:${#early[@]}}")
-if [ "${tail[*]}" = "${expected[*]}" ] && [ "$(printf '%s\n' "${direct[@]}" | grep -cx activation.sh)" -eq 2 ]; then
-  ok "late bytewise glob and current double-load are characterized"
-else bad "late glob/double-load changed: ${tail[*]}"; fi
+expected=(activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+if [ "${direct[*]}" = "${expected[*]}" ] \
+  && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
+  ok "explicit bottom manifest loads every module exactly once in canonical order"
+else bad "explicit module manifest changed: ${direct[*]}"; fi
 
 # Source from an unrelated peer CWD. The loaded graph module must capture the
 # canonical absolute CLI; exercise the exact helper-generation/subprocess path

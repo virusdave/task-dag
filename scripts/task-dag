@@ -62,18 +62,7 @@ VERSION="0.1.0"
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 TASKDAG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=task-dag.d/semantic-migration.sh
-source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
-# shellcheck source=task-dag.d/materialise.sh
-source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
-# shellcheck source=task-dag.d/materialise-census-capture.sh
-source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-census-capture.sh"
-# shellcheck source=task-dag.d/materialise-producer.sh
-source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-producer.sh"
-# shellcheck source=task-dag.d/materialise-reconcile.sh
-source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-reconcile.sh"
-# shellcheck source=task-dag.d/activation.sh
-source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
+TASKDAG_ENTRYPOINT="$TASKDAG_SCRIPT_DIR/task-dag"
 
 # Colors for output (if supported)
 if [ -t 1 ]; then
@@ -8132,19 +8121,6 @@ main() {
     esac
 }
 
-# Source extension modules (cross-repo coordination, etc.)
-# Located at scripts/task-dag.d/*.sh relative to this script.
-__task_dag_self="${BASH_SOURCE[0]}"
-__task_dag_dir="$(cd "$(dirname "$__task_dag_self")" && pwd)"
-if [ -d "${__task_dag_dir}/task-dag.d" ]; then
-    for __ext in "${__task_dag_dir}/task-dag.d"/*.sh; do
-        # shellcheck disable=SC1090
-        [ -f "$__ext" ] && source "$__ext"
-    done
-    unset __ext
-fi
-unset __task_dag_self __task_dag_dir
-
 # Command: check-workflow - validate recent commits follow task-dag convention
 cmd_check_workflow() {
     local count=10
@@ -8769,6 +8745,50 @@ EOF
     printf '%b' "${RESET}" >&2
     return 1
 }
+
+# Temporary explicit module manifest. Keep this list static and ordered while
+# monolithic providers are extracted into their final acyclic modules. Modules
+# never source one another; this runtime entrypoint owns the complete order.
+# shellcheck source=task-dag.d/activation-fleet.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation-fleet.sh"
+# shellcheck source=task-dag.d/activation.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/activation.sh"
+# shellcheck source=task-dag.d/ci-chains.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/ci-chains.sh"
+# shellcheck source=task-dag.d/ci-repair.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/ci-repair.sh"
+# shellcheck source=task-dag.d/comment-watchdog.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/comment-watchdog.sh"
+# shellcheck source=task-dag.d/cross-repo.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/cross-repo.sh"
+# shellcheck source=task-dag.d/edges-prune.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/edges-prune.sh"
+# shellcheck source=task-dag.d/edges-write.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/edges-write.sh"
+# shellcheck source=task-dag.d/edges.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/edges.sh"
+# shellcheck source=task-dag.d/facts.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/facts.sh"
+# shellcheck source=task-dag.d/graph-converge.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/graph-converge.sh"
+# shellcheck source=task-dag.d/legacy-edges.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/legacy-edges.sh"
+# shellcheck source=task-dag.d/mailbox.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/mailbox.sh"
+# shellcheck source=task-dag.d/materialise-census-capture.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-census-capture.sh"
+# shellcheck source=task-dag.d/materialise-intent.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-intent.sh"
+# shellcheck source=task-dag.d/materialise-producer.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-producer.sh"
+# shellcheck source=task-dag.d/materialise-reconcile.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise-reconcile.sh"
+# shellcheck source=task-dag.d/materialise.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
+# shellcheck source=task-dag.d/reconcile.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/reconcile.sh"
+# shellcheck source=task-dag.d/semantic-migration.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
 
 # Execute (must be the final statement so all functions, including those
 # in dead-code section above and any sourced extensions, are registered).

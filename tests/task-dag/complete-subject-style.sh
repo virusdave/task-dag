@@ -45,7 +45,7 @@ TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" claim "$T1" >/dev/null 2>&1
 echo w1 > i1.txt; git add i1.txt; git commit -qm "feat(helios): add a thing"
 HEAD_BEFORE=$(git rev-parse HEAD)
 out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete "$T1" 2>&1); rc=$?
-if [ $rc -ne 0 ] && echo "$out" | grep -qi "Conventional-Commits"; then
+if [ $rc -ne 0 ] && grep -qi "Conventional-Commits" <<<"$out"; then
   ok "single: refused a Conventional-Commits impl subject"
 else
   bad "single: did NOT refuse a bad impl subject (rc=$rc): $out"
@@ -87,8 +87,8 @@ C=$(git rev-parse HEAD)
 HEAD_BEFORE=$(git rev-parse HEAD)
 out=$(TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h "$TD" complete --leaves="$S_LEAF:$S,$C_LEAF:$C" 2>&1); rc=$?
 if [ $rc -ne 0 ] \
-   && echo "$out" | grep -q "server bit" \
-   && echo "$out" | grep -q "client bit"; then
+   && grep -q "server bit" <<<"$out" \
+   && grep -q "client bit" <<<"$out"; then
   ok "batch: reported BOTH offending impl subjects and refused"
 else
   bad "batch: did not report both offenders / did not refuse (rc=$rc): $out"

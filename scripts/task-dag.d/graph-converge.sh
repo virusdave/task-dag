@@ -15,7 +15,7 @@
 # and master history stay the authoritative state.
 # ═══════════════════════════════════════════════════════════════════════
 
-TASKDAG_GRAPH_CONVERGE_CLI="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
+TASKDAG_GRAPH_CONVERGE_CLI="$TASKDAG_ENTRYPOINT"
 
 taskdag_node_repo() {
     local node="$1" rest
