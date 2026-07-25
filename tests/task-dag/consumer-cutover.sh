@@ -22,6 +22,7 @@ git config taskdag.current-repo virusdave/task-dag
 git config taskdag.virusdave/task-dag.id 1
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 source "$(dirname "$TD")/task-dag.d/git-objects.sh"
+source "$(dirname "$TD")/task-dag.d/child-map.sh"
 
 dep=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: dependency\nIssue: #84')
 wait=$(git commit-tree "$EMPTY_TREE" -p HEAD -m 'Task: waiting leaf')

@@ -80,6 +80,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/cas-retry.sh" \
         "$(dirname "$TD")/task-dag.d/git-objects.sh" \
         "$(dirname "$TD")/task-dag.d/task-model.sh" \
+        "$(dirname "$TD")/task-dag.d/child-map.sh" \
         "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
         "$(dirname "$TD")/task-dag.d/repository-identity.sh" \
         "$(dirname "$TD")/task-dag.d/blocked-core.sh" \
@@ -126,6 +127,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/cas-retry.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/git-objects.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/task-model.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/child-map.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/repository-identity.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/github-origin.sh" \

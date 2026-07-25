@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # Canonical GitHub/origin identity and normalized remote-ref readers. The
-# entrypoint loads this acyclic foundation after repository-identity.sh and
-# before every feature consumer. It deliberately does not construct child
-# maps: synchronization only updates the normalized local ref view.
+# entrypoint loads this acyclic foundation after child-map.sh and
+# repository-identity.sh, before every feature consumer. It deliberately does
+# not construct child maps: synchronization only updates the normalized view.
 
 if ! declare -F parse_commit_metadata >/dev/null || ! declare -F extract_field >/dev/null; then
     echo "Error: github-origin.sh requires git-objects.sh to be loaded first" >&2
@@ -10,6 +10,10 @@ if ! declare -F parse_commit_metadata >/dev/null || ! declare -F extract_field >
 fi
 if ! declare -F taskdag_current_repo >/dev/null; then
     echo "Error: github-origin.sh requires repository-identity.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
+if ! declare -F taskdag_reset_child_map >/dev/null; then
+    echo "Error: github-origin.sh requires child-map.sh to be loaded first" >&2
     return 2 2>/dev/null || exit 2
 fi
 
@@ -69,7 +73,7 @@ root_active_sha_on_remote() {
 # the historical refspec/atomic/prune contract but intentionally does not
 # derive or cache a child map; that remains the feature consumer's job.
 taskdag_sync_root_refs() {
-    TASKDAG_CHILD_MAP_READY=false
+    taskdag_reset_child_map
     TASKDAG_RECON_READY=false
     git fetch --quiet --atomic --prune --no-tags origin \
         '+refs/heads/master:refs/remotes/origin/master' \

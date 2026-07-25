@@ -40,6 +40,8 @@ EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 # shellcheck source=/dev/null
 source "$LIB_DIR/git-objects.sh"
 # shellcheck source=/dev/null
+source "$LIB_DIR/child-map.sh"
+# shellcheck source=/dev/null
 source "$LIB_DIR/repository-identity.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/github-origin.sh"

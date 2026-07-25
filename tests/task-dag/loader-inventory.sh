@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -83,6 +83,12 @@ elif grep -q 'requires git-objects.sh to be loaded first' "$ROOT/model-order-err
   ok "task model fails loudly when loaded out of order"
 else bad "task-model source-order failure was not actionable"; fi
 
+if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/child-map.sh" >"$ROOT/child-map-order-out" 2>"$ROOT/child-map-order-err"; then
+  bad "child map loaded without its source-contract prerequisite"
+elif grep -q 'requires source-contract.sh to be loaded first' "$ROOT/child-map-order-err"; then
+  ok "child map fails loudly without its source-contract prerequisite"
+else bad "child-map source-order failure was not actionable"; fi
+
 if bash -c 'task_is_root_shaped_epic(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/ref-schema.sh" >"$ROOT/ref-json-out" 2>"$ROOT/ref-json-err"; then
   bad "ref schema loaded without its JSON prerequisite"
 elif grep -q 'requires json.sh to be loaded first' "$ROOT/ref-json-err"; then
@@ -112,6 +118,12 @@ if bash -c 'parse_commit_metadata(){ :; }; extract_field(){ :; }; source "$1"' _
 elif grep -q 'requires repository-identity.sh to be loaded first' "$ROOT/origin-repo-order-err"; then
   ok "GitHub/origin foundation fails loudly without repository identity"
 else bad "GitHub/origin repository source-order failure was not actionable"; fi
+
+if bash -c 'parse_commit_metadata(){ :; }; extract_field(){ :; }; taskdag_current_repo(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/github-origin.sh" >"$ROOT/origin-map-order-out" 2>"$ROOT/origin-map-order-err"; then
+  bad "GitHub/origin foundation loaded without child-map primitives"
+elif grep -q 'requires child-map.sh to be loaded first' "$ROOT/origin-map-order-err"; then
+  ok "GitHub/origin foundation fails loudly without child-map primitives"
+else bad "GitHub/origin child-map source-order failure was not actionable"; fi
 
 if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/blocked-core.sh" >"$ROOT/blocked-order-out" 2>"$ROOT/blocked-order-err"; then
   bad "blocked core loaded without Git-object primitives"

@@ -4,6 +4,10 @@ if ! declare -F taskdag_sync_root_refs >/dev/null; then
     echo "Error: reconcile.sh requires github-origin.sh to be loaded first" >&2
     return 2 2>/dev/null || exit 2
 fi
+if ! declare -F taskdag_prepare_child_map_from >/dev/null; then
+    echo "Error: reconcile.sh requires child-map.sh to be loaded first" >&2
+    return 2 2>/dev/null || exit 2
+fi
 if ! declare -F is_task_blocked >/dev/null || ! declare -F blocked_structural_ancestor >/dev/null; then
     echo "Error: reconcile.sh requires blocked-core.sh to be loaded first" >&2
     return 2 2>/dev/null || exit 2
@@ -79,13 +83,7 @@ fi
 #   • the resolved current repo (to address current-repo task nodes).
 TASKDAG_RECON_EDGES_JSON=""
 TASKDAG_RECON_FACTS_TIP=""
-declare -gA TASKDAG_RECON_FP_CHILDREN=()
-declare -gA TASKDAG_CHILDREN_ANY=()
 declare -gA TASKDAG_RECON_NODE_STATE=()
-TASKDAG_CHILD_MAP_READY=false
-TASKDAG_CHILD_MAP_MASTER=""
-TASKDAG_CHILD_MAP_REFS=""
-TASKDAG_CHILD_MAP_SOURCE=""
 TASKDAG_RECON_CUR=""
 TASKDAG_RECON_READY=false   # set by prepare; guards use-before-prepare
 
@@ -335,12 +333,7 @@ taskdag_consumer_prepare() {
     local rc=0
     _taskdag_consumer_prepare "$@" || rc=$?
     if [ "$rc" -ne 0 ]; then
-        TASKDAG_CHILD_MAP_READY=false
-        TASKDAG_CHILD_MAP_MASTER=""
-        TASKDAG_CHILD_MAP_REFS=""
-        TASKDAG_CHILD_MAP_SOURCE=""
-        TASKDAG_CHILDREN_ANY=()
-        TASKDAG_RECON_FP_CHILDREN=()
+        taskdag_reset_child_map
     fi
     return "$rc"
 }
@@ -507,12 +500,7 @@ taskdag_recon_prepare() {
             return 2
         }
     else
-        TASKDAG_CHILD_MAP_READY=false
-        TASKDAG_CHILD_MAP_MASTER=""
-        TASKDAG_CHILD_MAP_REFS=""
-        TASKDAG_CHILD_MAP_SOURCE=""
-        TASKDAG_CHILDREN_ANY=()
-        TASKDAG_RECON_FP_CHILDREN=()
+        taskdag_reset_child_map
     fi
     TASKDAG_RECON_NODE_STATE=()
 

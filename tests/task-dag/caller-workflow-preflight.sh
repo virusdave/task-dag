@@ -211,6 +211,7 @@ if (
     export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
     EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
     source "$ROOT/scripts/task-dag.d/git-objects.sh"
+    source "$ROOT/scripts/task-dag.d/child-map.sh"
     source "$ROOT/scripts/task-dag.d/repository-identity.sh"
     source "$ROOT/scripts/task-dag.d/github-origin.sh"
     source "$ROOT/scripts/task-dag.d/blocked-core.sh"
@@ -232,6 +233,7 @@ if (
     unset GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
     EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
     source "$ROOT/scripts/task-dag.d/git-objects.sh"
+    source "$ROOT/scripts/task-dag.d/child-map.sh"
     source "$ROOT/scripts/task-dag.d/repository-identity.sh"
     source "$ROOT/scripts/task-dag.d/github-origin.sh"
     source "$ROOT/scripts/task-dag.d/blocked-core.sh"

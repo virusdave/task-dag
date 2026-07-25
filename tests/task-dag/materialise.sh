@@ -4,6 +4,7 @@ TD="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}"
 TD="$(cd "$(dirname "$TD")" && pwd)/$(basename "$TD")"
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 source "$(dirname "$TD")/task-dag.d/git-objects.sh"
+source "$(dirname "$TD")/task-dag.d/child-map.sh"
 source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
 source "$(dirname "$TD")/task-dag.d/github-origin.sh"
 source "$(dirname "$TD")/task-dag.d/materialise-intent.sh"

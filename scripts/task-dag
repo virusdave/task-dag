@@ -462,64 +462,6 @@ fetch_root_refs() {
     taskdag_prepare_child_map || return 1
 }
 
-# Prepare the sole task-child view used by decomposition readers. The roots
-# are the captured origin/master commit plus the task refs attested by the
-# semantic consumer. Arbitrary local branches, HEAD, delegated side metadata,
-# and unreferenced objects minted during breakdown cannot enter this map.
-taskdag_prepare_child_map() {
-    taskdag_prepare_child_map_from refs/remotes/origin/master
-}
-
-taskdag_capture_child_map_refs() {
-    git for-each-ref --format='%(objectname) %(refname)' \
-        refs/heads/tasks/frontier/ refs/heads/tasks/active/ \
-        refs/heads/tasks/blocked/ refs/heads/tasks/blocked-meta/ \
-        refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
-        refs/heads/gh/issues/ | LC_ALL=C sort
-}
-
-# Build the same process-local child map from a caller-selected authority.
-# Offline semantic consumers use HEAD only after their caller has synchronized
-# and locked the local repository; this helper performs no network access.
-taskdag_prepare_child_map_from() {
-    local authority_ref=$1
-    TASKDAG_CHILD_MAP_READY=false
-    TASKDAG_CHILD_MAP_MASTER=""
-    TASKDAG_CHILD_MAP_REFS=""
-    TASKDAG_CHILD_MAP_SOURCE=""
-    TASKDAG_CHILDREN_ANY=()
-    TASKDAG_RECON_FP_CHILDREN=()
-
-    local master us=$'\x1f' commit tree subject parents first parent map_file
-    master=$(git rev-parse --verify -q "${authority_ref}^{commit}") || return 2
-    TASKDAG_CHILD_MAP_MASTER=$master
-    TASKDAG_CHILD_MAP_SOURCE=$authority_ref
-    TASKDAG_CHILD_MAP_REFS=$(taskdag_capture_child_map_refs) || return 2
-    map_file=$(mktemp) || return 2
-    if ! {
-        printf '%s\n' "$master"
-        awk '{print $1}' <<<"$TASKDAG_CHILD_MAP_REFS"
-    } | git log --stdin --format="%H${us}%T${us}%s${us}%P" >"$map_file" 2>/dev/null; then
-        rm -f "$map_file"
-        return 2
-    fi
-    while IFS="$us" read -r commit tree subject parents; do
-        [ -n "$commit" ] || continue
-        [ "$tree" = "$EMPTY_TREE" ] || continue
-        case "$subject" in
-            Claim:*|Blocked-Meta:*|kind:\ delegated*|kind:\ completion*) continue ;;
-        esac
-        first="${parents%% *}"
-        [ -n "$first" ] || continue
-        TASKDAG_RECON_FP_CHILDREN["$first"]+="$commit"$'\n'
-        for parent in $parents; do
-            TASKDAG_CHILDREN_ANY["$parent"]+="$commit"$'\n'
-        done
-    done <"$map_file"
-    rm -f "$map_file"
-    TASKDAG_CHILD_MAP_READY=true
-}
-
 # Helper: build the root-orchestration claim commit. Mirrors the leaf
 # claim commit (so liveness/attribution tooling reads it the same way)
 # but tags it `Claim-Kind: root` and records the issue number. Its first
@@ -628,40 +570,18 @@ claim_is_dead() {
 # root `tasks/root-active/*` claim commits are parented to their task but
 # are locks, not children). Callers MUST `fetch_root_refs` first so the
 # child refs are present locally.
-task_has_children() {
-    local parent_sha="$1"
-    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
-    local children="${TASKDAG_CHILDREN_ANY[$parent_sha]:-}"
-    [ -n "$children" ] || return 1
-    printf '%s\n' "${children%%$'\n'*}"
-}
-
 # Helper: true iff <parent_sha> has a direct STRUCTURAL child. Breakdown
 # containment is strictly first-parent; second+ parents are dependencies. Use
 # this when deciding whether a node itself is decomposed/intermediate. Do NOT
 # use task_has_children here: that intentionally matches any parent slot for
 # root/decomposition duplicate guards, where dependency children should also
 # make a root non-childless.
-task_has_structural_children() {
-    local parent_sha="$1"
-    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
-    local children="${TASKDAG_RECON_FP_CHILDREN[$parent_sha]:-}"
-    [ -n "$children" ] || return 1
-    printf '%s\n' "${children%%$'\n'*}"
-}
-
 # Helper: list ALL direct DAG children (breakdown child task commits) of a
 # node, one full SHA per line. Same membership/filtering rules as
 # task_has_children (exact whole-token parent match; skip Claim:/
 # Blocked-Meta: side commits and non-empty-tree commits), but enumerates
 # every child rather than short-circuiting at the first. Callers that care
 # about origin state must fetch the relevant task namespaces first.
-list_dag_children() {
-    local parent_sha="$1"
-    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
-    printf '%s' "${TASKDAG_CHILDREN_ANY[$parent_sha]:-}"
-}
-
 # Helper: recursively decide whether the entire subtree rooted at <node>
 # is complete. A node with NO DAG children is a LEAF: complete iff its
 # completion commit is on HEAD (is_task_completed). A node WITH children
@@ -8078,6 +7998,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/cas-retry.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 # shellcheck source=task-dag.d/task-model.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/task-model.sh"
+# shellcheck source=task-dag.d/child-map.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/child-map.sh"
 # shellcheck source=task-dag.d/ref-schema.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/ref-schema.sh"
 # shellcheck source=task-dag.d/repository-identity.sh
