@@ -22,7 +22,7 @@ const degradedSource: TaskDagSourceStatus = {
   coverage: 'partial',
   repositories: [
     { repository: 'automation', available: true, mode: 'mirror', lastError: null },
-    { repository: 'task-dag', available: false, mode: 'none', lastError: 'SSH authentication failed: the repository read key was rejected or is missing.' },
+    { repository: 'task-dag', available: false, mode: 'none', lastError: 'GitHub rejected the Helios App credential.' },
     { repository: 'top-level', available: true, mode: 'mirror', lastError: 'The repository operation timed out.' },
   ],
   mode: 'mirror',
@@ -51,10 +51,10 @@ describe('task presentation', () => {
     const html = renderToStaticMarkup(<SourceBanner source={degradedSource} />)
     expect(html).toContain('Task repository coverage warning')
     expect(html).toContain('task-dag')
-    expect(html).toContain('SSH authentication failed')
+    expect(html).toContain('GitHub rejected the Helios App credential')
     expect(html).toContain('top-level')
     expect(html).toContain('operation timed out')
-    expect(html).toContain('HELIOS_TASK_DAG_SSH_CONFIG')
+    expect(html).toContain('GitHub App installation')
     expect(html).toContain('Helios bug report')
     expect(html).toContain('Hide for this tab')
   })

@@ -16,7 +16,6 @@ import {
   initTaskDagMirror,
   parseTaskDagReposConfig,
   publicTaskDagError,
-  taskDagGitEnv,
 } from './taskDagMirror.js'
 
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
@@ -272,43 +271,6 @@ describe('taskDagRepo indexer', () => {
     }
   })
 
-  it('replaces persisted mirrors with a wrong or missing origin', async () => {
-    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-origin-target-'))
-    fs.rmSync(target, { recursive: true, force: true })
-    fs.cpSync(repoDir, target, { recursive: true })
-    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-origin-mirrors-'))
-    const mirror = path.join(mirrorRoot, 'repo.git')
-    const configFile = path.join(mirrorRoot, 'repos.conf')
-    execFileSync('git', ['clone', '--mirror', repoDir, mirror], { stdio: 'ignore' })
-    fs.writeFileSync(configFile, `repo ${target}\n`)
-    try {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
-      delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
-      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
-      __resetTaskDagMirrorForTests()
-      await initTaskDagMirror()
-      expect(execFileSync('git', ['remote', 'get-url', 'origin'], {
-        cwd: mirror,
-        encoding: 'utf8',
-      }).trim()).toBe(target)
-
-      execFileSync('git', ['remote', 'remove', 'origin'], { cwd: mirror, stdio: 'ignore' })
-      __resetTaskDagMirrorForTests()
-      await initTaskDagMirror()
-      expect(execFileSync('git', ['remote', 'get-url', 'origin'], {
-        cwd: mirror,
-        encoding: 'utf8',
-      }).trim()).toBe(target)
-    } finally {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
-      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
-      __resetTaskDagMirrorForTests()
-      fs.rmSync(target, { recursive: true, force: true })
-      fs.rmSync(mirrorRoot, { recursive: true, force: true })
-    }
-  })
-
   it('rejects malformed, duplicate, unsafe, and empty repository config', () => {
     expect(parseTaskDagReposConfig('repo url enforce master\n')).toEqual([
       { repository: 'repo', repoUrl: 'url' },
@@ -337,31 +299,88 @@ describe('taskDagRepo indexer', () => {
     }
   })
 
+  it('never falls back from a missing configured checkout to a persisted mirror', async () => {
+    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-local-no-fallback-'))
+    const configFile = path.join(mirrorRoot, 'repos.conf')
+    const pathsFile = path.join(mirrorRoot, 'paths.conf')
+    execFileSync('git', ['clone', '--mirror', repoDir, path.join(mirrorRoot, 'repo.git')], { stdio: 'ignore' })
+    fs.writeFileSync(configFile, 'repo https://github.com/Example/repo.git\n')
+    fs.writeFileSync(pathsFile, 'repo /missing/configured/checkout\n')
+    try {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
+      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
+      __resetTaskDagMirrorForTests()
+      const status = await initTaskDagMirror()
+      expect(status.repositories[0]).toMatchObject({ available: false, mode: 'none' })
+    } finally {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
+      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
+      __resetTaskDagMirrorForTests()
+      fs.rmSync(mirrorRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves a valid last-good mirror on auth failure and removes a wrong-origin mirror', async () => {
+    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-auth-failure-'))
+    const mirror = path.join(mirrorRoot, 'repo.git')
+    const configFile = path.join(mirrorRoot, 'repos.conf')
+    const credentialDir = path.join(mirrorRoot, 'credentials')
+    execFileSync('git', ['clone', '--mirror', repoDir, mirror], { stdio: 'ignore' })
+    execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/Example/repo.git'], { cwd: mirror })
+    fs.writeFileSync(configFile, 'repo https://github.com/Example/repo.git\n')
+    try {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
+      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
+      process.env.HELIOS_GITHUB_APP_CREDENTIAL_DIR = credentialDir
+      delete process.env.HELIOS_GITHUB_APP_ID
+      __resetTaskDagMirrorForTests()
+      const status = await initTaskDagMirror()
+      expect(fs.existsSync(mirror)).toBe(true)
+      expect(status.repositories[0]).toMatchObject({ available: true, mode: 'mirror' })
+
+      execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/Example/wrong.git'], { cwd: mirror })
+      __resetTaskDagMirrorForTests()
+      await initTaskDagMirror()
+      expect(fs.existsSync(mirror)).toBe(false)
+    } finally {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
+      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
+      delete process.env.HELIOS_GITHUB_APP_CREDENTIAL_DIR
+      __resetTaskDagMirrorForTests()
+      fs.rmSync(mirrorRoot, { recursive: true, force: true })
+    }
+  })
+
   it('categorizes public diagnostics without exposing secret-bearing process errors', () => {
     const diagnostic = publicTaskDagError(new Error(
-      'fatal: https://oauth2:super-secret-token@github.com/acme/private.git?access_token=other-secret: Permission denied (publickey). /var/lib/helios/private',
+      'GitHub App request /repos/acme/private/installation failed with HTTP 403: super-secret-token /var/lib/helios/private',
     ))
-    expect(diagnostic).toBe('SSH authentication failed: the repository read key was rejected or is missing.')
+    expect(diagnostic).toBe(
+      'GitHub rejected the Helios App credential. Verify the App key, installation, and repository read permission.',
+    )
     expect(diagnostic).not.toContain('super-secret-token')
-    expect(diagnostic).not.toContain('other-secret')
     expect(diagnostic).not.toContain('/var/lib/helios')
   })
 
-  it('defers strict host-key policy to the configured SSH file', () => {
-    const previousConfig = process.env.HELIOS_TASK_DAG_SSH_CONFIG
-    const previousCommand = process.env.GIT_SSH_COMMAND
+  it('rejects non-GitHub remote sources without a configured local checkout', async () => {
+    const configFile = path.join(os.tmpdir(), `taskdag-invalid-remote-${process.pid}.conf`)
     try {
-      process.env.HELIOS_TASK_DAG_SSH_CONFIG = '/etc/helios/task-dag-ssh.conf'
-      process.env.GIT_SSH_COMMAND = 'ssh -i /tmp/legacy-key'
-      const command = taskDagGitEnv().GIT_SSH_COMMAND
-      expect(command).toBe('ssh -F /etc/helios/task-dag-ssh.conf -o BatchMode=yes')
-      expect(command).not.toContain('StrictHostKeyChecking')
-      expect(command).not.toContain('legacy-key')
+      fs.writeFileSync(configFile, 'repo git@github.com:Example/repo.git\n')
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
+      __resetTaskDagMirrorForTests()
+      await expect(initTaskDagMirror()).rejects.toThrow(
+        "Task repository 'repo' must use an exact https://github.com/<owner>/<repo>.git URL",
+      )
     } finally {
-      if (previousConfig == null) delete process.env.HELIOS_TASK_DAG_SSH_CONFIG
-      else process.env.HELIOS_TASK_DAG_SSH_CONFIG = previousConfig
-      if (previousCommand == null) delete process.env.GIT_SSH_COMMAND
-      else process.env.GIT_SSH_COMMAND = previousCommand
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
+      __resetTaskDagMirrorForTests()
+      fs.rmSync(configFile, { force: true })
     }
   })
 

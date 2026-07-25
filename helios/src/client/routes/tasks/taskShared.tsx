@@ -333,7 +333,7 @@ export function SourceBanner({
       <details className="task-source-banner__help">
         <summary>How to fix or report this</summary>
         <p>
-          Check <code>HELIOS_TASK_DAG_REPOS_FILE</code> and <code>HELIOS_TASK_DAG_SSH_CONFIG</code>.
+          Check <code>HELIOS_TASK_DAG_REPOS_FILE</code> and the Helios GitHub App installation and read permission.
           For local-checkout sources, also check <code>HELIOS_TASK_DAG_LOCAL_PATHS_FILE</code>;
           for mirrors, check <code>HELIOS_TASK_DAG_MIRROR_ROOT</code>. After correcting the source,
           wait for the server refresh cycle, then reload this page. If this is a regression, include

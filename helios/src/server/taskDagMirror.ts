@@ -3,8 +3,8 @@
  *
  * Multi-repository mode reads the canonical registry at
  * `HELIOS_TASK_DAG_REPOS_FILE`, mirrors each entry below
- * `HELIOS_TASK_DAG_MIRROR_ROOT`, and uses the aliases/keys in
- * `HELIOS_TASK_DAG_SSH_CONFIG`. Local development may map registry names
+ * `HELIOS_TASK_DAG_MIRROR_ROOT`. GitHub HTTPS mirrors use the configured
+ * GitHub App. Local development may map registry names
  * to absolute checkouts with `HELIOS_TASK_DAG_LOCAL_PATHS_FILE` (two
  * whitespace-delimited fields per line). The registry is always required so
  * no environment can silently reduce task pages to automation-only data.
@@ -14,6 +14,10 @@ import { promisify } from 'node:util'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import {
+  prepareGithubAppGitCredentialDirectory,
+  withGithubAppGitCredentials,
+} from './githubAppGitCredentials.js'
 
 const execFileAsync = promisify(execFile)
 const DEFAULT_REFRESH_SECONDS = 60
@@ -74,11 +78,11 @@ function isRepo(dir: string): boolean {
 }
 export function publicTaskDagError(error: unknown): string {
   const raw = (error instanceof Error ? error.message : String(error)).toLowerCase()
-  if (/permission denied \(publickey\)|authentication failed|could not read from remote/.test(raw)) {
-    return 'SSH authentication failed: the repository read key was rejected or is missing.'
+  if (/github app request .* failed with http (401|403)/.test(raw)) {
+    return 'GitHub rejected the Helios App credential. Verify the App key, installation, and repository read permission.'
   }
-  if (/host key verification failed|remote host identification has changed/.test(raw)) {
-    return 'SSH host-key verification failed for the repository host.'
+  if (/github app request .* failed with http 404/.test(raw)) {
+    return 'The Helios GitHub App is not installed for this repository, or the repository no longer exists.'
   }
   if (/repository not found|not found.*repository|access denied/.test(raw)) {
     return 'The repository was not found or its read credential lacks access.'
@@ -98,7 +102,15 @@ export function publicTaskDagError(error: unknown): string {
   return 'The task repository operation failed. Check the Helios server log for the full error.'
 }
 function githubRepository(url: string): string | undefined {
-  const match = url.match(/(?:github\.com[/:])([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i)
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return undefined
+  }
+  if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com' || parsed.port ||
+      parsed.username || parsed.password || parsed.search || parsed.hash) return undefined
+  const match = parsed.pathname.match(/^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\.git$/)
   return match ? `${match[1]}/${match[2]}` : undefined
 }
 function assertRepository(value: string, line: number): void {
@@ -162,20 +174,26 @@ function resolveConfigs(): SourceConfig[] {
 
 function buildSources(): RuntimeSource[] {
   const root = envStr('HELIOS_TASK_DAG_MIRROR_ROOT') ?? path.join(process.env.HOME || os.tmpdir(), '.cache', 'helios', 'task-dag')
-  return resolveConfigs().map((source) => ({
-    ...source,
-    mirrorDir: path.join(root, `${source.repository}.git`),
-    githubRepository: githubRepository(source.repoUrl),
-    status: {
-      repository: source.repository,
-      githubRepository: githubRepository(source.repoUrl),
-      available: false,
-      mode: 'none',
-      lastAttemptAtMs: null,
-      lastSuccessAtMs: null,
-      lastError: null,
-    },
-  }))
+  return resolveConfigs().map((source) => {
+    const github = githubRepository(source.repoUrl)
+    if (!source.localPath && !github) {
+      throw new Error(`Task repository '${source.repository}' must use an exact https://github.com/<owner>/<repo>.git URL`)
+    }
+    return {
+      ...source,
+      mirrorDir: path.join(root, `${source.repository}.git`),
+      githubRepository: github,
+      status: {
+        repository: source.repository,
+        githubRepository: github,
+        available: false,
+        mode: 'none',
+        lastAttemptAtMs: null,
+        lastSuccessAtMs: null,
+        lastError: null,
+      },
+    }
+  })
 }
 
 function currentSources(): RuntimeSource[] {
@@ -186,7 +204,7 @@ function currentSources(): RuntimeSource[] {
 export function getTaskDagSources(): TaskDagSource[] {
   return currentSources().map((source) => {
     const local = source.localPath && isRepo(source.localPath) ? source.localPath : null
-    const mirror = source.mirrorDir && isRepo(source.mirrorDir) ? source.mirrorDir : null
+    const mirror = !source.localPath && source.mirrorDir && isRepo(source.mirrorDir) ? source.mirrorDir : null
     const gitDir = local ?? mirror
     const mode = local ? 'local-checkout' : mirror ? 'mirror' : 'none'
     return {
@@ -231,21 +249,28 @@ export function getTaskDagSourceStatus(): TaskDagSourceStatus {
   }
 }
 
-export function taskDagGitEnv(): NodeJS.ProcessEnv {
+function taskDagGitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' }
   delete env.GIT_SSH_COMMAND
-  const sshConfig = envStr('HELIOS_TASK_DAG_SSH_CONFIG')
-  if (sshConfig) {
-    env.GIT_SSH_COMMAND = `ssh -F ${sshConfig} -o BatchMode=yes`
-  }
   return env
 }
 
+async function withGitCredentials<T>(source: RuntimeSource, run: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+  return source.githubRepository
+    ? withGithubAppGitCredentials(source.githubRepository, run)
+    : run(taskDagGitEnv())
+}
+
 async function fetchSource(source: RuntimeSource): Promise<void> {
-  if (source.localPath && isRepo(source.localPath)) {
+  if (source.localPath) {
     source.status.lastAttemptAtMs = Date.now()
-    source.status.lastSuccessAtMs = source.status.lastAttemptAtMs
-    source.status.lastError = null
+    if (isRepo(source.localPath)) {
+      source.status.lastSuccessAtMs = source.status.lastAttemptAtMs
+      source.status.lastError = null
+    } else {
+      source.status.lastError = 'The configured local task repository is not a readable Git repository.'
+      log?.error('configured local task repository is unavailable', { repository: source.repository })
+    }
     return
   }
   const dir = source.mirrorDir as string
@@ -273,9 +298,11 @@ async function fetchSource(source: RuntimeSource): Promise<void> {
     }
     if (!isRepo(dir)) {
       if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true })
-      await execFileAsync('git', ['clone', '--mirror', '--filter=blob:none', source.repoUrl, dir], { cwd: path.dirname(dir), env: taskDagGitEnv(), timeout: 120_000 })
+      await withGitCredentials(source, (env) =>
+        execFileAsync('git', ['clone', '--mirror', '--filter=blob:none', source.repoUrl, dir], { cwd: path.dirname(dir), env, timeout: 120_000 }))
     } else {
-      await execFileAsync('git', ['fetch', '--prune', '--filter=blob:none', 'origin', '+refs/heads/*:refs/heads/*'], { cwd: dir, env: taskDagGitEnv(), timeout: 120_000 })
+      await withGitCredentials(source, (env) =>
+        execFileAsync('git', ['fetch', '--prune', '--filter=blob:none', 'origin', '+refs/heads/*:refs/heads/*'], { cwd: dir, env, timeout: 120_000 }))
     }
     source.status.lastSuccessAtMs = Date.now()
     source.status.lastError = null
@@ -301,6 +328,9 @@ export async function refreshTaskDagMirror(): Promise<void> {
 export async function initTaskDagMirror(opts: { log?: TaskDagMirrorLogger } = {}): Promise<TaskDagSourceStatus> {
   log = opts.log ?? null
   sources = buildSources()
+  if (sources.some((source) => source.githubRepository && !source.localPath)) {
+    prepareGithubAppGitCredentialDirectory()
+  }
   await refreshTaskDagMirror()
   if (refreshTimer) clearInterval(refreshTimer)
   const seconds = Number(envStr('HELIOS_TASK_DAG_REFRESH_SECONDS')) || DEFAULT_REFRESH_SECONDS
