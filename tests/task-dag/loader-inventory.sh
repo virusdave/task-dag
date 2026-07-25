@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh cross-repo.sh edges-prune.sh edges-write.sh edges.sh facts.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -166,6 +166,17 @@ if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/ci-repair.sh" >"$ROOT/
 elif grep -q 'requires claim-model.sh to be loaded first' "$ROOT/repair-claim-err"; then
   ok "CI repair fails loudly without claim model"
 else bad "CI repair claim-model source-order failure was not actionable"; fi
+
+root_prereqs='taskdag_prepare_child_map taskdag_sync_root_refs taskdag_recon_prepare taskdag_current_repo taskdag_node_complete taskdag_issue_closed_at_tip get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic fetch_task_refs_strict taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard taskdag_materialisation_intents_durable'
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/root-containment.sh" "$root_prereqs" >"$ROOT/root-order-out" 2>"$ROOT/root-order-err"; then
+  bad "root containment loaded without Git-object metadata providers"
+elif grep -q 'requires provider for parse_commit_metadata' "$ROOT/root-order-err"; then
+  ok "root containment fails loudly without Git-object metadata providers"
+else bad "root-containment source-order failure was not actionable"; fi
+
+if bash -c 'for n in parse_commit_metadata extract_field $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/root-containment.sh" "$root_prereqs" >/dev/null 2>"$ROOT/root-complete-err"; then
+  ok "root containment accepts its complete prerequisite set"
+else bad "root containment rejected its complete prerequisite set: $(cat "$ROOT/root-complete-err")"; fi
 
 # Source from an unrelated peer CWD. The loaded graph module must capture the
 # canonical absolute CLI; exercise the exact helper-generation/subprocess path

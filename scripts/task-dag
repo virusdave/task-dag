@@ -409,15 +409,6 @@ taskdag_ref_violations() {
 # origin as "no children" — otherwise a transient failure re-opens the
 # exact duplicate-decompose race this lock exists to prevent (#2). Display
 # paths (`roots`) may ignore the rc.
-fetch_root_refs() {
-    # Fetch the complete authoritative decomposition snapshot atomically.
-    # In particular, master is mandatory: completed children are reachable
-    # only through their completion merge after their scheduling ref retires.
-    # Never substitute HEAD/local master or retain a ready map after failure.
-    taskdag_sync_root_refs || return 1
-    taskdag_prepare_child_map || return 1
-}
-
 # Helper: build the root-orchestration claim commit. Mirrors the leaf
 # claim commit (so liveness/attribution tooling reads it the same way)
 # but tags it `Claim-Kind: root` and records the issue number. Its first
@@ -452,13 +443,6 @@ fetch_root_refs() {
 # never receive their own completion commit (the root-completion guard
 # refuses to complete a decomposed node), so completeness is derived from
 # the leaves, not from the intermediate node itself.
-epic_subtree_complete() {
-    local node="$1" cur
-    taskdag_recon_prepare --no-fetch || return 2
-    cur=$(taskdag_current_repo) || return 2
-    taskdag_node_complete "task:${cur}@${node}"
-}
-
 # Helper: does epic issue <N> have any cross-repo delegated children
 # (refs under tasks/delegated/<N>/*)? Purely-local epics have none and
 # close via `complete`; epics with delegations close via `close-epic`
@@ -472,28 +456,12 @@ epic_subtree_complete() {
 # before its cross-repo children are satisfied.
 #   return 0  -> delegated children exist (OR origin indeterminate)
 #   return 1  -> confirmed NONE (purely local)
-epic_has_delegated_children() {
-    local issue="$1" rc
-    git ls-remote --exit-code origin "refs/heads/tasks/delegated/$issue/*" >/dev/null 2>&1
-    rc=$?
-    case "$rc" in
-        0) return 0 ;;   # delegated refs present on origin
-        2) return 1 ;;   # ls-remote confirms: no matching refs
-        *) return 0 ;;   # transport/auth error → fail closed (assume delegated)
-    esac
-}
-
 # Helper: is there already a trailer-bearing Closes-Epic merge for issue
 # <N> with <epic_sha> as a parent, reachable from <base_ref>? Mirrors the
 # exact gate close-completed-issues.yml enforces (epic-as-parent AND a
 # matching `Closes-Epic: #<N>` trailer), so we never emit a duplicate
 # close commit. An ordinary `complete` attach-merge also lists the epic as
 # a parent but carries NO trailer, so the trailer check is required.
-epic_already_closed_on() {
-    local issue="$1" epic_sha="$2" base_ref="$3"
-    taskdag_issue_closed_at_tip "$base_ref" "$issue" "$epic_sha"
-}
-
 # After a successful leaf completion, auto-close the epic it belongs to IFF
 # that epic is a purely-local, top-level pending root whose ENTIRE subtree
 # is now complete. We append the canonical additive close commit to local
@@ -509,104 +477,6 @@ epic_already_closed_on() {
 # because it bypassed that gate and needed a token workers don't have.
 # All failure paths are non-fatal: a completion must never be blocked by a
 # best-effort auto-close.
-maybe_emit_local_epic_close() {
-    local task_sha="$1"
-
-    local root_sha
-    root_sha=$(get_first_parent "$task_sha" 2>/dev/null || true)
-    [ -n "$root_sha" ] || return 0
-    is_task_commit "$root_sha" || return 0
-
-    # Walk the structural (first-parent) lineage up to the TOP pending
-    # root. A leaf whose first parent is an intermediate sub-epic is not
-    # the root, but completing it can still finish the whole tree.
-    local node="$root_sha" issue="" up
-    while :; do
-        issue=$(task_is_pending_root "$node" 2>/dev/null || true)
-        [ -n "$issue" ] && break
-        up=$(get_first_parent "$node" 2>/dev/null || true)
-        [ -n "$up" ] || return 0
-        is_task_commit "$up" || return 0
-        node="$up"
-    done
-    root_sha="$node"
-
-    # Purely-local epics only; defer delegated/mixed epics to close-epic.
-    epic_has_delegated_children "$issue" && return 0
-
-    # Sync the FULL task-ref namespace (and origin/master) BEFORE judging
-    # completeness. epic_subtree_complete -> list_dag_children reads the
-    # LOCAL ref view (git rev-list --all); a worker's ephemeral checkout
-    # typically tracks ONLY master and inherited a pre-claim (it never ran
-    # claim/frontier, so it never fetched the sibling task refs). Without
-    # this sync it sees a PARTIAL DAG — just the leaf being completed — and
-    # wrongly concludes the whole epic is done, appending a spurious
-    # Closes-Epic commit that prematurely closes the issue and abandons the
-    # still-pending leaves. origin/master is needed too: a sibling whose
-    # task refs were already pruned on completion is only reachable via
-    # master history. FAIL CLOSED: if we cannot get an authoritative view,
-    # do NOT auto-close (the completion already succeeded; an open-but-done
-    # epic is repairable, a premature close is not).
-    if ! fetch_task_refs_strict; then
-        printf "${YELLOW}⚠ Could not sync task refs from origin; not auto-closing epic #%s. Retry the close after origin is reachable.${RESET}\n" \
-            "$issue" >&2
-        return 0
-    fi
-    # Explicit destination refspec so refs/remotes/origin/master is actually
-    # updated (a bare `git fetch origin master` only populates FETCH_HEAD);
-    # both the rev-list visibility of just-completed siblings and the
-    # origin/master duplicate-close check below depend on it being current.
-    if ! git fetch --quiet --no-tags origin \
-            '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1; then
-        printf "${YELLOW}⚠ Could not sync origin/master; not auto-closing epic #%s. Retry the close after origin is reachable.${RESET}\n" \
-            "$issue" >&2
-        return 0
-    fi
-
-    # Whole subtree must be complete (this completion is already on HEAD).
-    # After activation consume the canonical root status; parent recursion is
-    # retained only by the bounded pre-activation bridge.
-    taskdag_consumer_prepare local-epic-close --tip HEAD || return 0
-    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
-        local root_status
-        root_status=$(taskdag_root_status_json "task:${TASKDAG_RECON_CUR}@${root_sha}" "$issue") || return 0
-        [ "$(jq -r '.complete and (.blocked|not) and .requirementsSatisfied' <<<"$root_status")" = true ] || return 0
-    else
-        taskdag_migration_guard epic-close || return $?
-        epic_subtree_complete "$root_sha" || return 0
-    fi
-
-    # A Materialise-Child-Epic trailer in this local completion range is an
-    # obligation declaration even though its marker/delegation/edge are only
-    # created after the eventual push. Never turn temporary absence of those
-    # asynchronous projections into a close fact.
-    if ! taskdag_materialisation_intents_durable "$issue" "$root_sha" HEAD; then
-        printf "${YELLOW}⚠ Epic #%s has child-epic materialisation intent that is not durable yet; not auto-closing.${RESET}\n" \
-            "$issue" >&2
-        return 0
-    fi
-
-    # Don't duplicate an existing close (local HEAD or origin/master;
-    # origin/master was just synced above).
-    epic_already_closed_on "$issue" "$root_sha" "HEAD" && return 0
-    if git rev-parse --verify -q origin/master >/dev/null 2>&1; then
-        epic_already_closed_on "$issue" "$root_sha" "origin/master" && return 0
-    fi
-
-    local head_sha head_tree close_msg close_sha
-    head_sha=$(git rev-parse HEAD)
-    head_tree=$(git rev-parse "HEAD^{tree}")
-    close_msg="Close epic #${issue} (all tasks complete)
-
-All child tasks of this epic have completed.
-
-Closes-Epic: #${issue}"
-    close_sha=$(git commit-tree "$head_tree" -p "$head_sha" -p "$root_sha" -m "$close_msg") || return 0
-    git update-ref -m 'task-dag: local epic close commit' HEAD "$close_sha" "$head_sha" || return 0
-    printf "${GREEN}🎉 Epic #%s complete — appended local Closes-Epic commit %s.${RESET}\n" \
-        "$issue" "$(git rev-parse --short "$close_sha")"
-}
-
 # Helper: drop OUR own root claim (used by claim-root's post-claim bail
 # paths). Deletes tasks/root-active/<N> iff it is still at our claim
 # commit, then reads back. Returns 0 if the lock is no longer ours on
@@ -653,38 +523,6 @@ _release_our_root_claim() {
 # pending ref deleted) is treated as "not a current root" (rc 1): completing
 # such a retired root-shaped commit is the legitimate historical/tombstone
 # path, and it has no live leaves to clobber.
-task_is_pending_root() {
-    local sha="$1" issue remote rc
-    issue=$(extract_field "$(parse_commit_metadata "$sha")" "Issue" 2>/dev/null | sed 's/^#//' || true)
-    [ -n "$issue" ] || return 1
-    remote=$(pending_sha_on_remote_checked "$issue"); rc=$?
-    if [ "$rc" = 0 ]; then
-        [ "$remote" = "$sha" ] || return 1
-    elif [ "$rc" = 2 ]; then
-        # Cleanly absent on origin: origin is authoritative, so this is NOT a
-        # current pending root (the epic was closed/retired, or never had a
-        # root). Do not consult the local mirror here — a stale local
-        # refs/heads/tasks/pending/<N> must not resurrect a retired root and
-        # spuriously refuse the legitimate historical/tombstone completion.
-        return 1
-    else
-        # rc 3: origin indeterminate (transport/auth). Prefer the local
-        # mirror; if it confirms our root, treat as root. Otherwise, if the
-        # commit is SHAPED like a top-level epic root we cannot prove it is
-        # NOT a live (possibly decomposed) root, so signal indeterminate and
-        # let the caller fail closed rather than completing it blindly.
-        if [ "$(git rev-parse --verify -q "refs/heads/tasks/pending/$issue" 2>/dev/null)" = "$sha" ]; then
-            : # local mirror confirms → root
-        elif task_is_root_shaped_epic "$sha"; then
-            return 3
-        else
-            return 1
-        fi
-    fi
-    printf '%s\n' "$issue"
-    return 0
-}
-
 # Helper: advance HEAD to a completion commit WITHOUT destroying the
 # worktree. Replaces the old `git reset --hard` in cmd_complete, which —
 # because task-dag binds git ops to the CALLER'S cwd (the peer repo
@@ -7913,6 +7751,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/materialise.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/reconcile.sh"
 # shellcheck source=task-dag.d/semantic-migration.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/semantic-migration.sh"
+# shellcheck source=task-dag.d/root-containment.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/root-containment.sh"
 
 # Execute (must be the final statement so all functions, including those
 # in dead-code section above and any sourced extensions, are registered).
