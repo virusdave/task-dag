@@ -713,11 +713,12 @@ COMMANDS:
                            completion is durable on master — the automation#57
                            zombie in one command. Edge-only; --dry-run/--reason.
     materialise-batch --spec-file FILE
-                           Validate and atomically reserve immutable child-epic
-                           declarations. Disabled by migration policy (exit 75).
+                           Producer-authorized internal batch reservation path;
+                           requires compatible activation and matching
+                           post-census/import producer-enable authority.
     materialise-child --spec-file FILE
-                           One-declaration adapter to materialise-batch. Also
-                           disabled by migration policy (exit 75).
+                           Canonical one-declaration child-epic materialisation
+                           path; requires the same activation/producer authority.
     materialise-census --spec-file FILE --artifact FILE --digest-file FILE
                            Freeze and classify the activation registry universe.
     materialise-census-capture --spec-file FILE --output-dir DIR

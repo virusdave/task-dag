@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Canonical immutable materialisation reservation protocol (schema 1).
 
-for prerequisite in taskdag_materialise_groups_json_from_message taskdag_materialise_parent_number \
+for prerequisite in taskdag_json_no_duplicate_keys taskdag_json_file_is_single_strict \
+    taskdag_materialise_groups_json_from_message taskdag_materialise_parent_number \
     _taskdag_materialise_id _taskdag_materialise_authority_slot_id \
     _taskdag_materialise_slot_state_path _taskdag_materialise_slot_authorization_path \
     _taskdag_materialise_terminal_guard_path _taskdag_materialise_declared_slot \
@@ -20,40 +21,147 @@ TASKDAG_MATERIALISATION_MAX_DECLARATIONS=100
 
 _taskdag_materialise_error() { echo "Error: materialisation: $*" >&2; return 2; }
 
-# jq normally discards duplicate object keys. Its streaming representation
-# retains member order and container-close events. Reconstruct active member
-# containers and reject a decoded key whenever it starts a second occurrence
-# in the same object, before ordinary jq parsing can apply last-wins semantics.
 _taskdag_materialise_no_duplicate_keys() {
-    jq -c --stream . "$1" 2>/dev/null | jq -se '
-      def prefix($a;$b): ($a|length) <= ($b|length) and
-        all(range(0;($a|length)); $a[.] == $b[.]);
-      reduce .[] as $event (
-        {active:[[]],seen:[],duplicate:false};
-        if ($event|length)==2 then
-          $event[0] as $path |
-          reduce range(0;($path|length)) as $i (.;
-            if ($path[$i]|type)=="string" then
-              ($path[0:$i]) as $parent | ($path[0:$i+1]) as $child |
-              (($i==(($path|length)-1)) or ((any(.active[];.==$child))|not)) as $starts |
-              if $starts then
-                if any(.seen[];.==[$parent,$path[$i]]) then .duplicate=true
-                else .seen += [[$parent,$path[$i]]]
-                end |
-                if $i < (($path|length)-1) then .active += [$child] else . end
-              else . end
-            else . end)
-        else
-          ($event[0][0:-1]) as $closed |
-          .active |= map(select(. != $closed)) |
-          .seen |= map(select((prefix($closed;.[0]) and (.[0] != $closed))|not)) |
-          .seen |= map(select(.[0] != $closed))
-        end
-      ) | .duplicate|not' >/dev/null 2>&1
+    taskdag_json_no_duplicate_keys "$1"
 }
 
 _taskdag_materialise_sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 _taskdag_materialise_sha256_text() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+
+# Pure schema-1 protocol for the future cross-repository materialise-and-claim
+# writer. These providers validate/serialize reviewed bytes only; they perform
+# no GitHub, git-object, ref, checkout, or durable-state mutation.
+_taskdag_validate_materialise_claim_declaration_file() { # file
+    jq -e '
+      def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+      def ident: type=="string" and length>0 and length<=256 and
+        (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not);
+      def repo: type=="object" and keys==["repository","repositoryId","url"] and
+        (.repository|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and (.repositoryId|ident) and (.url|ident);
+      . as $d |
+      type=="object" and keys==["epic","implementation","operationId","schema","source","sourceClaim","target"] and .schema==1 and
+      (.operationId|test("^[0-9a-f]{64}$")) and
+      (.source|repo) and
+      (.sourceClaim|type=="object" and keys==["activeRef","claim","claimer","host","pid","task"] and
+        (.activeRef|test("^refs/heads/tasks/active/[0-9a-f]{7,64}$")) and
+        (.claim|oid) and (.task|oid) and (.claimer|ident) and (.host|ident) and
+        (.pid|type=="number" and floor==. and .>0 and .<=9007199254740991) and
+        (.task|startswith($d.sourceClaim.activeRef|split("/")|last))) and
+      (.target|type=="object" and keys==["headCommit","headRef","repository","repositoryId","schema","url"] and .schema==1 and
+        (.repository|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and (.repositoryId|ident) and (.url|ident) and
+        (.headRef|test("^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$")) and (.headCommit|oid)) and
+      (.epic|type=="object" and keys==["bodySha256","title"] and (.bodySha256|test("^[0-9a-f]{64}$")) and (.title|ident)) and
+      (.implementation|type=="object" and keys==["description","title"] and (.description|type=="string") and (.title|ident))
+    ' "$1" >/dev/null
+}
+
+taskdag_validate_materialise_claim_declaration() {
+    local input; input=$(mktemp) || return 1; cat >"$input"
+    taskdag_json_file_is_single_strict "$input" \
+        && _taskdag_validate_materialise_claim_declaration_file "$input"
+    local rc=$?; rm -f "$input"; return "$rc"
+}
+
+taskdag_serialize_materialise_claim_declaration() {
+    local input; input=$(mktemp) || return 1; cat >"$input"
+    taskdag_json_file_is_single_strict "$input" \
+        && _taskdag_validate_materialise_claim_declaration_file "$input" \
+        && jq -cS . "$input"
+    local rc=$?; rm -f "$input"; return "$rc"
+}
+
+_taskdag_validate_materialise_target_state_file() { # file
+    jq -e '
+      def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+      def activation: type=="object" and keys==["activationCommit","authorityTip","digest","epoch","guardVersion","minimumCompatibleTaskDagCommit","origin","runtimeCommit","state"] and
+        (.activationCommit|oid) and (.authorityTip|oid) and (.runtimeCommit|oid) and (.minimumCompatibleTaskDagCommit|oid) and
+        (.digest|test("^[0-9a-f]{64}$")) and (.epoch|type=="number" and floor==. and .>=1) and .guardVersion==1 and .state=="enabled" and
+        (.origin|type=="string" and length>0);
+      . as $s |
+      type=="object" and keys==["activation","advertisementDigest","claimCommit","issueNodeId","issueNumber","issueRef","issueUrl","leafCommit","leafPlan","leafRef","operationId","pendingRef","readback","rootCommit","rootPlan","schema","status","target"] and .schema==1 and
+      .status=="target-tuple-durable-linkage-pending" and
+      (.operationId|test("^[0-9a-f]{64}$")) and (.advertisementDigest|test("^[0-9a-f]{64}$")) and
+      (.rootCommit|oid) and (.leafCommit|oid) and (.claimCommit|oid) and (.issueNumber|type=="number" and floor==. and .>=1) and
+      (.issueNodeId|type=="string" and length>0) and (.issueUrl|type=="string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*$")) and
+      (.pendingRef|test("^refs/heads/tasks/pending/[1-9][0-9]*$")) and
+      (.issueRef|test("^refs/heads/gh/issues/[1-9][0-9]*$")) and
+      (.leafRef|test("^refs/heads/tasks/active/[0-9a-f]{7,64}$")) and
+      (.activation|activation) and
+      (.target|type=="object" and keys==["headCommit","headRef","repository","repositoryId","schema","url"] and .schema==1 and
+        (.repository|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and (.repositoryId|type=="string" and length>0) and
+        (.url|type=="string" and length>0) and (.headRef|test("^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$")) and (.headCommit|oid)) and
+      (.pendingRef|endswith("/"+($s.issueNumber|tostring))) and (.issueRef|endswith("/"+($s.issueNumber|tostring))) and
+      (.issueUrl|endswith("/"+($s.issueNumber|tostring))) and
+      (.readback|type=="array" and length==3 and .==sort_by(.ref) and (map(.ref)|length==(unique|length)) and
+        .==([$s.issueRef,$s.leafRef,$s.pendingRef]|sort|map(. as $ref | {ref:$ref,oid:(if $ref==$s.leafRef then $s.claimCommit else $s.rootCommit end)})))
+    ' "$1" >/dev/null || return 1
+    local digest leaf_ref_suffix
+    digest=$(jq -cS .readback "$1" | sha256sum | awk '{print $1}') || return 1
+    [ "$digest" = "$(jq -r .advertisementDigest "$1")" ] || return 1
+    leaf_ref_suffix=$(jq -r .leafRef "$1"); leaf_ref_suffix=${leaf_ref_suffix##*/}
+    jq -c .rootPlan "$1" | taskdag_validate_task_commit_plan || return 1
+    jq -c .leafPlan "$1" | taskdag_validate_task_commit_plan || return 1
+    [ "$(jq -r .rootPlan.task.operationId "$1")" = "$(jq -r .operationId "$1")" ] \
+        && [ "$(jq -r .leafPlan.task.operationId "$1")" = "$(jq -r .operationId "$1")" ] \
+        && [ "$(jq -r .rootPlan.parents[0] "$1")" = "$(jq -r .target.headCommit "$1")" ] \
+        && [ "$(jq -r .leafPlan.parents[0] "$1")" = "$(jq -r .rootCommit "$1")" ] \
+        && [ "$(jq -r .rootPlan.task.issue "$1")" = "#$(jq -r .issueNumber "$1")" ] \
+        && [ "$(jq -r .leafPlan.task.issue "$1")" = "#$(jq -r .issueNumber "$1")" ] \
+        && [ "$(jq -r .rootPlan.task.url "$1")" = "$(jq -r .issueUrl "$1")" ] \
+        && [ "$(jq -r .leafPlan.task.url "$1")" = "$(jq -r .issueUrl "$1")" ] \
+        && [ "$(jq -r .issueUrl "$1")" = "https://github.com/$(jq -r .target.repository "$1")/issues/$(jq -r .issueNumber "$1")" ] \
+        && [ "$(jq -r .activation.origin "$1")" = "$(jq -r .target.url "$1")" ] \
+        && [[ "$(jq -r .leafCommit "$1")" == "$leaf_ref_suffix"* ]]
+}
+
+taskdag_validate_materialise_target_state() {
+    local input; input=$(mktemp) || return 1; cat >"$input"
+    taskdag_json_file_is_single_strict "$input" && _taskdag_validate_materialise_target_state_file "$input"
+    local rc=$?; rm -f "$input"; return "$rc"
+}
+
+taskdag_serialize_materialise_target_state() {
+    local input; input=$(mktemp) || return 1; cat >"$input"
+    taskdag_json_file_is_single_strict "$input" \
+        && _taskdag_validate_materialise_target_state_file "$input" \
+        && jq -cS . "$input"
+    local rc=$?; rm -f "$input"; return "$rc"
+}
+
+_taskdag_validate_materialise_claim_output_file() { # file
+    jq -e '
+      def oid: type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+      def safe: type=="string" and length>0 and (test("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]")|not);
+      . as $o | type=="object" and .schema==1 and (.operationId|test("^[0-9a-f]{64}$")) and
+      if .status=="final" then
+        keys==["claimCommit","claimedTaskRef","claimedTaskSha","durableStage","issueUrl","nextAction","operationId","repository","rootSha","schema","status"] and
+        .durableStage=="final" and (.repository|test("^[a-z0-9_.-]+/[a-z0-9_.-]+$")) and
+        all(.rootSha,.claimedTaskSha,.claimCommit;oid) and (.claimedTaskRef|test("^tasks/active/[0-9a-f]{7,64}$")) and
+        (.claimedTaskSha|startswith($o.claimedTaskRef|split("/")|last)) and
+        (.issueUrl|test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*$")) and (.nextAction|safe)
+      elif .status=="replay-required" then
+        keys==["durableStage","nextAction","operationId","schema","status"] and
+        (.durableStage=="batch-reserved-before-create" or .durableStage=="create-in-flight-or-uncertain" or
+         .durableStage=="issue-adopted" or .durableStage=="target-tuple-durable-linkage-pending" or
+         .durableStage=="marker-durable-delegation-pending") and
+        .nextAction=="replay the same materialise-and-claim invocation with the same operation identity"
+      else false end
+    ' "$1" >/dev/null
+}
+
+taskdag_validate_materialise_claim_output() {
+    local input; input=$(mktemp) || return 1; cat >"$input"
+    taskdag_json_file_is_single_strict "$input" && _taskdag_validate_materialise_claim_output_file "$input"
+    local rc=$?; rm -f "$input"; return "$rc"
+}
+
+taskdag_serialize_materialise_claim_output() {
+    local input; input=$(mktemp) || return 1; cat >"$input"
+    taskdag_json_file_is_single_strict "$input" \
+        && _taskdag_validate_materialise_claim_output_file "$input" \
+        && jq -cS . "$input"
+    local rc=$?; rm -f "$input"; return "$rc"
+}
 taskdag_materialisation_adopted_issue_slot_count() { # tip issue-node-id [excluded-slot]
     local tip=$1 issue_node_id=$2 excluded=${3:-} encoded matches match path slot json rc
     local -A slots=()

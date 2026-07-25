@@ -10,21 +10,6 @@ _taskdag_activation_digest_file() {
     output=$(sha256sum "$1") || return 1
     awk 'NF==2 && $1 ~ /^[0-9a-f]{64}$/ {print $1}' <<<"$output"
 }
-taskdag_full_history_checkout() {
-    local repo=$1 shallow common config_matches rc promisor_pack
-    shallow=$(git -C "$repo" rev-parse --is-shallow-repository) || return 1
-    [ "$shallow" = false ] || return 1
-    common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir) || return 1
-    [ -d "$common/objects/pack" ] || return 1
-    config_matches=$(git -C "$repo" config --get-regexp '^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$' 2>/dev/null); rc=$?
-    case "$rc" in
-        0) return 1 ;;
-        1) ;;
-        *) return 1 ;;
-    esac
-    promisor_pack=$(find "$common/objects/pack" -maxdepth 1 -type f -name '*.promisor' -print -quit) || return 1
-    [ -z "$promisor_pack" ]
-}
 _taskdag_activation_full_checkout() {
     taskdag_full_history_checkout "$1"
 }

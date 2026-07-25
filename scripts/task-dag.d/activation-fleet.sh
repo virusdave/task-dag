@@ -39,14 +39,7 @@ _taskdag_activation_fleet_registry_rows() { # registry-file; name<TAB>url<TAB>re
 }
 
 _taskdag_activation_fleet_remote_head() { # checkout; ref<TAB>commit
-    local checkout=$1 advertisement ref commit
-    advertisement=$(git -C "$checkout" ls-remote --symref origin HEAD) || return 1
-    ref=$(awk '$1=="ref:" && $3=="HEAD" {print $2}' <<<"$advertisement")
-    commit=$(awk '$2=="HEAD" && $1 ~ /^[0-9a-f]{40,64}$/ {print $1}' <<<"$advertisement")
-    [[ "$ref" =~ ^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ "$commit" =~ ^[0-9a-f]{40,64}$ ]] || return 1
-    git -C "$checkout" fetch -q --no-tags origin "$commit" || return 1
-    [ "$(git -C "$checkout" rev-parse FETCH_HEAD)" = "$commit" ] || return 1
-    printf '%s\t%s\n' "$ref" "$commit"
+    taskdag_remote_head "$1"
 }
 
 _taskdag_activation_fleet_prepare_checkout() { # work-root name url
@@ -95,19 +88,12 @@ _taskdag_activation_fleet_validate_plan() { # file
 }
 
 _taskdag_activation_fleet_checkout_identity() { # checkout plan expected-repo
-    local checkout=$1 plan=$2 expected=$3 raw push endpoint repo_info head_ref head_commit
+    local checkout=$1 plan=$2 expected=$3 endpoint tuple
     endpoint=$(jq -c --arg repo "$expected" '.endpoints[]|select(.repository==$repo)' "$plan") || return 1
     [ -n "$endpoint" ] || return 1
-    raw=$(git -C "$checkout" config --get remote.origin.url 2>/dev/null) || return 1
-    push=$(git -C "$checkout" config --get-all remote.origin.pushurl 2>/dev/null || true)
-    [ -z "$push" ] || return 1
-    [ "$raw" = "$(jq -r .url <<<"$endpoint")" ] || return 1
-    repo_info=$(gh api "repos/$expected" 2>/dev/null) || return 1
-    [ "$(jq -r '.full_name|ascii_downcase' <<<"$repo_info")" = "$expected" ] || return 1
-    [ "$(jq -r .node_id <<<"$repo_info")" = "$(jq -r .repositoryId <<<"$endpoint")" ] || return 1
-    IFS=$'\t' read -r head_ref head_commit < <(_taskdag_activation_fleet_remote_head "$checkout") || return 1
-    [ "$head_ref" = "$(jq -r --arg repo "$expected" '.target.sourceTips[]|select(.repository==$repo)|.ref' "$plan")" ] &&
-      [ "$head_commit" = "$(jq -r --arg repo "$expected" '.target.sourceTips[]|select(.repository==$repo)|.commit' "$plan")" ]
+    tuple=$(jq -ncS --argjson endpoint "$endpoint" --arg headRef "$(jq -r --arg repo "$expected" '.target.sourceTips[]|select(.repository==$repo)|.ref' "$plan")" --arg headCommit "$(jq -r --arg repo "$expected" '.target.sourceTips[]|select(.repository==$repo)|.commit' "$plan")" \
+      '{schema:1,repository:$endpoint.repository,repositoryId:$endpoint.repositoryId,url:$endpoint.url,headRef:$headRef,headCommit:$headCommit}') || return 1
+    taskdag_validate_target_checkout "$checkout" "$tuple"
 }
 
 cmd_activation_fleet_plan() {

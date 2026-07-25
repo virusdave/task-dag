@@ -3,6 +3,22 @@ set -uo pipefail
 TD="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}"
 TD="$(cd "$(dirname "$TD")" && pwd)/$(basename "$TD")"
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+# Direct module sourcing below predates the guarded entrypoint loader. These
+# fixture-local equivalents satisfy the JSON foundation while real CLI calls
+# above/below exercise the canonical provider loaded by scripts/task-dag.
+taskdag_json_no_duplicate_keys() {
+  python3 - "$1" <<'PY'
+import json, sys
+def pairs(values):
+    keys = [key for key, _ in values]
+    if len(keys) != len(set(keys)): raise ValueError("duplicate")
+    return dict(values)
+with open(sys.argv[1]) as source: json.load(source, object_pairs_hook=pairs)
+PY
+}
+taskdag_json_file_is_single_strict() {
+  taskdag_json_no_duplicate_keys "$1"
+}
 source "$(dirname "$TD")/task-dag.d/git-objects.sh"
 source "$(dirname "$TD")/task-dag.d/child-map.sh"
 source "$(dirname "$TD")/task-dag.d/repository-identity.sh"
@@ -86,6 +102,33 @@ ids=$(
 )
 expected=$'205a028163b8c8da6fb3505e7b4169231e76a1adb5869204ea12cda91f9d60e7:ca0423b62c4ba49dc9f2e2f102cc338e335d5ff7cf8174fa8fb5ca36a42db7e0:786b2daa911b565593d5ddfde62833094fd1c70ba2e6c02625124b7090b10675\n5b5e6e4f3c3531addc2a01566c65a415b1ce4255412af9acfc90ca8918659b50'
 [ "$ids" = "$expected" ] && ok "golden slot, declaration, operation, and batch IDs" || bad "golden IDs changed: $ids"
+
+# Future materialise-and-claim protocol providers are strict, canonical, and
+# effect-free. Schema 1 rejects additions rather than silently accepting a
+# producer/consumer version skew.
+if (
+  source "$(dirname "$TD")/task-dag.d/task-model.sh"
+  source "$(dirname "$TD")/task-dag.d/materialise.sh"
+  oid=5555555555555555555555555555555555555555
+  op=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  root_commit=6666666666666666666666666666666666666666
+  root=$(taskdag_plan_task_commit root "$EMPTY_TREE" "$oid" Root '#7' actor https://github.com/o/r/issues/7 pending epic '' "$op")
+  leaf=$(taskdag_plan_task_commit leaf "$EMPTY_TREE" "$root_commit" Leaf '#7' actor https://github.com/o/r/issues/7 pending leaf body "$op")
+  printf '%s\n' "$root" | taskdag_validate_task_commit_plan
+  printf '%s\n' "$leaf" | taskdag_validate_task_commit_plan
+  declaration=$(jq -ncS '{schema:1,operationId:("a"*64),source:{repository:"o/s",repositoryId:"R_0",url:"git@github.com:o/s.git"},sourceClaim:{activeRef:"refs/heads/tasks/active/4444444",claim:("3"*40),task:("4"*40),claimer:"worker",host:"host",pid:42},target:{schema:1,repository:"o/r",repositoryId:"R_1",url:"git@github.com:o/r.git",headRef:"refs/heads/master",headCommit:("5"*40)},epic:{bodySha256:("b"*64),title:"Root"},implementation:{description:"body",title:"Leaf"}}')
+  canonical=$(printf '%s\n' "$declaration" | taskdag_serialize_materialise_claim_declaration)
+  [ "$canonical" = "$(jq -cS . <<<"$declaration")" ]
+  ! jq '.unexpected=true' <<<"$declaration" | taskdag_validate_materialise_claim_declaration
+  readback=$(jq -ncS --arg root "$root_commit" '[{ref:"refs/heads/gh/issues/7",oid:$root},{ref:"refs/heads/tasks/active/7777777",oid:("8"*40)},{ref:"refs/heads/tasks/pending/7",oid:$root}]|sort_by(.ref)')
+  advertisement=$(printf '%s\n' "$readback" | sha256sum | awk '{print $1}')
+  state=$(jq -ncS --argjson rootPlan "$root" --argjson leafPlan "$leaf" --argjson readback "$readback" --arg digest "$advertisement" --arg root "$root_commit" '{schema:1,status:"target-tuple-durable-linkage-pending",operationId:("a"*64),target:{schema:1,repository:"o/r",repositoryId:"R_1",url:"git@github.com:o/r.git",headRef:"refs/heads/master",headCommit:("5"*40)},activation:{activationCommit:("1"*40),authorityTip:("2"*40),digest:("3"*64),epoch:1,guardVersion:1,minimumCompatibleTaskDagCommit:("4"*40),origin:"git@github.com:o/r.git",runtimeCommit:("5"*40),state:"enabled"},issueNumber:7,issueNodeId:"I_7",issueUrl:"https://github.com/o/r/issues/7",rootCommit:$root,pendingRef:"refs/heads/tasks/pending/7",issueRef:"refs/heads/gh/issues/7",leafCommit:("7"*40),leafRef:"refs/heads/tasks/active/7777777",claimCommit:("8"*40),rootPlan:$rootPlan,leafPlan:$leafPlan,readback:$readback,advertisementDigest:$digest}')
+  printf '%s\n' "$state" | taskdag_validate_materialise_target_state
+  final=$(jq -ncS '{schema:1,status:"final",durableStage:"final",operationId:("a"*64),repository:"o/r",issueUrl:"https://github.com/o/r/issues/7",rootSha:("6"*40),claimedTaskSha:("7"*40),claimedTaskRef:"tasks/active/7777777",claimCommit:("8"*40),nextAction:"continue implementation"}')
+  replay=$(jq -ncS '{schema:1,status:"replay-required",durableStage:"issue-adopted",operationId:("a"*64),nextAction:"replay the same materialise-and-claim invocation with the same operation identity"}')
+  printf '%s\n' "$final" | taskdag_validate_materialise_claim_output
+  printf '%s\n' "$replay" | taskdag_validate_materialise_claim_output
+) 2>/dev/null; then ok "materialise-and-claim schemas and task plans are strict canonical pure providers"; else bad "materialise-and-claim protocol providers"; fi
 
 # Duplicate declarations coalesce with sorted provenance; declaration and
 # batch order cannot affect IDs or the resulting authority tree.

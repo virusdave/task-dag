@@ -71,3 +71,38 @@ require_jq_for_json() {
         return 1
     fi
 }
+
+# jq's ordinary object parser applies last-key-wins semantics. Protocol inputs
+# must reject that ambiguity before consumers inspect decoded values.
+taskdag_json_no_duplicate_keys() { # file
+    jq -c --stream . "$1" 2>/dev/null | jq -se '
+      def prefix($a;$b): ($a|length) <= ($b|length) and
+        all(range(0;($a|length)); $a[.] == $b[.]);
+      reduce .[] as $event (
+        {active:[[]],seen:[],duplicate:false};
+        if ($event|length)==2 then
+          $event[0] as $path |
+          reduce range(0;($path|length)) as $i (.;
+            if ($path[$i]|type)=="string" then
+              ($path[0:$i]) as $parent | ($path[0:$i+1]) as $child |
+              (($i==(($path|length)-1)) or ((any(.active[];.==$child))|not)) as $starts |
+              if $starts then
+                if any(.seen[];.==[$parent,$path[$i]]) then .duplicate=true
+                else .seen += [[$parent,$path[$i]]]
+                end |
+                if $i < (($path|length)-1) then .active += [$child] else . end
+              else . end
+            else . end)
+        else
+          ($event[0][0:-1]) as $closed |
+          .active |= map(select(. != $closed)) |
+          .seen |= map(select((prefix($closed;.[0]) and (.[0] != $closed))|not)) |
+          .seen |= map(select(.[0] != $closed))
+        end
+      ) | .duplicate|not' >/dev/null 2>&1
+}
+
+taskdag_json_file_is_single_strict() { # file
+    [ -f "$1" ] && jq -se 'length==1' "$1" >/dev/null 2>&1 \
+        && taskdag_json_no_duplicate_keys "$1"
+}

@@ -64,6 +64,39 @@ Note: ${note}"
     git commit-tree "$root_tree" -p "$root_sha" -m "$msg"
 }
 
+# Positively validate the exact claim object a caller intends to consume.
+# This is deliberately stricter than the historical completion/reaping readers:
+# new multi-repository operations must bind ownership to one immutable claim OID,
+# its task parent, and the complete process identity which won the claim.
+taskdag_validate_source_claim() { # claim-oid task-oid claimer host pid
+    local claim_oid=$1 task_oid=$2 expected_claimer=$3 expected_host=$4 expected_pid=$5
+    local actual_oid msg task claimer host pid first tree task_tree parents
+    [[ "$claim_oid" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || return 1
+    [[ "$task_oid" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || return 1
+    [ -n "$expected_claimer" ] && [ -n "$expected_host" ] \
+        && [[ "$expected_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    actual_oid=$(git rev-parse --verify "$claim_oid^{commit}" 2>/dev/null) || return 1
+    [ "$actual_oid" = "$claim_oid" ] || return 1
+    git cat-file -e "$task_oid^{commit}" 2>/dev/null || return 1
+    parents=$(git show -s --format=%P "$claim_oid" 2>/dev/null) || return 1
+    [ "$parents" = "$task_oid" ] || return 1
+    first=$(get_first_parent "$claim_oid" 2>/dev/null) || return 1
+    [ "$first" = "$task_oid" ] || return 1
+    tree=$(git rev-parse "$claim_oid^{tree}" 2>/dev/null) || return 1
+    task_tree=$(git rev-parse "$task_oid^{tree}" 2>/dev/null) || return 1
+    [ "$tree" = "$task_tree" ] || return 1
+    msg=$(parse_commit_metadata "$claim_oid" 2>/dev/null) || return 1
+    for field in Task-Commit Claimer Claimer-Host Claimer-PID; do
+        [ "$(awk -v key="$field" 'index($0,key ": ")==1{n++} END{print n+0}' <<<"$msg")" -eq 1 ] || return 1
+    done
+    task=$(extract_field "$msg" Task-Commit 2>/dev/null) || return 1
+    claimer=$(extract_field "$msg" Claimer 2>/dev/null) || return 1
+    host=$(extract_field "$msg" Claimer-Host 2>/dev/null) || return 1
+    pid=$(extract_field "$msg" Claimer-PID 2>/dev/null) || return 1
+    [ "$task" = "$task_oid" ] && [ "$claimer" = "$expected_claimer" ] \
+        && [ "$host" = "$expected_host" ] && [ "$pid" = "$expected_pid" ]
+}
+
 claim_dead_reason="none"
 
 # Returns 0 dead, 1 alive, 2 indeterminate. TTL retains the historical

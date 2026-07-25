@@ -107,6 +107,28 @@ else
   bad "4: skipped (no T1)"
 fi
 
+# ---------------------------------------------------------------------------
+# TEST 5: strict source ownership binds exact claim OID, task parent, and PID.
+# ---------------------------------------------------------------------------
+parse_commit_metadata() { git show -s --format=%B "$1"; }
+extract_field() { sed -n "s/^$2: //p" <<<"$1" | head -1; }
+get_first_parent() { git show -s --format=%P "$1" | awk '{print $1}'; }
+get_task_title() { git show -s --format=%s "$1" | sed 's/^Task: //'; }
+source "$(dirname "$TD")/task-dag.d/claim-model.sh"
+if [ -n "$T1" ]; then
+  claim_oid=$(git rev-parse "refs/heads/tasks/active/$T1")
+  task_oid=$(git rev-parse "$T1")
+  if taskdag_validate_source_claim "$claim_oid" "$task_oid" me h 424242 \
+    && ! taskdag_validate_source_claim "$claim_oid" "$task_oid" me h 424243 \
+    && ! taskdag_validate_source_claim "$claim_oid" "$EPIC" me h 424242; then
+    ok "5: strict source claim binds claim OID, task parent, owner, host, and PID"
+  else
+    bad "5: strict source claim accepted mismatched identity or rejected exact identity"
+  fi
+else
+  bad "5: skipped (no T1)"
+fi
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
