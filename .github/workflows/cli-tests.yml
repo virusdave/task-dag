@@ -60,5 +60,7 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@c70cb8ae92d68c66953db28a26a63db1665bc837 # v3.21.5
         with:
           github-token: ''
+      - name: Provision locale-sensitive fixture
+        run: sudo locale-gen en_US.UTF-8
       - name: Rust tests + shellcheck + bash -n + fixture smoke
         run: bash tests/task-dag/run-all.sh

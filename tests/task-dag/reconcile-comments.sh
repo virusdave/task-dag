@@ -143,6 +143,12 @@ metadata_sha=0123456789abcdef0123456789abcdef01234567
 clarification=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarification' '' \
   'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 98' \
   | git -C "$tmp/work" commit-tree "$empty")
+locale_issue_2=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarification' '' \
+  'issue:' '  number: 2' '  repo: acme/widgets' '' 'github:' '  comment_id: 96' \
+  | git -C "$tmp/work" commit-tree "$empty")
+locale_issue_20=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarification' '' \
+  'issue:' '  number: 20' '  repo: acme/widgets' '' 'github:' '  comment_id: 97' \
+  | git -C "$tmp/work" commit-tree "$empty")
 manual_cleanup=$(printf '%s\n' 'kind: completion' 'role: system' 'intent: cross-repo-satisfied' '' \
   'issue:' '  repo: acme/widgets' '  number: 12' '' 'delegated:' '  repo: acme/peer' \
   '  number: 1' '' 'source:' '  repo: acme/peer' '  commit: abcdef123456' \
@@ -150,6 +156,8 @@ manual_cleanup=$(printf '%s\n' 'kind: completion' 'role: system' 'intent: cross-
   | git -C "$tmp/work" commit-tree "$empty")
 git -C "$tmp/work" push -q origin \
   "$clarification:refs/heads/gh/comments/10/98" \
+  "$locale_issue_2:refs/heads/gh/comments/2/96" \
+  "$locale_issue_20:refs/heads/gh/comments/20/97" \
   "$manual_cleanup:refs/heads/gh/comments/12/manual-cleanup-peer-1"
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<'EOF'
@@ -197,6 +205,11 @@ case "$endpoint" in
     ;;
   *issues/10) header; printf '\r\n{"number":10,"state":"open","title":"Issue ten","body":"","html_url":"https://github.com/acme/widgets/issues/10","user":{"login":"alice"}}\n' ;;
   *issues/11) header; printf '\r\n{"number":11,"state":"open","title":"Pull request","body":"","html_url":"https://github.com/acme/widgets/pull/11","user":{"login":"alice"},"pull_request":{}}\n' ;;
+  *issues/1|*issues/2|*issues/20)
+    number=${endpoint##*/}
+    header; printf '\r\n'
+    jq -nc --argjson number "$number" '{number:$number,state:"closed",title:"Closed locale fixture",body:"",html_url:("https://github.com/acme/widgets/issues/"+($number|tostring)),user:{login:"alice"}}'
+    ;;
   *issues/12)
     if [[ "${GH_TIMEOUT_ISSUE:-0}" == 1 ]]; then sleep 5; exit 1; fi
     header; printf '\r\n{"number":12,"state":"closed","title":"Closed issue","body":"","html_url":"https://github.com/acme/widgets/issues/12","user":{"login":"alice"}}\n'
@@ -257,7 +270,7 @@ jq -e '.status == "success" and .requests == 0 and
 [ ! -s "$GH_LOG" ]
 index_tip=$(git --git-dir="$tmp/origin.git" rev-parse refs/heads/tasks/v1/reconcile-comments-index)
 [ "$(git --git-dir="$tmp/origin.git" rev-list --parents -n1 "$index_tip" | wc -w)" -eq 1 ]
-[ "$(git --git-dir="$tmp/origin.git" show "$index_tip:queue.tsv")" = $'10\n12' ]
+[ "$(git --git-dir="$tmp/origin.git" show "$index_tip:queue.tsv")" = $'10\n12\n2\n20' ]
 # Checkpoint reads reject every Git mechanism that can hide, lazily supply, or
 # rewrite the ordinary reachable-object closure.
 (cd "$tmp/work" && _xrepo_reconcile_checkpoint_store_safe)
@@ -289,14 +302,47 @@ git -C "$tmp/work" update-ref -d "refs/replace/$clarification"
 bad_index=$(printf 'Malformed index successor\n' | git -C "$tmp/work" commit-tree \
     "$(git --git-dir="$tmp/origin.git" rev-parse "$index_tip^{tree}")" -p "$index_tip" -p "$clarification")
 ! (cd "$tmp/work" && _xrepo_reconcile_index_read "$bad_index" "$tmp/bad-index" acme/widgets "")
+# Canonical manifests remain valid when the caller's locale sorts numeric ref
+# components differently. This shape reproduces the production join failure:
+# the current generation adds issue 1 ahead of persisted issues 10, 2, and 20.
+locale -a | grep -Fxq en_US.utf8
+mkdir "$tmp/locale-parent" "$tmp/locale-current"
+cat >"$tmp/locale-parent/manifest.tsv" <<'EOF'
+1111111111111111111111111111111111111111	refs/heads/gh/comments/10/1
+2222222222222222222222222222222222222222	refs/heads/gh/comments/2/1
+3333333333333333333333333333333333333333	refs/heads/gh/comments/20/1
+EOF
+cat >"$tmp/locale-current/manifest.tsv" <<'EOF'
+0000000000000000000000000000000000000000	refs/heads/gh/comments/1/1
+1111111111111111111111111111111111111111	refs/heads/gh/comments/10/1
+2222222222222222222222222222222222222222	refs/heads/gh/comments/2/1
+3333333333333333333333333333333333333333	refs/heads/gh/comments/20/1
+EOF
+LC_ALL=C sort -c -t $'\t' -k2,2 "$tmp/locale-parent/manifest.tsv"
+LC_ALL=C sort -c -t $'\t' -k2,2 "$tmp/locale-current/manifest.tsv"
+! LC_ALL=en_US.utf8 sort -c -t $'\t' -k2,2 "$tmp/locale-parent/manifest.tsv" 2>/dev/null
+! LC_ALL=en_US.utf8 sort -c -t $'\t' -k2,2 "$tmp/locale-current/manifest.tsv" 2>/dev/null
+printf '%s\n' '{"generation":1}' >"$tmp/locale-parent/metadata.json"
+printf '%s\n' '{"generation":2}' >"$tmp/locale-current/metadata.json"
+printf '%s\n' '{"delegations":{}}' >"$tmp/locale-parent/proofs.json"
+printf '%s\n' '{"delegations":{}}' >"$tmp/locale-current/proofs.json"
+printf '%s\n' '{"peers":{}}' >"$tmp/locale-parent/peers.json"
+printf '%s\n' '{"peers":{}}' >"$tmp/locale-current/peers.json"
+LC_ALL=en_US.utf8 _xrepo_reconcile_index_validate_successor \
+  "$tmp/locale-current" "$tmp/locale-parent" "$tmp/locale-join"
+[ "$(wc -l <"$tmp/locale-join.manifest")" -eq 3 ]
+locale_issue_1=$(printf '%s\n' 'kind: message' 'role: human' 'intent: clarification' '' \
+  'issue:' '  number: 1' '  repo: acme/widgets' '' 'github:' '  comment_id: 95' \
+  | git -C "$tmp/work" commit-tree "$empty")
+git -C "$tmp/work" push -q origin "$locale_issue_1:refs/heads/gh/comments/1/95"
 refs_before=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname) %(refname)' | sort)
 : >"$tmp/validation-work"
-out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+out=$(cd "$tmp/work" && LC_ALL=en_US.utf8 PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     TASKDAG_CHECKPOINT_FETCH_SLOW_SECONDS=0 \
     TASKDAG_VALIDATION_WORK_COUNTER="$tmp/validation-work" \
     reconcile-fixture --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --allow-comment 10:99 --dry-run)
-[ ! -s "$tmp/validation-work" ]
+[ "$(cut -f1 "$tmp/validation-work")" = receipt ]
 [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]
 jq -e '.schema_version == 1 and .status == "success" and .dry_run == true and
        .pages == 2 and .requests == 7 and .returned == 7 and .unique == 6 and
@@ -314,7 +360,7 @@ refs_after=$(git --git-dir="$tmp/origin.git" for-each-ref --format='%(objectname
 # recreating work, while an immutable historical completion receipt for that
 # same closed issue does not attempt close convergence against a retired root.
 : >"$GH_LOG"
-apply_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
+apply_out=$(cd "$tmp/work" && LC_ALL=en_US.utf8 PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     GH_CLOSED_ONLY=1 reconcile-fixture --mode complete \
     --ingestion-start-at 2025-01-01T00:00:00Z --watchdog-token-file "$tmp/watchdog-token" || true)
 jq -e '.status == "failed" and .dry_run == false and .applied == 1 and

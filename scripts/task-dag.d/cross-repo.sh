@@ -112,7 +112,7 @@ _xrepo_reconcile_index_read_one() { # commit output-directory expected-repositor
           (.key|test("^[1-9][0-9]*$")) and (.value|keys)==["close","root"] and
           (.value.close|test("^[0-9a-f]{40}$")) and (.value.root|test("^[0-9a-f]{40}$"))))
     ' "$out/peers.json" >/dev/null || return 2
-    awk -F '\t' 'BEGIN{p=""} NF!=2 || $1!~/^[0-9a-f]{40}$/ || $2!~/^refs\/heads\/gh\/comments\/[1-9][0-9]*\/([1-9][0-9]*|manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$/ && $2!~/^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ || (p!="" && $2<=p){exit 1} {p=$2}' "$out/manifest.tsv" || return 2
+    LC_ALL=C awk -F '\t' 'BEGIN{p=""} NF!=2 || $1!~/^[0-9a-f]{40}$/ || $2!~/^refs\/heads\/gh\/comments\/[1-9][0-9]*\/([1-9][0-9]*|manual-cleanup-[A-Za-z0-9_.-]+-[1-9][0-9]*)$/ && $2!~/^refs\/heads\/tasks\/delegated\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/delegated-close\/v1\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*$/ && $2!~/^refs\/heads\/tasks\/completions\/[1-9][0-9]*\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[1-9][0-9]*\/[0-9a-f]{7,40}$/ || (p!="" && $2<=p){exit 1} {p=$2}' "$out/manifest.tsv" || return 2
     awk 'NF!=1 || $0 !~ /^[1-9][0-9]*$/ || seen[$0]++ {exit 1}' "$out/queue.tsv" || return 2
 }
 
@@ -147,7 +147,7 @@ _xrepo_reconcile_index_validate_successor() { # current-dir parent-dir scratch-p
     generation=$(jq -r .generation "$current/metadata.json")
     prior_generation=$(jq -r .generation "$parent/metadata.json")
     [ "$generation" -eq $((prior_generation + 1)) ] || return 2
-    join -t $'\t' -j 2 -o 1.1,1.2,2.1 "$parent/manifest.tsv" "$current/manifest.tsv" >"$scratch.manifest" || true
+    LC_ALL=C join -t $'\t' -j 2 -o 1.1,1.2,2.1 "$parent/manifest.tsv" "$current/manifest.tsv" >"$scratch.manifest" || true
     [ "$(wc -l <"$scratch.manifest")" -eq "$(wc -l <"$parent/manifest.tsv")" ] \
         && awk -F '\t' '$1!=$3{exit 1}' "$scratch.manifest" || return 2
     jq -e --slurpfile newProofs "$current/proofs.json" --slurpfile oldPeers "$parent/peers.json" \
@@ -2255,7 +2255,7 @@ EOF
     _xrepo_write_sorted_listing "$listing" "$tmp/manifest"
     LC_ALL=C sort -t $'\t' -k2,2 "$tmp/manifest" -o "$tmp/manifest"
     if [ -n "$index_old" ]; then
-        join -t $'\t' -j 2 -o 1.1,1.2,2.1 "$index_dir/manifest.tsv" "$tmp/manifest" >"$tmp/old-joined" || true
+        LC_ALL=C join -t $'\t' -j 2 -o 1.1,1.2,2.1 "$index_dir/manifest.tsv" "$tmp/manifest" >"$tmp/old-joined" || true
         if [ "$(wc -l <"$tmp/old-joined")" -ne "$(wc -l <"$index_dir/manifest.tsv")" ] \
           || ! awk -F '\t' '$1!=$3{exit 1}' "$tmp/old-joined"; then
             _rc_fail snapshot "" "" "an indexed immutable ref was deleted or replaced"; fatal=true
