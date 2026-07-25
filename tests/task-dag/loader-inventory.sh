@@ -24,7 +24,7 @@ if (PS4='+${BASH_SOURCE}:${LINENO}: ' bash -x "$TD" --version) >"$ROOT/version" 
   ok "version output is stable under the characterized loader"
 else bad "version invocation failed or output changed"; fi
 mapfile -t direct < <(grep -F "+$TD:" "$trace" | sed -n 's/.* source .*\/task-dag.d\/\([^ ]*\.sh\)$/\1/p')
-expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh cross-repo.sh edges-prune.sh edges-write.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
+expected=(source-contract.sh json.sh cas-retry.sh git-objects.sh task-model.sh child-map.sh claim-model.sh ref-schema.sh repository-identity.sh github-origin.sh blocked-core.sh activation-fleet.sh activation.sh ci-chains.sh ci-repair.sh comment-watchdog.sh edges.sh facts.sh reconciliation-core.sh semantic-consumer.sh status-projection.sh scheduling-fence.sh cross-repo.sh edges-prune.sh edges-write.sh graph-converge.sh legacy-edges.sh mailbox.sh materialise-census-capture.sh materialise-intent.sh materialise-producer.sh materialise-reconcile.sh materialise.sh reconcile.sh semantic-migration.sh root-containment.sh)
 if [ "${direct[*]}" = "${expected[*]}" ] \
   && [ "$(printf '%s\n' "${direct[@]}" | LC_ALL=C sort -u | wc -l)" -eq "${#expected[@]}" ]; then
   ok "explicit bottom manifest loads every module exactly once in canonical order"
@@ -197,6 +197,17 @@ else bad "status projection prerequisite failure was not actionable"; fi
 if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/status-projection.sh" "$projection_prereqs" >/dev/null 2>"$ROOT/projection-complete-err"; then
   ok "status projection accepts its complete prerequisite set"
 else bad "status projection rejected its complete prerequisite set: $(cat "$ROOT/projection-complete-err")"; fi
+
+fence_prereqs='taskdag_consumer_prepare taskdag_requirements_status_json taskdag_task_status_json taskdag_activation_snapshot_token taskdag_activation_fenced_multi_push'
+if bash -c 'for n in $2; do [ "$n" = taskdag_consumer_prepare ] || eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/scheduling-fence.sh" "$fence_prereqs" >"$ROOT/fence-order-out" 2>"$ROOT/fence-order-err"; then
+  bad "scheduling fence loaded without semantic-consumer preparation"
+elif grep -q 'requires semantic-consumer.sh provider taskdag_consumer_prepare' "$ROOT/fence-order-err"; then
+  ok "scheduling fence fails loudly without a prerequisite"
+else bad "scheduling-fence prerequisite failure was not actionable"; fi
+
+if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/scheduling-fence.sh" "$fence_prereqs" >/dev/null 2>"$ROOT/fence-complete-err"; then
+  ok "scheduling fence accepts its complete prerequisite set"
+else bad "scheduling fence rejected its complete prerequisite set: $(cat "$ROOT/fence-complete-err")"; fi
 
 if bash -c 'taskdag_node_complete(){ :; }; taskdag_leaf_ready(){ :; }; taskdag_normalize_node(){ :; }; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/reconcile.sh" >"$ROOT/reconcile-core-out" 2>"$ROOT/reconcile-core-err"; then
   bad "reconcile loaded without reconciliation preparation"
