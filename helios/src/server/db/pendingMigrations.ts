@@ -1689,6 +1689,24 @@ const SENTINELS: MigrationSentinel[] = [
       'Capture-time inferred review-to-transaction attribution columns. ' +
       'Until applied, review submissions cannot snapshot an originating ' +
       'invoice/cashier and budtender rating metrics remain unavailable.',
+    blessing: {
+      ref: 'https://ampcode.com/threads/T-019f96d4-b6a0-70a7-bc7f-08947ea92044',
+      reviewedSha: 'e09100ccb9dc26d759416bbcbba0c24d33d866b0',
+      artifactSha256: 'b7495b0f6d72cf870909ef88307a76dff59932c35fd6a0018567afd2a3f5f03b',
+      transactionMode: 'transactional',
+      operatorExplanation:
+        'This migration adds four columns that let each newly accepted customer ' +
+        'review preserve its capture-time inferred invoice and cashier. Existing ' +
+        'reviews remain not_attempted; no historical attribution is guessed. It ' +
+        'adds two consistency checks but no index, backfill, scheduled workload, ' +
+        'or unrelated customer-review schema.',
+      note:
+        'Oracle-approved exact 1,291-byte single-file closure. Self-wrapped in ' +
+        'begin/commit with a 5s lock_timeout; no include, CREATE INDEX ' +
+        'CONCURRENTLY, heap rewrite, or attribution backfill. The two checks ' +
+        'validate 57 existing rows. The down migration is destructive and is ' +
+        'not part of normal rollback. Any artifact edit invalidates this blessing.',
+    },
     check: reviewTransactionAttributionSchemaApplied,
   },
   {
