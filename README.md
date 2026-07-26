@@ -55,7 +55,9 @@ the desired GitHub projection, and atomically publishes the registry fact,
 root, and born-active claim. It never calls GitHub; `--help` documents its
 strict `--json` contract. The command remains dormant until activation is
 enabled and `minimumCompatibleTaskDagCommit` is at or after the completed
-internal-minter commit `73bfe103b6f5e1bddc318e5592085619c7f0f2f4`.
+public-writer prerequisite commit `4e964e3294915e8625c7ce8047b1ab8751096a15`.
+The plan4 epoch-13 floor `73bfe103b6f5e1bddc318e5592085619c7f0f2f4`
+therefore leaves every public writer dormant after publication.
 Rollout must first deploy the new runtime everywhere, drain every old
 issue-writer run, and only then raise that floor. Before the raise, both the
 new public writer and the replaced workflow fail closed without mutation.

@@ -25,6 +25,16 @@ registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '
 printf '%s\n' "$registry" >"$ROOT/registry"
 registry_id=$(_taskdag_activation_registry_id "$ROOT/registry")
 jq -ncS --arg runtime "$runtime" --arg source "$source_parent" --arg floor "$TASKDAG_EPIC_WRITER_CUTOVER" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" --argjson repositories "$(jq -c .repositories "$ROOT/registry")" '{actor:"fixture",authoritativeTimestamp:"2026-07-25T00:00:00Z",minimumCompatibleTaskDagCommit:$floor,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:$repositories},sourceTips:[{repository:"owner/repo",repositoryId:"R_target",ref:"refs/heads/master",commit:$runtime},{repository:"source/repo",repositoryId:"R_source",ref:"refs/heads/master",commit:$source},{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
+# Plan4 epoch 13 intentionally enables the internal minter/readers while the
+# public writer remains dormant. Advance to the dedicated writer prerequisite
+# only after proving the plan4 floor is mutation-free.
+jq -cS '.minimumCompatibleTaskDagCommit="73bfe103b6f5e1bddc318e5592085619c7f0f2f4"' "$ROOT/activation-spec" >"$ROOT/plan4-spec"
+"$TD" activation apply --spec-file "$ROOT/plan4-spec" >/dev/null || exit 1
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+"$TD" epic-create --json --title dormant --author fixture --description dormant \
+  --repository owner/repo --repository-id R_target --origin-repository source/repo --origin-repository-id R_source \
+  --operation-id "$(printf '8%.0s' {1..64})" --timestamp 2026-07-25T00:00:00Z >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "plan4 floor 73bfe remains writer NO-GO"; else bad "plan4 floor enabled public writer"; fi
 "$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null || exit 1
 
 # Exercise the public operation ingress. Semantic replay must resolve the
@@ -146,11 +156,6 @@ git --git-dir="$ROOT/origin" update-ref "$native_pending" "$native_root"
 git --git-dir="$ROOT/origin" update-ref "$native_active" "$native_claim"
 
 saved_snapshot_function=$(declare -f taskdag_activation_snapshot_token)
-taskdag_activation_snapshot_token(){ local token; token=$(eval "$saved_snapshot_function"; taskdag_activation_snapshot_token) || return $?; jq -c --arg floor "$parent" '.minimumCompatibleTaskDagCommit=$floor' <<<"$token"; }
-before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
-taskdag_internal_mint_epic_root "$spec" >/dev/null 2>&1; rc=$?
-if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "old activation floor is mutation-free"; else bad "old activation floor escaped"; fi
-eval "$saved_snapshot_function"
 taskdag_activation_snapshot_token(){ return 3; }
 before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
 taskdag_internal_mint_epic_root "$spec" >/dev/null 2>&1; rc=$?
