@@ -58,6 +58,41 @@ if jq -e '.created==false and .claimCommit==null' <<<"$public_replay" >/dev/null
   && [ "$(jq -r .rootCommit <<<"$public_replay")" = "$public_root" ]; then
   ok "public operation replay ignores changed metadata, master, time and PID"
 else bad "public operation replay rewrote immutable state"; fi
+
+# Typed leaf completion is a distinct transition from typed root closure. The
+# public completion path must remain dormant below its dedicated prerequisite,
+# then resolve the immutable registry root (not the child that inherited the
+# same Epic-ID) and allow a real leaf completion while the root remains open.
+git config taskdag.current-repo owner/repo
+typed_operation=$(printf '7%.0s' {1..64})
+typed_create=$("$TD" epic-create --json --title 'Typed completion root' --author fixture --description '' \
+  --repository owner/repo --repository-id R_target --origin-repository source/repo --origin-repository-id R_source \
+  --operation-id "$typed_operation" --timestamp 2026-07-25T00:00:01Z)
+typed_root=$(jq -r .rootCommit <<<"$typed_create")
+typed_epic=$(jq -r .epicId <<<"$typed_create")
+"$TD" claim-root "$typed_epic" >/dev/null || exit 1
+printf '[{"title":"typed completion leaf","type":"leaf"}]' >"$ROOT/public-breakdown.json"
+"$TD" breakdown "$typed_root" --spec-file="$ROOT/public-breakdown.json" --json >"$ROOT/public-children.json" || exit 1
+public_leaf=$(jq -r '.tasks[0].sha' "$ROOT/public-children.json")
+TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ "$TD" claim "$public_leaf" >/dev/null || exit 1
+echo typed-completion >typed-completion; git add typed-completion; git commit -qm 'Implement typed completion fixture'
+impl=$(git rev-parse HEAD); before=$(git rev-parse HEAD)
+TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ "$TD" complete "$public_leaf" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$(git rev-parse HEAD)" = "$before" ]; then
+  ok "typed completion remains dormant below its dedicated activation prerequisite"
+else bad "typed completion activated below its prerequisite (rc=$rc)"; fi
+
+if [ "$TASKDAG_TYPED_COMPLETION_CUTOVER" != 0000000000000000000000000000000000000000 ]; then
+  jq -cS --arg floor "$TASKDAG_TYPED_COMPLETION_CUTOVER" '.minimumCompatibleTaskDagCommit=$floor' "$ROOT/activation-spec" >"$ROOT/typed-completion-spec"
+  "$TD" activation apply --spec-file "$ROOT/typed-completion-spec" >/dev/null || exit 1
+  TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ "$TD" complete "$public_leaf" >/dev/null 2>&1; rc=$?
+  completion=$(git rev-parse HEAD)
+  if [ "$rc" -eq 0 ] && [ "$(git rev-parse "$completion^1")" = "$impl" ] \
+    && [ "$(git rev-parse "$completion^2")" = "$public_leaf" ] \
+    && ! git show -s --format=%B "$completion" | grep -q '^Closes-Epic-ID:'; then
+    ok "activated typed leaf completion uses registry containment and leaves root open"
+  else bad "activated typed leaf completion failed or closed its root (rc=$rc)"; fi
+fi
 public_claimed=$(TASK_DAG_CLAIMER=ambient-worker TASK_DAG_CLAIMER_HOST=ambient-host TASK_DAG_CLAIMER_PID=333 "$TD" epic-create --json --claim \
   --title irrelevant --author irrelevant --description irrelevant \
   --repository owner/repo --repository-id R_target \

@@ -753,6 +753,16 @@ completion merely because its second parent is an empty-tree root. The typed
 close codec is currently read-only; all close writers remain legacy-only or
 return the established gated status before mutation.
 
+Typed **leaf** completion is a separate transition from that typed root close.
+An open root with some or all leaves durably complete is valid and recoverable;
+leaf completion neither requires nor implies root closure. Registry
+`rootCommit`, never an inherited child `Epic-ID` field by itself, is the root
+authority. Every admitted typed child must reach that exact root through a
+task-only first-parent lineage whose nodes preserve the same Epic-ID. Once a
+root is closed, no previously incomplete descendant may acquire a new
+completion fact. Leaf publication and root closure therefore remain separately
+atomic and separately activation-fenced.
+
 Explicit `--no-fetch` operations use only a previously observed local
 activation, graph, facts, and task refs. A nested offline helper may reuse its
 enclosing operation's just-observed pre-activation absence, but standalone

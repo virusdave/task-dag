@@ -6,6 +6,9 @@
 TASKDAG_EPIC_REGISTRY_REF=refs/heads/tasks/v1/epics
 TASKDAG_EPIC_READER_CUTOVER=e265d03a71baa0f64d0a7af0135cb4f7d2c40841
 TASKDAG_EPIC_WRITER_CUTOVER=4e964e3294915e8625c7ce8047b1ab8751096a15
+# Set by the public-routing commit after the dormant typed-completion reader
+# and admission checks have landed.  A zero value keeps the path fail-closed.
+TASKDAG_TYPED_COMPLETION_CUTOVER=0000000000000000000000000000000000000000
 TASKDAG_CANONICAL_AUTHOR_NAME=task-dag
 TASKDAG_CANONICAL_AUTHOR_EMAIL=task-dag@freshlybaked.us
 

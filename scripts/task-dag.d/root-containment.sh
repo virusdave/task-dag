@@ -8,7 +8,8 @@ for prerequisite in parse_commit_metadata extract_field \
     get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic \
     fetch_task_refs_strict \
     taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard \
-    taskdag_materialisation_intents_durable; do
+    taskdag_materialisation_intents_durable taskdag_activation_snapshot_token \
+    taskdag_epic_registry_record taskdag_root_locator taskdag_resolve_typed_root; do
     if ! declare -F "$prerequisite" >/dev/null; then
         echo "Error: root-containment.sh requires provider for $prerequisite to be loaded first" >&2
         return 2 2>/dev/null || exit 2
@@ -92,28 +93,50 @@ epic_already_closed_on() {
     taskdag_root_closed_at_tip "$base_ref" "$locator" "$epic_sha"
 }
 
-# Typed close production is intentionally gated. Completion commands call this
-# before creating even a dangling commit object, so an unclosed typed root is a
-# side-effect-free rc 75 refusal. A close already on either explicit authority
-# preserves idempotent completion recovery.
+# Typed leaf completion and typed root closure are separate transitions.  This
+# admission check authorizes only the former: the registered root may remain
+# open while children complete.  The dedicated activation floor keeps this
+# path dormant until every participating runtime understands that lifecycle.
 taskdag_typed_root_completion_preflight() { # task [authority-tip]
-    local node=$1 authority=${2:-HEAD} parent locator="" root="" msg close_rc
+    local node=$1 authority=${2:-HEAD} parent epic_id="" msg token floor rows registry master record root
+    local node_epic close_rc
+    msg=$(parse_commit_metadata "$node" 2>/dev/null || true)
+    epic_id=$(extract_field "$msg" Epic-ID 2>/dev/null || true)
+    [ -n "$epic_id" ] || return 0
+    [[ "$epic_id" =~ ^epic-v1:[0-9a-f]{64}$ ]] || return 2
+
+    token=$(taskdag_activation_snapshot_token) || return 3
+    floor=$(jq -er .minimumCompatibleTaskDagCommit <<<"$token") || return 3
+    git -C "$TASKDAG_SCRIPT_DIR/.." cat-file -e "$TASKDAG_TYPED_COMPLETION_CUTOVER^{commit}" 2>/dev/null || return 3
+    git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor "$TASKDAG_TYPED_COMPLETION_CUTOVER" "$floor" || return 3
+
+    rows=$(git ls-remote --refs origin "$TASKDAG_EPIC_REGISTRY_REF" refs/heads/master) || return 3
+    registry=$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$rows")
+    master=$(awk '$2=="refs/heads/master"{print $1}' <<<"$rows")
+    [ -n "$registry" ] && [ -n "$master" ] || return 3
+    git fetch -q --no-tags origin "$registry" "$master" || return 3
+    record=$(taskdag_epic_registry_record "$epic_id" "$registry" "$master") || return 3
+    root=$(jq -er .rootCommit <<<"$record") || return 3
+
+    # The registry is root authority.  Children inherit Epic-ID, so stopping
+    # at the first task carrying that field would incorrectly treat the leaf
+    # as its own root.  Walk strict first-parent containment to the exact
+    # immutable registry root and reject a lineage that changes Epic-ID.
     while :; do
+        [ "$node" = "$root" ] && break
         msg=$(parse_commit_metadata "$node" 2>/dev/null || true)
-        locator=$(extract_field "$msg" Epic-ID 2>/dev/null || true)
-        if [[ "$locator" = epic-v1:* ]]; then root=$node; break; fi
+        node_epic=$(extract_field "$msg" Epic-ID 2>/dev/null || true)
+        [ "$node_epic" = "$epic_id" ] || return 2
         parent=$(get_first_parent "$node" 2>/dev/null || true)
-        [ -n "$parent" ] && is_task_commit "$parent" || return 0
+        [ -n "$parent" ] && is_task_commit "$parent" || return 2
         node=$parent
     done
-    close_rc=0; epic_already_closed_on "$locator" "$root" "$authority" || close_rc=$?
-    case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
-    if [ "$authority" != HEAD ]; then
-        close_rc=0; epic_already_closed_on "$locator" "$root" HEAD || close_rc=$?
-        case "$close_rc" in 0) return 0 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
-    fi
-    echo "Error: typed root $locator is not closed; typed completion writers remain gated" >&2
-    return 75
+    [ "$(taskdag_resolve_typed_root "$(taskdag_root_locator "$epic_id")" "$root")" = "$(jq -cS .descriptor <<<"$record")" ] || return 2
+
+    # A root that was closed before this child acquired a durable completion
+    # fact is corrupt/premature; never add work beneath a closed root.
+    close_rc=0; epic_already_closed_on "$epic_id" "$root" "$authority" || close_rc=$?
+    case "$close_rc" in 0) return 2 ;; 1) return 0 ;; 2) return 2 ;; *) return 2 ;; esac
 }
 
 maybe_emit_local_epic_close() {
