@@ -210,6 +210,14 @@ if ! grep -Eq 'raw\.githubusercontent\.com/.+close-completed-issues|raw\.githubu
 else
     bad "close workflow mixes or shallow-clones runtime revisions"
 fi
+if grep -q 'Checkout coherent task-dag runtime' "$REPO_ROOT/.github/workflows/graph-converge.yml" \
+  && grep -q 'path: .task-dag-runtime' "$REPO_ROOT/.github/workflows/graph-converge.yml" \
+  && grep -q 'fetch-depth: 0' "$REPO_ROOT/.github/workflows/graph-converge.yml" \
+  && ! grep -Eq 'archive/.+tar\.gz|/tmp/task-dag-cli' "$REPO_ROOT/.github/workflows/graph-converge.yml"; then
+    ok "graph workflow uses a full coherent activation-compatible runtime"
+else
+    bad "graph workflow uses a shallow or history-less runtime"
+fi
 
 cp -R "$(dirname "$TD")" "$ROOT/scripts"
 rm "$ROOT/scripts/task-dag.d/semantic-migration-policy.json"

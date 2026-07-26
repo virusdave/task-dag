@@ -35,16 +35,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download canonical task-dag CLI bundle
-        env:
-          TASK_DAG_REF: ${{ inputs.ref }}
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/task-dag-cli
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
-            "https://github.com/virusdave/task-dag/archive/${TASK_DAG_REF}.tar.gz" \
-            | tar -xz --strip-components=1 -C /tmp/task-dag-cli
-          chmod 0755 /tmp/task-dag-cli/scripts/task-dag
+      - name: Checkout coherent task-dag runtime
+        uses: actions/checkout@v4
+        with:
+          repository: virusdave/task-dag
+          ref: ${{ inputs.ref }}
+          path: .task-dag-runtime
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Converge dependency graph
         env:
@@ -67,7 +65,7 @@ jobs:
             fi
           fi
           set +e
-          /tmp/task-dag-cli/scripts/task-dag graph-converge "${args[@]}"
+          .task-dag-runtime/scripts/task-dag graph-converge "${args[@]}"
           rc=$?
           set -e
           if [ "$rc" -eq 75 ]; then
