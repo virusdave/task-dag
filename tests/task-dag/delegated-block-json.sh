@@ -49,6 +49,7 @@ source "$LIB_DIR/repository-identity.sh"
 source "$LIB_DIR/github-origin.sh"
 # shellcheck source=/dev/null
 source "$LIB_DIR/blocked-core.sh"
+taskdag_consumer_prepare() { :; }
 # shellcheck source=/dev/null
 source "$CROSS_REPO"
 

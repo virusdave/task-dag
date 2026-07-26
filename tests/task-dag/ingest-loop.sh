@@ -19,6 +19,17 @@ Type: epic")
 git update-ref refs/heads/gh/issues/999 "$EPIC"
 git push -q origin refs/heads/gh/issues/999
 
+git config taskdag.current-repo acme/widgets
+runtime=$(git -C "$(dirname "$TD")/.." rev-parse HEAD)
+master=$(git rev-parse HEAD)
+registry_commit=1111111111111111111111111111111111111111
+registry_blob=2222222222222222222222222222222222222222
+registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"acme/widgets",repositoryId:"R_fixture",name:"widgets",repairMode:"off",repairBranch:null},{repository:"virusdave/task-dag",repositoryId:"R_taskdag",name:"task-dag",repairMode:"off",repairBranch:null}]}')
+printf '%s\n' "$registry" >"$ROOT/registry"
+registry_id=$(source "$TD" --help >/dev/null; _taskdag_activation_registry_id "$ROOT/registry")
+jq -ncS --arg runtime "$runtime" --arg master "$master" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" '{actor:"fixture",authoritativeTimestamp:"2026-07-26T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"acme/widgets",repositoryId:"R_fixture",name:"widgets",repairMode:"off",repairBranch:null},{repository:"virusdave/task-dag",repositoryId:"R_taskdag",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"acme/widgets",repositoryId:"R_fixture",ref:"refs/heads/master",commit:$master},{repository:"virusdave/task-dag",repositoryId:"R_taskdag",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
+"$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null || exit 1
+
 frontier_count(){ git ls-remote origin "refs/heads/tasks/frontier/*" 2>/dev/null | wc -l; }
 
 ingest(){  # $1=comment_id $2=body

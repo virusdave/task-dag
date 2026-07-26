@@ -313,7 +313,7 @@ elif grep -q 'requires reconciliation-core.sh to be loaded first' "$ROOT/converg
   ok "graph convergence fails loudly without reconciliation core"
 else bad "graph convergence source-order failure was not actionable"; fi
 
-root_prereqs='taskdag_prepare_child_map taskdag_sync_root_refs taskdag_recon_prepare taskdag_current_repo taskdag_node_complete taskdag_root_closed_at_tip get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic fetch_task_refs_strict taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard taskdag_materialisation_intents_durable'
+root_prereqs='taskdag_prepare_child_map taskdag_sync_root_refs taskdag_recon_prepare taskdag_current_repo taskdag_node_complete taskdag_root_closed_at_tip get_first_parent is_task_commit pending_sha_on_remote_checked task_is_root_shaped_epic fetch_task_refs_strict taskdag_consumer_prepare taskdag_root_status_json taskdag_migration_guard taskdag_materialisation_intents_durable taskdag_activation_snapshot_token taskdag_epic_registry_record taskdag_root_locator taskdag_resolve_typed_root'
 if bash -c 'for n in $2; do eval "$n(){ :; }"; done; source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/root-containment.sh" "$root_prereqs" >"$ROOT/root-order-out" 2>"$ROOT/root-order-err"; then
   bad "root containment loaded without Git-object metadata providers"
 elif grep -q 'requires provider for parse_commit_metadata' "$ROOT/root-order-err"; then

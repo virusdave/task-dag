@@ -170,6 +170,7 @@ git -C "$TMP/full-history" config user.email fixture@example.test
 printf 'fixture\n' >"$TMP/full-history/file"
 git -C "$TMP/full-history" add file
 git -C "$TMP/full-history" commit -qm fixture
+source "$ROOT/scripts/task-dag.d/repository-identity.sh"
 source "$ROOT/scripts/task-dag.d/activation.sh"
 full_history_matrix=true
 taskdag_full_history_checkout "$TMP/full-history" || full_history_matrix=false

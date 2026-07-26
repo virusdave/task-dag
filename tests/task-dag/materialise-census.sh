@@ -9,6 +9,7 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.test
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.test
 TASKDAG_SCRIPT_DIR=$(dirname "$TD"); EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+eval "$(source "$TD" --help >/dev/null; declare -f taskdag_json_no_duplicate_keys taskdag_json_file_is_single_strict)"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/child-map.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/claim-model.sh"

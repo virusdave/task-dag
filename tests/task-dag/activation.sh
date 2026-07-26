@@ -16,6 +16,7 @@ registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '
 registry_file="$ROOT/registry"; printf '%s\n' "$registry" >"$registry_file"
 TASKDAG_SCRIPT_DIR="$(dirname "$TD")"
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+eval "$(source "$TD" --help >/dev/null; declare -f taskdag_json_no_duplicate_keys taskdag_json_file_is_single_strict)"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/git-objects.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/child-map.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"

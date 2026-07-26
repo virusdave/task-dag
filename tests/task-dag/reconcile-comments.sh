@@ -202,7 +202,10 @@ comment() {
 }
 case "$endpoint" in
   repos/acme/widgets)
-    if [[ "${GH_TIMEOUT_REPO:-0}" == 1 ]]; then sleep 5; exit 1; fi
+    # Keep the provider delay strictly beyond the command budget, with enough
+    # headroom for index preparation under the parallel fixture runner. An
+    # equal sleep/deadline boundary can surface an unrelated earlier stage.
+    if [[ "${GH_TIMEOUT_REPO:-0}" == 1 ]]; then sleep 20; exit 1; fi
     header; printf '\r\n{"id":123}\n'
     ;;
   *issues/comments/99)
@@ -532,7 +535,7 @@ list_line=$(grep -n -m1 '^repos/acme/widgets/issues/comments?' "$GH_LOG" | cut -
 set +e
 timeout_out=$(cd "$tmp/work" && PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=acme/widgets \
     GH_TIMEOUT_REPO=1 GH_CLOSED_ONLY=1 reconcile-fixture --mode complete \
-    --ingestion-start-at 2025-01-01T00:00:00Z --max-seconds 5 \
+    --ingestion-start-at 2025-01-01T00:00:00Z --max-seconds 15 \
     --watchdog-token-file "$tmp/watchdog-token" 2>"$tmp/timeout.err")
 timeout_rc=$?
 set -e
@@ -612,7 +615,7 @@ converge_gate="$tmp/converge-gate"; mkdir "$converge_gate"
 printf '0\n' >"$converge_gate/captures"; : >"$converge_gate/calls"
 set +e
 (cd "$tmp/work" && \
-  _xrepo_capture_parent_snapshot() { :; } && \
+  _xrepo_capture_parent_snapshot() { printf 'delegation\n' >"$3"; } && \
   _xrepo_strict_snapshot_status() { printf '%s\n' "$native_snapshot"; } && \
   _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
   _xrepo_ensure_issue_epic() { printf 'ensure\n' >>"$converge_gate/calls"; } && \
@@ -627,7 +630,7 @@ malformed_snapshot='{"parent":{"kind":"legacy-adoption-v1"},"status":"ready"}'
 before_objects=$(git -C "$tmp/work" count-objects -v); before_refs=$(git -C "$tmp/work" for-each-ref --format='%(refname) %(objectname)')
 set +e
 (cd "$tmp/work" && \
-  _xrepo_capture_parent_snapshot() { :; } && \
+  _xrepo_capture_parent_snapshot() { printf 'delegation\n' >"$3"; } && \
   _xrepo_strict_snapshot_status() { printf '%s\n' "$malformed_snapshot"; } && \
   _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
   _xrepo_converge_completion_issue 91 acme/widgets)
@@ -642,7 +645,7 @@ assert_fixture "$([ "$malformed_converge_rc" -eq 2 ] && [ ! -s "$converge_gate/c
 v1_snapshot='{"parent":null,"status":"ready"}'
 : >"$converge_gate/calls"; printf '0\n' >"$converge_gate/captures"
 (cd "$tmp/work" && \
-  _xrepo_capture_parent_snapshot() { n=$(cat "$converge_gate/captures"); printf '%s\n' "$((n+1))" >"$converge_gate/captures"; } && \
+  _xrepo_capture_parent_snapshot() { n=$(cat "$converge_gate/captures"); printf '%s\n' "$((n+1))" >"$converge_gate/captures"; printf 'delegation\n' >"$3"; } && \
   _xrepo_strict_snapshot_status() { printf '%s\n' "$v1_snapshot"; } && \
   _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
   _xrepo_ensure_issue_epic() { printf 'ensure\n' >>"$converge_gate/calls"; printf '%s\n' "$batch_root_31"; } && \
@@ -674,7 +677,7 @@ fi
 set +e
 (cd "$tmp/work" && \
   taskdag_epic_registry_record() { jq -ncS --arg root "$batch_root_31" '{legacyAdoption:{issueNumber:"91"},rootCommit:$root}'; } && \
-  _xrepo_capture_parent_snapshot() { n=$(cat "$converge_gate/captures"); printf '%s\n' "$((n+1))" >"$converge_gate/captures"; } && \
+  _xrepo_capture_parent_snapshot() { n=$(cat "$converge_gate/captures"); printf '%s\n' "$((n+1))" >"$converge_gate/captures"; printf 'delegation\n' >"$3"; } && \
   _xrepo_strict_snapshot_status() { [ "$(cat "$converge_gate/captures")" -eq 1 ] && printf '%s\n' "$adoption_snapshot" || printf '%s\n' "$native_snapshot"; } && \
   _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile\n' >>"$converge_gate/calls"; } && \
   _xrepo_ensure_issue_epic() { printf 'ensure\n' >>"$converge_gate/calls"; } && \

@@ -52,6 +52,7 @@ registry_blob=2222222222222222222222222222222222222222
 registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
 printf '%s\n' "$registry" >"$ROOT/registry"
 TASKDAG_SCRIPT_DIR=$(dirname "$TD")
+eval "$(source "$TD" --help >/dev/null; declare -f taskdag_json_no_duplicate_keys taskdag_json_file_is_single_strict)"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/repository-identity.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/github-origin.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/blocked-core.sh"
@@ -144,9 +145,9 @@ else bad "activated root claim did not converge"; fi
 
 # Reaping is a semantic publication too. Property-oriented paired cases use
 # the same dead-claim transition: incomplete work is requeued, while completed
-# work is delete-only. Independently filtered public commands prove that each
-# outcome advances activation authority without partially publishing its
-# active/frontier pair.
+# work is delete-only. The first fenced write may co-converge both stale claims;
+# independently filtered public commands prove that cleanup is atomic and an
+# already-converged completed claim remains an idempotent no-op.
 reap_task=$(git commit-tree "$EMPTY_TREE" -p HEAD -m $'Task: activated reap leaf\nIssue: #83\nType: leaf')
 reap_short=$(git rev-parse --short "$reap_task")
 reap_claim=$(git commit-tree "$EMPTY_TREE" -p "$reap_task" -m "Claim: activated reap
@@ -179,8 +180,8 @@ authority_before_completed_reap=$(git ls-remote origin refs/heads/tasks/v1/activ
 if "$TD" reap --issue=84 >/dev/null \
    && [ -z "$(git ls-remote origin "refs/heads/tasks/active/$dep_short")" ] \
    && [ -z "$(git ls-remote origin "refs/heads/tasks/frontier/$dep_short")" ] \
-   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_completed_reap" ]; then
-  ok "activated reap atomically deletes completed stale claims without resurrection"
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" = "$authority_before_completed_reap" ]; then
+  ok "completed stale claim co-convergence makes filtered reap idempotent without resurrection"
 else
   bad "activated reap partially published or resurrected completed work"
 fi
@@ -396,17 +397,18 @@ export ISSUE_AUTHOR=fixture
 export ISSUE_URL=https://github.com/virusdave/task-dag/issues/78
 export ISSUE_BODY="Issue created before canonical task refs existed."
 authority_before_backfill=$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')
-if "$TD" ingest-comment --issue 78 --comment-id 7801 --author human \
-     --comment-url https://github.com/virusdave/task-dag/issues/78#issuecomment-7801 \
-     --created-at 2026-07-18T00:00:05Z --updated-at 2026-07-18T00:00:05Z \
-     --body-file "$ROOT/human-comment" >/dev/null \
-   && [ -n "$(git ls-remote origin refs/heads/tasks/pending/78 | awk '{print $1}')" ] \
-   && [ "$(git ls-remote origin refs/heads/tasks/pending/78 | awk '{print $1}')" = "$(git ls-remote origin refs/heads/gh/issues/78 | awk '{print $1}')" ] \
-   && [ -n "$(git ls-remote origin refs/heads/gh/comments/78/7801 | awk '{print $1}')" ] \
-   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" != "$authority_before_backfill" ]; then
-  ok "activated missing-epic ingestion fences backfill and comment effects"
+missing_epic_rc=0
+"$TD" ingest-comment --issue 78 --comment-id 7801 --author human \
+  --comment-url https://github.com/virusdave/task-dag/issues/78#issuecomment-7801 \
+  --created-at 2026-07-18T00:00:05Z --updated-at 2026-07-18T00:00:05Z \
+  --body-file "$ROOT/human-comment" >/dev/null 2>"$ROOT/missing-epic.err" || missing_epic_rc=$?
+if [ "$missing_epic_rc" -eq 2 ] \
+   && grep -Fq 'refusing duplicate legacy writer (ingest it with task-dag epic-create)' "$ROOT/missing-epic.err" \
+   && [ -z "$(git ls-remote origin refs/heads/tasks/pending/78 refs/heads/gh/issues/78 refs/heads/gh/comments/78/7801 | awk 'NR==1{print $1}')" ] \
+   && [ "$(git ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')" = "$authority_before_backfill" ]; then
+  ok "activated missing-epic ingestion requires public epic-create without semantic effects"
 else
-  bad "activated missing-epic ingestion escaped canonical generation fencing"
+  bad "activated missing-epic ingestion bypassed public epic-create"
 fi
 
 jq '.state="disabled" | .authoritativeTimestamp="2026-07-18T00:00:06Z"' "$ROOT/enabled" >"$ROOT/disabled-backfill"

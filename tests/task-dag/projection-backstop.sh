@@ -78,8 +78,8 @@ git remote set-url origin "$ROOT/origin.git"
 git config taskdag.current-repo "$REPO"
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
 activation_tip="$(git -C "$REPO_ROOT" ls-remote origin refs/heads/tasks/v1/activation | awk '{print $1}')"
-git -C "$REPO_ROOT" fetch -q origin "$activation_tip"
-git -C "$REPO_ROOT" push -q "$ROOT/origin.git" "FETCH_HEAD:refs/heads/tasks/v1/activation"
+git fetch -q "$REPO_ROOT" "$activation_tip"
+git push -q origin "$activation_tip:refs/heads/tasks/v1/activation"
 
 ROOT_TASK=$(git commit-tree "$EMPTY_TREE" -p "$(git rev-parse HEAD)" -m "Task: root
 
