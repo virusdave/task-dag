@@ -572,7 +572,10 @@ for spec in '31 301' '31 302' '32 303'; do
 done
 : >"$batch/counters"
 (cd "$tmp/work" && \
-  _xrepo_ensure_issue_epic() { [ "$1" = 31 ] && printf '%s\n' "$batch_root_31" || printf '%s\n' "$batch_root_32"; } && \
+  _xrepo_ensure_issue_epic() {
+    local root; [ "$1" = 31 ] && root="$batch_root_31" || root="$batch_root_32"
+    if [ "${2:-}" = --with-ref ]; then printf '%s\trefs/heads/tasks/pending/%s\n' "$root" "$1"; else printf '%s\n' "$root"; fi
+  } && \
   taskdag_consumer_prepare() { printf 'prepare\n' >>"$batch/counters"; TASKDAG_CONSUMER_READY=true; TASKDAG_CHILD_MAP_REFS=$(git for-each-ref --format='%(objectname) %(refname)' refs/heads/tasks/pending/ refs/heads/gh/issues/); } && \
   _xrepo_watchdog_fence() { printf 'fence\n' >>"$batch/counters"; } && \
   taskdag_consumer_fenced_scheduling_push() { printf 'push\n' >>"$batch/counters"; cat >"$batch/payload" <<<"$3"; } && \
@@ -703,7 +706,10 @@ _rc_api() {
   jq -nc --argjson number "$number" '{number:$number,state:"open",title:"Queued convergence",body:"",html_url:("https://example.invalid/"+($number|tostring)),user:{login:"alice"}}' >"$tmp/body"
 }
 _xrepo_reconcile_issue_delegated_closes() { printf 'reconcile:%s\n' "$1" >>"$batch_converge/calls"; }
-_xrepo_ensure_issue_epic() { printf 'ensure:%s\n' "$1" >>"$batch_converge/calls"; printf '%s\n' "$batch_root_31"; }
+_xrepo_ensure_issue_epic() {
+  printf 'ensure:%s\n' "$1" >>"$batch_converge/calls"
+  if [ "${2:-}" = --with-ref ]; then printf '%s\trefs/heads/tasks/pending/%s\n' "$batch_root_31" "$1"; else printf '%s\n' "$batch_root_31"; fi
+}
 _xrepo_watchdog_fence() { printf 'fence\n' >>"$batch_converge/calls"; }
 taskdag_emit_origin_epic_close() { printf 'close:%s:%s\n' "$1" "$2" >>"$batch_converge/calls"; }
 taskdag_epic_registry_record() { jq -ncS --arg root "$batch_root_31" '{legacyAdoption:{issueNumber:"94"},rootCommit:$root}'; }
@@ -747,12 +753,41 @@ assert_fixture "$([ "$(cat "$batch_converge/calls")" = $'reconcile:94\nfail:conv
 # governs acceptance. A mismatching prepared root fails before fence/push.
 batch_bad="$tmp/batch-prepared-mismatch"; cp -a "$batch" "$batch_bad"; rm -f "$batch_bad/applied" "$batch_bad/result"
 (cd "$tmp/work" && \
-  _xrepo_ensure_issue_epic() { [ "$1" = 31 ] && printf '%s\n' "$batch_root_31" || printf '%s\n' "$batch_root_32"; } && \
+  _xrepo_ensure_issue_epic() {
+    local root; [ "$1" = 31 ] && root="$batch_root_31" || root="$batch_root_32"
+    if [ "${2:-}" = --with-ref ]; then printf '%s\trefs/heads/tasks/pending/%s\n' "$root" "$1"; else printf '%s\n' "$root"; fi
+  } && \
   taskdag_consumer_prepare() { TASKDAG_CONSUMER_READY=true; TASKDAG_CHILD_MAP_REFS="$clarification refs/heads/tasks/pending/31"; } && \
   _xrepo_watchdog_fence() { assert_fixture false "prepared child-map mismatch must fail before watchdog fence"; } && \
   taskdag_consumer_fenced_scheduling_push() { assert_fixture false "prepared child-map mismatch must fail before push"; } && \
   ! _xrepo_reconcile_apply_batch "$batch_bad" acme/widgets "$batch_bad/staged" "$batch_bad/applied" "$batch_bad/result")
 assert_fixture "$([ ! -s "$batch_bad/applied" ] && echo true || echo false)" "prepared child-map mismatch must apply zero comments"
+
+# The right root under an unrelated pending ref is not authority for this
+# issue. Require the exact resolved locator, not merely an OID alias.
+batch_alias="$tmp/batch-prepared-alias"; cp -a "$batch" "$batch_alias"; rm -f "$batch_alias/applied" "$batch_alias/result"
+(cd "$tmp/work" && \
+  _xrepo_ensure_issue_epic() {
+    if [ "${2:-}" = --with-ref ]; then printf '%s\trefs/heads/tasks/pending/%s\n' "$batch_root_31" "$1"; else printf '%s\n' "$batch_root_31"; fi
+  } && \
+  taskdag_consumer_prepare() { TASKDAG_CONSUMER_READY=true; TASKDAG_CHILD_MAP_REFS="$batch_root_31 refs/heads/tasks/pending/999"; } && \
+  _xrepo_watchdog_fence() { assert_fixture false "prepared wrong-ref alias must fail before watchdog fence"; } && \
+  taskdag_consumer_fenced_scheduling_push() { assert_fixture false "prepared wrong-ref alias must fail before push"; } && \
+  ! _xrepo_reconcile_apply_batch "$batch_alias" acme/widgets "$batch_alias/staged" "$batch_alias/applied" "$batch_alias/result")
+assert_fixture "$([ ! -s "$batch_alias/applied" ] && echo true || echo false)" "prepared wrong-ref alias must apply zero comments"
+
+typed_expected="refs/heads/tasks/pending/epic-v1/$(printf 'a%.0s' {1..64})"
+typed_alias="refs/heads/tasks/pending/epic-v1/$(printf 'b%.0s' {1..64})"
+batch_typed_alias="$tmp/batch-prepared-typed-alias"; cp -a "$batch" "$batch_typed_alias"; rm -f "$batch_typed_alias/applied" "$batch_typed_alias/result"
+(cd "$tmp/work" && \
+  _xrepo_ensure_issue_epic() {
+    if [ "${2:-}" = --with-ref ]; then printf '%s\t%s\n' "$batch_root_31" "$typed_expected"; else printf '%s\n' "$batch_root_31"; fi
+  } && \
+  taskdag_consumer_prepare() { TASKDAG_CONSUMER_READY=true; TASKDAG_CHILD_MAP_REFS="$batch_root_31 $typed_alias"; } && \
+  _xrepo_watchdog_fence() { assert_fixture false "prepared typed wrong-ref alias must fail before watchdog fence"; } && \
+  taskdag_consumer_fenced_scheduling_push() { assert_fixture false "prepared typed wrong-ref alias must fail before push"; } && \
+  ! _xrepo_reconcile_apply_batch "$batch_typed_alias" acme/widgets "$batch_typed_alias/staged" "$batch_typed_alias/applied" "$batch_typed_alias/result")
+assert_fixture "$([ ! -s "$batch_typed_alias/applied" ] && echo true || echo false)" "prepared typed wrong-ref alias must apply zero comments"
 
 unsupported=$(printf '%s\n' 'kind: message' 'role: human' 'intent: unsupported' '' \
   'issue:' '  number: 10' '  repo: acme/widgets' '' 'github:' '  comment_id: 97' \

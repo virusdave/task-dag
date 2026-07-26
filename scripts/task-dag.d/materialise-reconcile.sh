@@ -112,10 +112,11 @@ taskdag_materialise_provider_create() { # repository title body-file
 }
 
 _taskdag_materialise_visible_body() { # authority declaration output-file
-    local tip=$1 declaration=$2 output=$3 body_sha operation digest
+    local tip=$1 declaration=$2 output=$3 body_sha operation digest source source_id
     body_sha=$(jq -r .bodySha256 <<<"$declaration"); operation=$(jq -r .operationId <<<"$declaration"); digest=$(jq -r .declarationDigest <<<"$declaration")
+    source=$(jq -r .sourceRepo.name <<<"$declaration"); source_id=$(jq -r .sourceRepo.id <<<"$declaration")
     git show "$tip:bodies/$body_sha.body" >"$output" || return 1
-    printf '\n\n<!-- task-dag-materialisation:v1 operation=%s declaration=%s -->\n' "$operation" "$digest" >>"$output"
+    printf '\n\n<!-- task-dag-materialisation:v1 source=%s source-id=%s operation=%s declaration=%s -->\n' "$source" "$source_id" "$operation" "$digest" >>"$output"
 }
 
 _taskdag_materialise_exact_matches() { # issues-json declaration expected-body transition-time creator output

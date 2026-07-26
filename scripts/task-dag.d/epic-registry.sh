@@ -5,6 +5,7 @@
 
 TASKDAG_EPIC_REGISTRY_REF=refs/heads/tasks/v1/epics
 TASKDAG_EPIC_READER_CUTOVER=e265d03a71baa0f64d0a7af0135cb4f7d2c40841
+TASKDAG_EPIC_WRITER_CUTOVER=73bfe103b6f5e1bddc318e5592085619c7f0f2f4
 TASKDAG_CANONICAL_AUTHOR_NAME=task-dag
 TASKDAG_CANONICAL_AUTHOR_EMAIL=task-dag@freshlybaked.us
 
@@ -159,15 +160,22 @@ taskdag_epic_registry_validate_snapshot() { # commit [authority-tip] [origin-sna
     while IFS=$'\t' read -r digest record; do
         projection=$(jq -cS .descriptor.projection <<<"$record")
         peer=$(awk -F '\t' -v d="$digest" '$1==d {print $3}' "$epic_bindings")
-        if [ "$(jq -r '.issueId==null' <<<"$projection")" = true ]; then [ -z "$peer" ] || { rm -rf "$tmp"; return 1; }
+        if [ "$(jq -r '.issueId==null' <<<"$projection")" = true ]; then
+            if [ -n "$peer" ]; then
+                taskdag_epic_registry_validate_binding_to_record "$record" "$peer" || { rm -rf "$tmp"; return 1; }
+                key=$(taskdag_provider_binding_key "$(jq -r .projection.provider <<<"$peer")" "$(jq -r .projection.repositoryId <<<"$peer")" "$(jq -r .projection.issueId <<<"$peer")") || { rm -rf "$tmp"; return 1; }
+                expected=$(awk -F '\t' -v k="$key" '$1==k {print $3}' "$provider_bindings")
+                [ "$(printf '%s\n' "$expected" | sed '/^$/d' | wc -l)" -eq 1 ] && [ "$expected" = "$peer" ] || { rm -rf "$tmp"; return 1; }
+            fi
         else
-            [ "$(printf '%s\n' "$peer" | sed '/^$/d' | wc -l)" -eq 1 ] && [ "$(jq -cS .projection <<<"$peer")" = "$projection" ] || { rm -rf "$tmp"; return 1; }
+            [ "$(printf '%s\n' "$peer" | sed '/^$/d' | wc -l)" -eq 1 ] \
+                && taskdag_epic_registry_validate_binding_to_record "$record" "$peer" || { rm -rf "$tmp"; return 1; }
             key=$(taskdag_provider_binding_key "$(jq -r .provider <<<"$projection")" "$(jq -r .repositoryId <<<"$projection")" "$(jq -r .issueId <<<"$projection")") || { rm -rf "$tmp"; return 1; }
             expected=$(awk -F '\t' -v k="$key" '$1==k {print $3}' "$provider_bindings")
             [ "$(printf '%s\n' "$expected" | sed '/^$/d' | wc -l)" -eq 1 ] && [ "$expected" = "$peer" ] || { rm -rf "$tmp"; return 1; }
         fi
     done <"$roots"
-    [ "$(wc -l <"$epic_bindings")" -eq "$(awk -F '\t' 'index($2,"\"issueId\":null")==0 {n++} END{print n+0}' "$roots")" ] || { rm -rf "$tmp"; return 1; }
+    [ "$(wc -l <"$epic_bindings")" -le "$(wc -l <"$roots")" ] || { rm -rf "$tmp"; return 1; }
     [ "$(wc -l <"$provider_bindings")" -eq "$(wc -l <"$epic_bindings")" ] || { rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
 }
@@ -216,6 +224,124 @@ taskdag_epic_registry_provider_binding() { # provider repository-id issue-id [ti
     git show "$tip:bindings/by-provider/$key.json" 2>/dev/null || return 1
 }
 
+taskdag_epic_registry_validate_binding_to_record() { # record binding
+    local record=$1 binding=$2
+    jq -e --argjson binding "$binding" '
+      . as $record | ($binding.schema==1 and $binding.epicId==$record.epicId) and
+      if $record.descriptor.origin.kind=="provider" then
+        $binding.projection==$record.descriptor.projection
+      elif $record.descriptor.origin.kind=="operation" then
+        ($record.descriptor.projection.issueId==null and
+         $record.descriptor.projection.issueNumber==null and
+         $record.descriptor.projection.issueUrl==null and
+         $binding.projection.issueId!=null and
+         $binding.projection.issueNumber!=null and
+         $binding.projection.issueUrl!=null and
+         $binding.projection.provider==$record.descriptor.projection.provider and
+         $binding.projection.repository==$record.descriptor.projection.repository and
+         $binding.projection.repositoryId==$record.descriptor.projection.repositoryId)
+      else false end' <<<"$record" >/dev/null
+}
+
+# Bind a projector-created provider issue to its already-durable operation
+# root. The root fact is immutable: this transition appends only the paired
+# binding indexes. The caller has already resolved the hidden projector marker
+# to these strict immutable identities; mutable title/body text is irrelevant.
+taskdag_internal_bind_operation_projection() { # source-checkout source-repository source-id operation declaration provider repository repository-id issue-id issue-number issue-url actor timestamp
+    local source_checkout=$1 source_repository=$2 source_id=$3 operation=$4 declaration_digest=$5 provider=$6 repository=$7 repository_id=$8 issue_id=$9 issue_number=${10} issue_url=${11} actor=${12} timestamp=${13}
+    local token activation registry_old master_old materialisation_old declaration epic digest record descriptor projection binding key
+    local idx blob tree registry_new updates result readback rows source_rows source_tip source_registry_tip source_identity
+    [[ "$operation" =~ ^[0-9a-f]{64}$ && "$declaration_digest" =~ ^[0-9a-f]{64}$ ]] || return 2
+    [[ "$provider" =~ ^[a-z0-9][a-z0-9-]*$ && "$issue_number" =~ ^[1-9][0-9]*$ ]] || return 2
+    _taskdag_epic_opaque_id_valid "$repository_id" && _taskdag_epic_opaque_id_valid "$issue_id" || return 2
+    [ "$issue_url" = "https://github.com/$repository/issues/$issue_number" ] || return 2
+    token=$(taskdag_activation_snapshot_token) || return 3
+    activation=$(taskdag_activation_record_for_snapshot "$token") || return 3
+    repository=$(taskdag_norm_owner_repo "$repository") || return 2
+    jq -e --arg repo "$repository" --arg id "$repository_id" 'any(.registrySnapshot.repositories[];.repository==$repo and .repositoryId==$id)' <<<"$activation" >/dev/null || return 3
+
+    source_repository=$(taskdag_norm_owner_repo "$source_repository") || return 2
+    jq -e --arg repo "$source_repository" --arg id "$source_id" 'any(.registrySnapshot.repositories[];.repository==$repo and .repositoryId==$id)' <<<"$activation" >/dev/null || return 3
+    [ -n "$source_checkout" ] && [ -d "$source_checkout/.git" ] && taskdag_full_history_checkout "$source_checkout" || return 3
+    source_identity=$(git -C "$source_checkout" config --get taskdag.current-repo 2>/dev/null || true)
+    [ "$(taskdag_norm_owner_repo "$source_identity" 2>/dev/null)" = "$source_repository" ] || return 3
+    source_tip=$(jq -er --arg repo "$source_repository" --arg id "$source_id" '.sourceTips[]|select(.repository==$repo and .repositoryId==$id and .ref=="refs/heads/master")|.commit' <<<"$activation") || return 3
+    source_rows=$(git -C "$source_checkout" ls-remote --refs origin refs/heads/master "$TASKDAG_MATERIALISATION_REF") || return 3
+    [ "$(awk '$2=="refs/heads/master"{print $1}' <<<"$source_rows")" = "$source_tip" ] || return 3
+    source_registry_tip=$(awk -v r="$TASKDAG_MATERIALISATION_REF" '$2==r{print $1}' <<<"$source_rows")
+    [ -n "$source_registry_tip" ] || return 3
+    git -C "$source_checkout" fetch -q --no-tags origin "$source_registry_tip" || return 3
+    declaration=$(git -C "$source_checkout" show "$source_registry_tip:declarations/$declaration_digest.json") || return 3
+
+    rows=$(git ls-remote --refs origin "$TASKDAG_EPIC_REGISTRY_REF" refs/heads/master) || return 3
+    registry_old=$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$rows")
+    master_old=$(awk '$2=="refs/heads/master"{print $1}' <<<"$rows")
+    [ -n "$registry_old" ] && [ -n "$master_old" ] || return 3
+    git fetch -q --no-tags origin "$registry_old" "$master_old" || return 3
+    jq -e --arg digest "$declaration_digest" --arg operation "$operation" --arg source "$source_repository" --arg source_id "$source_id" --arg peer "$repository" --arg peer_id "$repository_id" '
+      .declarationDigest==$digest and .operationId==$operation and
+      .sourceRepo.id==$source_id and .sourceRepo.name==$source and
+      .peerRepo.id==$peer_id and .peerRepo.name==$peer' <<<"$declaration" >/dev/null || return 3
+
+    epic=$(taskdag_epic_id_for_operation "$source_id" "$operation") || return 3
+    digest=${epic#epic-v1:}
+    record=$(taskdag_epic_registry_record "$epic" "$registry_old" "$master_old") || return 3
+    descriptor=$(jq -cS .descriptor <<<"$record") || return 3
+    jq -e --arg op "$operation" --arg repo "$repository" --arg rid "$repository_id" --arg source "$source_id" '
+      .origin.kind=="operation" and .origin.operationId==$op and
+      .origin.repositoryId==$source and
+      .projection.provider=="github" and .projection.repository==$repo and
+      .projection.repositoryId==$rid and .projection.issueId==null and
+      .projection.issueNumber==null and .projection.issueUrl==null' <<<"$descriptor" >/dev/null || return 3
+    key=$(taskdag_provider_binding_key "$provider" "$repository_id" "$issue_id") || return 2
+
+    projection=$(jq -ncS --arg p "$provider" --arg repo "$repository" --arg rid "$repository_id" --arg iid "$issue_id" --arg n "$issue_number" --arg url "$issue_url" \
+      '{issueId:$iid,issueNumber:$n,issueUrl:$url,provider:$p,repository:$repo,repositoryId:$rid}') || return 2
+    binding=$(jq -ncS --arg epic "$epic" --argjson projection "$projection" '{epicId:$epic,projection:$projection,schema:1}') || return 2
+    taskdag_epic_registry_validate_binding_to_record "$record" "$binding" || return 2
+    local existing_epic existing_provider root_ref
+    existing_epic=$(taskdag_epic_registry_binding "$epic" "$registry_old" "$master_old" 2>/dev/null || true)
+    existing_provider=$(taskdag_epic_registry_provider_binding "$provider" "$repository_id" "$issue_id" "$registry_old" "$master_old" 2>/dev/null || true)
+    if [ -n "$existing_epic$existing_provider" ]; then
+        [ "$existing_epic" = "$binding" ] && [ "$existing_provider" = "$binding" ] || return 3
+        root_ref=$(jq -r .pendingRef <<<"$(taskdag_root_locator "$epic")") || return 3
+        jq -ncS --arg epicId "$epic" --arg rootCommit "$(jq -r .rootCommit <<<"$record")" --arg rootRef "$root_ref" \
+          '{activeRef:null,claimCommit:null,created:false,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
+        return 0
+    fi
+    idx=$(mktemp) || return 2; rm -f "$idx"; GIT_INDEX_FILE=$idx git read-tree "$registry_old" || { rm -f "$idx"; return 2; }
+    blob=$(printf '%s\n' "$binding" | git hash-object -w --stdin) || { rm -f "$idx"; return 2; }
+    if ! GIT_INDEX_FILE=$idx git update-index --add --cacheinfo "100644,$blob,bindings/by-epic/$digest.json" \
+      || ! GIT_INDEX_FILE=$idx git update-index --add --cacheinfo "100644,$blob,bindings/by-provider/$key.json"; then
+        rm -f "$idx"; return 2
+    fi
+    tree=$(GIT_INDEX_FILE=$idx git write-tree); rm -f "$idx" || return 2
+    registry_new=$(GIT_AUTHOR_NAME="$TASKDAG_CANONICAL_AUTHOR_NAME" GIT_AUTHOR_EMAIL="$TASKDAG_CANONICAL_AUTHOR_EMAIL" GIT_COMMITTER_NAME="$TASKDAG_CANONICAL_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$TASKDAG_CANONICAL_AUTHOR_EMAIL" GIT_AUTHOR_DATE="$timestamp" GIT_COMMITTER_DATE="$timestamp" git commit-tree "$tree" -p "$registry_old" -m "Bind Epic-ID $epic provider projection") || return 2
+    taskdag_epic_registry_validate_history "$registry_new" "$master_old" || return 2
+    updates=$(jq -ncS --arg ref "$TASKDAG_EPIC_REGISTRY_REF" --arg old "$registry_old" --arg new "$registry_new" '[{ref:$ref,old:$old,new:$new}]') || return 2
+    if ! taskdag_activation_fenced_multi_push "$token" scheduling bind-operation-projection "$actor" "$timestamp" "$updates"; then
+        # Another marker ingress may have won the same bind. Reconcile the
+        # immutable paired indexes; only the exact same binding is success.
+        registry_new=$(git ls-remote --refs origin "$TASKDAG_EPIC_REGISTRY_REF" | awk 'NF==2{print $1}')
+        [ -n "$registry_new" ] && git fetch -q --no-tags origin "$registry_new" || return 3
+        [ "$(taskdag_epic_registry_binding "$epic" "$registry_new" "$master_old" 2>/dev/null)" = "$binding" ] \
+          && [ "$(taskdag_epic_registry_provider_binding "$provider" "$repository_id" "$issue_id" "$registry_new" "$master_old" 2>/dev/null)" = "$binding" ] || return 3
+        jq -ncS --arg epicId "$epic" --arg rootCommit "$(jq -r .rootCommit <<<"$record")" --arg rootRef "$(jq -r .pendingRef <<<"$(taskdag_root_locator "$epic")")" \
+          '{activeRef:null,claimCommit:null,created:false,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
+        return 0
+    fi
+    result=$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT
+    jq -e --arg ref "$TASKDAG_EPIC_REGISTRY_REF" --arg oid "$registry_new" '.outcome=="applied" and any(.readback.targets[];.ref==$ref and .oid==$oid)' <<<"$result" >/dev/null || return 3
+    readback=$(git ls-remote --refs origin "$TASKDAG_ACTIVATION_REF" "$TASKDAG_EPIC_REGISTRY_REF") || return 3
+    [ "$(awk -v r="$TASKDAG_ACTIVATION_REF" '$2==r{print $1}' <<<"$readback")" = "$(jq -r .authority.observed <<<"$result")" ] \
+      && [ "$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$readback")" = "$registry_new" ] || return 3
+    git fetch -q --no-tags origin "$registry_new" || return 3
+    [ "$(taskdag_epic_registry_binding "$epic" "$registry_new" "$master_old")" = "$binding" ] \
+      && [ "$(taskdag_epic_registry_provider_binding "$provider" "$repository_id" "$issue_id" "$registry_new" "$master_old")" = "$binding" ] || return 3
+    jq -ncS --arg epicId "$epic" --arg rootCommit "$(jq -r .rootCommit <<<"$record")" --arg rootRef "$(jq -r .pendingRef <<<"$(taskdag_root_locator "$epic")")" \
+      '{activeRef:null,claimCommit:null,created:false,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
+}
+
 # Atomically create (or adopt) one canonical root, append its immutable
 # registry facts, and acquire its root orchestration lock. Input is one strict
 # canonical JSON object. This deliberately accepts already-resolved immutable
@@ -223,21 +349,21 @@ taskdag_epic_registry_provider_binding() { # provider repository-id issue-id [ti
 taskdag_internal_mint_epic_root() { # spec-json
     local spec=$1 canonical descriptor epic_id digest locator pending active parent legacy kind root message
     local claim claim_id claimer host pid ttl note timestamp registry_old registry_new record binding key
-    local rows pending_old active_old issue_old master_old idx tree record_blob binding_blob token updates result readback existing_record=false
-    local scheduling_pending scheduling_active existing provider_existing retired=false adopted_live=false
+    local rows pending_old active_old issue_old issue_number master_old idx tree record_blob binding_blob token updates result readback existing_record=false
+    local scheduling_pending scheduling_active existing provider_existing retired=false adopted_live=false auto_adopt_active=''
     local discovery snapshot refs_file ref oid snapshot_rows
     local -a snapshot_args
     jq -e 'type=="object" and keys==["actor","authoritativeTimestamp","claim","descriptor","legacyAdoption","parentCommit","schema"] and
       .schema==1 and (.actor|type=="string" and length>0 and (test("[[:cntrl:]]")|not)) and
       (.authoritativeTimestamp|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
       (.parentCommit|type=="string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$")) and
-      (.claim|type=="object" and keys==["claimId","claimer","host","note","pid","ttlHours"] and
+      (.claim==null or (.claim|type=="object" and keys==["claimId","claimer","host","note","pid","ttlHours"] and
        (.claimId|type=="string" and test("^[A-Za-z0-9._-]{1,128}$")) and
        (.claimer|type=="string" and length>0 and (test("[[:cntrl:]]")|not)) and
        (.host|type=="string" and length>0 and (test("[[:cntrl:]]")|not)) and
        (.note|type=="string" and (test("[[:cntrl:]]")|not)) and
        (.pid|type=="string" and test("^[1-9][0-9]*$")) and
-       (.ttlHours|type=="string" and test("^[1-9][0-9]*$"))) and
+       (.ttlHours|type=="string" and test("^[1-9][0-9]*$")))) and
       (.legacyAdoption==null or (.legacyAdoption|type=="object" and keys==["issueNumber","issueRef","pendingRef"] and
        (.issueNumber|type=="string" and test("^[1-9][0-9]*$")) and .issueRef==("refs/heads/gh/issues/"+.issueNumber) and
        .pendingRef==("refs/heads/tasks/pending/"+.issueNumber)))' <<<"$spec" >/dev/null 2>&1 || return 2
@@ -278,6 +404,13 @@ taskdag_internal_mint_epic_root() { # spec-json
     fi
     refs_file=$(mktemp) || return 2
     printf '%s\n' "$TASKDAG_EPIC_REGISTRY_REF" refs/heads/master "$scheduling_pending" "$scheduling_active" "$pending" "$active" >"$refs_file"
+    # GitHub provider mint always snapshots the prospective numeric namespace,
+    # including absence. A legacy writer racing a typed mint therefore changes
+    # the shared activation generation and cannot create a duplicate root.
+    if [ "$(jq -r '.origin.kind=="provider" and .projection.provider=="github"' <<<"$descriptor")" = true ]; then
+        issue_number=$(jq -r .projection.issueNumber <<<"$descriptor")
+        printf 'refs/heads/gh/issues/%s\nrefs/heads/tasks/pending/%s\nrefs/heads/tasks/root-active/%s\n' "$issue_number" "$issue_number" "$issue_number" >>"$refs_file"
+    fi
     if [ -n "$registry_old" ]; then
         while read -r oid; do
             git cat-file blob "$oid" | jq -r 'if .kind=="legacy-adoption-v1" then .legacyAdoption.issueRef,.legacyAdoption.pendingRef else empty end' >>"$refs_file" \
@@ -313,6 +446,24 @@ taskdag_internal_mint_epic_root() { # spec-json
     pending_old=$(awk -v r="$scheduling_pending" '$2==r{print $1}' <<<"$rows")
     active_old=$(awk -v r="$scheduling_active" '$2==r{print $1}' <<<"$rows")
 
+    # Numeric adoption is decided only from this authoritative transaction
+    # snapshot. Provider callers cannot preselect legacy/native semantics.
+    if [ "$(jq -r '.origin.kind=="provider" and .projection.provider=="github"' <<<"$descriptor")" = true ]; then
+        issue_number=$(jq -r .projection.issueNumber <<<"$descriptor")
+        local numeric_issue numeric_pending numeric_active
+        numeric_issue=$(taskdag__registry_snapshot_ref "$snapshot" "refs/heads/gh/issues/$issue_number") || return 3
+        numeric_pending=$(taskdag__registry_snapshot_ref "$snapshot" "refs/heads/tasks/pending/$issue_number") || return 3
+        numeric_active=$(taskdag__registry_snapshot_ref "$snapshot" "refs/heads/tasks/root-active/$issue_number") || return 3
+        if [ -n "$numeric_issue$numeric_pending$numeric_active" ]; then
+            [ -n "$numeric_issue" ] && [ -n "$numeric_pending" ] && [ "$numeric_issue" = "$numeric_pending" ] || return 3
+            legacy=$(jq -ncS --arg n "$issue_number" '{issueNumber:$n,issueRef:("refs/heads/gh/issues/"+$n),pendingRef:("refs/heads/tasks/pending/"+$n)}') || return 2
+            scheduling_pending="refs/heads/tasks/pending/$issue_number"
+            scheduling_active="refs/heads/tasks/root-active/$issue_number"
+            pending_old=$numeric_pending; active_old=$numeric_active; issue_old=$numeric_issue
+            auto_adopt_active=$numeric_active
+        fi
+    fi
+
     if [ "$legacy" = null ]; then
         message=$(mktemp) || return 2
         taskdag_serialize_epic_root_message <<<"$descriptor" >"$message" || { rm -f "$message"; return 2; }
@@ -327,15 +478,17 @@ taskdag_internal_mint_epic_root() { # spec-json
     fi
     record=$(jq -ncS --argjson descriptor "$descriptor" --arg epic "$epic_id" --arg root "$root" --arg kind "$kind" --argjson legacy "$legacy" \
       '{descriptor:$descriptor,epicId:$epic,kind:$kind,legacyAdoption:$legacy,rootCommit:$root,schema:1}') || return 2
-    claim=$(jq -c .claim <<<"$spec"); claim_id=$(jq -r .claimId <<<"$claim"); claimer=$(jq -r .claimer <<<"$claim")
-    host=$(jq -r .host <<<"$claim"); pid=$(jq -r .pid <<<"$claim"); ttl=$(jq -r .ttlHours <<<"$claim"); note=$(jq -r .note <<<"$claim")
-    if [ "$legacy" = null ]; then
+    claim=$(jq -c .claim <<<"$spec")
+    if [ "$claim" != null ]; then
+      claim_id=$(jq -r .claimId <<<"$claim"); claimer=$(jq -r .claimer <<<"$claim")
+      host=$(jq -r .host <<<"$claim"); pid=$(jq -r .pid <<<"$claim"); ttl=$(jq -r .ttlHours <<<"$claim"); note=$(jq -r .note <<<"$claim")
+      if [ "$legacy" = null ]; then
         binding="Epic-ID: $epic_id
 Root-Ref: $scheduling_pending"
-    else
+      else
         binding="Issue: #$(jq -r .issueNumber <<<"$legacy")"
-    fi
-    message="Claim: $(jq -r .task.title <<<"$descriptor")
+      fi
+      message="Claim: $(jq -r .task.title <<<"$descriptor")
 
 Claim-Kind: root
 $binding
@@ -346,11 +499,20 @@ Claimer-Host: $host
 Claimer-PID: $pid
 Claimed-At: $timestamp
 TTL-Hours: $ttl"
-    [ -z "$note" ] || message="$message
+      [ -z "$note" ] || message="$message
 Note: $note"
-    claim=$(GIT_AUTHOR_NAME="$TASKDAG_CANONICAL_AUTHOR_NAME" GIT_AUTHOR_EMAIL="$TASKDAG_CANONICAL_AUTHOR_EMAIL" GIT_COMMITTER_NAME="$TASKDAG_CANONICAL_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$TASKDAG_CANONICAL_AUTHOR_EMAIL" GIT_AUTHOR_DATE="$timestamp" GIT_COMMITTER_DATE="$timestamp" git commit-tree "$EMPTY_TREE" -p "$root" -m "$message") || return 2
-    locator=$(taskdag_root_locator "$scheduling_pending") || return 2
-    taskdag_validate_root_claim "$locator" "$root" "$claim" || return 2
+      claim=$(GIT_AUTHOR_NAME="$TASKDAG_CANONICAL_AUTHOR_NAME" GIT_AUTHOR_EMAIL="$TASKDAG_CANONICAL_AUTHOR_EMAIL" GIT_COMMITTER_NAME="$TASKDAG_CANONICAL_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$TASKDAG_CANONICAL_AUTHOR_EMAIL" GIT_AUTHOR_DATE="$timestamp" GIT_COMMITTER_DATE="$timestamp" git commit-tree "$EMPTY_TREE" -p "$root" -m "$message") || return 2
+      locator=$(taskdag_root_locator "$scheduling_pending") || return 2
+      taskdag_validate_root_claim "$locator" "$root" "$claim" || return 2
+    else
+      claim=""
+    fi
+    if [ -n "$auto_adopt_active" ]; then
+      git fetch -q --no-tags origin "$auto_adopt_active" || return 3
+      locator=$(taskdag_root_locator "$scheduling_pending") || return 3
+      taskdag_validate_root_claim "$locator" "$root" "$auto_adopt_active" || return 3
+      claim=$auto_adopt_active
+    fi
 
     if [ -n "$registry_old" ]; then
         git fetch -q --no-tags origin "$registry_old" || return 3
@@ -372,10 +534,10 @@ Note: $note"
     elif [ "$legacy" != null ] && ! $existing_record; then
         [ "$pending_old" = "$root" ] && [ "$active_old" = "$claim" ] || return 3
         adopted_live=true
-    elif $existing_record && [ -n "$pending_old" ] && [ -n "$active_old" ]; then
+    elif $existing_record && [ -n "$pending_old" ] && { [ "$active_old" = "$claim" ]; }; then
         [ "$pending_old" = "$root" ] && [ "$active_old" = "$claim" ] || return 3
         jq -ncS --arg epicId "$epic_id" --arg rootCommit "$root" --arg rootRef "$scheduling_pending" --arg claimCommit "$claim" --arg activeRef "$scheduling_active" \
-          '{activeRef:$activeRef,claimCommit:$claimCommit,created:false,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
+          '{activeRef:(if $claimCommit=="" then null else $activeRef end),claimCommit:(if $claimCommit=="" then null else $claimCommit end),created:false,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
         return 0
     elif $existing_record || [ -n "$pending_old" ] || [ -n "$active_old" ]; then
         return 3
@@ -409,7 +571,7 @@ Note: $note"
       --arg pr "$scheduling_pending" --arg root "$root" --arg ar "$scheduling_active" --arg claim "$claim" --argjson retired "$retired" --argjson adopted "$adopted_live" \
       '[{ref:$rr,old:$ro,new:$rn}] +
        (if $retired or $adopted then []
-        else [{ref:$pr,old:"",new:$root},{ref:$ar,old:"",new:$claim}] end)|sort_by(.ref)') || return 2
+        else [{ref:$pr,old:"",new:$root}] + (if $claim=="" then [] else [{ref:$ar,old:"",new:$claim}] end) end)|sort_by(.ref)') || return 2
     taskdag_activation_fenced_multi_push "$token" scheduling mint-epic-root "$(jq -r .actor <<<"$spec")" "$timestamp" "$updates" || return 3
     result=$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT
     jq -e --arg rr "$TASKDAG_EPIC_REGISTRY_REF" --arg rn "$registry_new" '
@@ -422,7 +584,7 @@ Note: $note"
       && [ "$(awk -v r="$scheduling_pending" '$2==r{print $1}' <<<"$readback")" = "$([ "$retired" = true ] || printf '%s' "$root")" ] \
       && [ "$(awk -v r="$scheduling_active" '$2==r{print $1}' <<<"$readback")" = "$([ "$retired" = true ] || printf '%s' "$claim")" ] || return 3
     jq -ncS --arg epicId "$epic_id" --arg rootCommit "$root" --arg rootRef "$scheduling_pending" --arg claimCommit "$claim" --arg activeRef "$scheduling_active" --argjson retired "$retired" \
-      '{activeRef:(if $retired then null else $activeRef end),claimCommit:(if $retired then null else $claimCommit end),created:true,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
+      '{activeRef:(if $retired or $claimCommit=="" then null else $activeRef end),claimCommit:(if $retired or $claimCommit=="" then null else $claimCommit end),created:true,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
 }
 
 taskdag_parse_epic_close_commit() { # commit [registry-tip] [authority-tip]

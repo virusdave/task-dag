@@ -242,10 +242,12 @@ else
     bad "legacy root serialization changed"
 fi
 
-if ! "$TD" --help | grep -Eq 'epic-create|create-epic|mint-root'; then
-    ok "no public Epic-ID root writer command exists"
+if "$TD" epic-create --help >/dev/null \
+    && ! "$TD" epic-create --json --title x --author x --description x --repository bad --repository-id bad \
+         --operation-id bad --origin-repository bad --origin-repository-id bad >/dev/null 2>&1; then
+    ok "public Epic-ID root writer is help-safe and malformed input is gated"
 else
-    bad "an Epic-ID root writer command was exposed"
+    bad "public Epic-ID root writer help or safety gate failed"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"

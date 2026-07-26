@@ -500,10 +500,59 @@ _xrepo_current_repo_offline() {
 # view`. If neither yields a title, it dies rather than write a junk epic.
 _xrepo_ensure_issue_epic() {
     local issue="$1"
+    local with_ref=false
+    [ "${2:-}" != --with-ref ] || with_ref=true
     local gh_issues_ref="refs/heads/gh/issues/${issue}"
     local pending_ref="refs/heads/tasks/pending/${issue}"
+    local repository repository_id token activation rows registry master tmp matches record epic locator canonical_ref binding epic_sha
 
-    local epic_sha
+    # Typed roots are authoritative. Resolve by the target repository pair in
+    # the activation registry plus issue number, then require the paired
+    # provider index to prove the immutable issue metadata. Never guess an
+    # Epic-ID from a mutable numeric ref.
+    repository=$(_xrepo_current_repo) || return 2
+    repository=$(taskdag_norm_owner_repo "$repository") || return 2
+    token=$(taskdag_activation_snapshot_token) || return 3
+    activation=$(taskdag_activation_record_for_snapshot "$token") || return 3
+    repository_id=$(jq -er --arg repo "$repository" '[.registrySnapshot.repositories[]|select(.repository==$repo)|.repositoryId]|if length==1 then .[0] else error("ambiguous repository") end' <<<"$activation") || return 3
+    rows=$(git ls-remote --refs origin "$TASKDAG_EPIC_REGISTRY_REF" refs/heads/master) || return 3
+    registry=$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$rows")
+    master=$(awk '$2=="refs/heads/master"{print $1}' <<<"$rows")
+    if [ -n "$registry" ]; then
+        [ -n "$master" ] && git fetch -q --no-tags origin "$registry" "$master" || return 3
+        taskdag_epic_registry_validate_history "$registry" "$master" || return 3
+        tmp=$(mktemp) || return 2
+        # Issue numbers are projection metadata, not registry root keys. Search
+        # only the validated provider-binding index, then dereference its
+        # Epic-ID into the immutable root record. This admits both native
+        # provider roots and operation roots bound by the projector.
+        while read -r _ _ blob path; do
+            binding=$(git cat-file blob "$blob") || { rm -f "$tmp"; return 3; }
+            if jq -e --arg repo "$repository" --arg rid "$repository_id" --arg n "$issue" \
+              '.projection.provider=="github" and .projection.repository==$repo and
+               .projection.repositoryId==$rid and .projection.issueNumber==$n' <<<"$binding" >/dev/null; then
+                printf '%s\t%s\n' "$path" "$binding" >>"$tmp"
+            fi
+        done < <(git ls-tree -r "$registry" bindings/by-provider/)
+        matches=$(wc -l <"$tmp")
+        [ "$matches" -le 1 ] || { rm -f "$tmp"; _xrepo_die "ensure-epic: ambiguous typed roots for ${repository}#${issue}"; return 3; }
+        if [ "$matches" -eq 1 ]; then
+            binding=$(cut -f2- "$tmp"); rm -f "$tmp"
+            epic=$(jq -r .epicId <<<"$binding")
+            record=$(taskdag_epic_registry_record "$epic" "$registry" "$master") || return 3
+            taskdag_epic_registry_validate_binding_to_record "$record" "$binding" || return 3
+            locator=$(taskdag_root_locator "$epic") || return 3
+            canonical_ref=$(jq -r .pendingRef <<<"$locator")
+            epic_sha=$(jq -r .rootCommit <<<"$record")
+            [ "$(git ls-remote --refs origin "$canonical_ref" | awk 'NF==2{print $1}')" = "$epic_sha" ] || return 3
+            _XREPO_ISSUE_EPIC_ROOT=$epic_sha
+            _XREPO_ISSUE_EPIC_REF=$canonical_ref
+            if $with_ref; then printf '%s\t%s' "$epic_sha" "$canonical_ref"; else printf '%s' "$epic_sha"; fi
+            return 0
+        fi
+        rm -f "$tmp"
+    fi
+
     epic_sha="$(git rev-parse --verify "$gh_issues_ref" 2>/dev/null || true)"
     if [ -z "$epic_sha" ]; then
         git fetch origin "$gh_issues_ref":"$gh_issues_ref" >/dev/null 2>&1 || true
@@ -518,9 +567,18 @@ _xrepo_ensure_issue_epic() {
         fi
     fi
     if [ -n "$epic_sha" ]; then
-        printf '%s' "$epic_sha"
+        _XREPO_ISSUE_EPIC_ROOT=$epic_sha
+        _XREPO_ISSUE_EPIC_REF=$([ "$epic_sha" = "$(git rev-parse --verify "$gh_issues_ref" 2>/dev/null || true)" ] && printf '%s' "$gh_issues_ref" || printf '%s' "$pending_ref")
+        if $with_ref; then printf '%s\t%s' "$epic_sha" "$pending_ref"; else printf '%s' "$epic_sha"; fi
         return 0
     fi
+
+    # Root creation is exclusively owned by epic-create. This compatibility
+    # reader does not possess immutable repository/issue node IDs, so it must
+    # fail closed rather than race the canonical typed writer with a numeric
+    # root. The issue-event ingress supplies those IDs and invokes the minter.
+    _xrepo_die "ensure-epic: root for #${issue} is absent; refusing duplicate legacy writer (ingest it with task-dag epic-create)"
+    return 2
 
     # ---- Epic missing: backfill it. ----
     # Prepare before authoring or publishing anything: after activation,
@@ -1508,7 +1566,7 @@ _xrepo_registry_identity() { # worktree epic-id registry-tip authority-tip; prin
     record=$(GIT_DIR="$record" taskdag_epic_registry_record "$epic" "$registry" "$authority") || return 2
     binding=$(GIT_DIR="$(env -u GIT_DIR git -C "$wt" rev-parse --absolute-git-dir)" \
         taskdag_epic_registry_binding "$epic" "$registry" "$authority") || return 2
-    [ "$(jq -cS .projection <<<"$binding")" = "$(jq -cS .descriptor.projection <<<"$record")" ] || return 2
+    taskdag_epic_registry_validate_binding_to_record "$record" "$binding" || return 2
     printf '%s\t%s\n' "$record" "$binding"
 }
 
@@ -2576,7 +2634,7 @@ _xrepo_reconcile_argument_failure() {
 _xrepo_reconcile_apply_batch() { # staging-dir repository staged-jsonl applied-count-file result-file
     local stage=$1 repo=$2 staged=$3 applied_out=$4 result_out=$5
     local roots="$stage/batch-roots" objects="$stage/batch-objects" updates_file="$stage/batch-updates"
-    local issue root refs pending issue_ref pending_oid issue_oid item cid disposition body hash effect="" effect_ref="" receipt msgf nonce short
+    local issue root expected_ref resolved refs pending issue_ref pending_oid issue_oid item cid disposition body hash effect="" effect_ref="" receipt msgf nonce short
     : >"$roots"; : >"$objects"; : >"$updates_file"
     [ -s "$staged" ] || return 0
 
@@ -2584,17 +2642,14 @@ _xrepo_reconcile_apply_batch() { # staging-dir repository staged-jsonl applied-c
     # each distinct human issue once, so a batch never creates a root and its
     # children in the same scheduling push.
     while IFS= read -r issue; do
-        root=$(ISSUE_TITLE="$(jq -r .title "$stage/issue-${issue}.json")" \
+        resolved=$(ISSUE_TITLE="$(jq -r .title "$stage/issue-${issue}.json")" \
             ISSUE_AUTHOR="$(jq -r .user.login "$stage/issue-${issue}.json")" \
             ISSUE_URL="$(jq -r .html_url "$stage/issue-${issue}.json")" \
             ISSUE_BODY="$(jq -r '.body // ""' "$stage/issue-${issue}.json")" \
-            _xrepo_ensure_issue_epic "$issue") || return 2
-        refs=$(git ls-remote --refs origin "refs/heads/gh/issues/$issue" "refs/heads/tasks/pending/$issue") || return 2
-        pending_oid=$(awk -v r="refs/heads/tasks/pending/$issue" '$2==r{print $1}' <<<"$refs")
-        issue_oid=$(awk -v r="refs/heads/gh/issues/$issue" '$2==r{print $1}' <<<"$refs")
-        [ -n "$pending_oid$issue_oid" ] && { [ -z "$pending_oid" ] || [ "$pending_oid" = "$root" ]; } \
-            && { [ -z "$issue_oid" ] || [ "$issue_oid" = "$root" ]; } || return 2
-        printf '%s\t%s\t%s\t%s\n' "$issue" "$root" "$pending_oid" "$issue_oid" >>"$roots"
+            _xrepo_ensure_issue_epic "$issue" --with-ref) || return 2
+        IFS=$'\t' read -r root expected_ref <<<"$resolved"
+        [ -n "$root" ] && [ -n "$expected_ref" ] || return 2
+        printf '%s\t%s\t%s\n' "$issue" "$root" "$expected_ref" >>"$roots"
     done < <(jq -r 'select(.disposition=="human")|.issue' "$staged" | LC_ALL=C sort -un)
 
     # Author every effect first. Frontier abbreviations are derived only after
@@ -2631,11 +2686,13 @@ _xrepo_reconcile_apply_batch() { # staging-dir repository staged-jsonl applied-c
 
     taskdag_consumer_prepare reconcile-comments-batch || return 2
     [ "$TASKDAG_CONSUMER_READY" = true ] || return 2
-    while IFS=$'\t' read -r issue root pending_oid issue_oid; do
-        pending=$(awk -v r="refs/heads/tasks/pending/$issue" '$2==r{print $1}' <<<"$TASKDAG_CHILD_MAP_REFS")
-        issue_ref=$(awk -v r="refs/heads/gh/issues/$issue" '$2==r{print $1}' <<<"$TASKDAG_CHILD_MAP_REFS")
-        [ -n "$pending$issue_ref" ] && { [ -z "$pending" ] || [ "$pending" = "$root" ]; } \
-            && { [ -z "$issue_ref" ] || [ "$issue_ref" = "$root" ]; } || return 2
+    while IFS=$'\t' read -r issue root expected_ref; do
+        # The prepared child-map snapshot must still contain the exact root
+        # under either its legacy numeric or canonical typed pending ref.
+        # This preserves the pre-push race fence without requiring numeric
+        # refs for typed provider or bound-operation roots.
+        awk -v root="$root" -v ref="$expected_ref" '$1==root && $2==ref {found=1} END {exit !found}' \
+            <<<"$TASKDAG_CHILD_MAP_REFS" || return 2
         while IFS= read -r effect; do
             [ "$(git rev-parse "$effect^")" = "$root" ] || return 2
         done < <(jq -r --argjson issue "$issue" 'select(.issue==$issue and .effect!="")|.effect' "$objects")

@@ -83,6 +83,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/epic-registry.sh" \
         "$(dirname "$TD")/task-dag.d/child-map.sh" \
         "$(dirname "$TD")/task-dag.d/claim-model.sh" \
+        "$(dirname "$TD")/task-dag.d/epic-create.sh" \
         "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
         "$(dirname "$TD")/task-dag.d/repository-identity.sh" \
         "$(dirname "$TD")/task-dag.d/blocked-core.sh" \
@@ -140,6 +141,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/epic-registry.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/child-map.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/claim-model.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/epic-create.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/repository-identity.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/github-origin.sh" \

@@ -10,16 +10,56 @@ taskdag_json_file_is_single_strict(){ jq -e . "$1" >/dev/null 2>&1; }
 source "$LIB/git-objects.sh"; source "$LIB/task-model.sh"; source "$LIB/claim-model.sh"; source "$LIB/repository-identity.sh"
 _taskdag_materialise_no_duplicate_keys(){ jq -e . "$1" >/dev/null 2>&1; }
 source "$LIB/activation.sh"; source "$LIB/epic-registry.sh"
+TASKDAG_MATERIALISATION_REF=refs/heads/tasks/v1/materialisation
 git init -q --bare "$ROOT/origin"; git init -q "$ROOT/wc"; cd "$ROOT/wc" || exit; git remote add origin "$ROOT/origin"
 echo seed >seed; git add seed; git commit -qm seed; parent=$(git rev-parse HEAD); git push -q origin HEAD:master
+git init -q --bare "$ROOT/source-origin"; git init -q "$ROOT/source-wc"
+git -C "$ROOT/source-wc" remote add origin "$ROOT/source-origin"
+git -C "$ROOT/source-wc" config taskdag.current-repo source/repo
+echo source >"$ROOT/source-wc/seed"; git -C "$ROOT/source-wc" add seed; git -C "$ROOT/source-wc" commit -qm seed
+source_parent=$(git -C "$ROOT/source-wc" rev-parse HEAD); git -C "$ROOT/source-wc" push -q origin HEAD:master
 runtime=$(git -C "$TASKDAG_SCRIPT_DIR/.." rev-parse HEAD)
 registry_commit=1111111111111111111111111111111111111111
 registry_blob=2222222222222222222222222222222222222222
-registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
+registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"owner/repo",repositoryId:"R_target",name:"target",repairMode:"off",repairBranch:null},{repository:"source/repo",repositoryId:"R_source",name:"source",repairMode:"off",repairBranch:null},{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
 printf '%s\n' "$registry" >"$ROOT/registry"
 registry_id=$(_taskdag_activation_registry_id "$ROOT/registry")
-jq -ncS --arg runtime "$runtime" --arg floor "$TASKDAG_EPIC_READER_CUTOVER" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" '{actor:"fixture",authoritativeTimestamp:"2026-07-25T00:00:00Z",minimumCompatibleTaskDagCommit:$floor,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
+jq -ncS --arg runtime "$runtime" --arg source "$source_parent" --arg floor "$TASKDAG_EPIC_WRITER_CUTOVER" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" --argjson repositories "$(jq -c .repositories "$ROOT/registry")" '{actor:"fixture",authoritativeTimestamp:"2026-07-25T00:00:00Z",minimumCompatibleTaskDagCommit:$floor,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:$repositories},sourceTips:[{repository:"owner/repo",repositoryId:"R_target",ref:"refs/heads/master",commit:$runtime},{repository:"source/repo",repositoryId:"R_source",ref:"refs/heads/master",commit:$source},{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
 "$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null || exit 1
+
+# Exercise the public operation ingress. Semantic replay must resolve the
+# authoritative Epic-ID record before mutable payload, parent, time, or PID
+# can influence object authoring; a later --claim is an independent claim-root.
+public_operation=$(printf '9%.0s' {1..64})
+public_create=$(TASK_DAG_CLAIMER_HOST=first-host TASK_DAG_CLAIMER_PID=111 "$TD" epic-create --json \
+  --title 'Public root' --author first --description 'first body' \
+  --repository owner/repo --repository-id R_target \
+  --origin-repository source/repo --origin-repository-id R_source \
+  --operation-id "$public_operation" --timestamp 2026-07-25T00:00:00Z)
+public_root=$(jq -r .rootCommit <<<"$public_create")
+echo moved >>seed; git add seed; git commit -qm 'move master'; git push -q origin HEAD:master
+parent=$(git rev-parse HEAD)
+public_replay=$(TASK_DAG_CLAIMER_HOST=changed-host TASK_DAG_CLAIMER_PID=222 "$TD" epic-create --json \
+  --title 'Changed title' --author changed --description 'changed body' \
+  --repository owner/repo --repository-id R_target \
+  --origin-repository source/repo --origin-repository-id R_source \
+  --operation-id "$public_operation" --timestamp 2030-01-01T00:00:00Z)
+if jq -e '.created==false and .claimCommit==null' <<<"$public_replay" >/dev/null \
+  && [ "$(jq -r .rootCommit <<<"$public_replay")" = "$public_root" ]; then
+  ok "public operation replay ignores changed metadata, master, time and PID"
+else bad "public operation replay rewrote immutable state"; fi
+public_claimed=$(TASK_DAG_CLAIMER=ambient-worker TASK_DAG_CLAIMER_HOST=ambient-host TASK_DAG_CLAIMER_PID=333 "$TD" epic-create --json --claim \
+  --title irrelevant --author irrelevant --description irrelevant \
+  --repository owner/repo --repository-id R_target \
+  --origin-repository source/repo --origin-repository-id R_source \
+  --operation-id "$public_operation" --timestamp 2031-01-01T00:00:00Z)
+public_claim=$(jq -r .claimCommit <<<"$public_claimed")
+if [ "$(git show -s --format='%(trailers:key=Claimer,valueonly)' "$public_claim")" = ambient-worker ] \
+  && [ "$(git show -s --format='%(trailers:key=Claimer-Host,valueonly)' "$public_claim")" = ambient-host ] \
+  && [ "$(git show -s --format='%(trailers:key=Claimer-PID,valueonly)' "$public_claim")" = 333 ]; then
+  ok "public replay later --claim uses canonical ambient claim-root identity"
+else bad "public replay claim did not preserve ambient worker identity"; fi
+
 operation=$(printf 'a%.0s' {1..64}); epic=$(taskdag_epic_id_for_operation R_source "$operation")
 descriptor=$(jq -ncS --arg epic "$epic" --arg op "$operation" '{epicId:$epic,origin:{kind:"operation",operationId:$op,repositoryId:"R_source"},projection:{issueId:null,issueNumber:null,issueUrl:null,provider:"github",repository:"owner/repo",repositoryId:"R_target"},schema:1,task:{author:"worker",description:"",status:"pending",title:"Root",type:"epic"}}')
 spec=$(jq -ncS --argjson descriptor "$descriptor" --arg parent "$parent" '{actor:"worker",authoritativeTimestamp:"2026-07-25T00:00:00Z",claim:{claimId:"stable",claimer:"worker",host:"host",note:"",pid:"123",ttlHours:"12"},descriptor:$descriptor,legacyAdoption:null,parentCommit:$parent,schema:1}')
@@ -30,6 +70,52 @@ again=$(taskdag_internal_mint_epic_root "$spec")
 if jq -e '.created==false' <<<"$again" >/dev/null \
   && [ "$(jq -r .rootCommit <<<"$out")" = "$(jq -r .rootCommit <<<"$again")" ] \
   && [ "$(jq -r .claimCommit <<<"$out")" = "$(jq -r .claimCommit <<<"$again")" ]; then ok "replay is deterministic across ambient Git identities"; else bad "replay was not idempotent"; fi
+
+# The hidden projector marker carries only immutable operation/declaration
+# identity. Adoption proves both against the canonical declaration and the
+# existing unbound root, then appends paired indexes without changing it.
+declaration_digest=$(printf 'd%.0s' {1..64})
+declaration=$(jq -ncS --arg op "$operation" --arg dd "$declaration_digest" '{schema:1,operationId:$op,declarationDigest:$dd,sourceRepo:{name:"source/repo",id:"R_source"},peerRepo:{name:"owner/repo",id:"R_target"}}')
+idx="$ROOT/materialisation-index"; printf '%s\n' "$declaration" >"$ROOT/declaration"
+GIT_INDEX_FILE=$idx git update-index --add --cacheinfo "100644,$(git hash-object -w "$ROOT/declaration"),declarations/$declaration_digest.json"
+materialisation_tree=$(GIT_INDEX_FILE=$idx git write-tree); materialisation_commit=$(printf 'fixture materialisation\n' | git commit-tree "$materialisation_tree")
+git push -q "$ROOT/source-origin" "$materialisation_commit:$TASKDAG_MATERIALISATION_REF"
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_bind_operation_projection "$ROOT/source-wc" source/repo R_wrong "$operation" "$(printf 'f%.0s' {1..64})" github owner/repo R_target I_42 42 https://github.com/owner/repo/issues/42 worker 2026-07-25T00:00:01Z >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "forged marker is mutation-free"; else bad "forged marker mutated state"; fi
+taskdag_internal_bind_operation_projection "$ROOT/source-wc" source/repo R_source "$operation" "$declaration_digest" gitlab owner/repo R_target I_42 42 https://github.com/owner/repo/issues/42 worker 2026-07-25T00:00:01Z >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 2 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "invalid binding provider is rejected before publication"; else bad "invalid binding provider mutated state"; fi
+taskdag_internal_bind_operation_projection "$ROOT/source-wc" source/repo R_source "$operation" "$declaration_digest" github owner/repo R_target I_42 42 https://github.com/owner/repo/issues/42 worker 2026-07-25T00:00:01Z >/dev/null || bad "valid marker adoption failed"
+bound_registry=$(git --git-dir="$ROOT/origin" rev-parse "$TASKDAG_EPIC_REGISTRY_REF")
+bound_root=$(git --git-dir="$ROOT/origin" rev-parse "$(jq -r .rootRef <<<"$out")")
+if [ "$bound_root" = "$(jq -r .rootCommit <<<"$out")" ] && taskdag_epic_registry_validate_history "$bound_registry"; then ok "valid marker appends paired binding without rewriting root"; else bad "valid marker binding invalid"; fi
+replay_bound=$(taskdag_internal_bind_operation_projection "$ROOT/source-wc" source/repo R_source "$operation" "$declaration_digest" github owner/repo R_target I_42 42 https://github.com/owner/repo/issues/42 worker 2026-07-25T00:00:02Z)
+if jq -e '.created==false' <<<"$replay_bound" >/dev/null && [ "$bound_registry" = "$(git --git-dir="$ROOT/origin" rev-parse "$TASKDAG_EPIC_REGISTRY_REF")" ]; then ok "marker replay is idempotent"; else bad "marker replay appended duplicate state"; fi
+
+# The opposite delivery order is equally convergent: an issue marker observed
+# before its operation root is mutation-free, then an exact replay binds the
+# same authoritative root after the root writer wins.
+reverse_operation=$(printf '8%.0s' {1..64}); reverse_digest=$(printf '7%.0s' {1..64})
+reverse_epic=$(taskdag_epic_id_for_operation R_source "$reverse_operation")
+reverse_declaration=$(jq -ncS --arg op "$reverse_operation" --arg dd "$reverse_digest" '{schema:1,operationId:$op,declarationDigest:$dd,sourceRepo:{name:"source/repo",id:"R_source"},peerRepo:{name:"owner/repo",id:"R_target"}}')
+printf '%s\n' "$reverse_declaration" >"$ROOT/reverse-declaration"
+reverse_idx="$ROOT/reverse-materialisation-index"; GIT_INDEX_FILE=$reverse_idx git read-tree "$materialisation_commit"
+GIT_INDEX_FILE=$reverse_idx git update-index --add --cacheinfo "100644,$(git hash-object -w "$ROOT/reverse-declaration"),declarations/$reverse_digest.json"
+reverse_tree=$(GIT_INDEX_FILE=$reverse_idx git write-tree); rm -f "$reverse_idx"
+reverse_materialisation=$(printf 'second declaration\n' | git commit-tree "$reverse_tree" -p "$materialisation_commit")
+git push -q "$ROOT/source-origin" "$reverse_materialisation:$TASKDAG_MATERIALISATION_REF"
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_bind_operation_projection "$ROOT/source-wc" source/repo R_source "$reverse_operation" "$reverse_digest" github owner/repo R_target I_43 43 https://github.com/owner/repo/issues/43 worker 2026-07-25T00:00:03Z >/dev/null 2>&1; reverse_rc=$?
+after_early_marker=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+reverse_descriptor=$(jq -ncS --arg epic "$reverse_epic" --arg op "$reverse_operation" '{epicId:$epic,origin:{kind:"operation",operationId:$op,repositoryId:"R_source"},projection:{issueId:null,issueNumber:null,issueUrl:null,provider:"github",repository:"owner/repo",repositoryId:"R_target"},schema:1,task:{author:"worker",description:"",status:"pending",title:"Reverse root",type:"epic"}}')
+reverse_spec=$(jq -ncS --argjson descriptor "$reverse_descriptor" --arg parent "$parent" '{actor:"worker",authoritativeTimestamp:"2026-07-25T00:00:04Z",claim:null,descriptor:$descriptor,legacyAdoption:null,parentCommit:$parent,schema:1}')
+reverse_created=$(taskdag_internal_mint_epic_root "$reverse_spec")
+reverse_bound=$(taskdag_internal_bind_operation_projection "$ROOT/source-wc" source/repo R_source "$reverse_operation" "$reverse_digest" github owner/repo R_target I_43 43 https://github.com/owner/repo/issues/43 worker 2026-07-25T00:00:05Z)
+if [ "$reverse_rc" -eq 3 ] && [ "$before" = "$after_early_marker" ] \
+  && [ "$(jq -r .rootCommit <<<"$reverse_bound")" = "$(jq -r .rootCommit <<<"$reverse_created")" ] \
+  && [ "$(jq -r .epicId <<<"$reverse_bound")" = "$reverse_epic" ]; then
+  ok "two delivery orders converge on one operation root and binding"
+else bad "marker-first replay did not converge"; fi
 
 # Every useful strict subset of {registry,pending,active} is indeterminate. In
 # particular, immutable registry bytes alone never resurrect native refs.
@@ -121,14 +207,20 @@ taskdag_internal_mint_epic_root "$legacy_spec" >/dev/null 2>&1; rc=$?
 if [ "$rc" -eq 3 ] \
   && [ "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/epics)" = "$before_registry" ] \
   && [ "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/root-active/9)" = "$legacy_foreign" ] \
+  && ! git --git-dir="$ROOT/origin" show-ref --verify --quiet "$typed_pending" \
   && [ "$(git --git-dir="$ROOT/origin" log -1 --format=%B "$race_winning_guard" | sed -n 's/^Expected-Authority-Tip: //p')" = "$race_expected_authority" ]; then
-  ok "post-snapshot repair retirement advances activation and rejects whole registry append"
+  ok "injected numeric legacy-writer race cannot publish a typed duplicate"
 else bad "activation generation lease did not fence live adoption (rc=$rc expected=$race_expected_authority guard=$race_winning_guard)"; fi
 restore_token=$(taskdag_activation_snapshot_token)
 restore_updates=$(jq -ncS --arg ref refs/heads/tasks/root-active/9 --arg old "$legacy_foreign" --arg new "$legacy_claim" '[{ref:$ref,old:$old,new:$new}]')
 taskdag_activation_fenced_multi_push "$restore_token" scheduling fixture-active-restore fixture 2026-07-25T00:00:03Z "$restore_updates" >/dev/null || exit 1
-legacy_out=$(taskdag_internal_mint_epic_root "$legacy_spec")
-if [ "$(jq -r .rootCommit <<<"$legacy_out")" = "$legacy_root" ]; then ok "legacy migration adopts exact root"; else bad "legacy migration reminted root"; fi
+legacy_out=$("$TD" epic-create --json --title Legacy --author worker --description '' \
+  --repository owner/repo --repository-id R_target --issue-id I_9 --issue-number 9 \
+  --issue-url https://github.com/owner/repo/issues/9 --timestamp 2026-07-25T00:00:04Z)
+if [ "$(jq -r .rootCommit <<<"$legacy_out")" = "$legacy_root" ] \
+  && [ "$(jq -r .claimCommit <<<"$legacy_out")" = "$legacy_claim" ]; then
+  ok "raw pre-snapshot provider ingress adopts exact numeric root and claim"
+else bad "provider ingress reminted the legacy root"; fi
 
 native_spec() { # operation-char timestamp title
   local operation descriptor epic
@@ -182,5 +274,5 @@ if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref
   ok "origin-absent legacy root fails closed without registry-only resurrection"
 else bad "registry or stale local refs resurrected origin-absent legacy root"; fi
 
-if ! "$TD" --help | grep -Eq 'mint-epic-root|epic-root-minter'; then ok "minter remains internal"; else bad "minter became public"; fi
+if "$TD" epic-create --help | grep -q 'Atomically create or replay an Epic-ID root'; then ok "public epic-create exposes minter contract"; else bad "epic-create help missing"; fi
 echo "PASS=$pass FAIL=$fail"; [ "$fail" -eq 0 ]

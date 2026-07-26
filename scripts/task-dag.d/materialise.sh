@@ -371,7 +371,7 @@ _taskdag_materialise_fresh_transition_violations() { # tip path state
         echo "✗ transition $path lacks recovery body"
         return
       fi
-      expected_body_sha=$({ cat "$body_file"; printf '\n\n<!-- task-dag-materialisation:v1 operation=%s declaration=%s -->\n' "$(jq -r .operationId <<<"$state")" "$(jq -r .declarationDigest <<<"$state")"; } | sha256sum | awk '{print $1}')
+      expected_body_sha=$({ cat "$body_file"; printf '\n\n<!-- task-dag-materialisation:v1 source=%s source-id=%s operation=%s declaration=%s -->\n' "$(jq -r .sourceRepo.name <<<"$declaration")" "$(jq -r .sourceRepo.id <<<"$declaration")" "$(jq -r .operationId <<<"$state")" "$(jq -r .declarationDigest <<<"$state")"; } | sha256sum | awk '{print $1}')
       rm -f "$body_file"
       [ "$(jq -r .providerReceipt.matchedIdentity.bodySha256 <<<"$state")" = "$expected_body_sha" ] || echo "✗ transition $path has recovery body digest mismatch"
       jq -e --arg floor "$(jq -r .provider.timeFloor <<<"$prior")" '

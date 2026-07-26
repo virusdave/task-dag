@@ -639,6 +639,10 @@ COMMANDS:
     retire-owned           Release or park exact claims owned by the ambient
                            process identity (--all|--task|--root)
     capabilities --json    Print the effect-free machine capability contract
+    epic-create            Atomically create/adopt a born-claimed Epic-ID root
+                           without provider calls; strict --json interface
+    epic-bind-projection   Bind a projected issue using an authoritative
+                           source checkout and target operation-root repo
     reap                   Reclaim provably-dead leaf/root claims safely
     roots                  List epic roots + orchestration state
                            (decomposed/claimed/pickable); --pickable for
@@ -7114,6 +7118,8 @@ main() {
             else
                 echo "Usage: task-dag capabilities --json" >&2; return 2
             fi ;;
+        epic-create) cmd_epic_create "$@" ;;
+        epic-bind-projection) cmd_epic_bind_projection "$@" ;;
         migration-status)
             if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
                 echo "Usage: task-dag migration-status --json"
@@ -7840,6 +7846,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/epic-registry.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/child-map.sh"
 # shellcheck source=task-dag.d/claim-model.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/claim-model.sh"
+# shellcheck source=task-dag.d/epic-create.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/epic-create.sh"
 # shellcheck source=task-dag.d/ref-schema.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/ref-schema.sh"
 # shellcheck source=task-dag.d/repository-identity.sh

@@ -49,6 +49,32 @@ docs/
   MIGRATION.md                      phased rollout from the old scattered layout
 ```
 
+`task-dag epic-create` is the sole public root writer. It accepts either an
+operation identity or immutable provider repository/issue node IDs, persists
+the desired GitHub projection, and atomically publishes the registry fact,
+root, and born-active claim. It never calls GitHub; `--help` documents its
+strict `--json` contract. The command remains dormant until activation is
+enabled and `minimumCompatibleTaskDagCommit` is at or after the completed
+internal-minter commit `73bfe103b6f5e1bddc318e5592085619c7f0f2f4`.
+Rollout must first deploy the new runtime everywhere, drain every old
+issue-writer run, and only then raise that floor. Before the raise, both the
+new public writer and the replaced workflow fail closed without mutation.
+
+Numeric GitHub refs are migration input only. The minter snapshots
+`gh/issues/N`, `tasks/pending/N`, and `tasks/root-active/N` together and adopts
+an exact legacy root inside its activation-fenced transaction; any partial or
+conflicting tuple aborts. The operational drain above excludes a raw old
+writer after this snapshot.
+
+Projected issues are bound with `task-dag epic-bind-projection`, run from the
+target operation-root repository and supplied an absolute `--source-checkout`
+for the declaration's source repository. Its origin identity and activation
+source tip must match the registry before the declaration is fetched from
+that origin. GitHub issue ingress has no such source authority: a marker can
+only replay an existing binding and otherwise fails closed. Projectors must
+bind first, then enable issue ingress for that issue; they must never simulate
+convergence by deleting either root.
+
 ## How peers use it
 
 Each peer repo carries **one** logic-free caller workflow,
