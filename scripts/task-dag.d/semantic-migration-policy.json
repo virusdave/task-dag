@@ -4,7 +4,8 @@
   "recognizedReadSchemas": ["legacy", "canonical-v1"],
   "authorizedSemantics": [
     "legacy-read-only",
-    "canonical-v1-completed-epic-close"
+    "canonical-v1-completed-epic-close",
+    "canonical-v1-completed-issue-projection"
   ],
   "disabledWriterClasses": [
     "epic-close",

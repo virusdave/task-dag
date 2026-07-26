@@ -25,7 +25,7 @@ taskdag_migration_status_json() {
          and .schema == 1
          and .mode == "draining-legacy-writers"
          and .recognizedReadSchemas == ["legacy","canonical-v1"]
-         and .authorizedSemantics == ["legacy-read-only","canonical-v1-completed-epic-close"]
+         and .authorizedSemantics == ["legacy-read-only","canonical-v1-completed-epic-close","canonical-v1-completed-issue-projection"]
          and .disabledWriterClasses == ["epic-close","materialise","completion-ingest","projection"]
       then .
       else error("invalid semantic migration policy")
@@ -38,7 +38,7 @@ taskdag_migration_status_json() {
 taskdag_migration_guard() {
     local writer_class="${1:-}" status
     case "$writer_class" in
-        epic-close|completed-epic-close|materialise|completion-ingest|projection) ;;
+        epic-close|completed-epic-close|completed-issue-projection|materialise|completion-ingest|projection) ;;
         *) echo "Error: unknown semantic migration writer class: ${writer_class:-<empty>}" >&2; return 1 ;;
     esac
     status="$(taskdag_migration_status_json)" || return 1
@@ -56,6 +56,10 @@ EOF
       && jq -e '.authorizedSemantics | index("canonical-v1-completed-epic-close") != null' <<<"$status" >/dev/null; then
         return 0
     fi
+    if [ "$writer_class" = completed-issue-projection ] \
+      && jq -e '.authorizedSemantics | index("canonical-v1-completed-issue-projection") != null' <<<"$status" >/dev/null; then
+        return 0
+    fi
     echo "Error: semantic migration policy unexpectedly authorized guarded writer class: $writer_class" >&2
     return 1
 }
@@ -63,6 +67,15 @@ EOF
 taskdag_prepare_authorized_completed_epic_close() { # consumer-id
     local consumer=${1:-completed-epic-close} state
     taskdag_migration_guard completed-epic-close || return $?
+    taskdag_consumer_prepare "$consumer" || return 3
+    [ "$TASKDAG_CONSUMER_MODE" = canonical ] || return 3
+    state=$(jq -er .record.state <<<"$TASKDAG_CONSUMER_ACTIVATION") || return 3
+    [ "$state" = enabled ] || return 3
+}
+
+taskdag_prepare_authorized_completed_issue_projection() { # consumer-id
+    local consumer=${1:-completed-issue-projection} state
+    taskdag_migration_guard completed-issue-projection || return $?
     taskdag_consumer_prepare "$consumer" || return 3
     [ "$TASKDAG_CONSUMER_MODE" = canonical ] || return 3
     state=$(jq -er .record.state <<<"$TASKDAG_CONSUMER_ACTIVATION") || return 3

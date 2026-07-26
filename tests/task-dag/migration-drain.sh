@@ -9,12 +9,12 @@ bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 REPO_ROOT="$(cd "$(dirname "$TD")/.." && pwd)"
 
 status="$($TD migration-status --json 2>/dev/null)"
-if jq -e '.schema == 1 and .mode == "draining-legacy-writers" and .recognizedReadSchemas == ["legacy","canonical-v1"] and .authorizedSemantics == ["legacy-read-only","canonical-v1-completed-epic-close"] and .disabledWriterClasses == ["epic-close","materialise","completion-ingest","projection"]' <<<"$status" >/dev/null; then ok "strict status JSON"; else bad "strict status JSON"; fi
+if jq -e '.schema == 1 and .mode == "draining-legacy-writers" and .recognizedReadSchemas == ["legacy","canonical-v1"] and .authorizedSemantics == ["legacy-read-only","canonical-v1-completed-epic-close","canonical-v1-completed-issue-projection"] and .disabledWriterClasses == ["epic-close","materialise","completion-ingest","projection"]' <<<"$status" >/dev/null; then ok "strict status JSON"; else bad "strict status JSON"; fi
 
 printf '<!-- task-dag:completion --> Satisfies virusdave/task-dag#1 via peer/repo@abcdef1' >"$ROOT/completion-body"
 printf 'child body\n\n' >"$ROOT/materialise-body"
 jq -n --arg body "materialise-body" '{schema:1,actor:"fixture",authoritativeTimestamp:"2026-07-17T00:00:00Z",provenance:["fixture"],declarations:[{sourceRepo:{id:"1",name:"o/source"},parentIssue:{id:"2",number:21},peerRepo:{id:"3",name:"o/peer"},title:"Child",bodyFile:$body,provenance:"fixture"}]}' >"$ROOT/materialise-spec"
-for spec in "close-epic --issue 1" "close-ops-epic --issue 1 --yes" "delegate --issue 1 --to peer/repo#2" "reconcile-closed-issue 1 --yes"; do
+for spec in "close-epic --issue 1" "close-ops-epic --issue 1 --yes" "delegate --issue 1 --to peer/repo#2"; do
     read -r -a args <<<"$spec"
     out="$($TD "${args[@]}" 2>&1)"; rc=$?
     if [ "$rc" -eq 75 ] && grep -q '^MIGRATION REQUIRED$' <<<"$out" && grep -q '^mode: draining-legacy-writers$' <<<"$out"; then ok "${args[0]} drains before effects"; else bad "${args[0]} rc=$rc: $out"; fi
@@ -59,9 +59,7 @@ done
 export EFFECT_LOG="$ROOT/effects"
 for spec in \
   "$REPO_ROOT/scripts/aggregate-cross-repo-completions.sh" \
-  "$REPO_ROOT/.github/scripts/materialise-child-epics.sh" \
-  "$REPO_ROOT/.github/scripts/close-completed-issues.sh" \
-  "$REPO_ROOT/.github/scripts/cleanup-closed-issue-task-refs.sh 1"; do
+  "$REPO_ROOT/.github/scripts/materialise-child-epics.sh"; do
     read -r -a args <<<"$spec"
     out="$(PATH="$ROOT/bin:$PATH" "${args[@]}" 2>&1)"; rc=$?
     if [ "$(basename "${args[0]}")" = materialise-child-epics.sh ] \
@@ -104,6 +102,10 @@ set -u
 [ "$rc" -ne 0 ] && [ "$rc" -ne 75 ] && ok "unknown writer class fails closed" || bad "unknown writer class returned rc=$rc"
 taskdag_migration_guard completed-epic-close >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && ok "completed epic-close has explicit positive authorization" || bad "completed epic-close guard returned rc=$rc"
+taskdag_migration_guard completed-issue-projection >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "completed-issue projection has explicit positive authorization" || bad "completed-issue projection guard returned rc=$rc"
+taskdag_migration_guard projection >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 75 ] && ok "generic projection remains drained" || bad "generic projection unexpectedly returned rc=$rc"
 
 mkdir -p "$ROOT/mixed/.github/scripts"
 cp "$REPO_ROOT/.github/scripts/close-completed-issues.sh" "$ROOT/mixed/.github/scripts/"
@@ -202,10 +204,11 @@ for workflow in aggregate-cross-repo-completions close-completed-issues graph-co
     fi
 done
 if ! grep -Eq 'raw\.githubusercontent\.com/.+close-completed-issues|raw\.githubusercontent\.com/.+cleanup-closed' "$REPO_ROOT/.github/workflows/close-completed-issues.yml" \
-  && grep -q 'Checkout coherent task-dag runtime' "$REPO_ROOT/.github/workflows/close-completed-issues.yml"; then
+  && grep -q 'Checkout coherent task-dag runtime' "$REPO_ROOT/.github/workflows/close-completed-issues.yml" \
+  && [ "$(grep -c 'fetch-depth: 0' "$REPO_ROOT/.github/workflows/close-completed-issues.yml")" -eq 2 ]; then
     ok "close workflow uses one coherent immutable runtime"
 else
-    bad "close workflow mixes runtime revisions"
+    bad "close workflow mixes or shallow-clones runtime revisions"
 fi
 
 cp -R "$(dirname "$TD")" "$ROOT/scripts"

@@ -52,7 +52,10 @@ jobs:
           repository: virusdave/task-dag
           ref: ${{ inputs.ref }}
           path: .task-dag-runtime
-          fetch-depth: 1
+          # Semantic preparation proves the activated minimum runtime is an
+          # ancestor of this coherent checkout, so the floor object/history
+          # must be present rather than hidden by a depth-1 clone.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Close issues for completed task epics

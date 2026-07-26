@@ -6643,6 +6643,97 @@ closed_issue_candidate_rows() {
     return 0
 }
 
+# List only strict, durable numeric Closes-Epic facts from the prepared
+# first-parent master snapshot. This is the sole admission path for the
+# temporarily authorized completed-issue projection.
+cmd_completed_issue_projection_list() {
+    [ "$#" -eq 1 ] && [ "$1" = --json ] || {
+        echo "Usage: task-dag completed-issue-projection-list --json" >&2
+        return 2
+    }
+    taskdag_prepare_authorized_completed_issue_projection completed-issue-projection-list || return $?
+    local rows
+    rows=$(taskdag__scan_closed_issues "$TASKDAG_CONSUMER_MASTER_TIP") || return 3
+    jq -Rsc '
+      split("\n") | map(select(length>0) | split("\t") |
+        {issue:(.[0]|tonumber),closeCommit:.[1],root:.[2]})' <<<"$rows"
+}
+
+# Atomically retire one strict completed issue's identity and stale scheduling
+# refs after GitHub is confirmed CLOSED. Public generic reconciliation remains
+# migration-drained; this command accepts only a fact re-derived from the
+# current prepared canonical snapshot.
+cmd_project_completed_issue() {
+    local issue="" root="" close_commit=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --issue=*) issue=${1#*=} ;;
+            --root=*) root=${1#*=} ;;
+            --close-commit=*) close_commit=${1#*=} ;;
+            --help|-h)
+                echo "Usage: task-dag project-completed-issue --issue=N --root=SHA --close-commit=SHA"
+                return 0 ;;
+            *) echo "Error: unknown project-completed-issue argument: $1" >&2; return 2 ;;
+        esac
+        shift
+    done
+    [[ "$issue" =~ ^[1-9][0-9]*$ ]] || return 2
+    [[ "$root" =~ ^[0-9a-f]{40}$ && "$close_commit" =~ ^[0-9a-f]{40}$ ]] || return 2
+
+    taskdag_prepare_authorized_completed_issue_projection project-completed-issue || return $?
+    taskdag__scan_closed_issues "$TASKDAG_CONSUMER_MASTER_TIP" \
+      | awk -F '\t' -v i="$issue" -v c="$close_commit" -v r="$root" \
+          '$1==i && $2==c && $3==r {found=1} END {exit !found}' || return 3
+
+    local repo state rows refs ref oid updates author mention comment commit_url
+    repo=$(taskdag_current_repo) || return 3
+    author=$(gh issue view "$issue" --repo "$repo" --json author --jq '.author.login' 2>/dev/null || true)
+    [ -n "$author" ] && mention="@${author}: " || mention=""
+    commit_url="https://github.com/${repo}/commit/${close_commit}"
+    comment="${mention}task epic completed in commit [\`${close_commit:0:12}\`](${commit_url})."
+
+    # Re-prepare immediately before the user-visible GitHub mutation. A fact
+    # discovered by the wrapper is only a hint; closure is authorized solely
+    # by this fresh canonical snapshot in this coherent CLI process.
+    taskdag_prepare_authorized_completed_issue_projection project-completed-issue-pre-close || return 3
+    taskdag__scan_closed_issues "$TASKDAG_CONSUMER_MASTER_TIP" \
+      | awk -F '\t' -v i="$issue" -v c="$close_commit" -v r="$root" \
+          '$1==i && $2==c && $3==r {found=1} END {exit !found}' || return 3
+    if ! gh issue close "$issue" --repo "$repo" --comment "$comment"; then
+        state=$(issue_state_remote "$repo" "$issue") || return 3
+        [ "$state" = CLOSED ] || return 3
+    fi
+    state=$(issue_state_remote "$repo" "$issue") || return 3
+    [ "$state" = CLOSED ] || return 3
+
+    # Re-prepare immediately before constructing the exact leased deletion
+    # set. The fenced push below atomically attests this activation, master,
+    # and task-ref generation or performs no target mutation.
+    taskdag_prepare_authorized_completed_issue_projection project-completed-issue-pre-cas || return 3
+    taskdag__scan_closed_issues "$TASKDAG_CONSUMER_MASTER_TIP" \
+      | awk -F '\t' -v i="$issue" -v c="$close_commit" -v r="$root" \
+          '$1==i && $2==c && $3==r {found=1} END {exit !found}' || return 3
+    rows=$(closed_issue_candidate_rows "$repo" "$issue") || return 3
+    refs=$({ printf '%s\n' "refs/heads/tasks/pending/$issue" "refs/heads/tasks/root-active/$issue"; \
+        awk -F '\t' 'NF>=4 {print $4}' <<<"$rows"; } | LC_ALL=C sort -u) || return 3
+    updates=$(while IFS= read -r ref; do
+        oid=$(git rev-parse -q --verify "$ref^{commit}" 2>/dev/null || true)
+        [ -n "$oid" ] || continue
+        if [ "$ref" = "refs/heads/tasks/pending/$issue" ] && [ "$oid" != "$root" ]; then
+            exit 3
+        fi
+        jq -ncS --arg ref "$ref" --arg old "$oid" '{ref:$ref,old:$old,new:""}' || exit 3
+    done <<<"$refs" | jq -sS 'sort_by(.ref)') || return 3
+    if [ "$(jq -r length <<<"$updates")" -eq 0 ]; then
+        jq -ncS --argjson issue "$issue" '{ok:true,issue:$issue,alreadyProjected:true,removed:[]}'
+        return 0
+    fi
+    taskdag_consumer_fenced_scheduling_push project-completed-issue \
+        "${TASK_DAG_CLAIMER:-completed-issue-projector}" "$updates" || return 3
+    jq -ncS --argjson issue "$issue" --argjson updates "$updates" \
+        '{ok:true,issue:$issue,alreadyProjected:false,removed:($updates|map(.ref))}'
+}
+
 # Command: reconcile-closed-issue - drop the lingering scheduling refs
 # (tasks/frontier/<short>, tasks/blocked/<full-sha>, tasks/blocked-meta/
 # <full-sha>) left behind by tasks whose GitHub issue is CONFIRMED CLOSED.
@@ -7117,6 +7208,8 @@ main() {
             else
                 echo "Usage: task-dag migration-status --json" >&2; return 2
             fi ;;
+        completed-issue-projection-list) cmd_completed_issue_projection_list "$@" ;;
+        project-completed-issue) cmd_project_completed_issue "$@" ;;
         frontier) cmd_frontier "$@" ;;
         claim) cmd_claim "$@" ;;
         claim-root) cmd_claim_root "$@" ;;
