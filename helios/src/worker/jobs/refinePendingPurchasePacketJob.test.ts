@@ -29,7 +29,7 @@ const context = {
   id: 44,
   jobType: 'catalog.pending_purchases.refine',
   module: 'catalog',
-  payload: { refinementTurnId: 9001 },
+  payload: { refinementTurnId: 9001, scopeRowLineageIds: ['pprline_501'] },
   scope: null,
 } as JobHandlerContext
 
@@ -54,7 +54,10 @@ const prepared = {
       expectedSubcategory: 'Packaged Eighth',
       rawProvenance: {
         reuseProductId: 7001,
-        suggestionCandidates: [{ productId: 7001, productName: 'Pink Runtz', score: 0.98 }],
+        suggestionCandidates: [
+          { productId: 7001, productName: 'Pink Runtz', score: 0.98 },
+          { productId: 7002, productName: 'Pink Runtz Reserve', score: 0.92 },
+        ],
         validatedReuseSnapshot: { productId: 7001, productName: 'Pink Runtz' },
       },
       rowId: 501,
@@ -65,6 +68,7 @@ const prepared = {
 }
 
 const refinement = {
+  degradedProviders: [],
   model: 'test-model',
   patches: [{
     basePacketSnapshotSha256: 'b'.repeat(64),
@@ -85,27 +89,35 @@ beforeEach(() => {
   mocks.pool.query.mockImplementation(async (text: string) => {
     if (/select distinct category_name/i.test(text)) return { rows: [{ value: 'Flower' }] }
     if (/select distinct subcategory_name/i.test(text)) return { rows: [{ value: 'Packaged Eighth' }] }
-    if (/from catalog_group_products/i.test(text)) return { rows: [{ product_id: 7001 }] }
+    if (/from catalog_group_products/i.test(text)) return { rows: [{ product_id: 7001 }, { product_id: 7002 }] }
     throw new Error(`Unexpected test query: ${text}`)
   })
 })
 
 describe('runCatalogPendingPurchasesRefineJob', () => {
   it('calls the strict model with offered candidates, then materializes its validated patches', async () => {
-    await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001 })
+    await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001, scopeRowLineageIds: ['pprline_501'] })
 
     expect(mocks.refine).toHaveBeenCalledWith(expect.objectContaining({
       allowedTaxonomy: { categories: ['Flower'], subcategories: ['Packaged Eighth'] },
       contextItems: [{
         contextId: 'catalog:pprline_501:7001',
         data: { productId: 7001, productName: 'Pink Runtz', score: 0.98 },
+        priority: 0,
         source: 'catalog',
+        targetRowLineageId: 'pprline_501',
+      }, {
+        contextId: 'catalog:pprline_501:7002',
+        data: { productId: 7002, productName: 'Pink Runtz Reserve', score: 0.92 },
+        priority: 2,
+        source: 'catalog',
+        targetRowLineageId: 'pprline_501',
       }],
       db: mocks.pool,
       feedbackText: prepared.feedbackText,
       packetDescription: prepared.packetTitle,
       rows: [expect.objectContaining({
-        productIdCandidates: [7001],
+        productIdCandidates: [7001, 7002],
         rowLineageId: 'pprline_501',
       })],
       rowSnapshotSha256: prepared.rowSnapshotSha256,
@@ -125,18 +137,27 @@ describe('runCatalogPendingPurchasesRefineJob', () => {
   it('preserves the turn as failed when model refinement errors', async () => {
     mocks.refine.mockRejectedValue(new Error('Model output failed strict validation.'))
 
-    await expect(runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001 })).rejects.toThrow(
-      'Model output failed strict validation.',
+    await expect(runCatalogPendingPurchasesRefineJob(context, {
+      refinementTurnId: 9001,
+      scopeRowLineageIds: ['pprline_501'],
+    })).rejects.toThrow(
+      'The analyst could not produce a safe candidate.',
     )
 
     expect(mocks.createCandidate).not.toHaveBeenCalled()
-    expect(mocks.markFailed).toHaveBeenCalledWith(mocks.transaction, 9001, 'Model output failed strict validation.')
+    expect(mocks.markFailed).toHaveBeenCalledWith(
+      mocks.transaction,
+      9001,
+      expect.stringContaining('The analyst could not produce a safe candidate.'),
+      'unsafe_candidate',
+      null,
+    )
   })
 
   it('returns idempotently when another worker already created the candidate', async () => {
     mocks.prepare.mockResolvedValue(null)
 
-    await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001 })
+    await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001, scopeRowLineageIds: ['pprline_501'] })
 
     expect(mocks.pool.query).not.toHaveBeenCalled()
     expect(mocks.refine).not.toHaveBeenCalled()
@@ -160,10 +181,68 @@ describe('runCatalogPendingPurchasesRefineJob', () => {
       },
     })
 
-    await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001 })
+    await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001, scopeRowLineageIds: ['pprline_501'] })
 
     expect(mocks.refine).toHaveBeenCalledWith(expect.objectContaining({
-      rows: [expect.objectContaining({ productIdCandidates: [7001] })],
+      rows: [expect.objectContaining({ productIdCandidates: [7001, 7002] })],
     }))
+  })
+
+  it('fails closed when the selected scope is absent from the immutable snapshot', async () => {
+    await expect(runCatalogPendingPurchasesRefineJob(context, {
+      refinementTurnId: 9001,
+      scopeRowLineageIds: ['pprline_missing'],
+    })).rejects.toThrow(/packet changed before refinement could finish/i)
+
+    expect(mocks.refine).not.toHaveBeenCalled()
+    expect(mocks.markFailed).toHaveBeenCalledWith(
+      mocks.transaction,
+      9001,
+      expect.stringContaining('choose the scope again'),
+      'stale_scope',
+      null,
+    )
+  })
+
+  it('classifies missing model configuration without suggesting a smaller scope', async () => {
+    mocks.refine.mockRejectedValue(new Error('Bedrock Mantle token unavailable; cannot refine.'))
+
+    await expect(runCatalogPendingPurchasesRefineJob(context, {
+      refinementTurnId: 9001,
+      scopeRowLineageIds: ['pprline_501'],
+    })).rejects.toThrow(/configuration is unavailable/)
+    expect(mocks.markFailed).toHaveBeenCalledWith(
+      mocks.transaction,
+      9001,
+      expect.stringContaining('configuration is unavailable'),
+      'configuration_unavailable',
+      null,
+    )
+  })
+
+  it('persists bounded attempt provenance when emergency compaction is exhausted', async () => {
+    const failure = Object.assign(new Error('The analyst still needs less context. Choose one row and retry.'), {
+      attemptProvenance: {
+        compactionLevel: 'emergency',
+        contextItemCount: 15,
+        degradedProviders: ['litalerts-market'],
+        estimatedInputTokens: 47_900,
+        omittedContextItemCount: 42,
+        overflowRetryCount: 1,
+      },
+    })
+    mocks.refine.mockRejectedValue(failure)
+
+    await expect(runCatalogPendingPurchasesRefineJob(context, {
+      refinementTurnId: 9001,
+      scopeRowLineageIds: ['pprline_501'],
+    })).rejects.toThrow(/smaller request/i)
+    expect(mocks.markFailed).toHaveBeenCalledWith(
+      mocks.transaction,
+      9001,
+      expect.stringContaining('smaller request'),
+      'smaller_scope',
+      failure.attemptProvenance,
+    )
   })
 })

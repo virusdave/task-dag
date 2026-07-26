@@ -6,6 +6,7 @@ import type {
   JsonValue,
   PendingPurchasePacketRevisionSummary,
   PendingPurchasePacketRootSummary,
+  PendingPurchaseRefinementFailureCode,
   PendingPurchaseRefinementTurnSummary,
   PendingPurchaseRevisionRowDiff,
   PendingPurchaseRowSnapshotRef,
@@ -47,11 +48,13 @@ interface RefinementTurnDbRow extends QueryResultRow {
   created_at: Date
   error_message: string | null
   feedback_sha256: string | null
+  feedback_text: string
   finished_at: Date | null
   id: number
   job_id: number | null
   model: string | null
   packet_root_id: number
+  prompt_context_json: JsonValue
   prompt_version: string | null
   requested_by_user: string | null
   row_snapshot_sha256: string
@@ -161,7 +164,13 @@ export interface PreparedPendingPurchaseRefinement {
 }
 
 export interface PendingPurchaseCandidateRefinement {
+  readonly compactionLevel: string
+  readonly contextItemCount: number
+  readonly degradedProviders: readonly string[]
+  readonly estimatedInputTokens: number
   readonly model: string
+  readonly omittedContextItemCount: number
+  readonly overflowRetryCount: number
   readonly patches: readonly PendingPurchaseCandidatePatch[]
   readonly promptVersion: string
   readonly schemaVersion: number
@@ -314,6 +323,7 @@ export async function createPendingPurchaseRefinementTurn(
     requestedByUserId: number
     rowSnapshot: JsonValue
     rowSnapshotSha256: string
+    scopeRowLineageIds: readonly string[]
     targetRevisionNumber: number
     packetRootId: number
   },
@@ -336,7 +346,7 @@ export async function createPendingPurchaseRefinementTurn(
         row_snapshot_json,
         prompt_context_json
       )
-      values ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9::jsonb, '{}'::jsonb)
+      values ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9::jsonb, $10::jsonb)
       returning id
     `,
     [
@@ -349,6 +359,7 @@ export async function createPendingPurchaseRefinementTurn(
       sha256(input.feedbackText),
       input.rowSnapshotSha256,
       JSON.stringify(input.rowSnapshot),
+      JSON.stringify({ scope: { kind: 'row-lineages', rowLineageIds: input.scopeRowLineageIds } }),
     ],
   )
   return getPendingPurchaseRefinementTurn(db, result.rows[0].id).then((turn) => {
@@ -675,23 +686,11 @@ export async function createPendingPurchaseCandidateRevision(
           primary_image_url = case when patch.fields ? 'primaryImageUrl' then patch.fields ->> 'primaryImageUrl' else target_row.primary_image_url end,
           notes = case when patch.fields ? 'notes' then patch.fields ->> 'notes' else target_row.notes end,
           review_flags_json = case when patch.fields ? 'reviewFlags' then coalesce(nullif(patch.fields -> 'reviewFlags', 'null'::jsonb), '[]'::jsonb) else target_row.review_flags_json end,
-          edited_structured_fields = case when patch.fields ? 'targetReuseProductId'
-            then coalesce(target_row.edited_structured_fields, '{}'::jsonb)
-              || jsonb_build_object('targetReuseProductId', patch.fields -> 'targetReuseProductId')
-            else target_row.edited_structured_fields
-          end,
           raw_row_json = target_row.raw_row_json
             || case when patch.fields ? 'targetVariantTab' then jsonb_build_object('targetVariantTab', patch.fields -> 'targetVariantTab') else '{}'::jsonb end
             || case when patch.fields ? 'targetStrainName' then jsonb_build_object('targetStrain', patch.fields -> 'targetStrainName') else '{}'::jsonb end
             || case when patch.fields ? 'targetSize' then jsonb_build_object('targetSize', patch.fields -> 'targetSize') else '{}'::jsonb end
-            || case when patch.fields ? 'targetPackCount' then jsonb_build_object('targetPackCount', patch.fields -> 'targetPackCount') else '{}'::jsonb end
-            || case when patch.fields ? 'targetReuseProductId' then jsonb_build_object(
-              'reuseProductId', patch.fields -> 'targetReuseProductId',
-              'validatedReuseSnapshot', case
-                when patch.fields -> 'targetReuseProductId' = 'null'::jsonb then 'null'::jsonb
-                else target_row.raw_row_json -> 'validatedReuseSnapshot'
-              end
-            ) else '{}'::jsonb end,
+            || case when patch.fields ? 'targetPackCount' then jsonb_build_object('targetPackCount', patch.fields -> 'targetPackCount') else '{}'::jsonb end,
           refinement_provenance_json = target_row.refinement_provenance_json || jsonb_build_object(
             'mode', 'llm-patch',
             'model', $2::text,
@@ -732,7 +731,7 @@ export async function createPendingPurchaseCandidateRevision(
           candidate_packet_id = $2,
           model = $3,
           prompt_version = $4,
-          prompt_context_json = $5::jsonb,
+          prompt_context_json = prompt_context_json || $5::jsonb,
           finished_at = now(),
           updated_at = now()
       where id = $1
@@ -744,7 +743,16 @@ export async function createPendingPurchaseCandidateRevision(
       candidate.id,
       refinement.model,
       refinement.promptVersion,
-      JSON.stringify({ patchCount: refinement.patches.length, schemaVersion: refinement.schemaVersion }),
+      JSON.stringify({
+        compactionLevel: refinement.compactionLevel,
+        contextItemCount: refinement.contextItemCount,
+        degradedProviders: refinement.degradedProviders,
+        estimatedInputTokens: refinement.estimatedInputTokens,
+        omittedContextItemCount: refinement.omittedContextItemCount,
+        overflowRetryCount: refinement.overflowRetryCount,
+        patchCount: refinement.patches.length,
+        schemaVersion: refinement.schemaVersion,
+      }),
     ],
   )
   return { candidatePacketId: candidate.id, revisionNumber: candidate.revision_number }
@@ -809,9 +817,11 @@ export async function listPendingPurchaseRefinementHistory(
           t.job_id,
           u.name as requested_by_user,
           t.feedback_sha256,
+          t.feedback_text,
           t.row_snapshot_sha256,
           t.model,
           t.prompt_version,
+          t.prompt_context_json,
           t.candidate_packet_id,
           t.error_message,
           t.created_at,
@@ -842,9 +852,17 @@ export async function listPendingPurchaseRefinementHistory(
             ('proposedPrice', to_jsonb(p.proposed_price), to_jsonb(c.proposed_price)),
             ('proposedDescription', to_jsonb(p.proposed_description), to_jsonb(c.proposed_description)),
             ('primaryImageUrl', to_jsonb(p.primary_image_url), to_jsonb(c.primary_image_url)),
+            ('notes', to_jsonb(p.notes), to_jsonb(c.notes)),
             ('targetBrand', to_jsonb(p.target_brand), to_jsonb(c.target_brand)),
             ('targetGroupName', to_jsonb(p.target_group_name), to_jsonb(c.target_group_name)),
             ('targetVariantName', to_jsonb(p.target_variant_name), to_jsonb(c.target_variant_name)),
+            ('expectedCategory', to_jsonb(p.expected_category), to_jsonb(c.expected_category)),
+            ('expectedSubcategory', to_jsonb(p.expected_subcategory), to_jsonb(c.expected_subcategory)),
+            ('targetVariantTab', p.raw_row_json -> 'targetVariantTab', c.raw_row_json -> 'targetVariantTab'),
+            ('targetStrainName', p.raw_row_json -> 'targetStrain', c.raw_row_json -> 'targetStrain'),
+            ('targetSize', p.raw_row_json -> 'targetSize', c.raw_row_json -> 'targetSize'),
+            ('targetPackCount', p.raw_row_json -> 'targetPackCount', c.raw_row_json -> 'targetPackCount'),
+            ('targetReuseProductId', p.edited_structured_fields -> 'targetReuseProductId', c.edited_structured_fields -> 'targetReuseProductId'),
             ('reviewFlags', p.review_flags_json, c.review_flags_json)
         ) as diff(field, before, after)
         where c.packet_id = $1
@@ -899,6 +917,23 @@ export async function switchPendingPurchaseCurrentRevision(
   }
   if (root.root_status !== 'active' || root.current_packet_id === null) {
     throw new PendingPurchaseRefinementConflictError('This packet root is no longer active.')
+  }
+  const activeApply = await db.query<{ id: number }>(
+    `
+      select id
+      from pending_purchase_apply_requests
+      where packet_id = $1
+        and status in ('queued', 'running')
+      order by id asc
+      limit 1
+      for update
+    `,
+    [root.current_packet_id],
+  )
+  if (activeApply.rows.length > 0) {
+    throw new PendingPurchaseRefinementConflictError(
+      'Wait for the current packet apply to finish before switching revisions.',
+    )
   }
   const selected = await loadPacketRevisionById(db, input.selectedPacketId)
   if (!selected || selected.packetRootId !== root.id) {
@@ -995,6 +1030,30 @@ export async function assertPendingPurchasePacketApplyable(db: Queryable, packet
   }
 }
 
+export async function lockPendingPurchasePacketRootForApply(
+  db: Queryable,
+  packetId: number,
+): Promise<void> {
+  if (!(await isPendingPurchaseRefinementSchemaAvailable(db))) return
+  await lockPendingPurchasePacketRootRow(db, packetId)
+}
+
+export async function lockPendingPurchasePacketRootRow(
+  db: Queryable,
+  packetId: number,
+): Promise<void> {
+  await db.query(
+    `
+      select r.id
+      from pending_purchase_packets p
+      join pending_purchase_packet_roots r on r.id = p.packet_root_id
+      where p.id = $1
+      for update of r
+    `,
+    [packetId],
+  )
+}
+
 export async function isPendingPurchaseRefinementSchemaAvailable(db: Queryable): Promise<boolean> {
   return pendingPurchaseRefinementSchemaApplied(db)
 }
@@ -1015,9 +1074,11 @@ async function getPendingPurchaseRefinementTurn(
         t.job_id,
         u.name as requested_by_user,
         t.feedback_sha256,
+        t.feedback_text,
         t.row_snapshot_sha256,
         t.model,
         t.prompt_version,
+        t.prompt_context_json,
         t.candidate_packet_id,
         t.error_message,
         t.created_at,
@@ -1089,19 +1150,25 @@ export async function markPendingPurchaseRefinementTurnFailed(
   db: Queryable,
   turnId: number,
   message: string,
+  failureCode: PendingPurchaseRefinementFailureCode | null = null,
+  attemptProvenance: JsonValue | null = null,
 ): Promise<void> {
   await db.query(
     `
       update pending_purchase_refinement_turns
       set status = 'failed',
           error_message = $2,
+          prompt_context_json = prompt_context_json || case
+            when $3::text is null then '{}'::jsonb
+            else jsonb_build_object('failureCode', $3::text)
+          end || coalesce($4::jsonb, '{}'::jsonb),
           finished_at = now(),
           updated_at = now()
       where id = $1
         and status in ('queued', 'running')
         and candidate_packet_id is null
     `,
-    [turnId, message],
+    [turnId, message, failureCode, attemptProvenance === null ? null : JSON.stringify(attemptProvenance)],
   )
 }
 
@@ -1209,11 +1276,13 @@ function mapTurn(row: RefinementTurnDbRow): PendingPurchaseRefinementTurnSummary
     createdAt: toIso(row.created_at),
     errorMessage: row.error_message,
     feedbackSha256: row.feedback_sha256,
+    feedbackText: row.feedback_text,
     finishedAt: toIsoOrNull(row.finished_at),
     jobId: row.job_id,
     model: row.model,
     packetRootId: row.packet_root_id,
     promptVersion: row.prompt_version,
+    promptContext: row.prompt_context_json,
     requestedByUser: row.requested_by_user,
     rowSnapshotSha256: row.row_snapshot_sha256,
     startedAt: toIsoOrNull(row.started_at),

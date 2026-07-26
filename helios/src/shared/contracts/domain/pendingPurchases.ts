@@ -62,6 +62,17 @@ export type PendingPurchaseRefinementTurnStatus = z.infer<
   typeof PendingPurchaseRefinementTurnStatusSchema
 >
 
+export const PendingPurchaseRefinementFailureCodeSchema = z.enum([
+  'configuration_unavailable',
+  'smaller_scope',
+  'stale_scope',
+  'temporarily_unavailable',
+  'unsafe_candidate',
+])
+export type PendingPurchaseRefinementFailureCode = z.infer<
+  typeof PendingPurchaseRefinementFailureCodeSchema
+>
+
 export const PendingPurchasePacketRootSummarySchema = z.object({
   currentPacketId: z.number().int().positive().nullable(),
   currentRevisionNumber: z.number().int().positive().nullable(),
@@ -108,10 +119,12 @@ export const PendingPurchaseRefinementTurnSummarySchema = z.object({
   createdAt: z.iso.datetime(),
   errorMessage: z.string().nullable(),
   feedbackSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  feedbackText: z.string().max(20000).optional(),
   finishedAt: z.iso.datetime().nullable(),
   jobId: z.number().int().positive().nullable(),
   model: z.string().nullable(),
   packetRootId: z.number().int().positive(),
+  promptContext: JsonValueSchema.optional(),
   promptVersion: z.string().nullable(),
   requestedByUser: z.string().nullable(),
   rowSnapshotSha256: z.string().regex(/^[0-9a-f]{64}$/),

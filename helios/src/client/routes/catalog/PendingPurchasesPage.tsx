@@ -409,6 +409,10 @@ export function PendingPurchasesPage() {
         PendingPurchaseRefinementHistoryResponseSchema,
       )
       setRefinementHistory(history)
+      const failedTurn = history.turns.find((turn) => turn.status === 'failed')
+      if (failedTurn?.feedbackText) {
+        setRefinementFeedback((current) => current.trim().length > 0 ? current : failedTurn.feedbackText ?? current)
+      }
       const activeTurn = history.turns.find((turn) => (
         (turn.status === 'queued' || turn.status === 'running') && turn.jobId !== null
       ))
@@ -683,7 +687,7 @@ export function PendingPurchasesPage() {
     }
   }
 
-  async function handleSubmitRefinement() {
+  async function handleSubmitRefinement(scopeRowLineageIds: readonly string[]) {
     if (!data.activePacket || !refinementHistory?.root) {
       return
     }
@@ -695,6 +699,7 @@ export function PendingPurchasesPage() {
         baseRows: buildPendingPurchaseRowSnapshotRefs(data.items),
         expectedRootVersion: refinementHistory.root.version,
         feedbackText: refinementFeedback,
+        scopeRowLineageIds,
       })
       const response = await mutateJson(
         `/api/catalog/pending-purchases/${data.activePacket.packetId}/refinements`,
@@ -1035,7 +1040,8 @@ export function PendingPurchasesPage() {
           onClearSelection={() => setSelectedRowIds([])}
           onQueueApply={() => void handleApplySelectedRows()}
           onRefinementFeedbackChange={setRefinementFeedback}
-          onSubmitRefinement={() => void handleSubmitRefinement()}
+          onRefreshRefinement={() => void revalidator.revalidate()}
+          onSubmitRefinement={(scopeRowLineageIds) => void handleSubmitRefinement(scopeRowLineageIds)}
           onSwitchRevision={(revision, action) => void handleSwitchRevision(revision, action)}
           onSelectApprovedVisible={() => setSelectedRowIds(approvedVisibleRows.map((item) => item.rowId))}
           onToggleSelected={toggleSelectedRow}
@@ -1212,8 +1218,9 @@ interface PendingPurchasesRowsViewProps {
   onClearSelection: () => void
   onQueueApply: () => void
   onRefinementFeedbackChange: (value: string) => void
+  onRefreshRefinement: () => void
   onSelectApprovedVisible: () => void
-  onSubmitRefinement: () => void
+  onSubmitRefinement: (scopeRowLineageIds: readonly string[]) => void
   onSwitchRevision: (revision: PendingPurchasePacketRevisionSummary, action: 'accept' | 'rollback') => void
   onToggleSelected: (rowId: number) => void
   refinementFeedback: string
@@ -1237,6 +1244,7 @@ function PendingPurchasesRowsView({
   onClearSelection,
   onQueueApply,
   onRefinementFeedbackChange,
+  onRefreshRefinement,
   onSelectApprovedVisible,
   onSubmitRefinement,
   onSwitchRevision,
@@ -1287,6 +1295,7 @@ function PendingPurchasesRowsView({
           isSwitchingRevision={isSwitchingRevision}
           jobStatus={refinementJobStatus}
           onFeedbackChange={onRefinementFeedbackChange}
+          onRefresh={onRefreshRefinement}
           onSubmit={onSubmitRefinement}
           onSwitchRevision={onSwitchRevision}
           rows={data.items}
@@ -1476,6 +1485,7 @@ function PendingPurchaseRefinementPanel({
   isSwitchingRevision,
   jobStatus,
   onFeedbackChange,
+  onRefresh,
   onSubmit,
   onSwitchRevision,
   rows,
@@ -1488,7 +1498,8 @@ function PendingPurchaseRefinementPanel({
   isSwitchingRevision: boolean
   jobStatus: JobStatusResponse | null
   onFeedbackChange: (value: string) => void
-  onSubmit: () => void
+  onRefresh: () => void
+  onSubmit: (scopeRowLineageIds: readonly string[]) => void
   onSwitchRevision: (revision: PendingPurchasePacketRevisionSummary, action: 'accept' | 'rollback') => void
   rows: readonly PendingPurchaseRow[]
 }) {
@@ -1498,7 +1509,24 @@ function PendingPurchaseRefinementPanel({
   const activeTurn = history?.turns.find((turn) => turn.status === 'queued' || turn.status === 'running') ?? null
   const candidateRevision = history?.revisions.find((revision) => revision.revisionStatus === 'candidate') ?? null
   const latestFailedTurn = history?.turns[0]?.status === 'failed' ? history.turns[0] : null
-  const canSubmit = canEdit && root !== null && activePacketId === currentPacketId && feedback.trim().length > 0 && !isRefining && !activeTurn
+  const latestFailureCode = readRefinementFailureCode(latestFailedTurn?.promptContext)
+  const staleScopeFailure = latestFailureCode === 'stale_scope'
+  const failedScopeCount = readRefinementScopeCount(latestFailedTurn?.promptContext)
+  const exhaustedEmergencyCompaction = latestFailureCode === 'smaller_scope'
+    && readRefinementCompactionLevel(latestFailedTurn?.promptContext) === 'emergency'
+  const [scopeKey, setScopeKey] = useState('')
+  const scopeGroups = useMemo(() => buildFamilyGroups(rows), [rows])
+  const scopeRows = scopeKey === 'all'
+    ? rows
+    : scopeKey.startsWith('family:')
+      ? scopeGroups.find((group) => `family:${group.familyKeyString}` === scopeKey)?.rows ?? []
+      : rows.filter((row) => `row:${row.rowLineageId}` === scopeKey)
+  const scopeRowLineageIds = scopeRows
+    .map((row) => row.rowLineageId)
+    .filter((lineageId): lineageId is string => lineageId !== null)
+  const canSubmit = canEdit && root !== null && activePacketId === currentPacketId && feedback.trim().length > 0
+    && scopeRowLineageIds.length > 0 && !isRefining && !activeTurn
+    && (latestFailureCode !== 'smaller_scope' || failedScopeCount === null || scopeRowLineageIds.length < failedScopeCount)
   const diffCount = history?.rowDiffs.length ?? 0
   const rootVersionLabel = root ? `root v${root.version}` : 'refinement unavailable'
   const currentRevisionHref = history?.currentRevision
@@ -1550,14 +1578,39 @@ function PendingPurchaseRefinementPanel({
                   value={feedback}
                 />
               </label>
+              <label className="stack-field pp-refinement-scope">
+                <span>Refine scope</span>
+                <select disabled={!canEdit || !!activeTurn} onChange={(event) => setScopeKey(event.currentTarget.value)} value={scopeKey}>
+                  <option value="">Choose rows…</option>
+                  <option disabled={rows.length > 30} value="all">
+                    {rows.length > 30 ? `All rows shown (${rows.length}); choose a family` : `All rows shown (${rows.length})`}
+                  </option>
+                  {scopeGroups.map((group) => (
+                    <option disabled={group.rows.length > 30} key={group.familyKeyString} value={`family:${group.familyKeyString}`}>
+                      {`Family: ${group.familyLabel} (${group.rows.length})${group.rows.length > 30 ? '; choose a row' : ''}`}
+                    </option>
+                  ))}
+                  {rows.map((row) => row.rowLineageId ? (
+                    <option key={row.rowLineageId} value={`row:${row.rowLineageId}`}>
+                      {`Row: ${row.distributorProductName}`}
+                    </option>
+                  ) : null)}
+                </select>
+                <span className="subtle-copy">Only these rows and their ranked evidence are sent to the analyst.</span>
+              </label>
               <div className="inline-row wrap-row pp-refinement-actions">
-                <button className="primary-button" disabled={!canSubmit} onClick={onSubmit} type="button">
+                <button
+                  className="primary-button"
+                  disabled={staleScopeFailure ? false : !canSubmit}
+                  onClick={() => staleScopeFailure ? onRefresh() : onSubmit(scopeRowLineageIds)}
+                  type="button"
+                >
                   {isRefining
                     ? 'Queueing…'
                     : activeTurn
                       ? 'Refinement running'
                       : latestFailedTurn
-                        ? 'Retry feedback'
+                        ? refinementFailureActionLabel(latestFailureCode, exhaustedEmergencyCompaction)
                         : 'Submit feedback'}
                 </button>
                 {jobStatus ? <Link className="ghost-button" to={`/jobs/${jobStatus.job.jobId}`}>{`Open job #${jobStatus.job.jobId}`}</Link> : null}
@@ -1570,6 +1623,9 @@ function PendingPurchaseRefinementPanel({
               <div>
                 <strong>Last refinement failed</strong>
                 <p>{latestFailedTurn.errorMessage ?? 'The analyst could not create a candidate. Your feedback is ready to retry.'}</p>
+                {exhaustedEmergencyCompaction ? (
+                  <p className="subtle-copy">The smallest automatic context was exhausted. Choose fewer rows or use the row overrides below.</p>
+                ) : null}
               </div>
               {latestFailedTurn.jobId ? (
                 <Link className="ghost-button pp-refinement-failure-job" to={`/jobs/${latestFailedTurn.jobId}`}>
@@ -1644,6 +1700,10 @@ function PendingPurchaseRefinementPanel({
                       {turn.requestedByUser ? ` · ${turn.requestedByUser}` : ''}
                       {turn.model ? ` · model ${turn.model}` : ''}
                       {turn.promptVersion ? ` · prompt ${turn.promptVersion}` : ''}
+                      {readRefinementScopeCount(turn.promptContext) !== null
+                        ? ` · ${readRefinementScopeCount(turn.promptContext)} scoped row${readRefinementScopeCount(turn.promptContext) === 1 ? '' : 's'}`
+                        : ''}
+                      {formatRefinementProvenance(turn.promptContext)}
                     </p>
                     {turn.errorMessage ? <p className="error-text">{turn.errorMessage}</p> : null}
                   </li>
@@ -1763,6 +1823,52 @@ function revisionLabel(revision: PendingPurchasePacketRevisionSummary): string {
     : revision.revisionStatus === 'candidate'
       ? 'candidate · review first'
       : revision.revisionStatus.replaceAll('_', ' ')
+}
+
+function readRefinementScopeCount(promptContext: unknown): number | null {
+  if (promptContext === null || typeof promptContext !== 'object' || Array.isArray(promptContext)) return null
+  const scope = (promptContext as Record<string, unknown>).scope
+  if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return null
+  const rowLineageIds = (scope as Record<string, unknown>).rowLineageIds
+  return Array.isArray(rowLineageIds) ? rowLineageIds.length : null
+}
+
+function readRefinementFailureCode(promptContext: unknown): string | null {
+  if (promptContext === null || typeof promptContext !== 'object' || Array.isArray(promptContext)) return null
+  const value = (promptContext as Record<string, unknown>).failureCode
+  return typeof value === 'string' ? value : null
+}
+
+function readRefinementCompactionLevel(promptContext: unknown): string | null {
+  if (promptContext === null || typeof promptContext !== 'object' || Array.isArray(promptContext)) return null
+  const value = (promptContext as Record<string, unknown>).compactionLevel
+  return typeof value === 'string' ? value : null
+}
+
+function refinementFailureActionLabel(failureCode: string | null, exhaustedEmergencyCompaction: boolean): string {
+  if (failureCode === 'stale_scope') return 'Refresh packet'
+  if (exhaustedEmergencyCompaction) return 'Choose fewer rows'
+  if (failureCode === 'smaller_scope') return 'Retry with fewer rows'
+  if (failureCode === 'temporarily_unavailable') return 'Retry now'
+  if (failureCode === 'configuration_unavailable') return 'Retry after configuration is restored'
+  return 'Retry with selected scope'
+}
+
+function formatRefinementProvenance(promptContext: unknown): string {
+  if (promptContext === null || typeof promptContext !== 'object' || Array.isArray(promptContext)) return ''
+  const context = promptContext as Record<string, unknown>
+  const parts = [
+    typeof context.compactionLevel === 'string' ? context.compactionLevel : null,
+    typeof context.contextItemCount === 'number' ? `${context.contextItemCount} evidence included` : null,
+    typeof context.omittedContextItemCount === 'number' ? `${context.omittedContextItemCount} omitted` : null,
+    Array.isArray(context.degradedProviders) && context.degradedProviders.length > 0
+      ? `degraded: ${context.degradedProviders.join(', ')}`
+      : null,
+    typeof context.overflowRetryCount === 'number' && context.overflowRetryCount > 0
+      ? `${context.overflowRetryCount} compact retry`
+      : null,
+  ].filter((value): value is string => value !== null)
+  return parts.length > 0 ? ` · ${parts.join(' · ')}` : ''
 }
 
 function formatCompactDiffValue(value: unknown): string {

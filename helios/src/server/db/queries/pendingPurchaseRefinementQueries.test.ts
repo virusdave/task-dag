@@ -6,8 +6,11 @@ import {
   assertPendingPurchasePacketApplyable,
   createPendingPurchaseCandidateRevision,
   hashJsonForPendingPurchaseRefinement,
+  listPendingPurchaseRefinementHistory,
+  lockPendingPurchasePacketRootForApply,
   markPendingPurchaseRefinementTurnFailed,
   PendingPurchaseRefinementConflictError,
+  switchPendingPurchaseCurrentRevision,
 } from './pendingPurchaseRefinementQueries.js'
 
 describe('assertBaseRowsMatchSnapshot', () => {
@@ -92,6 +95,24 @@ describe('assertPendingPurchasePacketApplyable', () => {
   })
 })
 
+describe('lockPendingPurchasePacketRootForApply', () => {
+  it('takes the packet-root lock used to serialize apply and revision switching', async () => {
+    const calls: RecordedQuery[] = []
+    const db = {
+      async query(text: string, params?: unknown[]) {
+        calls.push({ text, params })
+        if (calls.length === 1) return resultRows([{ schema_applied: true }])
+        return resultRows([{ id: 77 }])
+      },
+    }
+
+    await lockPendingPurchasePacketRootForApply(db, 100)
+
+    expect(calls[1]?.text).toMatch(/for update of r/i)
+    expect(calls[1]?.params).toEqual([100])
+  })
+})
+
 describe('createPendingPurchaseCandidateRevision', () => {
   it('materializes validated patches without making the candidate current/applyable', async () => {
     const db = fakeCandidateCreationDb()
@@ -116,23 +137,18 @@ describe('createPendingPurchaseCandidateRevision', () => {
     expect(insertRows?.text).toMatch(/jsonb_build_object\('targetReuseProductId', edited_structured_fields -> 'targetReuseProductId'\)/)
     const patchRows = db.calls.find((call) => /jsonb_to_recordset/i.test(call.text))
     expect(patchRows?.text).toMatch(/target_brand = case when patch\.fields \? 'targetBrand'/)
-    expect(patchRows?.text).toMatch(/edited_structured_fields = case when patch\.fields \? 'targetReuseProductId'/)
-    expect(patchRows?.text).toMatch(/jsonb_build_object\('targetReuseProductId', patch\.fields -> 'targetReuseProductId'\)/)
+    expect(patchRows?.text).not.toMatch(/patch\.fields \? 'targetReuseProductId'/)
     expect(patchRows?.text).toMatch(/'mode', 'llm-patch'/)
     expect(patchRows?.text).toMatch(/nullif\(patch\.fields -> 'reviewFlags', 'null'::jsonb\)/)
     expect(patchRows?.params?.[0]).toContain('Pink Runtz')
     const completed = db.calls.find((call) => /set status = 'candidate_created'/i.test(call.text))
-    expect(completed?.params).toEqual([9001, 101, 'test-model', 'test-prompt-v1', '{"patchCount":1,"schemaVersion":1}'])
-  })
-
-  it('persists an explicit null reuse override for apply key-presence semantics', async () => {
-    const db = fakeCandidateCreationDb()
-
-    await createPendingPurchaseCandidateRevision(db, 9001, refinement(db.expectedSnapshotSha256, null))
-
-    const patchRows = db.calls.find((call) => /jsonb_to_recordset/i.test(call.text))
-    expect(patchRows?.params?.[0]).toContain('"targetReuseProductId":null')
-    expect(patchRows?.text).toMatch(/jsonb_build_object\('targetReuseProductId', patch\.fields -> 'targetReuseProductId'\)/)
+    expect(completed?.params).toEqual([
+      9001,
+      101,
+      'test-model',
+      'test-prompt-v1',
+      '{"compactionLevel":"balanced","contextItemCount":4,"degradedProviders":[],"estimatedInputTokens":1200,"omittedContextItemCount":0,"overflowRetryCount":0,"patchCount":1,"schemaVersion":1}',
+    ])
   })
 
   it('rejects stale turns without inserting a candidate', async () => {
@@ -146,13 +162,53 @@ describe('createPendingPurchaseCandidateRevision', () => {
   })
 })
 
-function refinement(basePacketSnapshotSha256: string, targetReuseProductId: number | null = 7001) {
+describe('listPendingPurchaseRefinementHistory', () => {
+  it('reviews every model-patchable field plus the operator-owned reuse link', async () => {
+    const calls: string[] = []
+    const db = {
+      async query(text: string) {
+        calls.push(text)
+        if (/join pending_purchase_packet_roots/i.test(text)) {
+          return resultRows([{
+            current_packet_id: 100,
+            current_revision_number: 1,
+            id: 77,
+            root_key: 'packet-root',
+            root_status: 'active',
+            updated_at: new Date('2026-07-25T12:00:00Z'),
+            version: 1,
+          }])
+        }
+        return resultRows([])
+      },
+    } as unknown as Queryable
+
+    await listPendingPurchaseRefinementHistory(db, 100)
+
+    const diffSql = calls.find((text) => /cross join lateral/i.test(text) && /diff\.field/i.test(text))
+    for (const field of [
+      'expectedCategory', 'expectedSubcategory', 'notes', 'primaryImageUrl', 'proposedDescription',
+      'proposedPrice', 'reviewFlags', 'targetBrand', 'targetGroupName', 'targetPackCount',
+      'targetReuseProductId', 'targetSize', 'targetStrainName', 'targetVariantName', 'targetVariantTab',
+    ]) {
+      expect(diffSql).toContain(`('${field}'`)
+    }
+  })
+})
+
+function refinement(basePacketSnapshotSha256: string) {
   return {
+    compactionLevel: 'balanced',
+    contextItemCount: 4,
+    degradedProviders: [],
+    estimatedInputTokens: 1200,
     model: 'test-model',
+    omittedContextItemCount: 0,
+    overflowRetryCount: 0,
     patches: [{
       basePacketSnapshotSha256,
       citedContextIds: ['catalog:pprline_501:7001'],
-      fields: { targetBrand: 'Pink Runtz', targetReuseProductId },
+      fields: { targetBrand: 'Pink Runtz' },
       rationale: 'Matches the offered catalog candidate.',
       rowLineageId: 'pprline_501',
     }],
@@ -160,6 +216,37 @@ function refinement(basePacketSnapshotSha256: string, targetReuseProductId: numb
     schemaVersion: 1,
   }
 }
+
+describe('switchPendingPurchaseCurrentRevision', () => {
+  it('rejects a revision switch while the current packet has an active apply', async () => {
+    const db = {
+      async query(text: string) {
+        if (/lock table pending_purchase_packets/i.test(text)) return resultRows([], 'LOCK')
+        if (/join pending_purchase_packet_roots/i.test(text)) {
+          return resultRows([{
+            current_packet_id: 100,
+            current_revision_number: 1,
+            id: 77,
+            root_key: 'packet-root-77',
+            root_status: 'active',
+            updated_at: new Date(),
+            version: 4,
+          }])
+        }
+        if (/from pending_purchase_apply_requests/i.test(text)) return resultRows([{ id: 88 }])
+        throw new Error(`Unexpected query: ${text}`)
+      },
+    }
+
+    await expect(switchPendingPurchaseCurrentRevision(db as never, {
+      expectedRootVersion: 4,
+      packetId: 100,
+      reason: 'test switch',
+      selectedPacketId: 101,
+      userId: 9,
+    })).rejects.toThrow(/apply to finish/)
+  })
+})
 
 describe('markPendingPurchaseRefinementTurnFailed', () => {
   it('cannot overwrite a candidate created by a concurrent worker', async () => {
@@ -173,7 +260,7 @@ describe('markPendingPurchaseRefinementTurnFailed', () => {
 
     expect(calls[0]?.text).toMatch(/status in \('queued', 'running'\)/)
     expect(calls[0]?.text).toMatch(/candidate_packet_id is null/)
-    expect(calls[0]?.params).toEqual([9001, 'late failure'])
+    expect(calls[0]?.params).toEqual([9001, 'late failure', null, null])
   })
 })
 

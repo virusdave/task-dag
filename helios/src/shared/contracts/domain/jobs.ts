@@ -316,6 +316,7 @@ export type CatalogPendingPurchasesQueueRepriceJobPayload = z.infer<typeof Catal
 export const CatalogPendingPurchasesRefineJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
   refinementTurnId: z.number().int().positive(),
+  scopeRowLineageIds: z.array(z.string().trim().min(1)).min(1).max(30),
 })
 export type CatalogPendingPurchasesRefineJobPayload = z.infer<typeof CatalogPendingPurchasesRefineJobPayloadSchema>
 

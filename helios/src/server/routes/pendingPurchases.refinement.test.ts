@@ -138,6 +138,7 @@ vi.mock('../db/queries/pendingPurchaseRefinementQueries.js', () => ({
       )
     }
   }),
+  lockPendingPurchasePacketRootForApply: vi.fn(async () => undefined),
   attachJobToPendingPurchaseRefinementTurn: vi.fn(async (_db: unknown, turnId: number, jobId: number) => {
     if (mockState.turn?.turnId === turnId) mockState.turn = { ...mockState.turn, jobId }
   }),
@@ -335,6 +336,7 @@ import {
   attachJobToPendingPurchaseRefinementTurn,
   createPendingPurchaseCandidateRevision,
   createPendingPurchaseRefinementTurn,
+  lockPendingPurchasePacketRootForApply,
   markPendingPurchaseRefinementTurnFailed,
   preparePendingPurchaseRefinement,
   switchPendingPurchaseCurrentRevision,
@@ -548,6 +550,7 @@ describe('pending-purchase refinement feedback route', () => {
         baseRows,
         expectedRootVersion: 4,
         feedbackText: 'All Pink Runtz rows should map to the existing 3.5g flower product.',
+        scopeRowLineageIds: ['pprline_501'],
       },
       url: '/api/catalog/pending-purchases/100/refinements',
     })
@@ -567,7 +570,7 @@ describe('pending-purchase refinement feedback route', () => {
       concurrencyKey: 'catalog.pending_purchases.refine:77',
       dedupeKey: 'catalog.pending_purchases.refine:9001',
       jobType: 'catalog.pending_purchases.refine',
-      payload: { refinementTurnId: 9001, requestedByUserId: 9 },
+      payload: { refinementTurnId: 9001, requestedByUserId: 9, scopeRowLineageIds: ['pprline_501'] },
     }))
     expect(attachJobToPendingPurchaseRefinementTurn).toHaveBeenCalledWith(mockState.tx, 9001, 4242)
     expect(appendAuditEvent).toHaveBeenCalledWith(mockState.tx, expect.objectContaining({
@@ -589,6 +592,7 @@ describe('pending-purchase refinement feedback route', () => {
         baseRows,
         expectedRootVersion: 4,
         feedbackText: 'This feedback was typed on an old packet view.',
+        scopeRowLineageIds: ['pprline_501'],
       },
       url: '/api/catalog/pending-purchases/100/refinements',
     })
@@ -605,7 +609,7 @@ describe('pending-purchase refinement REPL in-process integration', () => {
     const feedbackText = 'All Pink Runtz rows should map to the existing 3.5g flower product.'
     const submitted = await server.inject({
       method: 'POST',
-      payload: { baseRows, expectedRootVersion: 4, feedbackText },
+      payload: { baseRows, expectedRootVersion: 4, feedbackText, scopeRowLineageIds: ['pprline_501'] },
       url: '/api/catalog/pending-purchases/100/refinements',
     })
 
@@ -690,7 +694,7 @@ describe('pending-purchase refinement REPL in-process integration', () => {
     const feedbackText = 'Keep this exact feedback available after the stale turn fails.'
     const submitted = await server.inject({
       method: 'POST',
-      payload: { baseRows, expectedRootVersion: 4, feedbackText },
+      payload: { baseRows, expectedRootVersion: 4, feedbackText, scopeRowLineageIds: ['pprline_501'] },
       url: '/api/catalog/pending-purchases/100/refinements',
     })
     expect(submitted.statusCode).toBe(200)
@@ -707,13 +711,15 @@ describe('pending-purchase refinement REPL in-process integration', () => {
         scope: null,
       },
       queuedPayload,
-    )).rejects.toThrow(/snapshot is stale/)
+    )).rejects.toThrow(/packet changed before refinement could finish/)
 
     expect(refinePendingPurchasePacketWithLlm).not.toHaveBeenCalled()
     expect(markPendingPurchaseRefinementTurnFailed).toHaveBeenCalledWith(
       mockState.tx,
       9001,
-      expect.stringMatching(/snapshot is stale/),
+      expect.stringMatching(/packet changed before refinement could finish/),
+      'stale_scope',
+      null,
     )
     expect(mockState.storedFeedbackText).toBe(feedbackText)
     expect(mockState.history).toMatchObject({
@@ -736,7 +742,7 @@ describe('pending-purchase refinement REPL in-process integration', () => {
     const feedbackText = 'Retry this feedback after the model recovers.'
     const submitted = await server.inject({
       method: 'POST',
-      payload: { baseRows, expectedRootVersion: 4, feedbackText },
+      payload: { baseRows, expectedRootVersion: 4, feedbackText, scopeRowLineageIds: ['pprline_501'] },
       url: '/api/catalog/pending-purchases/100/refinements',
     })
     expect(submitted.statusCode).toBe(200)
@@ -754,14 +760,14 @@ describe('pending-purchase refinement REPL in-process integration', () => {
         scope: null,
       },
       queuedPayload,
-    )).rejects.toThrow('Model output failed strict validation.')
+    )).rejects.toThrow('The analyst could not produce a safe candidate.')
 
     expect(createPendingPurchaseCandidateRevision).not.toHaveBeenCalled()
     expect(mockState.storedFeedbackText).toBe(feedbackText)
     expect(mockState.history).toMatchObject({
       currentRevision: { packetId: 100 },
       revisions: [{ packetId: 100 }],
-      turns: [{ candidatePacketId: null, errorMessage: 'Model output failed strict validation.', status: 'failed' }],
+      turns: [{ candidatePacketId: null, errorMessage: expect.stringContaining('safe candidate'), status: 'failed' }],
     })
     const history = await server.inject({
       method: 'GET',
@@ -770,7 +776,7 @@ describe('pending-purchase refinement REPL in-process integration', () => {
     expect(history.json()).toMatchObject({
       currentRevision: { packetId: 100 },
       revisions: [{ packetId: 100 }],
-      turns: [{ errorMessage: 'Model output failed strict validation.', status: 'failed' }],
+      turns: [{ errorMessage: expect.stringContaining('safe candidate'), status: 'failed' }],
     })
   })
 })
@@ -846,6 +852,9 @@ describe('pending-purchase revision switching and apply gating routes', () => {
     expect(res.statusCode).toBe(409)
     expect(res.json().error).toContain('Only the current applyable packet revision')
     expect(assertPendingPurchasePacketApplyable).toHaveBeenCalledWith(mockState.tx, 101)
+    expect(vi.mocked(lockPendingPurchasePacketRootForApply).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(assertPendingPurchasePacketApplyable).mock.invocationCallOrder[0]!,
+    )
     expect(mockState.tx.query).not.toHaveBeenCalledWith(expect.stringMatching(/from pending_purchase_rows/i), expect.anything())
     expect(enqueueJob).not.toHaveBeenCalled()
   })

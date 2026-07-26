@@ -68,6 +68,7 @@ import {
   isPendingPurchaseRefinementSchemaAvailable,
   listPendingPurchaseRefinementHistory,
   loadPendingPurchaseRefinementSnapshot,
+  lockPendingPurchasePacketRootForApply,
   PendingPurchaseRefinementConflictError,
   switchPendingPurchaseCurrentRevision,
 } from '../db/queries/pendingPurchaseRefinementQueries.js'
@@ -271,6 +272,11 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           throw new PendingPurchaseRefinementConflictError('This packet changed since the refinement form loaded. Refresh and try again.')
         }
         assertBaseRowsMatchSnapshot(snapshot.rowRefs, body.baseRows)
+        const availableLineages = new Set(snapshot.rowRefs.map((row) => row.rowLineageId))
+        if (new Set(body.scopeRowLineageIds).size !== body.scopeRowLineageIds.length
+          || body.scopeRowLineageIds.some((lineageId) => !availableLineages.has(lineageId))) {
+          throw new PendingPurchaseRefinementConflictError('The selected refinement scope is stale. Refresh and choose the rows again.')
+        }
         const turn = await createPendingPurchaseRefinementTurn(db, {
           expectedRootVersion: body.expectedRootVersion,
           feedbackText: body.feedbackText,
@@ -279,6 +285,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           requestedByUserId: user.id,
           rowSnapshot: snapshot.rowSnapshot,
           rowSnapshotSha256: snapshot.rowSnapshotSha256,
+          scopeRowLineageIds: body.scopeRowLineageIds,
           targetRevisionNumber: snapshot.targetRevisionNumber,
         })
         const scope = buildPendingPurchasePacketScope(params.packetId)
@@ -290,6 +297,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           payload: {
             refinementTurnId: turn.turnId,
             requestedByUserId: user.id,
+            scopeRowLineageIds: body.scopeRowLineageIds,
           },
           priority: JOB_PRIORITY_LIVE_REQUESTED,
           requestedByUserId: user.id,
@@ -309,6 +317,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
             packetRootId: snapshot.root.packetRootId,
             queuedJobId: jobId,
             rowSnapshotSha256: snapshot.rowSnapshotSha256,
+            scopeRowLineageIds: body.scopeRowLineageIds,
             summary: `Queued pending-purchase packet refinement for ${snapshot.packetTitle}.`,
             targetRevisionNumber: snapshot.targetRevisionNumber,
             turnId: turn.turnId,
@@ -838,6 +847,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
 
     try {
       const mutationResult = await withTransaction(async (db) => {
+        await lockPendingPurchasePacketRootForApply(db, body.packetId)
         await assertPendingPurchasePacketApplyable(db, body.packetId)
 
         const rowsResult = await db.query<PendingPurchaseApplySelectionRow>(

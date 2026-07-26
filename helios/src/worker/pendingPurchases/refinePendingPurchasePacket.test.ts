@@ -71,7 +71,6 @@ function patch(overrides: Record<string, unknown> = {}): Record<string, unknown>
     fields: {
       expectedCategory: 'Flower',
       targetBrand: 'Runtz',
-      targetReuseProductId: 7001,
     },
     rationale: 'Operator feedback and catalog context identify this as Pink Runtz flower.',
     citedContextIds: ['ctx-catalog-1'],
@@ -136,7 +135,8 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 
     expect(result.schemaVersion).toBe(1)
     expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toMatch(/strict-patches/)
+    expect(result.promptVersion).toMatch(/bounded-sketches-v2\/balanced/)
+    expect(result).toMatchObject({ compactionLevel: 'balanced', overflowRetryCount: 0 })
     expect(result.patches).toEqual([patch()])
   })
 
@@ -147,11 +147,11 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
     const userPayload = JSON.parse((body.messages as Array<{ role: string; content: string }>)[1]!.content)
-    const contextIds = userPayload.contextItems.map((item: { contextId: string }) => item.contextId)
+    const contextIds = userPayload.evidence.map((item: { contextId: string }) => item.contextId)
     expect(contextIds).toContain('prior-outcome:pprline_1:91')
     expect(contextIds).toContain('current-link:pprline_1:7001')
     expect(contextIds).toContain('litalerts-market:pprline_1:501')
-    expect(userPayload.rows[0].productIdCandidates).toEqual([7001, 7002])
+    expect(userPayload.rows[0].exactCurrentSweedProductIds).toEqual([7001, 7002])
     expect(result.patches[0]?.citedContextIds).toEqual([optionalCitation])
   })
 
@@ -201,11 +201,11 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
     }))).rejects.toThrow(/not in the allowed taxonomy/)
   })
 
-  it('rejects a product id that was not offered for the row', async () => {
+  it('rejects all model-authored product-link changes', async () => {
     stubFetch(modelResponse({ patches: [patch({ fields: { targetReuseProductId: 999999 } })] }))
 
     await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /not offered for that row/,
+      /model output failed validation/i,
     )
   })
 
@@ -287,8 +287,106 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
       () => modelResponse({ patches: [patch()] }),
     ])
 
-    await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/truncated/)
+    await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/too large to validate safely/)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries one context overflow with tighter compaction and hides provider internals', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fetchMock = stubFetchSequence([
+      () => new Response(JSON.stringify({ error: { message: 'maximum context length; input_tokens=999999 secret-provider-detail' } }), {
+        status: 400,
+        statusText: 'Bad Request',
+      }),
+      () => modelResponse({ patches: [patch()] }),
+    ])
+
+    const result = await refinePendingPurchasePacketWithLlm(buildInput())
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(result).toMatchObject({ compactionLevel: 'compact', overflowRetryCount: 1 })
+    const retryBody = JSON.parse((fetchMock.mock.calls[1]![1] as { body: string }).body)
+    const retryPayload = JSON.parse(retryBody.messages[1].content)
+    expect(retryPayload.compaction.level).toBe('compact')
+    expect(warn).toHaveBeenCalledOnce()
+  })
+
+  it('retries one transient provider failure without exposing provider details', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fetchMock = stubFetchSequence([
+      () => new Response('upstream secret outage details', { status: 503 }),
+      () => modelResponse({ patches: [patch()] }),
+    ])
+
+    const result = await refinePendingPurchasePacketWithLlm(buildInput())
+
+    expect(result.patches).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('ranks and bounds evidence while preserving operator guidance verbatim', async () => {
+    const fetchMock = stubFetch(modelResponse({ patches: [patch({ citedContextIds: [] })] }))
+    const contextItems = Array.from({ length: 120 }, (_, index): PendingPurchaseRefinementContextItem => ({
+      contextId: `market-${String(index).padStart(3, '0')}`,
+      source: 'litalerts',
+      targetRowLineageId: index === 119 ? 'pprline_late' : 'pprline_1',
+      data: { listing: `market listing ${index}`, padding: 'x'.repeat(500) },
+    }))
+    const feedbackText = 'Keep this operator guidance exactly, including punctuation: A → B.'
+
+    await refinePendingPurchasePacketWithLlm(buildInput({ contextItems, feedbackText }))
+
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    const userPayload = JSON.parse(body.messages[1].content)
+    expect(userPayload.operatorGuidance.verbatim).toBe(feedbackText)
+    expect(userPayload.compaction.level).toBe('balanced')
+    expect(userPayload.evidence).toHaveLength(90)
+    expect(userPayload.evidence.some((item: { targetRowLineageId: string }) => item.targetRowLineageId === 'pprline_late')).toBe(true)
+    expect(userPayload.sketchVersion).toBe(1)
+  })
+
+  it('omits an oversized evidence record whole and records the omission', async () => {
+    const fetchMock = stubFetch(modelResponse({ patches: [patch({ citedContextIds: [] })] }))
+    const result = await refinePendingPurchasePacketWithLlm(buildInput({
+      contextItems: [contextItem({ data: { exactRecord: 'x'.repeat(5000) } })],
+    }))
+
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    const userPayload = JSON.parse(body.messages[1].content)
+    expect(userPayload.evidence.some((item: { contextId: string }) => item.contextId === 'ctx-catalog-1')).toBe(false)
+    expect(result.omittedContextItemCount).toBeGreaterThan(0)
+  })
+
+  it('admits exact-current and accepted evidence for every row before lower-priority market evidence', async () => {
+    const fetchMock = stubFetch(modelResponse({ patches: [] }))
+    const rows = Array.from({ length: 30 }, (_, index) => row({
+      distributorProductId: `dist-${index}`,
+      rowLineageId: `pprline_${String(index).padStart(2, '0')}`,
+    }))
+    const contextItems = rows.flatMap((target) => [
+      contextItem({ contextId: `current-${target.rowLineageId}`, priority: 0, targetRowLineageId: target.rowLineageId }),
+      contextItem({ contextId: `prior-${target.rowLineageId}`, priority: 1, source: 'prior-packet', targetRowLineageId: target.rowLineageId }),
+      ...Array.from({ length: 3 }, (_, rank) => contextItem({
+        contextId: `suggestion-${rank}-${target.rowLineageId}`,
+        priority: 2,
+        targetRowLineageId: target.rowLineageId,
+      })),
+      contextItem({ contextId: `market-${target.rowLineageId}`, priority: 3, source: 'litalerts', targetRowLineageId: target.rowLineageId }),
+    ])
+
+    await refinePendingPurchasePacketWithLlm(buildInput({ contextItems, rows }))
+
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    const evidenceIds: string[] = JSON.parse(body.messages[1].content).evidence.map((item: { contextId: string }) => item.contextId)
+    expect(evidenceIds.filter((id) => id.startsWith('current-'))).toHaveLength(30)
+    expect(evidenceIds.filter((id) => id.startsWith('prior-'))).toHaveLength(30)
+    expect(evidenceIds).not.toContain('market-pprline_29')
+  })
+
+  it('classifies provider authentication rejection as configuration unavailable', async () => {
+    stubFetch(new Response('provider credential detail', { status: 403 }))
+
+    await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/configuration is unavailable/)
   })
 })
 
@@ -308,10 +406,9 @@ describe('refinePendingPurchasePacketWithLlm — repair loop', () => {
     expect(secondBody.messages.map((message: { role: string }) => message.role)).toEqual([
       'system',
       'user',
-      'assistant',
       'user',
     ])
-    expect(secondBody.messages[3].content).toMatch(/FAILED strict validation/)
+    expect(secondBody.messages[2].content).toMatch(/FAILED strict validation/)
     expect(warn).toHaveBeenCalledOnce()
   })
 
@@ -321,9 +418,9 @@ describe('refinePendingPurchasePacketWithLlm — repair loop', () => {
     const fetchMock = stubFetchSequence([badReply])
 
     await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /after 2 repair attempt\(s\)/,
+      /after 1 repair attempt\(s\)/,
     )
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -436,6 +533,7 @@ function evidenceDb(): Queryable {
         return resultRows([
           {
             brand_name: 'Runtz',
+            candidate_priority: 0,
             catalog_group_id: 201,
             category_name: 'Flower',
             group_name: 'Pink Runtz',

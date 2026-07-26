@@ -1411,6 +1411,10 @@ pre {
   resize: vertical;
 }
 
+.pp-refinement-scope select {
+  width: 100%;
+}
+
 .pp-refinement-failure,
 .pp-refinement-next-action {
   display: flex;

@@ -12,6 +12,10 @@ import {
   normalizePendingPurchaseParserText,
   updatePendingPurchaseParseRuleFeedback,
 } from '../../server/db/queries/pendingPurchaseParserQueries.js'
+import {
+  assertPendingPurchasePacketApplyable,
+  lockPendingPurchasePacketRootForApply,
+} from '../../server/db/queries/pendingPurchaseRefinementQueries.js'
 import { withTransaction } from '../../server/db/tx.js'
 import { enqueueJob } from '../../server/jobs/enqueueJob.js'
 import { findDescriptionMedicalClaimIssues, normalizeDescriptionText } from '../catalog/liveState.js'
@@ -496,10 +500,13 @@ async function runPendingPurchaseApplyJob(
   }
 
   const applyRequest = await withTransaction(async (db) => {
+    const packetId = await readPendingPurchaseApplyRequestPacketId(db, payload.pendingPurchaseApplyRequestId)
+    await lockPendingPurchasePacketRootForApply(db, packetId)
     const current = await lockPendingPurchaseApplyRequest(db, payload.pendingPurchaseApplyRequestId)
     if (isFinalRequestStatus(current.status)) {
       return current
     }
+    await assertPendingPurchasePacketApplyable(db, current.packet_id)
 
     await db.query(
       `
@@ -1865,6 +1872,19 @@ function pickEffectiveInt<K extends keyof EditedStructuredFieldOverrides>(
   if (raw === null || raw === undefined) return null
   if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) return fallback
   return raw
+}
+
+async function readPendingPurchaseApplyRequestPacketId(
+  db: Queryable,
+  applyRequestId: number,
+): Promise<number> {
+  const result = await db.query<{ packet_id: number }>(
+    'select packet_id from pending_purchase_apply_requests where id = $1',
+    [applyRequestId],
+  )
+  const packetId = result.rows[0]?.packet_id
+  if (!packetId) throw new Error(`Pending-purchase apply request ${applyRequestId} was not found.`)
+  return packetId
 }
 
 async function lockPendingPurchaseApplyRequest(

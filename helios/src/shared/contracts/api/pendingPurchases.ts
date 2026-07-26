@@ -67,7 +67,8 @@ export type PendingPurchaseRefinementTurnRouteParams = z.infer<
 export const SubmitPendingPurchaseRefinementRequestSchema = z.object({
   baseRows: z.array(PendingPurchaseRowSnapshotRefSchema).min(1).max(500),
   expectedRootVersion: z.number().int().positive(),
-  feedbackText: z.string().trim().min(1).max(20000),
+  feedbackText: z.string().max(20000).refine((value) => value.trim().length > 0, 'Feedback must not be blank.'),
+  scopeRowLineageIds: z.array(z.string().trim().min(1)).min(1).max(30),
 })
 export type SubmitPendingPurchaseRefinementRequest = z.infer<
   typeof SubmitPendingPurchaseRefinementRequestSchema

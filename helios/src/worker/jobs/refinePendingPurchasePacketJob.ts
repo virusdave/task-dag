@@ -1,6 +1,10 @@
 import { z } from 'zod'
 
-import type { CatalogPendingPurchasesRefineJobPayload } from '../../shared/contracts/index.js'
+import type {
+  CatalogPendingPurchasesRefineJobPayload,
+  JsonValue,
+  PendingPurchaseRefinementFailureCode,
+} from '../../shared/contracts/index.js'
 import { getPool } from '../../server/db/pool.js'
 import {
   createPendingPurchaseCandidateRevision,
@@ -72,6 +76,11 @@ export async function runCatalogPendingPurchasesRefineJob(
     const db = getPool()
     const taxonomy = await loadRefinementTaxonomy(db)
     let { contextItems, rows } = buildRefinementModelRows(prepared)
+    const scopeLineages = new Set(payload.scopeRowLineageIds)
+    rows = rows.filter((row) => scopeLineages.has(row.rowLineageId))
+    if (rows.length !== scopeLineages.size) {
+      throw new Error('Pending-purchase refinement scope no longer matches the packet snapshot.')
+    }
     const currentProductIds = await loadCurrentCatalogProductIds(db, rows.flatMap((row) => row.productIdCandidates))
     rows = rows.map((row) => ({
       ...row,
@@ -95,15 +104,68 @@ export async function runCatalogPendingPurchasesRefineJob(
       await createPendingPurchaseCandidateRevision(transaction, payload.refinementTurnId, refinement)
     })
   } catch (error) {
+    const failure = operatorRefinementFailure(error)
+    console.error('[pendingPurchaseRefinement] refinement failed', error)
     await withTransaction(async (db) => {
       await markPendingPurchaseRefinementTurnFailed(
         db,
         payload.refinementTurnId,
-        error instanceof Error ? error.message : 'Pending-purchase refinement failed.',
+        failure.message,
+        failure.code,
+        failure.attemptProvenance,
       )
     })
-    throw error
+    throw new Error(failure.message)
   }
+}
+
+function operatorRefinementFailure(error: unknown): {
+  attemptProvenance: JsonValue | null
+  code: PendingPurchaseRefinementFailureCode
+  message: string
+} {
+  const message = error instanceof Error ? error.message : ''
+  const attemptProvenance = readAttemptProvenance(error)
+  if (/scope no longer matches|snapshot is stale/i.test(message)) {
+    return {
+      attemptProvenance,
+      code: 'stale_scope',
+      message: 'This packet changed before refinement could finish. Refresh the packet, choose the scope again, and retry; your feedback is preserved.',
+    }
+  }
+  if (/choose one row|choose fewer rows|less context|response was too large/i.test(message)) {
+    return {
+      attemptProvenance,
+      code: 'smaller_scope',
+      message: 'The analyst needs a smaller request. Choose one row or one family and retry; your feedback is preserved.',
+    }
+  }
+  if (/temporarily unavailable|transport failed|timeout|rate limit/i.test(message)) {
+    return {
+      attemptProvenance,
+      code: 'temporarily_unavailable',
+      message: 'The packet analyst is temporarily unavailable. Retry this feedback shortly; your feedback is preserved.',
+    }
+  }
+  if (/token unavailable|required|configuration/i.test(message)) {
+    return {
+      attemptProvenance,
+      code: 'configuration_unavailable',
+      message: 'The packet analyst configuration is unavailable. Retry after configuration is restored; your feedback is preserved.',
+    }
+  }
+  return {
+    attemptProvenance,
+    code: 'unsafe_candidate',
+    message: 'The analyst could not produce a safe candidate. Choose fewer rows or clarify the feedback, then retry; your feedback is preserved.',
+  }
+}
+
+function readAttemptProvenance(error: unknown): JsonValue | null {
+  if (error === null || typeof error !== 'object' || !('attemptProvenance' in error)) return null
+  const value = error.attemptProvenance
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as JsonValue
 }
 
 function buildRefinementModelRows(prepared: PreparedPendingPurchaseRefinement): {
@@ -127,7 +189,9 @@ function buildRefinementModelRows(prepared: PreparedPendingPurchaseRefinement): 
       contextItems.push({
         contextId: `catalog:${rowLineageId}:${candidate.productId}`,
         data: candidate.data,
+        priority: candidate.priority,
         source: 'catalog',
+        targetRowLineageId: rowLineageId,
       })
     }
     return {
@@ -144,35 +208,52 @@ function buildRefinementModelRows(prepared: PreparedPendingPurchaseRefinement): 
 
 function readCandidateProducts(current: z.infer<typeof RefinementSnapshotRowSchema>): Array<{
   data: { productId: number; productName?: string | null; score?: number | null }
+  priority: number
   productId: number
 }> {
   const { editedStructuredFields: overrides, rawProvenance: raw } = current
   const reuseOverridePresent = overrides !== null && Object.prototype.hasOwnProperty.call(overrides, 'targetReuseProductId')
   const effectiveReuseProductId = reuseOverridePresent ? overrides.targetReuseProductId ?? null : raw.reuseProductId ?? null
-  if (effectiveReuseProductId === null) {
-    return []
-  }
-  const suggestion = raw.suggestionCandidates?.find((candidate) => candidate.productId === effectiveReuseProductId)
-  const validatedName = raw.validatedReuseSnapshot?.productId === effectiveReuseProductId
-    ? raw.validatedReuseSnapshot.productName
-    : null
-  return [{
-    data: {
+  const candidates = new Map<number, { productId: number; productName?: string | null; score?: number | null }>()
+  if (effectiveReuseProductId !== null) {
+    const suggestion = raw.suggestionCandidates?.find((candidate) => candidate.productId === effectiveReuseProductId)
+    const validatedName = raw.validatedReuseSnapshot?.productId === effectiveReuseProductId
+      ? raw.validatedReuseSnapshot.productName
+      : null
+    candidates.set(effectiveReuseProductId, {
       productId: effectiveReuseProductId,
       productName: suggestion?.productName ?? validatedName,
       ...(suggestion?.score !== undefined ? { score: suggestion.score } : {}),
-    },
-    productId: effectiveReuseProductId,
-  }]
+    })
+  }
+  const rankedSuggestions = [...(raw.suggestionCandidates ?? [])]
+    .sort((left, right) => (right.score ?? -1) - (left.score ?? -1) || left.productId - right.productId)
+  for (const suggestion of rankedSuggestions) {
+    if (candidates.size >= 10) break
+    if (!candidates.has(suggestion.productId)) candidates.set(suggestion.productId, suggestion)
+  }
+  return [...candidates.values()].map((candidate) => ({
+    data: candidate,
+    priority: candidate.productId === effectiveReuseProductId ? 0 : 2,
+    productId: candidate.productId,
+  }))
 }
 
 function buildEffectiveCurrent(current: z.infer<typeof RefinementSnapshotRowSchema>): Record<string, unknown> {
   const overrides = current.editedStructuredFields
   const raw = current.rawProvenance
   return {
-    ...current,
+    actionType: readNullableString(current.actionType),
+    approvalStatus: readNullableString(current.approvalStatus),
+    catalogAction: readNullableString(current.catalogAction),
     expectedCategory: pickEffective(overrides, 'expectedCategory', current.expectedCategory),
     expectedSubcategory: pickEffective(overrides, 'expectedSubcategory', current.expectedSubcategory),
+    notes: readNullableString(current.notes),
+    primaryImageUrl: readNullableString(current.effectivePrimaryImageUrl ?? current.primaryImageUrl),
+    proposedDescription: readNullableString(current.effectiveProposedDescription ?? current.proposedDescription),
+    proposedPrice: current.effectiveProposedPrice ?? current.proposedPrice ?? null,
+    reviewFlags: Array.isArray(current.reviewFlags) ? current.reviewFlags : [],
+    siteKey: readNullableString(current.siteKey),
     targetBrand: pickEffective(overrides, 'targetBrand', readNullableString(current.targetBrand)),
     targetGroupName: pickEffective(overrides, 'targetGroupName', readNullableString(current.targetGroupName)),
     targetPackCount: pickEffective(overrides, 'targetPackCount', readNullablePositiveInt(raw.targetPackCount)),
