@@ -41,6 +41,12 @@ import { z } from 'zod'
 const DEFAULT_HINT_ROOT = '/cloud/data/fbnyc'
 const KEY_PREFIX = 'pending-purchase-hints'
 const CONTENT_TYPE = 'text/plain; charset=utf-8'
+const TRANSIENT_DIRECTORY_RETRY_DELAYS_MS = [500, 1_500] as const
+
+interface LocalFsHintDocumentStoreOptions {
+  readonly mkdir?: typeof mkdir
+  readonly sleep?: (delayMs: number) => Promise<void>
+}
 
 export type HintStorageBackend = 'fs' | 's3'
 
@@ -94,7 +100,16 @@ function keyForSha(sha: string): string {
 }
 
 class LocalFsHintDocumentStore implements HintDocumentStore {
-  constructor(private readonly root: string) {}
+  private readonly makeDirectory: typeof mkdir
+  private readonly sleep: (delayMs: number) => Promise<void>
+
+  constructor(
+    private readonly root: string,
+    options: LocalFsHintDocumentStoreOptions = {},
+  ) {
+    this.makeDirectory = options.mkdir ?? mkdir
+    this.sleep = options.sleep ?? ((delayMs) => new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs)))
+  }
 
   /**
    * Resolve a relative key to an absolute path, asserting it stays inside the
@@ -161,10 +176,9 @@ class LocalFsHintDocumentStore implements HintDocumentStore {
     // Refuse to write if the root (e.g. the /cloud mount) is absent, so a
     // dropped mount can't silently create a local shadow tree. Only the lower
     // shard dirs are created below.
-    await this.assertRootMounted()
-    await mkdir(this.resolveKey(`${KEY_PREFIX}/${contentSha256.slice(0, 2)}/${contentSha256.slice(2, 4)}`), {
-      recursive: true,
-    })
+    await this.ensureShardDirectory(
+      this.resolveKey(`${KEY_PREFIX}/${contentSha256.slice(0, 2)}/${contentSha256.slice(2, 4)}`),
+    )
 
     // Write to a unique temp file in the same dir, then atomically rename, so
     // a concurrent reader/put never observes a half-written final path. The
@@ -183,6 +197,29 @@ class LocalFsHintDocumentStore implements HintDocumentStore {
     await writeFile(tmpMeta, sidecar, 'utf8')
     await rename(tmpMeta, metaPath)
     return pointer
+  }
+
+  private async ensureShardDirectory(directory: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      // Re-check on every attempt. A transient lower-directory failure may be
+      // retried, but a dropped /cloud mount must remain a loud failure rather
+      // than allowing recursive mkdir to create a local shadow tree.
+      await this.assertRootMounted()
+      try {
+        await this.makeDirectory(directory, { recursive: true })
+        return
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        const delayMs = TRANSIENT_DIRECTORY_RETRY_DELAYS_MS[attempt]
+        if (!isTransientDirectoryError(code) || delayMs === undefined) {
+          throw error
+        }
+        console.warn(
+          `[pendingPurchaseHintStore] mkdir ${directory} failed with ${code}; retrying in ${delayMs}ms`,
+        )
+        await this.sleep(delayMs)
+      }
+    }
   }
 
   private async isCompleteValidBlob(
@@ -233,8 +270,11 @@ class LocalFsHintDocumentStore implements HintDocumentStore {
 }
 
 /** Test-only constructor so unit tests can point at a temp root. */
-export function createLocalFsHintDocumentStore(root: string): HintDocumentStore {
-  return new LocalFsHintDocumentStore(root)
+export function createLocalFsHintDocumentStore(
+  root: string,
+  options: LocalFsHintDocumentStoreOptions = {},
+): HintDocumentStore {
+  return new LocalFsHintDocumentStore(root, options)
 }
 
 let cachedStore: HintDocumentStore | null = null
@@ -260,3 +300,7 @@ export function _setHintDocumentStoreForTests(store: HintDocumentStore | null): 
 }
 
 export const HINT_BLOB_CONTENT_TYPE = CONTENT_TYPE
+
+function isTransientDirectoryError(code: string | undefined): boolean {
+  return code === 'ENOENT' || code === 'EACCES' || code === 'EPERM'
+}

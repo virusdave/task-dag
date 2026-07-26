@@ -102,6 +102,88 @@ describe('LocalFsHintDocumentStore', () => {
     await expect(fenced.put('some text')).rejects.toThrow(/does not exist/)
   })
 
+  it('retries transient lower-directory failures after revalidating the mounted root', async () => {
+    const delays: number[] = []
+    let attempts = 0
+    const retrying = createLocalFsHintDocumentStore(root, {
+      mkdir: async (...args) => {
+        attempts += 1
+        if (attempts < 3) {
+          const error = new Error('transient sshfs directory race') as NodeJS.ErrnoException
+          error.code = attempts === 1 ? 'ENOENT' : 'EACCES'
+          throw error
+        }
+        const { mkdir } = await import('node:fs/promises')
+        return mkdir(...args)
+      },
+      sleep: async (delayMs) => {
+        delays.push(delayMs)
+      },
+    })
+
+    const pointer = await retrying.put('eventually stored')
+
+    expect(attempts).toBe(3)
+    expect(delays).toEqual([500, 1_500])
+    expect((await retrying.read(pointer)).text).toBe('eventually stored')
+  })
+
+  it('stops after two retries when a transient directory failure persists', async () => {
+    const delays: number[] = []
+    let attempts = 0
+    const failing = createLocalFsHintDocumentStore(root, {
+      mkdir: async () => {
+        attempts += 1
+        const error = new Error('persistent sshfs directory race') as NodeJS.ErrnoException
+        error.code = 'ENOENT'
+        throw error
+      },
+      sleep: async (delayMs) => {
+        delays.push(delayMs)
+      },
+    })
+
+    await expect(failing.put('still unavailable')).rejects.toThrow(/persistent sshfs directory race/)
+    expect(attempts).toBe(3)
+    expect(delays).toEqual([500, 1_500])
+  })
+
+  it('fails closed before another mkdir if the mounted root disappears during a retry', async () => {
+    let attempts = 0
+    const fenced = createLocalFsHintDocumentStore(root, {
+      mkdir: async () => {
+        attempts += 1
+        const error = new Error('transient sshfs directory race') as NodeJS.ErrnoException
+        error.code = 'ENOENT'
+        throw error
+      },
+      sleep: async () => {
+        await rm(root, { recursive: true, force: true })
+      },
+    })
+
+    await expect(fenced.put('mount disappeared')).rejects.toThrow(/storage root .* does not exist/)
+    expect(attempts).toBe(1)
+  })
+
+  it('does not retry non-transient lower-directory failures', async () => {
+    let attempts = 0
+    const failing = createLocalFsHintDocumentStore(root, {
+      mkdir: async () => {
+        attempts += 1
+        const error = new Error('read-only storage') as NodeJS.ErrnoException
+        error.code = 'EROFS'
+        throw error
+      },
+      sleep: async () => {
+        throw new Error('sleep must not run')
+      },
+    })
+
+    await expect(failing.put('cannot store')).rejects.toThrow(/read-only storage/)
+    expect(attempts).toBe(1)
+  })
+
   it('rejects a non-fs backend on read', async () => {
     const pointer = await store.put('x')
     await expect(store.read({ ...pointer, storageBackend: 's3' })).rejects.toThrow(
