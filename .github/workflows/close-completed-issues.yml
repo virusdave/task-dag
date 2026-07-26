@@ -40,7 +40,7 @@ jobs:
   close-issues:
     runs-on: ubuntu-latest
     concurrency:
-      group: task-dag-semantic-projectors-${{ github.repository }}
+      group: task-dag-semantic-projectors-${{ github.repository }}-${{ github.run_id }}
       cancel-in-progress: false
     steps:
       - name: Checkout caller repository
