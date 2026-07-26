@@ -148,3 +148,11 @@ introduced, `git2` must enable both `https` and `ssh`. The same change must
 deliberately choose and encode a vendored-versus-system-library policy,
 including the platform-specific Nix inputs it actually requires, rather than
 relying on ambient system libraries.
+## Cross-repository composition
+
+`task-dag epic-compose` is the provider-free cross-repository coordinator. It
+level-triggeredly composes `epic-create --claim`, `breakdown --claim-first`,
+and pointwise source `dep add` operations from one strict JSON spec bound to an
+exact live source claim. Replaying the same spec repairs a crash at any
+boundary; it neither mints children itself nor calls a provider. See
+`task-dag epic-compose --help` for the schema.

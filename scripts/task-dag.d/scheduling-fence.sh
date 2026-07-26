@@ -54,9 +54,13 @@ taskdag_task_is_complete_prepared() { # <task-sha>
 
 taskdag_consumer_fenced_scheduling_push() { # <operation> <actor> <updates-json>
     local operation=$1 actor=$2 updates=$3 token timestamp
+    TASKDAG_SCHEDULING_FENCE_RESULT=""
     [ "$TASKDAG_CONSUMER_MODE" = canonical ] || return 2
     token=$(taskdag_activation_snapshot_token) || return 3
-    [ "$(jq -r .authorityTip <<<"$token")" = "$(jq -r .authorityTip <<<"$TASKDAG_CONSUMER_ACTIVATION")" ] || return 3
+    if [ "$(jq -r .authorityTip <<<"$token")" != "$(jq -r .authorityTip <<<"$TASKDAG_CONSUMER_ACTIVATION")" ]; then
+        TASKDAG_SCHEDULING_FENCE_RESULT=stale-authority
+        return 3
+    fi
     updates=$(jq -cS 'sort_by(.ref)' <<<"$updates") || return 3
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     taskdag_activation_fenced_multi_push "$token" scheduling "$operation" "$actor" "$timestamp" "$updates"

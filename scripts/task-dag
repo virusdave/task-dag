@@ -641,6 +641,8 @@ COMMANDS:
     capabilities --json    Print the effect-free machine capability contract
     epic-create            Atomically create/adopt a born-claimed Epic-ID root
                            without provider calls; strict --json interface
+    epic-compose           Replayably compose cross-repository root creation,
+                           breakdown --claim-first, and source graph writes
     epic-bind-projection   Bind a projected issue using an authoritative
                            source checkout and target operation-root repo
     reap                   Reclaim provably-dead leaf/root claims safely
@@ -2871,6 +2873,90 @@ cmd_context() {
     printf "authoritative on origin; always read it via the task-dag commands above.\n"
 }
 
+# Emit the one canonical child message used both to mint a breakdown and to
+# prove that a consumed-root retry is an exact replay.  Keep this byte-oriented:
+# `git cat-file commit` validation below compares the message, including its
+# final newline, rather than re-parsing a lossy subset of trailers.
+taskdag_breakdown_child_message() { # index
+    local i=$1
+    printf 'Task: %s\n\n' "${titles[i]}"
+    [ -n "$issue_num" ] && printf 'Issue: %s\n' "$issue_num"
+    [ -n "$author" ] && printf 'Author: %s\n' "$author"
+    [ -n "$issue_url" ] && printf 'URL: %s\n' "$issue_url"
+    printf 'Status: %s\n' "${statuses[i]}"
+    printf 'Type: %s\n' "${types[i]}"
+    [ -z "$inherited_root_headers" ] || printf '%s' "$inherited_root_headers"
+    if [ -n "${descs[i]}" ]; then printf '\n%s\n' "${descs[i]}"; fi
+}
+
+# Validate the only state in which `breakdown --claim-first` is an idempotent
+# success: the root lock was consumed by precisely this canonical breakdown.
+# 0 exact replay, 1 semantic conflict, 3 indeterminate transport/snapshot.
+taskdag_breakdown_exact_replay() { # root root-locator
+    local root=$1 locator=$2 refs ref oid task short i n=${#titles[@]} found idx tree parents expected expected_ref
+    local claim_count=0 active_ref claim_oid pending_ref active_root_ref pending_oid
+    taskdag_consumer_prepare breakdown-exact-replay || return 3
+    refs=$TASKDAG_CHILD_MAP_REFS
+    pending_ref=$(jq -r .pendingRef <<<"$locator") || return 1
+    active_root_ref=$(jq -r .activeRef <<<"$locator") || return 1
+    pending_oid=$(awk -v r="$pending_ref" '$2==r{print $1}' <<<"$refs")
+    [ "$pending_oid" = "$root" ] || return 1
+    ! grep -qE "^[0-9a-f]+ ${active_root_ref//\//\\/}$" <<<"$refs" || return 1
+    local -a got=() got_ref=() got_claim=()
+    local structural=${TASKDAG_RECON_FP_CHILDREN[$root]:-} structural_count=0
+    while read -r task; do [ -z "$task" ] || structural_count=$((structural_count+1)); done <<<"$structural"
+    [ "$structural_count" -eq "$n" ] || return 1
+    while read -r oid ref; do
+        [[ "$ref" == refs/heads/tasks/frontier/* || "$ref" == refs/heads/tasks/active/* ]] || continue
+        task=$oid
+        if [[ "$ref" == refs/heads/tasks/active/* ]]; then
+            task=$(git rev-parse --verify -q "$oid^1" 2>/dev/null) || return 1
+        fi
+        grep -qxF "$task" <<<"$structural" || continue
+        found=-1
+        for ((i=0;i<n;i++)); do
+            [ "$(git show -s --format=%s "$task" 2>/dev/null)" = "Task: ${titles[i]}" ] && { [ "$found" -eq -1 ] || return 1; found=$i; }
+        done
+        [ "$found" -ge 0 ] || return 1
+        [ -z "${got[found]:-}" ] || return 1
+        got[found]=$task; got_ref[found]=$ref; got_claim[found]=$oid
+    done <<<"$refs"
+    for ((i=0;i<n;i++)); do
+        task=${got[i]:-}; [ -n "$task" ] || return 1
+        tree=$(git rev-parse "$task^{tree}" 2>/dev/null) || return 1
+        [ "$tree" = "$EMPTY_TREE" ] || return 1
+        local actual_file expected_file
+        actual_file=$(mktemp) || return 3; expected_file=$(mktemp) || { rm -f "$actual_file"; return 3; }
+        git cat-file commit "$task" | sed '1,/^$/d' >"$actual_file" || { rm -f "$actual_file" "$expected_file"; return 1; }
+        taskdag_breakdown_child_message "$i" >"$expected_file" || { rm -f "$actual_file" "$expected_file"; return 1; }
+        cmp -s "$actual_file" "$expected_file" || { rm -f "$actual_file" "$expected_file"; return 1; }
+        rm -f "$actual_file" "$expected_file"
+        parents=$(git show -s --format=%P "$task") || return 1
+        expected=$root
+        local token dep
+        for token in ${dep_plans[i]}; do
+            case "$token" in idx:*) dep=${got[${token#idx:}]:-};; sha:*) dep=${token#sha:};; esac
+            [ -n "$dep" ] || return 1; expected+=" $dep"
+        done
+        [ "$parents" = "$expected" ] || return 1
+        short=$(git rev-parse --short "$task") || return 1
+        if [ "${claims[i]}" = true ]; then
+            expected_ref="refs/heads/tasks/active/$short"; claim_count=$((claim_count+1))
+            [ "${got_ref[i]}" = "$expected_ref" ] || return 1
+            taskdag_validate_born_claim "${got_claim[i]}" "$task" \
+              "${TASK_DAG_CLAIMER:-${USER:-unknown}}" \
+              "${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}" \
+              "${TASK_DAG_CLAIMER_PID:-$PPID}" "$claimer_ttl_hours" \
+              "born-claimed at breakdown of ${root:0:12}" || return 1
+        else
+            expected_ref="refs/heads/tasks/frontier/$short"
+            [ "${got_ref[i]}" = "$expected_ref" ] && [ "${got_claim[i]}" = "$task" ] || return 1
+        fi
+    done
+    [ "$claim_count" -eq 1 ] || return 1
+    return 0
+}
+
 # Command: breakdown - create task breakdown from spec
 cmd_breakdown() {
     local parent_sha="" spec_file="" stdin_json=false dry_run=false force=false json=false claim_first=false
@@ -3206,6 +3292,43 @@ EOF
         out_lines[first_ready]="${out_lines[first_ready]} (claimed by ${claimer})"
     fi
 
+    # A retry after the original atomic publication sees no root-active lock.
+    # Recognise it here, before ordinary ownership/double-breakdown errors, but
+    # only when every byte/ref/parent/claim and root registry identity matches.
+    if [ "$claim_first" = true ] && [ "$dry_run" = false ] && [ -n "$inherited_epic_id" ] && [ "$parent_is_typed_root" = true ]; then
+        local replay_locator replay_rc=0
+        replay_locator=$(taskdag_root_locator "$inherited_epic_id") || return 1
+        taskdag_breakdown_exact_replay "$parent_sha" "$replay_locator" || replay_rc=$?
+        if [ "$replay_rc" -eq 0 ]; then
+            local replay_tasks='[]' ri rtask rshort rclaimed rref roid expected_subject advertised
+            for ((ri=0;ri<count;ri++)); do
+                expected_subject="Task: ${titles[ri]}"
+                rtask=""
+                while read -r roid rref; do
+                    [[ "$rref" == refs/heads/tasks/frontier/* || "$rref" == refs/heads/tasks/active/* ]] || continue
+                    advertised=$roid
+                    [[ "$rref" == *'/active/'* ]] && roid=$(git rev-parse "$roid^1")
+                    grep -qxF "$roid" <<<"${TASKDAG_RECON_FP_CHILDREN[$parent_sha]:-}" || { roid=$advertised; continue; }
+                    if [ "$(git show -s --format=%s "$roid")" = "$expected_subject" ]; then
+                        [ -z "$rtask" ] || return 1
+                        rtask=$(printf '%s\t%s' "$roid" "$rref")
+                    fi
+                    roid=$advertised
+                done <<<"$TASKDAG_CHILD_MAP_REFS"
+                [ -n "$rtask" ] || return 1
+                IFS=$'\t' read -r roid rref <<<"$rtask"; rshort=$(git rev-parse --short "$roid")
+                rclaimed=false; [[ "$rref" == *'/active/'* ]] && rclaimed=true
+                replay_tasks=$(jq -ncS --argjson a "$replay_tasks" --arg sha "$roid" --arg short "$rshort" --argjson claimed "$rclaimed" --arg ref "${rref#refs/heads/}" '$a+[{claimed:$claimed,ref:$ref,sha:$sha,shortSha:$short}]')
+            done
+            jq -ncS --arg parent "$parent_sha" --argjson count "$count" --argjson tasks "$replay_tasks" '{count:$count,ok:true,parent:$parent,replayed:true,tasks:$tasks}'
+            return 0
+        elif [ "$replay_rc" -eq 3 ]; then
+            echo "Error: cannot attest an existing breakdown replay (transport or unstable snapshot)" >&2; return 4
+        fi
+        # A conflict continues into the normal lock/state checks, which retain
+        # their specific stale/ownership diagnostics and never report success.
+    fi
+
     # ── epic-root orchestration lock (issue #2) ─────────────────────
     # If <parent> is the pending epic ROOT, decomposing it is the
     # orchestration step that the cross-host root lock protects. Require
@@ -3470,18 +3593,7 @@ EOF
     for (( i=0; i<count; i++ )); do
         local msg_file
         msg_file=$(mktemp)
-        {
-            printf 'Task: %s\n\n' "${titles[i]}"
-            [ -n "$issue_num" ] && printf 'Issue: %s\n' "$issue_num"
-            [ -n "$author" ] && printf 'Author: %s\n' "$author"
-            [ -n "$issue_url" ] && printf 'URL: %s\n' "$issue_url"
-            printf 'Status: %s\n' "${statuses[i]}"
-            printf 'Type: %s\n' "${types[i]}"
-            [ -z "$inherited_root_headers" ] || printf '%s' "$inherited_root_headers"
-            if [ -n "${descs[i]}" ]; then
-                printf '\n%s\n' "${descs[i]}"
-            fi
-        } > "$msg_file"
+        taskdag_breakdown_child_message "$i" > "$msg_file"
 
         local -a parent_args=("-p" "$parent_sha")
         local token
@@ -7199,6 +7311,7 @@ main() {
                 echo "Usage: task-dag capabilities --json" >&2; return 2
             fi ;;
         epic-create) cmd_epic_create "$@" ;;
+        epic-compose) cmd_epic_compose "$@" ;;
         epic-bind-projection) cmd_epic_bind_projection "$@" ;;
         migration-status)
             if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -7931,6 +8044,8 @@ source "$TASKDAG_SCRIPT_DIR/task-dag.d/child-map.sh"
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/claim-model.sh"
 # shellcheck source=task-dag.d/epic-create.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/epic-create.sh"
+# shellcheck source=task-dag.d/epic-compose.sh
+source "$TASKDAG_SCRIPT_DIR/task-dag.d/epic-compose.sh"
 # shellcheck source=task-dag.d/ref-schema.sh
 source "$TASKDAG_SCRIPT_DIR/task-dag.d/ref-schema.sh"
 # shellcheck source=task-dag.d/repository-identity.sh

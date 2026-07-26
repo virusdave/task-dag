@@ -116,8 +116,9 @@ _taskdag_consumer_mismatch_reason() { # before local-activation observed-activat
     printf '\n'
 }
 
-_taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
+_taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch] [--expected-activation-authority OID]
     local consumer=${1:-} requested_tip="" nofetch=false before after token runtime attempt arg advertisement graph_tip master_tip
+    local expected_activation_authority=""
     local candidate_mode local_activation local_graph local_master local_task_refs local_task_refs_digest
     local observed_task_refs observed_task_refs_digest reason max_attempts retry_budget
     local prior_ready=${TASKDAG_CONSUMER_READY:-false} prior_mode=${TASKDAG_CONSUMER_MODE:-}
@@ -129,9 +130,16 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
             --tip) requested_tip=${1:-}; [ -n "$requested_tip" ] || return 2; shift ;;
             --tip=*) requested_tip=${arg#*=} ;;
             --no-fetch) nofetch=true ;;
+            --expected-activation-authority)
+                expected_activation_authority=${1:-}; [ -n "$expected_activation_authority" ] || return 2; shift ;;
+            --expected-activation-authority=*) expected_activation_authority=${arg#*=} ;;
             *) return 2 ;;
         esac
     done
+    if [ -n "$expected_activation_authority" ] && ! [[ "$expected_activation_authority" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "Error: --expected-activation-authority requires a full 40-hex commit OID" >&2
+        return 2
+    fi
     TASKDAG_CONSUMER_READY=false
     TASKDAG_CONSUMER_MODE=""
     TASKDAG_CONSUMER_ID=""
@@ -158,6 +166,11 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
             before=""
         elif [ "$nofetch" = true ]; then before=$(_taskdag_consumer_local_activation_authority) || return 2
         else before=$(_taskdag_activation_fetch_authority) || return 2
+        fi
+        if [ -n "$expected_activation_authority" ] && [ "$before" != "$expected_activation_authority" ]; then
+            TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result exhausted "activation-authority" "$attempt" "$before" "" "" "" "" "$before" "" "" "") || return 2
+            echo "Error: activation authority differs from the caller's prepared snapshot; refusing to retry against newer authority" >&2
+            return 2
         fi
         token=null
         if [ -n "$before" ]; then
@@ -229,6 +242,12 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch]
         fi
         if [ -n "$reason" ]; then
             TASKDAG_RECON_READY=false
+            if [ -n "$expected_activation_authority" ]; then
+                TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result exhausted "$reason" "$attempt" "$before" "$local_activation" \
+                  "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
+                echo "Error: prepared semantic snapshot changed while using fixed activation authority; refusing retry" >&2
+                return 2
+            fi
             if [ "$attempt" -ge "$max_attempts" ]; then
                 TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result exhausted "$reason" "$attempt" "$before" "$local_activation" \
                   "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2

@@ -9,6 +9,10 @@ TASKDAG_EPIC_WRITER_CUTOVER=4e964e3294915e8625c7ce8047b1ab8751096a15
 # Set by the public-routing commit after the dormant typed-completion reader
 # and admission checks have landed.  A zero value keeps the path fail-closed.
 TASKDAG_TYPED_COMPLETION_CUTOVER=4f3053827c60b8f87000c54e4ddedea77716dd1f
+# Deliberately impossible until the compose rollout commit is selected.  This
+# is a protocol constant, not configuration: an inherited environment must
+# never be able to turn a dormant cross-repository writer on.
+readonly TASKDAG_EPIC_COMPOSE_CUTOVER=ffffffffffffffffffffffffffffffffffffffff
 TASKDAG_CANONICAL_AUTHOR_NAME=task-dag
 TASKDAG_CANONICAL_AUTHOR_EMAIL=task-dag@freshlybaked.us
 

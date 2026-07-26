@@ -15,6 +15,17 @@ task_is_claimed_on_remote() {
         >/dev/null 2>&1 && echo "yes" || echo "no"
 }
 
+taskdag_claim_message() { # task title claimer host pid claimed-at ttl note
+    local task_sha=$1 task_title=$2 claimer=$3 claimer_host=$4 claimer_pid=$5
+    local claimed_at=$6 ttl_hours=$7 note=$8
+    printf 'Claim: %s\n\n' "$task_title"
+    printf 'Task-Commit: %s\nClaimer: %s\nClaimer-Host: %s\n' \
+        "$task_sha" "$claimer" "$claimer_host"
+    [ -z "$claimer_pid" ] || printf 'Claimer-PID: %s\n' "$claimer_pid"
+    printf 'Claimed-At: %s\nTTL-Hours: %s\n' "$claimed_at" "$ttl_hours"
+    [ -z "$note" ] || printf 'Note: %s\n' "$note"
+}
+
 build_claim_commit() {
     local task_sha="$1" claimer="$2" claimer_host="$3" ttl_hours="$4" note="$5"
     local claimer_pid="$6" task_title task_tree now
@@ -22,19 +33,9 @@ build_claim_commit() {
     task_tree=$(git rev-parse "$task_sha^{tree}")
     now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    local msg="Claim: ${task_title}
-
-Task-Commit: ${task_sha}
-Claimer: ${claimer}
-Claimer-Host: ${claimer_host}"
-    [ -z "$claimer_pid" ] || msg="${msg}
-Claimer-PID: ${claimer_pid}"
-    msg="${msg}
-Claimed-At: ${now}
-TTL-Hours: ${ttl_hours}"
-    [ -z "$note" ] || msg="${msg}
-Note: ${note}"
-    git commit-tree "$task_tree" -p "$task_sha" -m "$msg"
+    taskdag_claim_message "$task_sha" "$task_title" "$claimer" "$claimer_host" \
+        "$claimer_pid" "$now" "$ttl_hours" "$note" \
+        | git commit-tree "$task_tree" -p "$task_sha"
 }
 
 build_root_claim_commit() {
@@ -152,6 +153,27 @@ taskdag_validate_source_claim() { # claim-oid task-oid claimer host pid
     pid=$(extract_field "$msg" Claimer-PID 2>/dev/null) || return 1
     [ "$task" = "$task_oid" ] && [ "$claimer" = "$expected_claimer" ] \
         && [ "$host" = "$expected_host" ] && [ "$pid" = "$expected_pid" ]
+}
+
+# Validate a born claim including the fields which are intentionally not part
+# of generic source-claim ownership.  Construction and replay both use
+# build_claim_commit's canonical field contract.
+taskdag_validate_born_claim() { # claim task claimer host pid ttl note
+    local claim=$1 task=$2 claimer=$3 host=$4 pid=$5 ttl=$6 note=$7 msg claimed_at title actual expected
+    taskdag_validate_source_claim "$claim" "$task" "$claimer" "$host" "$pid" || return 1
+    msg=$(parse_commit_metadata "$claim") || return 1
+    [ "$(grep -c '^Claimed-At:' <<<"$msg")" -eq 1 ] \
+      && [[ "$(extract_field "$msg" Claimed-At)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+      && [ "$(grep -c '^TTL-Hours:' <<<"$msg")" -eq 1 ] \
+      && [ "$(extract_field "$msg" TTL-Hours)" = "$ttl" ] || return 1
+    claimed_at=$(extract_field "$msg" Claimed-At) || return 1
+    title=$(get_task_title "$task") || return 1
+    actual=$(mktemp) || return 1; expected=$(mktemp) || { rm -f "$actual"; return 1; }
+    git cat-file commit "$claim" | sed '1,/^$/d' >"$actual" \
+        && taskdag_claim_message "$task" "$title" "$claimer" "$host" "$pid" \
+            "$claimed_at" "$ttl" "$note" >"$expected" \
+        && cmp -s "$actual" "$expected"
+    local rc=$?; rm -f "$actual" "$expected"; return "$rc"
 }
 
 claim_dead_reason="none"

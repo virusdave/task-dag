@@ -72,12 +72,16 @@ echo "== rust tests =="
 # config/remote discovery; tests for the environment path set it explicitly.
 unset GITHUB_REPOSITORY
 
+# epic-compose has a dedicated two-origin integration fixture below in the
+# fixture inventory; keep its module in the same static syntax/shellcheck gate.
+
 command -v shellcheck >/dev/null 2>&1 && {
     echo "== shellcheck =="
     shellcheck -S error "$TD" \
         "$(dirname "$TD")/task-dag.d/source-contract.sh" \
         "$(dirname "$TD")/task-dag.d/json.sh" \
         "$(dirname "$TD")/task-dag.d/cas-retry.sh" \
+        "$(dirname "$TD")/task-dag.d/epic-compose.sh" \
         "$(dirname "$TD")/task-dag.d/git-objects.sh" \
         "$(dirname "$TD")/task-dag.d/task-model.sh" \
         "$(dirname "$TD")/task-dag.d/epic-registry.sh" \
@@ -187,6 +191,7 @@ bash -n "$TD" \
 
 parallel_tests=(
     loader-inventory.sh
+    epic-compose.sh
     epic-id-protocol.sh
     epic-root-minter.sh
     retire-owned.sh

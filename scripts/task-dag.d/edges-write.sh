@@ -205,7 +205,11 @@ _taskdag_graph_cas() {
 
     while :; do
         # (1) fetch tip — tri-state so we never CAS against a false-empty set.
-        if ! taskdag_sync_graph_ref; then
+        if [ "${TASKDAG_USE_PREPARED_SNAPSHOT:-false}" = true ]; then
+            taskdag_consumer_require_prepared || return 75
+            old=$TASKDAG_CONSUMER_GRAPH_TIP
+            [ "$(jq -r '.authorityTip // empty' <<<"$TASKDAG_CONSUMER_ACTIVATION")" = "${TASKDAG_EXPECTED_ACTIVATION_AUTHORITY:-}" ] || return 75
+        elif ! taskdag_sync_graph_ref; then
             attempt=$(( attempt + 1 ))
             if [ "$attempt" -gt "$TASKDAG_CAS_MAX_ATTEMPTS" ]; then
                 echo "Error: could not sync ${TASKDAG_GRAPH_REF} from origin after ${TASKDAG_CAS_MAX_ATTEMPTS} attempts (indeterminate transport) — failing loud rather than spin" >&2
@@ -216,7 +220,7 @@ _taskdag_graph_cas() {
         fi
 
         # (2) recompute the new tree against the freshly-fetched tip.
-        old=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
+        [ "${TASKDAG_USE_PREPARED_SNAPSHOT:-false}" = true ] || old=$(git rev-parse --verify -q "${TASKDAG_GRAPH_REF}^{commit}" 2>/dev/null || true)
         if [ -n "$old" ]; then
             oldtree=$(git rev-parse --verify -q "${old}^{tree}") || return 1
         else
@@ -250,8 +254,19 @@ _taskdag_graph_cas() {
         #     concurrently. Before activation preserve the legacy direct CAS.
         lease="--force-with-lease=${TASKDAG_GRAPH_REF}:${old}"
         local updates graph_push_rc=0
-        taskdag_consumer_prepare graph-cas || return 1
-        [ "$TASKDAG_CONSUMER_GRAPH_TIP" = "$old" ] || { taskdag_cas_sleep 1; continue; }
+        if [ "${TASKDAG_USE_PREPARED_SNAPSHOT:-false}" = true ]; then
+            taskdag_consumer_require_prepared || return 75
+            [ "$(jq -r '.authorityTip // empty' <<<"$TASKDAG_CONSUMER_ACTIVATION")" = "${TASKDAG_EXPECTED_ACTIVATION_AUTHORITY:-}" ] || return 75
+        else
+            local -a prepare_args=(graph-cas)
+            [ -z "${TASKDAG_EXPECTED_ACTIVATION_AUTHORITY:-}" ] \
+              || prepare_args+=(--expected-activation-authority "$TASKDAG_EXPECTED_ACTIVATION_AUTHORITY")
+            taskdag_consumer_prepare "${prepare_args[@]}" || return 1
+        fi
+        if [ "$TASKDAG_CONSUMER_GRAPH_TIP" != "$old" ]; then
+            [ "${TASKDAG_USE_PREPARED_SNAPSHOT:-false}" = true ] && return 75
+            taskdag_cas_sleep 1; continue
+        fi
         if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
             updates=$(jq -ncS --arg ref "$TASKDAG_GRAPH_REF" --arg old "$old" --arg new "$newcommit" \
                 '[{ref:$ref,old:$old,new:$new}]') || return 1
@@ -270,6 +285,7 @@ _taskdag_graph_cas() {
                 return 1
             fi
             if [ "$readback" != "$newcommit" ]; then
+                [ "${TASKDAG_USE_PREPARED_SNAPSHOT:-false}" = true ] && return 75
                 # Someone landed between our push and the readback. Treat as a
                 # lost race: refetch + recompute + retry within the budget.
                 attempt=$(( attempt + 1 ))
@@ -285,6 +301,13 @@ _taskdag_graph_cas() {
             git update-ref "$TASKDAG_GRAPH_REF" "$newcommit" 2>/dev/null \
                 || echo "Warning: origin updated but local mirror of ${TASKDAG_GRAPH_REF} failed" >&2
             return 0
+        fi
+
+        if [ "${TASKDAG_USE_PREPARED_SNAPSHOT:-false}" = true ]; then
+            [ "${TASKDAG_SCHEDULING_FENCE_RESULT:-}" != stale-authority ] || return 75
+            local fenced_state
+            fenced_state=$(jq -r '.outcome // empty' <<<"${TASKDAG_ACTIVATION_FENCED_PUSH_RESULT:-{}}" 2>/dev/null || true)
+            case "$fenced_state" in authority-contention|target-changed) return 75;; esac
         fi
 
         # (6) classify the failure. A non-FF / stale-lease rejection is a lost
@@ -351,6 +374,7 @@ Reason: ${reason}"
     case "$rc" in
         0) printf "${GREEN}✓ Added edge %s${RESET} (%s %s %s)\n" "${eid:0:12}" "$from" "$relation" "$to" ;;
         2) printf "${BLUE}• Edge %s already present${RESET} (idempotent no-op)\n" "${eid:0:12}"; return 0 ;;
+        75) return 75 ;;
         *) return 1 ;;
     esac
 }
@@ -497,7 +521,7 @@ taskdag_dep_help() {
 Usage:
   task-dag dep add --from <node> --to <node> --relation requires|satisfies
                    [--mode all|any] [--repo-id <n>] [--witness <id>]
-                   [--reason "..."]
+                   [--reason "..."] [--expected-activation-authority <oid>]
   task-dag dep drop <edge-id> [--reason "..."]
   task-dag dep prune [<edge-id>] [--no-fetch]
 
@@ -517,6 +541,9 @@ match the fixed pair.
            to the current HEAD commit sha.
 --reason   free text recorded in the graph commit message (durable history
            provenance), never in the edge blob.
+--expected-activation-authority is an internal coordination fence. It requires
+           the exact 40-hex authority captured with the source claim snapshot
+           and fails immediately if activation authority has advanced.
 
 `dep drop` is PRUNABILITY-AWARE (relation-aware): if the edge is already
 prunable on master — done(TO) for a requires edge, done(FROM) for a satisfies
@@ -534,12 +561,12 @@ EOF
 }
 
 _cmd_dep_add() {
-    local from="" to="" relation="" mode="" repo_id="" witness="" reason=""
+    local from="" to="" relation="" mode="" repo_id="" witness="" reason="" expected_authority=""
     while [ $# -gt 0 ]; do
         # Guard $2 before reading it so a value-less option (e.g. `dep add
         # --from`) is a clean usage error, not a `set -u` process abort.
         case "$1" in
-            --from|--to|--relation|--mode|--repo-id|--witness|--reason)
+            --from|--to|--relation|--mode|--repo-id|--witness|--reason|--expected-activation-authority)
                 [ $# -ge 2 ] || { echo "Error: $1 requires a value" >&2; return 2; } ;;
         esac
         case "$1" in
@@ -550,6 +577,7 @@ _cmd_dep_add() {
             --repo-id) repo_id="$2"; shift 2 ;;
             --witness) witness="$2"; shift 2 ;;
             --reason) reason="$2"; shift 2 ;;
+            --expected-activation-authority) expected_authority="$2"; shift 2 ;;
             --help|-h) taskdag_dep_help; return 0 ;;
             *) echo "Error: unknown option to 'dep add': $1" >&2; return 2 ;;
         esac
@@ -557,6 +585,10 @@ _cmd_dep_add() {
     [ -n "$from" ] || { echo "Error: dep add requires --from" >&2; return 2; }
     [ -n "$to" ]   || { echo "Error: dep add requires --to" >&2; return 2; }
     [ -n "$relation" ] || { echo "Error: dep add requires --relation (requires|satisfies)" >&2; return 2; }
+    if [ -n "$expected_authority" ] && ! [[ "$expected_authority" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "Error: --expected-activation-authority requires a full 40-hex commit OID" >&2
+        return 2
+    fi
     # Default mode from the fixed relation pairing; validate any explicit one.
     if [ -z "$mode" ]; then
         case "$relation" in
@@ -586,7 +618,8 @@ _cmd_dep_add() {
         [ -n "$witness" ] || { echo "Error: no HEAD to use as a default --witness; pass --witness explicitly" >&2; return 2; }
     fi
 
-    taskdag_dep_add "$from" "$to" "$relation" "$mode" "$repo_id" "$witness" "$reason"
+    TASKDAG_EXPECTED_ACTIVATION_AUTHORITY="$expected_authority" \
+      taskdag_dep_add "$from" "$to" "$relation" "$mode" "$repo_id" "$witness" "$reason"
 }
 
 _cmd_dep_drop() {
