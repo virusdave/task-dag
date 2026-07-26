@@ -1507,8 +1507,13 @@ EOF
         canonical_issue="#${canonical_issue}"
     fi
 
-    local tmp initial_snapshot initial_result classify_rc=0 first_red issue obs_repo obs_branch
+    local tmp activation_token="" initial_snapshot initial_result classify_rc=0 first_red issue obs_repo obs_branch
     tmp="$(mktemp -d)" || { _repair_retire_report 4 unconfirmed "cannot create scratch space"; return $?; }
+    # Capture semantic activation before the projection snapshot it leases.
+    # Absent/disabled activation preserves the legacy CI-chain-only protocol;
+    # malformed or incompatible enabled authority fails closed.
+    activation_token=$(taskdag_activation_optional_snapshot_token) || {
+        rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot capture canonical activation authority"; return $?; }
     initial_snapshot="$tmp/initial.git"
     if ! _ci_repair_projection_snapshot_from_origin "$initial_snapshot"; then
         rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot take authoritative projection snapshot"; return $?
@@ -1623,7 +1628,7 @@ Retired-At: ${now}"
     child="$(_cichain_build_state_commit "$repo" "$branch" "$token" "$now" next_state)" || {
         rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot construct fenced chain transition"; return $?; }
 
-    local chain_ref push_rc=0 ref oid
+    local chain_ref push_rc=0 ref oid updates="" activation_result=""
     local -a leases refspecs
     chain_ref="$(_cichain_ref "$repo" "$branch")"
     leases=("--force-with-lease=${chain_ref}:${token}")
@@ -1637,7 +1642,22 @@ Retired-At: ${now}"
         leases+=("--force-with-lease=${ref}:${oid}")
         refspecs+=(":${ref}")
     done < <(jq -r '.candidates[] | [.ref,.expectedOid] | @tsv' <<<"$initial_result")
-    git push --atomic origin "${leases[@]}" "${refspecs[@]}" >/dev/null 2>&1 || push_rc=$?
+    if [ -n "$activation_token" ]; then
+        updates=$(jq -ncS --arg chain_ref "$chain_ref" --arg token "$token" --arg child "$child" \
+            --arg audit_ref "$audit_ref" --arg audit_old "$existing_audit" --arg audit_oid "$audit_oid" \
+            --argjson audit_new "$audit_new" --argjson candidates "$(jq -c .candidates <<<"$initial_result")" '
+            ([{ref:$chain_ref,old:$token,new:$child}]
+             + (if $audit_new then [{ref:$audit_ref,old:$audit_old,new:$audit_oid}] else [] end)
+             + ($candidates|map({ref:.ref,old:.expectedOid,new:""}))) | sort_by(.ref)') || {
+                rm -rf "$tmp"; _repair_retire_report 4 unconfirmed "cannot construct activation-fenced retirement"; return $?; }
+        taskdag_internal_repair_retire_transaction "$activation_token" "$owner" "$now" "$updates" \
+            || push_rc=$?
+        activation_result=$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT
+        [ "$push_rc" -ne 0 ] || jq -e '.outcome=="applied"' <<<"$activation_result" >/dev/null 2>&1 \
+            || push_rc=3
+    else
+        git push --atomic origin "${leases[@]}" "${refspecs[@]}" >/dev/null 2>&1 || push_rc=$?
+    fi
 
     # Push status is advisory. Always read back the audit, chain, and a newly
     # classified full namespace snapshot before deciding whether effects landed.

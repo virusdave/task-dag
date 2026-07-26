@@ -731,6 +731,18 @@ projection must agree exactly. The issue ref always names the root. The pending
 ref either still names it, or is absent only after the exact legacy close fact
 for that issue/root appears on the current authority master.
 
+The root minter captures the canonical activation authority generation before
+capturing its complete origin scheduling snapshot. That generation is the
+genuine server-side transaction lease for the whole snapshot: the registry
+append and every in-scope canonical scheduling writer atomically advance the
+same activation authority guard. Numeric pending/active refs are therefore not
+repeated as old-equals-new push updates. A canonical scheduling change after
+the snapshot makes the minter's authority lease stale and rejects the whole
+append. Direct authorized ref writes that bypass this protocol are outside the
+task-dag threat model. After an accepted transaction, one exact coherent
+advertisement must read back activation authority, registry, and numeric or
+typed pending/active projections together.
+
 Typed completion is the exact two-parent, first-parent-history, tree-equal
 merge shape with exactly one `Closes-Epic-ID: epic-v1:<64-lowercase-hex>`
 trailer, no `Closes-Epic:` trailer, and a second parent equal to the registry's

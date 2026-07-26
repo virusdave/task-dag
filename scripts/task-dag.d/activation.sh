@@ -255,10 +255,8 @@ _taskdag_activation_fetch_authority() {
     printf '%s\n' "$old"
 }
 
-taskdag_activation_snapshot_token() {
-    local tip info active authority path digest record runtime epoch
-    tip=$(_taskdag_activation_fetch_authority) || return $?
-    [ -n "$tip" ] || return 3
+_taskdag_activation_snapshot_token_for_tip() { # authority-tip
+    local tip=$1 info active authority path digest record runtime epoch
     info=$(taskdag_activation_validate_history "$tip") || return 3
     IFS=$'\t' read -r active authority path digest <<<"$info"
     record=$(git show "$active:$path") || return 3
@@ -269,6 +267,31 @@ taskdag_activation_snapshot_token() {
     epoch=$(jq -r .epoch <<<"$record")
     jq -ncS --arg origin "$(git remote get-url origin)" --argjson epoch "$epoch" --arg digest "$digest" --arg activationCommit "$active" --arg authorityTip "$authority" --arg state enabled --argjson guardVersion 1 --arg minimumCompatibleTaskDagCommit "$(jq -r .minimumCompatibleTaskDagCommit <<<"$record")" --arg runtimeCommit "$runtime" \
       '{activationCommit:$activationCommit,authorityTip:$authorityTip,digest:$digest,epoch:$epoch,guardVersion:$guardVersion,minimumCompatibleTaskDagCommit:$minimumCompatibleTaskDagCommit,origin:$origin,runtimeCommit:$runtimeCommit,state:$state}'
+}
+
+taskdag_activation_snapshot_token() {
+    local tip
+    tip=$(_taskdag_activation_fetch_authority) || return $?
+    [ -n "$tip" ] || return 3
+    _taskdag_activation_snapshot_token_for_tip "$tip"
+}
+
+# Compatibility-aware writer snapshot. An absent or canonically disabled
+# activation authority retains the legacy transaction protocol and emits no
+# token. Any malformed authority, or an enabled authority this runtime cannot
+# honor, fails closed rather than silently falling back to unfenced writes.
+taskdag_activation_optional_snapshot_token() {
+    local tip info active path record
+    tip=$(_taskdag_activation_fetch_authority) || return $?
+    [ -n "$tip" ] || return 0
+    info=$(taskdag_activation_validate_history "$tip") || return 3
+    IFS=$'\t' read -r active _ path _ <<<"$info"
+    record=$(git show "$active:$path") || return 3
+    case "$(jq -r .state <<<"$record")" in
+        disabled) return 0 ;;
+        enabled) _taskdag_activation_snapshot_token_for_tip "$tip" ;;
+        *) return 3 ;;
+    esac
 }
 
 # Recover the immutable activation record bound by an already captured token;
@@ -453,6 +476,13 @@ taskdag_activation_fenced_push() { # compatibility wrapper
     local token=$1 writer=$2 operation=$3 actor=$4 timestamp=$5 target=$6 old=$7 new=$8 updates
     updates=$(jq -ncS --arg ref "$target" --arg old "$old" --arg new "$new" '[{ref:$ref,old:$old,new:$new}]') || return 2
     taskdag_activation_fenced_multi_push "$token" "$writer" "$operation" "$actor" "$timestamp" "$updates"
+}
+
+# Exact canonical transaction seam used by repair-retire and its cross-writer
+# race fixtures. Semantic validation and update construction remain owned by
+# repair-retire; activation owns the one atomic authority/target protocol.
+taskdag_internal_repair_retire_transaction() { # token actor timestamp updates
+    taskdag_activation_fenced_multi_push "$1" scheduling repair-retire "$2" "$3" "$4"
 }
 
 cmd_activation_apply() {

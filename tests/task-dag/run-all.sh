@@ -80,6 +80,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/cas-retry.sh" \
         "$(dirname "$TD")/task-dag.d/git-objects.sh" \
         "$(dirname "$TD")/task-dag.d/task-model.sh" \
+        "$(dirname "$TD")/task-dag.d/epic-registry.sh" \
         "$(dirname "$TD")/task-dag.d/child-map.sh" \
         "$(dirname "$TD")/task-dag.d/claim-model.sh" \
         "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
@@ -127,7 +128,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$here/wrappers.sh" "$here/caller-workflow-preflight.sh" \
         "$here/install-completion-order-hook.sh" "$here/reconcile-comments.sh" \
         "$here/consumer-cutover.sh" "$here/loader-inventory.sh" \
-        "$here/epic-id-protocol.sh" || exit 1
+        "$here/epic-id-protocol.sh" "$here/epic-root-minter.sh" || exit 1
 }
 echo "== bash -n =="
 bash -n "$TD" \
@@ -136,6 +137,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/cas-retry.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/git-objects.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/task-model.sh" \
+    && bash -n "$(dirname "$TD")/task-dag.d/epic-registry.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/child-map.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/claim-model.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ref-schema.sh" \
@@ -178,11 +180,13 @@ bash -n "$TD" \
     && bash -n "$here/consumer-cutover.sh" \
     && bash -n "$here/loader-inventory.sh" \
     && bash -n "$here/epic-id-protocol.sh" \
+    && bash -n "$here/epic-root-minter.sh" \
     && bash -n "$here/retire-owned.sh" || exit 1
 
 parallel_tests=(
     loader-inventory.sh
     epic-id-protocol.sh
+    epic-root-minter.sh
     retire-owned.sh
     reconcile.sh
     complete-safety.sh

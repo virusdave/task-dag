@@ -278,6 +278,27 @@ if [ "$rc" -eq 10 ] && jq -e '.outcome=="stale-accepted" and .remainingCandidate
   ok "9: final chain read detects authority advancing during fresh classification"
 else bad "9: delayed stale-accepted race rc=$rc out=$out"; fi
 
+# Canonical activation makes the same retirement transaction advance both
+# authorities with every target deletion. This is intentionally last so the
+# preceding cases continue to cover absent-activation compatibility.
+runtime=$(git -C "$(dirname "$TD")/.." rev-parse HEAD)
+registry_commit=$(printf 'a%.0s' {1..40}); registry_blob=$(printf 'b%.0s' {1..40})
+registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
+registry_id="sha256:$({ printf 'task-dag-activation-registry-v1\000'; jq -cS '{source,repositories}' <<<"$registry"; } | sha256sum | awk '{print $1}')"
+jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" --argjson registry "$registry" \
+  '{actor:"fixture",authoritativeTimestamp:"2030-01-01T00:04:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:($registry+{id:$id}),sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
+"$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null || bad "10a: activation setup failed"
+git push -q --force origin "$CHILD:$FRONTIER_REF"
+activation_before=$(remote_sha refs/heads/tasks/v1/activation)
+chain_before=$(remote_sha "$CHAIN_REF")
+out=$(retire "$NOW4" "$chain_before"); rc=$?
+activation_after=$(remote_sha refs/heads/tasks/v1/activation)
+if [ "$rc" -eq 0 ] && [ -z "$(remote_sha "$FRONTIER_REF")" ] \
+   && [ "$activation_after" != "$activation_before" ] \
+   && [ "$(git --git-dir="$ROOT/origin.git" rev-parse "$activation_after^")" = "$activation_before" ]; then
+  ok "10: activated repair retirement atomically advances activation, CI chain, and targets"
+else bad "10: activated retirement rc=$rc out=$out activation=$activation_before..$activation_after"; fi
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

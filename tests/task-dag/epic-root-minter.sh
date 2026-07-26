@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -uo pipefail
+TD=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)/task-dag}
+TASKDAG_SCRIPT_DIR=$(dirname "$TD")
+LIB=$TASKDAG_SCRIPT_DIR/task-dag.d ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
+pass=0 fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+taskdag_json_file_is_single_strict(){ jq -e . "$1" >/dev/null 2>&1; }
+source "$LIB/git-objects.sh"; source "$LIB/task-model.sh"; source "$LIB/claim-model.sh"; source "$LIB/repository-identity.sh"
+_taskdag_materialise_no_duplicate_keys(){ jq -e . "$1" >/dev/null 2>&1; }
+source "$LIB/activation.sh"; source "$LIB/epic-registry.sh"
+git init -q --bare "$ROOT/origin"; git init -q "$ROOT/wc"; cd "$ROOT/wc" || exit; git remote add origin "$ROOT/origin"
+echo seed >seed; git add seed; git commit -qm seed; parent=$(git rev-parse HEAD); git push -q origin HEAD:master
+runtime=$(git -C "$TASKDAG_SCRIPT_DIR/.." rev-parse HEAD)
+registry_commit=1111111111111111111111111111111111111111
+registry_blob=2222222222222222222222222222222222222222
+registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
+printf '%s\n' "$registry" >"$ROOT/registry"
+registry_id=$(_taskdag_activation_registry_id "$ROOT/registry")
+jq -ncS --arg runtime "$runtime" --arg floor "$TASKDAG_EPIC_READER_CUTOVER" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" '{actor:"fixture",authoritativeTimestamp:"2026-07-25T00:00:00Z",minimumCompatibleTaskDagCommit:$floor,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
+"$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null || exit 1
+operation=$(printf 'a%.0s' {1..64}); epic=$(taskdag_epic_id_for_operation R_source "$operation")
+descriptor=$(jq -ncS --arg epic "$epic" --arg op "$operation" '{epicId:$epic,origin:{kind:"operation",operationId:$op,repositoryId:"R_source"},projection:{issueId:null,issueNumber:null,issueUrl:null,provider:"github",repository:"owner/repo",repositoryId:"R_target"},schema:1,task:{author:"worker",description:"",status:"pending",title:"Root",type:"epic"}}')
+spec=$(jq -ncS --argjson descriptor "$descriptor" --arg parent "$parent" '{actor:"worker",authoritativeTimestamp:"2026-07-25T00:00:00Z",claim:{claimId:"stable",claimer:"worker",host:"host",note:"",pid:"123",ttlHours:"12"},descriptor:$descriptor,legacyAdoption:null,parentCommit:$parent,schema:1}')
+out=$(taskdag_internal_mint_epic_root "$spec")
+if jq -e '.created==true' <<<"$out" >/dev/null && taskdag_epic_registry_validate_history "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/epics)"; then ok "creates root, registry, binding state and root claim atomically"; else bad "create failed"; fi
+export GIT_AUTHOR_NAME=ambient-two GIT_AUTHOR_EMAIL=two@example.invalid GIT_COMMITTER_NAME=ambient-two GIT_COMMITTER_EMAIL=two@example.invalid
+again=$(taskdag_internal_mint_epic_root "$spec")
+if jq -e '.created==false' <<<"$again" >/dev/null \
+  && [ "$(jq -r .rootCommit <<<"$out")" = "$(jq -r .rootCommit <<<"$again")" ] \
+  && [ "$(jq -r .claimCommit <<<"$out")" = "$(jq -r .claimCommit <<<"$again")" ]; then ok "replay is deterministic across ambient Git identities"; else bad "replay was not idempotent"; fi
+
+# Every useful strict subset of {registry,pending,active} is indeterminate. In
+# particular, immutable registry bytes alone never resurrect native refs.
+registry=refs/heads/tasks/v1/epics
+native_pending=$(jq -r .rootRef <<<"$out"); native_active=$(jq -r .activeRef <<<"$out")
+registry_oid=$(git --git-dir="$ROOT/origin" rev-parse "$registry")
+native_root=$(jq -r .rootCommit <<<"$out"); native_claim=$(jq -r .claimCommit <<<"$out")
+assert_native_partial_fails() { # label keep-registry keep-pending keep-active
+  local label=$1 keep_registry=$2 keep_pending=$3 keep_active=$4 before rc
+  git --git-dir="$ROOT/origin" update-ref -d "$registry"
+  git --git-dir="$ROOT/origin" update-ref -d "$native_pending"
+  git --git-dir="$ROOT/origin" update-ref -d "$native_active"
+  [ "$keep_registry" = true ] && git --git-dir="$ROOT/origin" update-ref "$registry" "$registry_oid"
+  [ "$keep_pending" = true ] && git --git-dir="$ROOT/origin" update-ref "$native_pending" "$native_root"
+  [ "$keep_active" = true ] && git --git-dir="$ROOT/origin" update-ref "$native_active" "$native_claim"
+  before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+  taskdag_internal_mint_epic_root "$spec" >/dev/null 2>&1; rc=$?
+  if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "$label partial state fails closed"; else bad "$label partial state mutated"; fi
+}
+assert_native_partial_fails registry-only true false false
+assert_native_partial_fails pending-only false true false
+assert_native_partial_fails active-only false false true
+assert_native_partial_fails registry-pending true true false
+assert_native_partial_fails registry-active true false true
+assert_native_partial_fails pending-active false true true
+git --git-dir="$ROOT/origin" update-ref "$registry" "$registry_oid"
+git --git-dir="$ROOT/origin" update-ref "$native_pending" "$native_root"
+git --git-dir="$ROOT/origin" update-ref "$native_active" "$native_claim"
+
+saved_snapshot_function=$(declare -f taskdag_activation_snapshot_token)
+taskdag_activation_snapshot_token(){ local token; token=$(eval "$saved_snapshot_function"; taskdag_activation_snapshot_token) || return $?; jq -c --arg floor "$parent" '.minimumCompatibleTaskDagCommit=$floor' <<<"$token"; }
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_mint_epic_root "$spec" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "old activation floor is mutation-free"; else bad "old activation floor escaped"; fi
+eval "$saved_snapshot_function"
+taskdag_activation_snapshot_token(){ return 3; }
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_mint_epic_root "$spec" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "disabled activation is mutation-free"; else bad "disabled activation escaped"; fi
+eval "$saved_snapshot_function"
+bad_spec=$(jq -cS '.descriptor.task.title="Different"' <<<"$spec")
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_mint_epic_root "$bad_spec" >/dev/null 2>&1; rc=$?
+if [ "$rc" -ne 0 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "same-ID payload conflict is mutation-free"; else bad "payload conflict mutated"; fi
+malformed=$(jq -c '.claim.pid="0"' <<<"$spec"); taskdag_internal_mint_epic_root "$malformed" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] && ok "malformed spec fails before publication" || bad "malformed spec rc=$rc"
+
+# A competing exact-lease winner cannot be overwritten.
+digest=${epic#epic-v1:}; active=refs/heads/tasks/root-active/epic-v1/$digest
+git --git-dir="$ROOT/origin" update-ref -d "$active"
+foreign=$(printf foreign | git commit-tree "$EMPTY_TREE" -p "$parent")
+git push -q origin "$foreign:$active"
+taskdag_internal_mint_epic_root "$spec" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$(git --git-dir="$ROOT/origin" rev-parse "$active")" = "$foreign" ]; then ok "foreign root-claim race loses without overwrite"; else bad "race fence failed"; fi
+
+# Legacy migration adopts exact existing bytes rather than minting a new root.
+legacy_epic=$(taskdag_epic_id_for_provider github R_target I_9)
+legacy_desc=$(jq -ncS --arg epic "$legacy_epic" '{epicId:$epic,origin:{issueId:"I_9",kind:"provider",provider:"github",repositoryId:"R_target"},projection:{issueId:"I_9",issueNumber:"9",issueUrl:"https://github.com/owner/repo/issues/9",provider:"github",repository:"owner/repo",repositoryId:"R_target"},schema:1,task:{author:"worker",description:"",status:"pending",title:"Legacy",type:"epic"}}')
+taskdag_serialize_task_message Legacy '#9' worker https://github.com/owner/repo/issues/9 pending epic '' >"$ROOT/legacy"
+legacy_root=$(git commit-tree "$EMPTY_TREE" -p "$parent" <"$ROOT/legacy")
+legacy_claim=$(GIT_AUTHOR_NAME=task-dag GIT_AUTHOR_EMAIL=task-dag@freshlybaked.us GIT_COMMITTER_NAME=task-dag GIT_COMMITTER_EMAIL=task-dag@freshlybaked.us GIT_AUTHOR_DATE=2026-07-25T00:00:01Z GIT_COMMITTER_DATE=2026-07-25T00:00:01Z git commit-tree "$EMPTY_TREE" -p "$legacy_root" -m $'Claim: Legacy\n\nClaim-Kind: root\nIssue: #9\nClaim-ID: legacy\nTask-Commit: '"$legacy_root"$'\nClaimer: worker\nClaimer-Host: host\nClaimer-PID: 123\nClaimed-At: 2026-07-25T00:00:01Z\nTTL-Hours: 12')
+git push -q --atomic origin "$legacy_root:refs/heads/gh/issues/9" "$legacy_root:refs/heads/tasks/pending/9" "$legacy_claim:refs/heads/tasks/root-active/9"
+legacy_spec=$(jq -ncS --argjson descriptor "$legacy_desc" --arg parent "$parent" '{actor:"worker",authoritativeTimestamp:"2026-07-25T00:00:01Z",claim:{claimId:"legacy",claimer:"worker",host:"host",note:"",pid:"123",ttlHours:"12"},descriptor:$descriptor,legacyAdoption:{issueNumber:"9",issueRef:"refs/heads/gh/issues/9",pendingRef:"refs/heads/tasks/pending/9"},parentCommit:$parent,schema:1}')
+
+# Typed and numeric locators for one provider root are a split-brain conflict.
+legacy_digest=${legacy_epic#epic-v1:}; typed_pending=refs/heads/tasks/pending/epic-v1/$legacy_digest
+git push -q origin "$legacy_root:$typed_pending"
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_mint_epic_root "$legacy_spec" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "typed duplicate locator fails closed"; else bad "typed duplicate locator was accepted"; fi
+git push -q origin ":$typed_pending"
+
+# Retire numeric active through repair-retire's exact canonical transaction
+# helper after the minter snapshot but immediately before its receive-pack.
+legacy_foreign=$(printf legacy-race | git commit-tree "$EMPTY_TREE" -p "$legacy_root")
+race_expected_authority=""
+race_winning_guard=""
+taskdag_activation_test_pre_fenced_push_hook(){
+  unset -f taskdag_activation_test_pre_fenced_push_hook
+  local race_token race_updates
+  race_token=$(taskdag_activation_snapshot_token) || return 3
+  race_expected_authority=$(jq -r .authorityTip <<<"$race_token")
+  race_updates=$(jq -ncS --arg ref refs/heads/tasks/root-active/9 --arg old "$legacy_claim" --arg new "$legacy_foreign" '[{ref:$ref,old:$old,new:$new}]')
+  taskdag_internal_repair_retire_transaction "$race_token" fixture 2026-07-25T00:00:02Z "$race_updates" || return 3
+  race_winning_guard=$(git --git-dir="$ROOT/origin" rev-parse "$TASKDAG_ACTIVATION_REF")
+}
+before_registry=$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/epics)
+taskdag_internal_mint_epic_root "$legacy_spec" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] \
+  && [ "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/v1/epics)" = "$before_registry" ] \
+  && [ "$(git --git-dir="$ROOT/origin" rev-parse refs/heads/tasks/root-active/9)" = "$legacy_foreign" ] \
+  && [ "$(git --git-dir="$ROOT/origin" log -1 --format=%B "$race_winning_guard" | sed -n 's/^Expected-Authority-Tip: //p')" = "$race_expected_authority" ]; then
+  ok "post-snapshot repair retirement advances activation and rejects whole registry append"
+else bad "activation generation lease did not fence live adoption (rc=$rc expected=$race_expected_authority guard=$race_winning_guard)"; fi
+restore_token=$(taskdag_activation_snapshot_token)
+restore_updates=$(jq -ncS --arg ref refs/heads/tasks/root-active/9 --arg old "$legacy_foreign" --arg new "$legacy_claim" '[{ref:$ref,old:$old,new:$new}]')
+taskdag_activation_fenced_multi_push "$restore_token" scheduling fixture-active-restore fixture 2026-07-25T00:00:03Z "$restore_updates" >/dev/null || exit 1
+legacy_out=$(taskdag_internal_mint_epic_root "$legacy_spec")
+if [ "$(jq -r .rootCommit <<<"$legacy_out")" = "$legacy_root" ]; then ok "legacy migration adopts exact root"; else bad "legacy migration reminted root"; fi
+
+native_spec() { # operation-char timestamp title
+  local operation descriptor epic
+  operation=$(printf "$1%.0s" {1..64}); epic=$(taskdag_epic_id_for_operation R_source "$operation")
+  descriptor=$(jq -ncS --arg epic "$epic" --arg op "$operation" --arg title "$3" '{epicId:$epic,origin:{kind:"operation",operationId:$op,repositoryId:"R_source"},projection:{issueId:null,issueNumber:null,issueUrl:null,provider:"github",repository:"owner/repo",repositoryId:"R_target"},schema:1,task:{author:"worker",description:"",status:"pending",title:$title,type:"epic"}}')
+  jq -ncS --argjson descriptor "$descriptor" --arg parent "$parent" --arg timestamp "$2" '{actor:"worker",authoritativeTimestamp:$timestamp,claim:{claimId:"stable",claimer:"worker",host:"host",note:"",pid:"123",ttlHours:"12"},descriptor:$descriptor,legacyAdoption:null,parentCommit:$parent,schema:1}'
+}
+
+# One provider tuple is immutable even if a competing operation-derived
+# Epic-ID presents the same projection.
+competing=$(native_spec e 2026-07-25T00:00:05Z Competing)
+competing=$(jq -cS --argjson projection "$(jq -c .projection <<<"$legacy_desc")" '.descriptor.projection=$projection' <<<"$competing")
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_mint_epic_root "$competing" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then ok "competing Epic-IDs cannot bind one provider tuple"; else bad "provider tuple was rebound"; fi
+
+# A clone with no ambient legacy refs must validate the prior adoption from one
+# origin snapshot and append normally.
+git clone -q "$ROOT/origin" "$ROOT/fresh"; cd "$ROOT/fresh" || exit
+fresh_out=$(taskdag_internal_mint_epic_root "$(native_spec b 2026-07-25T00:00:02Z Fresh)")
+if jq -e '.created==true' <<<"$fresh_out" >/dev/null \
+  && ! git show-ref --verify --quiet refs/heads/gh/issues/9; then
+  ok "fresh clone appends after legacy adoption without materialising legacy refs"
+else bad "fresh clone could not append after legacy adoption"; fi
+
+# Deliberately wrong local legacy refs are non-authoritative to the writer.
+stale=$(printf stale | git commit-tree "$EMPTY_TREE" -p "$parent")
+git update-ref refs/heads/gh/issues/9 "$stale"; git update-ref refs/heads/tasks/pending/9 "$stale"
+stale_out=$(taskdag_internal_mint_epic_root "$(native_spec c 2026-07-25T00:00:03Z Stale)")
+if jq -e '.created==true' <<<"$stale_out" >/dev/null \
+  && [ "$(git rev-parse refs/heads/gh/issues/9)" = "$stale" ]; then
+  ok "stale local legacy history cannot affect append or get rewritten"
+else bad "ambient stale legacy refs affected append"; fi
+
+# Retirement is proved only by the captured origin master and does not require
+# recreating the deleted pending ref before a later native append.
+close=$(git commit-tree "$(git rev-parse "$parent^{tree}")" -p "$parent" -p "$legacy_root" -m $'Close legacy epic\n\nCloses-Epic: #9')
+git push -q --atomic origin "$close:refs/heads/master" :refs/heads/tasks/pending/9
+retired_out=$(taskdag_internal_mint_epic_root "$(native_spec d 2026-07-25T00:00:04Z Retired)")
+if jq -e '.created==true' <<<"$retired_out" >/dev/null \
+  && ! git --git-dir="$ROOT/origin" show-ref --verify --quiet refs/heads/tasks/pending/9; then
+  ok "retired legacy adoption permits native append without resurrection"
+else bad "retired legacy root blocked append or was resurrected"; fi
+
+# Registry bytes alone cannot resurrect a legacy root absent at origin, even
+# when stale local issue/pending refs still point at its historical commit.
+git push -q origin :refs/heads/gh/issues/9
+before=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+taskdag_internal_mint_epic_root "$legacy_spec" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$before" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then
+  ok "origin-absent legacy root fails closed without registry-only resurrection"
+else bad "registry or stale local refs resurrected origin-absent legacy root"; fi
+
+if ! "$TD" --help | grep -Eq 'mint-epic-root|epic-root-minter'; then ok "minter remains internal"; else bad "minter became public"; fi
+echo "PASS=$pass FAIL=$fail"; [ "$fail" -eq 0 ]
