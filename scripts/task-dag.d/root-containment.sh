@@ -99,7 +99,7 @@ epic_already_closed_on() {
 # path dormant until every participating runtime understands that lifecycle.
 taskdag_typed_root_completion_preflight() { # task [authority-tip] [--prepared]
     local original=$1 authority=${2:-HEAD} mode=${3:-} node=$1 parent epic_id="" msg token floor rows registry master record root
-    local node_epic node_descriptor descriptor close_rc advertised_activation expected_activation
+    local node_epic node_descriptor descriptor node_type children close_rc advertised_activation expected_activation
 
     # Discover whether this task belongs to a typed root, but do not treat an
     # absent child field as legacy until the complete task-only ancestry has
@@ -149,6 +149,17 @@ taskdag_typed_root_completion_preflight() { # task [authority-tip] [--prepared]
     record=$(taskdag_epic_registry_record "$epic_id" "$registry" "$master") || return 3
     root=$(jq -er .rootCommit <<<"$record") || return 3
     descriptor=$(jq -cS .descriptor <<<"$record") || return 3
+
+    # This capability admits leaf completion only. Root lifecycle is the
+    # separate Closes-Epic-ID transition, and structural intermediate nodes
+    # remain obligations rather than ordinary completion targets.
+    [ "$original" != "$root" ] || return 2
+    msg=$(parse_commit_metadata "$original" 2>/dev/null || true)
+    node_type=$(extract_field "$msg" Type 2>/dev/null || true)
+    case "$node_type" in leaf|task) ;; *) return 2 ;; esac
+    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
+    children=${TASKDAG_RECON_FP_CHILDREN[$original]:-}
+    [ -z "$children" ] || return 2
 
     # The registry is root authority.  Children inherit Epic-ID, so stopping
     # at the first task carrying that field would incorrectly treat the leaf
