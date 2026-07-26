@@ -359,6 +359,7 @@ taskdag_canonical_fold_satisfies() {
             1) ;;
             *) echo "Error: contradictory active-claim authority for ${short}" >&2; return 2 ;;
         esac
+        taskdag_typed_root_completion_preflight "$task" "$base" --prepared || return $?
         tree=$(git rev-parse "$base^{tree}") || return 2
         msg="Supersede task ${short}
 

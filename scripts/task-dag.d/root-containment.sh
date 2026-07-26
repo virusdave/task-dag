@@ -99,7 +99,7 @@ epic_already_closed_on() {
 # path dormant until every participating runtime understands that lifecycle.
 taskdag_typed_root_completion_preflight() { # task [authority-tip] [--prepared]
     local original=$1 authority=${2:-HEAD} mode=${3:-} node=$1 parent epic_id="" msg token floor rows registry master record root
-    local node_epic close_rc advertised_activation expected_activation
+    local node_epic node_descriptor descriptor close_rc advertised_activation expected_activation
 
     # Discover whether this task belongs to a typed root, but do not treat an
     # absent child field as legacy until the complete task-only ancestry has
@@ -148,6 +148,7 @@ taskdag_typed_root_completion_preflight() { # task [authority-tip] [--prepared]
     git fetch -q --no-tags origin "$registry" "$master" || return 3
     record=$(taskdag_epic_registry_record "$epic_id" "$registry" "$master") || return 3
     root=$(jq -er .rootCommit <<<"$record") || return 3
+    descriptor=$(jq -cS .descriptor <<<"$record") || return 3
 
     # The registry is root authority.  Children inherit Epic-ID, so stopping
     # at the first task carrying that field would incorrectly treat the leaf
@@ -159,11 +160,14 @@ taskdag_typed_root_completion_preflight() { # task [authority-tip] [--prepared]
         msg=$(parse_commit_metadata "$node" 2>/dev/null || true)
         node_epic=$(extract_field "$msg" Epic-ID 2>/dev/null || true)
         [ "$node_epic" = "$epic_id" ] || return 2
+        node_descriptor=$(extract_field "$msg" Epic-Root-Descriptor 2>/dev/null || true)
+        node_descriptor=$(taskdag_canonicalize_epic_root_descriptor <<<"$node_descriptor") || return 2
+        [ "$node_descriptor" = "$descriptor" ] || return 2
         parent=$(get_first_parent "$node" 2>/dev/null || true)
         [ -n "$parent" ] && is_task_commit "$parent" || return 2
         node=$parent
     done
-    [ "$(taskdag_resolve_typed_root "$(taskdag_root_locator "$epic_id")" "$root")" = "$(jq -cS .descriptor <<<"$record")" ] || return 2
+    [ "$(taskdag_resolve_typed_root "$(taskdag_root_locator "$epic_id")" "$root")" = "$descriptor" ] || return 2
 
     # A root that was closed before this child acquired a durable completion
     # fact is corrupt/premature; never add work beneath a closed root.
