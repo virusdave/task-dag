@@ -1514,19 +1514,35 @@ function PendingPurchaseRefinementPanel({
   const failedScopeCount = readRefinementScopeCount(latestFailedTurn?.promptContext)
   const exhaustedEmergencyCompaction = latestFailureCode === 'smaller_scope'
     && readRefinementCompactionLevel(latestFailedTurn?.promptContext) === 'emergency'
-  const [scopeKey, setScopeKey] = useState('')
+  const [selectedLineageIds, setSelectedLineageIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [scopeSearch, setScopeSearch] = useState('')
+  const [scopeNotice, setScopeNotice] = useState<string | null>(null)
   const scopeGroups = useMemo(() => buildFamilyGroups(rows), [rows])
-  const scopeRows = scopeKey === 'all'
-    ? rows
-    : scopeKey.startsWith('family:')
-      ? scopeGroups.find((group) => `family:${group.familyKeyString}` === scopeKey)?.rows ?? []
-      : rows.filter((row) => `row:${row.rowLineageId}` === scopeKey)
-  const scopeRowLineageIds = scopeRows
-    .map((row) => row.rowLineageId)
-    .filter((lineageId): lineageId is string => lineageId !== null)
+  const selectableRows = useMemo(
+    () => rows.filter((row): row is PendingPurchaseRow & { rowLineageId: string } => row.rowLineageId !== null),
+    [rows],
+  )
+  const availableLineageIds = useMemo(
+    () => new Set(selectableRows.map((row) => row.rowLineageId)),
+    [selectableRows],
+  )
+  const effectiveSelectedLineageIds = useMemo(
+    () => new Set([...selectedLineageIds].filter((lineageId) => availableLineageIds.has(lineageId))),
+    [availableLineageIds, selectedLineageIds],
+  )
+  const scopeRowLineageIds = orderedRefinementScope(selectableRows, effectiveSelectedLineageIds)
+  const selectedRows = selectableRows.filter((row) => effectiveSelectedLineageIds.has(row.rowLineageId))
+  const scopeLimit = refinementScopeLimit(latestFailureCode, failedScopeCount)
+  const normalizedScopeSearch = scopeSearch.trim().toLowerCase()
+  const filteredScopeGroups = scopeGroups.filter((group) => normalizedScopeSearch.length === 0
+    || group.familyLabel.toLowerCase().includes(normalizedScopeSearch)
+    || group.rows.some((row) => row.distributorProductName.toLowerCase().includes(normalizedScopeSearch)))
+  const filteredScopeRows = selectableRows.filter((row) => normalizedScopeSearch.length === 0
+    || row.distributorProductName.toLowerCase().includes(normalizedScopeSearch)
+    || row.siteLabel.toLowerCase().includes(normalizedScopeSearch))
   const canSubmit = canEdit && root !== null && activePacketId === currentPacketId && feedback.trim().length > 0
     && scopeRowLineageIds.length > 0 && !isRefining && !activeTurn
-    && (latestFailureCode !== 'smaller_scope' || failedScopeCount === null || scopeRowLineageIds.length < failedScopeCount)
+    && scopeLimit > 0 && scopeRowLineageIds.length <= scopeLimit
   const diffCount = history?.rowDiffs.length ?? 0
   const rootVersionLabel = root ? `root v${root.version}` : 'refinement unavailable'
   const currentRevisionHref = history?.currentRevision
@@ -1541,6 +1557,33 @@ function PendingPurchaseRefinementPanel({
         { mode: 'rows', packetId: candidateRevision.packetId, page: 1 },
       )
     : null
+
+  useEffect(() => {
+    setSelectedLineageIds((current) => {
+      const pruned = new Set([...current].filter((lineageId) => availableLineageIds.has(lineageId)))
+      return setsEqual(current, pruned) ? current : pruned
+    })
+  }, [activePacketId, availableLineageIds])
+
+  function replaceScope(next: ReadonlySet<string>): void {
+    if (next.size > scopeLimit) {
+      setScopeNotice(scopeLimit > 0
+        ? `Select at most ${scopeLimit} row${scopeLimit === 1 ? '' : 's'} for this refinement.`
+        : 'Refresh the packet before retrying this refinement.')
+      return
+    }
+    setScopeNotice(null)
+    setSelectedLineageIds(new Set(next))
+  }
+
+  function toggleScopeRows(lineageIds: readonly string[], select: boolean): void {
+    const next = updateRefinementScope(effectiveSelectedLineageIds, lineageIds, select, scopeLimit)
+    if (next === null) {
+      setScopeNotice(`Select at most ${scopeLimit} row${scopeLimit === 1 ? '' : 's'} for this refinement.`)
+      return
+    }
+    replaceScope(next)
+  }
 
   return (
     <section className="pp-refinement-panel" aria-label="Packet refinement">
@@ -1578,26 +1621,115 @@ function PendingPurchaseRefinementPanel({
                   value={feedback}
                 />
               </label>
-              <label className="stack-field pp-refinement-scope">
-                <span>Refine scope</span>
-                <select disabled={!canEdit || !!activeTurn} onChange={(event) => setScopeKey(event.currentTarget.value)} value={scopeKey}>
-                  <option value="">Choose rows…</option>
-                  <option disabled={rows.length > 30} value="all">
-                    {rows.length > 30 ? `All rows shown (${rows.length}); choose a family` : `All rows shown (${rows.length})`}
-                  </option>
-                  {scopeGroups.map((group) => (
-                    <option disabled={group.rows.length > 30} key={group.familyKeyString} value={`family:${group.familyKeyString}`}>
-                      {`Family: ${group.familyLabel} (${group.rows.length})${group.rows.length > 30 ? '; choose a row' : ''}`}
-                    </option>
-                  ))}
-                  {rows.map((row) => row.rowLineageId ? (
-                    <option key={row.rowLineageId} value={`row:${row.rowLineageId}`}>
-                      {`Row: ${row.distributorProductName}`}
-                    </option>
-                  ) : null)}
-                </select>
-                <span className="subtle-copy">Only these rows and their ranked evidence are sent to the analyst.</span>
-              </label>
+              <div className="stack-field pp-refinement-scope">
+                <div className="pp-refinement-scope-heading">
+                  <span>Rows to refine</span>
+                  <span aria-live="polite" className="subtle-copy">{`${scopeRowLineageIds.length} of ${scopeLimit || 0} selected`}</span>
+                  <button
+                    className="ghost-button"
+                    disabled={scopeRowLineageIds.length === 0 || !canEdit || !!activeTurn}
+                    onClick={() => replaceScope(new Set())}
+                    type="button"
+                  >Clear</button>
+                </div>
+                <details className="pp-refinement-scope-picker">
+                  <summary>Choose families or individual rows</summary>
+                  <div className="pp-refinement-scope-picker-body">
+                    <label className="stack-field">
+                      <span className="sr-only">Search family or product name</span>
+                      <input
+                        disabled={!canEdit || !!activeTurn}
+                        onChange={(event) => setScopeSearch(event.currentTarget.value)}
+                        placeholder="Search family or product name"
+                        type="search"
+                        value={scopeSearch}
+                      />
+                    </label>
+                    <button
+                      className="ghost-button pp-refinement-select-all"
+                      disabled={!canEdit || !!activeTurn || selectableRows.length > scopeLimit}
+                      onClick={() => replaceScope(new Set(selectableRows.map((row) => row.rowLineageId)))}
+                      type="button"
+                    >{`Select all shown (${selectableRows.length})`}</button>
+                    <div className="pp-refinement-scope-section">
+                      <strong>Families</strong>
+                      {filteredScopeGroups.map((group) => {
+                        const lineageIds = group.rows
+                          .map((row) => row.rowLineageId)
+                          .filter((lineageId): lineageId is string => lineageId !== null)
+                        const selectedCount = lineageIds.filter((lineageId) => effectiveSelectedLineageIds.has(lineageId)).length
+                        const allSelected = lineageIds.length > 0 && selectedCount === lineageIds.length
+                        const mixed = selectedCount > 0 && !allSelected
+                        const addWouldExceedLimit = effectiveSelectedLineageIds.size + lineageIds.length - selectedCount > scopeLimit
+                        return (
+                          <div className="pp-refinement-scope-option" key={group.familyKeyString}>
+                            <ScopeCheckbox
+                              checked={allSelected}
+                              disabled={!canEdit || !!activeTurn || (!allSelected && addWouldExceedLimit)}
+                              indeterminate={mixed}
+                              label={`${group.familyLabel} · ${lineageIds.length} rows`}
+                              onChange={() => toggleScopeRows(lineageIds, !allSelected)}
+                            />
+                            {mixed ? (
+                              <button
+                                className="ghost-button"
+                                disabled={!canEdit || !!activeTurn}
+                                onClick={() => toggleScopeRows(lineageIds, false)}
+                                type="button"
+                              >
+                                Remove included
+                              </button>
+                            ) : null}
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <div className="pp-refinement-scope-section">
+                      <strong>Individual rows</strong>
+                      {filteredScopeRows.map((row) => (
+                        <ScopeCheckbox
+                          checked={effectiveSelectedLineageIds.has(row.rowLineageId)}
+                          disabled={!canEdit || !!activeTurn
+                            || (!effectiveSelectedLineageIds.has(row.rowLineageId) && effectiveSelectedLineageIds.size >= scopeLimit)}
+                          indeterminate={false}
+                          key={row.rowLineageId}
+                          label={`${row.distributorProductName} · ${row.siteLabel}`}
+                          onChange={() => toggleScopeRows(
+                            [row.rowLineageId],
+                            !effectiveSelectedLineageIds.has(row.rowLineageId),
+                          )}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </details>
+                {scopeNotice ? <span className="error-text" role="status">{scopeNotice}</span> : null}
+                {latestFailureCode === 'smaller_scope' && failedScopeCount === null ? (
+                  <span className="error-text">Refresh the packet before retrying; the previous scope size is unavailable.</span>
+                ) : null}
+                {scopeLimit > 0 && effectiveSelectedLineageIds.size >= scopeLimit ? (
+                  <span className="subtle-copy">{`${scopeLimit}-row limit reached. Remove a row to add another.`}</span>
+                ) : null}
+                <span className="subtle-copy">Only included rows and their ranked evidence are sent to the analyst.</span>
+                <details className="pp-refinement-included-rows">
+                  <summary>{`Included rows (${selectedRows.length})`}</summary>
+                  {selectedRows.length === 0 ? <p className="subtle-copy">No rows selected.</p> : (
+                    <ul className="compact-list">
+                      {selectedRows.map((row) => (
+                        <li key={row.rowLineageId}>
+                          <span>{`${row.distributorProductName} · ${row.siteLabel}`}</span>
+                          <button
+                            className="ghost-button"
+                            disabled={!canEdit || !!activeTurn}
+                            onClick={() => toggleScopeRows([row.rowLineageId], false)}
+                            type="button"
+                          >Remove</button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </details>
+              </div>
               <div className="inline-row wrap-row pp-refinement-actions">
                 <button
                   className="primary-button"
@@ -1715,6 +1847,64 @@ function PendingPurchaseRefinementPanel({
       )}
     </section>
   )
+}
+
+function ScopeCheckbox({
+  checked,
+  disabled,
+  indeterminate,
+  label,
+  onChange,
+}: {
+  checked: boolean
+  disabled: boolean
+  indeterminate: boolean
+  label: string
+  onChange: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = indeterminate
+  }, [indeterminate])
+  return (
+    <label className="pp-refinement-scope-checkbox">
+      <input checked={checked} disabled={disabled} onChange={onChange} ref={inputRef} type="checkbox" />
+      <span>{label}</span>
+    </label>
+  )
+}
+
+export function refinementScopeLimit(failureCode: string | null, failedScopeCount: number | null): number {
+  if (failureCode !== 'smaller_scope') return 30
+  if (failedScopeCount === null) return 0
+  return Math.max(0, Math.min(30, failedScopeCount - 1))
+}
+
+export function orderedRefinementScope(
+  rows: readonly Pick<PendingPurchaseRow, 'rowLineageId'>[],
+  selectedLineageIds: ReadonlySet<string>,
+): string[] {
+  return rows
+    .map((row) => row.rowLineageId)
+    .filter((lineageId): lineageId is string => lineageId !== null && selectedLineageIds.has(lineageId))
+}
+
+export function updateRefinementScope(
+  current: ReadonlySet<string>,
+  lineageIds: readonly string[],
+  select: boolean,
+  limit: number,
+): ReadonlySet<string> | null {
+  const next = new Set(current)
+  for (const lineageId of lineageIds) {
+    if (select) next.add(lineageId)
+    else next.delete(lineageId)
+  }
+  return next.size <= limit ? next : null
+}
+
+function setsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value))
 }
 
 function PendingPurchaseRevisionCard({
