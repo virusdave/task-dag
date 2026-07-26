@@ -39,6 +39,9 @@ on:
 jobs:
   close-issues:
     runs-on: ubuntu-latest
+    concurrency:
+      group: task-dag-semantic-projectors-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - name: Checkout caller repository
         uses: actions/checkout@v4

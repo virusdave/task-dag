@@ -220,6 +220,15 @@ if grep -q 'Checkout coherent task-dag runtime' "$REPO_ROOT/.github/workflows/gr
 else
     bad "graph workflow uses a shallow or history-less runtime"
 fi
+projector_group='group: task-dag-semantic-projectors-${{ github.repository }}'
+if grep -Fq "$projector_group" "$REPO_ROOT/.github/workflows/close-completed-issues.yml" \
+  && grep -Fq "$projector_group" "$REPO_ROOT/.github/workflows/graph-converge.yml" \
+  && grep -A2 -F "$projector_group" "$REPO_ROOT/.github/workflows/close-completed-issues.yml" | grep -q 'cancel-in-progress: false' \
+  && grep -A2 -F "$projector_group" "$REPO_ROOT/.github/workflows/graph-converge.yml" | grep -q 'cancel-in-progress: false'; then
+    ok "close and graph projectors serialize without cancellation"
+else
+    bad "close and graph projectors can contend or cancel each other"
+fi
 
 cp -R "$(dirname "$TD")" "$ROOT/scripts"
 rm "$ROOT/scripts/task-dag.d/semantic-migration-policy.json"

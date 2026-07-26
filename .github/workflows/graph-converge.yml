@@ -26,7 +26,7 @@ jobs:
   converge:
     runs-on: ubuntu-latest
     concurrency:
-      group: graph-converge-${{ github.repository }}
+      group: task-dag-semantic-projectors-${{ github.repository }}
       cancel-in-progress: false
 
     steps:
