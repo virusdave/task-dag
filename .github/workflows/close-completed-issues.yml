@@ -66,6 +66,10 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           CLEANUP_REFS_SCRIPT: .task-dag-runtime/.github/scripts/cleanup-closed-issue-task-refs.sh
           TASK_DAG_CLI: .task-dag-runtime/scripts/task-dag
+          GIT_AUTHOR_NAME: task-dag[bot]
+          GIT_AUTHOR_EMAIL: task-dag[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: task-dag[bot]
+          GIT_COMMITTER_EMAIL: task-dag[bot]@users.noreply.github.com
         run: |
           set -euo pipefail
           set +e

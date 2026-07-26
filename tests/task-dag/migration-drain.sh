@@ -205,7 +205,9 @@ for workflow in aggregate-cross-repo-completions close-completed-issues graph-co
 done
 if ! grep -Eq 'raw\.githubusercontent\.com/.+close-completed-issues|raw\.githubusercontent\.com/.+cleanup-closed' "$REPO_ROOT/.github/workflows/close-completed-issues.yml" \
   && grep -q 'Checkout coherent task-dag runtime' "$REPO_ROOT/.github/workflows/close-completed-issues.yml" \
-  && [ "$(grep -c 'fetch-depth: 0' "$REPO_ROOT/.github/workflows/close-completed-issues.yml")" -eq 2 ]; then
+  && [ "$(grep -c 'fetch-depth: 0' "$REPO_ROOT/.github/workflows/close-completed-issues.yml")" -eq 2 ] \
+  && grep -q 'GIT_AUTHOR_NAME: task-dag\[bot\]' "$REPO_ROOT/.github/workflows/close-completed-issues.yml" \
+  && grep -q 'GIT_COMMITTER_NAME: task-dag\[bot\]' "$REPO_ROOT/.github/workflows/close-completed-issues.yml"; then
     ok "close workflow uses one coherent immutable runtime"
 else
     bad "close workflow mixes or shallow-clones runtime revisions"
