@@ -1,6 +1,10 @@
+// @vitest-environment happy-dom
+
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   SourceBanner,
   TaskCard,
@@ -10,12 +14,16 @@ import {
   type TaskNode,
 } from './taskShared.js'
 
+const missingA = 'a'.repeat(40)
+const missingB = 'b'.repeat(40)
 const task: TaskNode = {
   repository: 'automation', sha: 'abc123', shortSha: 'abc123', title: 'Improve task UX',
-  status: 'in-progress', type: 'leaf', dependencies: ['first'], dependents: [],
-  breakdownChildren: [], refs: [], isFrontier: true, isActive: true, isBlocked: false,
+  status: 'in-progress', type: 'leaf', dependencies: ['first', missingB, missingA], dependents: [],
+  breakdownChildren: ['child'], refs: [], isFrontier: true, isActive: true, isBlocked: false,
   isReady: false, dependenciesMet: false, completedBy: [], epicIssueNumber: 89,
 }
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const degradedSource: TaskDagSourceStatus = {
   available: true,
@@ -43,6 +51,8 @@ describe('task presentation', () => {
     expect(html).toContain('automation')
     expect(html).toContain('Task plan')
     expect(html).toContain('prerequisite')
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('task-disclosure-button')
     expect(html).not.toContain('claim')
     expect(html).not.toContain('scripts/task')
   })
@@ -73,5 +83,151 @@ describe('task presentation', () => {
     })
     expect(first).toBe(reordered)
     expect(changed).not.toBe(first)
+  })
+})
+
+describe('TaskCard disclosures', () => {
+  let host: HTMLDivElement | null = null
+  let root: Root | null = null
+
+  afterEach(() => {
+    if (root) act(() => root?.unmount())
+    host?.remove()
+    host = null
+    root = null
+    vi.unstubAllGlobals()
+  })
+
+  it('uses one tray for status and relationships and restores focus on Escape', async () => {
+    const dependency: TaskNode = {
+      ...task,
+      sha: 'first',
+      shortSha: 'first',
+      title: 'First prerequisite',
+      status: 'blocked',
+      isActive: false,
+      isBlocked: true,
+    }
+    const child: TaskNode = {
+      ...task,
+      sha: 'child',
+      shortSha: 'child',
+      title: 'Child task',
+      status: 'pending',
+      dependencies: [],
+      breakdownChildren: [],
+      isActive: false,
+      isReady: true,
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      source: degradedSource,
+      task,
+      parent: null,
+      dependencies: [dependency],
+      dependents: [],
+      children: [child],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })))
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => root?.render(<MemoryRouter><TaskCard task={task} /></MemoryRouter>))
+
+    const statusButton = [...host.querySelectorAll('button')].find((button) => button.textContent === 'In progress')!
+    const prerequisitesButton = [...host.querySelectorAll('button')].find((button) => button.textContent === '3 prerequisites')!
+    const subtasksButton = [...host.querySelectorAll('button')].find((button) => button.textContent === '1 subtask')!
+    await act(async () => statusButton.click())
+    expect(host.querySelectorAll('.task-card-disclosure')).toHaveLength(1)
+    expect(host.textContent).toContain('current claim')
+    expect(fetch).not.toHaveBeenCalled()
+
+    await act(async () => prerequisitesButton.click())
+    expect(host.querySelectorAll('.task-card-disclosure')).toHaveLength(1)
+    expect(host.textContent).toContain('First prerequisite')
+    expect(host.textContent).toContain('Blocked')
+    expect(host.textContent).toContain('Unavailable relationship')
+    expect(host.textContent).toContain('Retry unavailable relationships')
+    expect(host.textContent).toContain(missingA)
+    expect(host.textContent).toContain(missingB)
+    expect(host.textContent!.indexOf(missingA)).toBeLessThan(host.textContent!.indexOf(missingB))
+    expect(host.querySelector('.task-card-disclosure')?.getAttribute('aria-labelledby')).toBeTruthy()
+    expect(fetch).toHaveBeenCalledWith('/api/tasks/repositories/automation/tasks/abc123')
+
+    await act(async () => subtasksButton.click())
+    expect(host.textContent).toContain('Child task')
+    expect(host.textContent).toContain('Ready')
+    await act(async () => subtasksButton.click())
+    expect(host.querySelector('.task-card-disclosure')).toBeNull()
+
+    await act(async () => prerequisitesButton.click())
+    prerequisitesButton.focus()
+    await act(async () => host?.querySelector('.task-card-disclosure')?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+    })))
+    expect(host.querySelector('.task-card-disclosure')).toBeNull()
+    expect(document.activeElement).toBe(prerequisitesButton)
+  })
+
+  it('suppresses stale relationship responses across same-identity polling refreshes', async () => {
+    const firstDependency = { ...task, sha: 'first', shortSha: 'first', title: 'Old title' }
+    const freshTask = { ...task }
+    const freshDependency = { ...firstDependency, title: 'Fresh title', status: 'done' as const }
+    const response = (responseTask: TaskNode, dependency: TaskNode) => new Response(JSON.stringify({
+      source: degradedSource,
+      task: responseTask,
+      parent: null,
+      dependencies: [dependency],
+      dependents: [],
+      children: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+    let resolveOld!: (value: Response) => void
+    let resolveFresh!: (value: Response) => void
+    const oldResponse = new Promise<Response>((resolve) => { resolveOld = resolve })
+    const freshResponse = new Promise<Response>((resolve) => { resolveFresh = resolve })
+    vi.stubGlobal('fetch', vi.fn()
+      .mockReturnValueOnce(oldResponse)
+      .mockReturnValueOnce(freshResponse))
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => root?.render(<MemoryRouter><TaskCard task={task} /></MemoryRouter>))
+    const prerequisites = [...host.querySelectorAll('button')].find((button) => button.textContent === '3 prerequisites')!
+    act(() => prerequisites.click())
+    expect(host.textContent).toContain('Loading prerequisites')
+
+    await act(async () => root?.render(<MemoryRouter><TaskCard task={freshTask} /></MemoryRouter>))
+    expect(host.textContent).not.toContain('Old title')
+    expect(host.textContent).toContain('Loading prerequisites')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    await act(async () => resolveFresh(response(freshTask, freshDependency)))
+    expect(host.textContent).toContain('Fresh title')
+    await act(async () => resolveOld(response(task, firstDependency)))
+    expect(host.textContent).toContain('Fresh title')
+    expect(host.textContent).not.toContain('Old title')
+  })
+
+  it('retries a failed relationship request inline', async () => {
+    const dependency = { ...task, sha: 'first', shortSha: 'first', title: 'Recovered prerequisite' }
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response('failure', { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        source: degradedSource,
+        task,
+        parent: null,
+        dependencies: [dependency],
+        dependents: [],
+        children: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })))
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => root?.render(<MemoryRouter><TaskCard task={task} /></MemoryRouter>))
+    const prerequisites = [...host.querySelectorAll('button')].find((button) => button.textContent === '3 prerequisites')!
+    await act(async () => prerequisites.click())
+    expect(host.textContent).toContain('Could not load prerequisites')
+    const retry = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Retry')!
+    await act(async () => retry.click())
+    expect(host.textContent).toContain('Recovered prerequisite')
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 })

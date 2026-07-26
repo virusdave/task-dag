@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Pill } from '../../components/Pill.js'
 
@@ -456,28 +456,149 @@ export function StatusBadge({ task }: { task: Pick<TaskNode, 'status' | 'isReady
   return <Pill tone={tone}>{label}</Pill>
 }
 
+type TaskCardTray = 'status' | 'dependencies' | 'children'
+
 /**
  * Compact, reusable task row for queue, plan, and relationship views.
  */
 export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?: boolean }) {
+  return <TaskCardBody key={`${task.repository}:${task.sha}`} task={task} showEpic={showEpic} />
+}
+
+function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean }) {
+  const [tray, setTray] = useState<TaskCardTray | null>(null)
+  const [detailState, setDetailState] = useState<{ snapshot: string; detail: TaskDetail } | null>(null)
+  const [detailErrorState, setDetailErrorState] = useState<{ snapshot: string; message: string } | null>(null)
+  const [detailLoadingSnapshot, setDetailLoadingSnapshot] = useState<string | null>(null)
+  const requestIdRef = useRef(0)
+  const buttonRefs = useRef<Record<TaskCardTray, HTMLButtonElement | null>>({
+    status: null,
+    dependencies: null,
+    children: null,
+  })
+  const taskVersionRef = useRef({ task, version: 0 })
+  if (taskVersionRef.current.task !== task) {
+    taskVersionRef.current = { task, version: taskVersionRef.current.version + 1 }
+  }
+  const trayId = `task-card-tray-${useId().replaceAll(':', '')}`
+  const trayHeadingId = `${trayId}-heading`
+  const snapshot = `${task.repository}:${task.sha}:${taskVersionRef.current.version}`
+  const detail = detailState?.snapshot === snapshot ? detailState.detail : null
+  const detailError = detailErrorState?.snapshot === snapshot ? detailErrorState.message : null
+  const detailLoading = detailLoadingSnapshot === snapshot
+
+  async function loadDetail(): Promise<void> {
+    const requestId = requestIdRef.current + 1
+    requestIdRef.current = requestId
+    const requestedSnapshot = snapshot
+    setDetailLoadingSnapshot(requestedSnapshot)
+    setDetailErrorState(null)
+    try {
+      const result = await fetchTaskJson<TaskDetail>(
+        `/api/tasks/repositories/${encodeURIComponent(task.repository)}/tasks/${encodeURIComponent(task.sha)}`,
+      )
+      if (requestIdRef.current === requestId) {
+        setDetailState({ snapshot: requestedSnapshot, detail: result })
+      }
+    } catch (error) {
+      if (requestIdRef.current === requestId) {
+        setDetailErrorState({
+          snapshot: requestedSnapshot,
+          message: error instanceof Error ? error.message : 'Task details are temporarily unavailable.',
+        })
+      }
+    } finally {
+      if (requestIdRef.current === requestId) setDetailLoadingSnapshot(null)
+    }
+  }
+
+  useEffect(() => {
+    if (tray && tray !== 'status' && !detail && !detailLoading && !detailError) void loadDetail()
+    // loadDetail deliberately captures the exact current task snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tray, snapshot, detail, detailLoading, detailError])
+
+  function toggleTray(next: TaskCardTray): void {
+    if (tray === next) {
+      setTray(null)
+      return
+    }
+    setTray(next)
+  }
+
+  function closeTray(restoreFocus: boolean): void {
+    const previous = tray
+    setTray(null)
+    if (restoreFocus && previous) buttonRefs.current[previous]?.focus()
+  }
+
+  const status = statusLabel(task)
+  const tone = status === 'Ready' ? 'success' : statusTone(task.status)
   return (
-    <article className="task-card">
+    <article
+      className="task-card"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && tray) {
+          event.preventDefault()
+          event.stopPropagation()
+          closeTray(true)
+        }
+      }}
+    >
       <div className="task-card-main">
         <Link to={`/tasks/${task.repository}/task/${task.sha}`} className="task-card-title">
           {task.title}
         </Link>
         <div className="task-card-badges">
-          <StatusBadge task={task} />
+          <button
+            ref={(node) => { buttonRefs.current.status = node }}
+            type="button"
+            className={`task-disclosure-button pill pill-${tone}`}
+            aria-expanded={tray === 'status'}
+            aria-controls={trayId}
+            onClick={() => toggleTray('status')}
+          >
+            {status}
+          </button>
           {task.dependencies.length > 0 && (
-            <Pill tone={task.dependenciesMet ? 'success' : 'muted'}>
+            <button
+              ref={(node) => { buttonRefs.current.dependencies = node }}
+              type="button"
+              className={`task-disclosure-button pill pill-${task.dependenciesMet ? 'success' : 'muted'}`}
+              aria-expanded={tray === 'dependencies'}
+              aria-controls={trayId}
+              onClick={() => toggleTray('dependencies')}
+            >
               {`${task.dependencies.length} prerequisite${task.dependencies.length === 1 ? '' : 's'}`}
-            </Pill>
+            </button>
           )}
           {task.breakdownChildren.length > 0 && (
-            <Pill tone="muted">{`${task.breakdownChildren.length} subtasks`}</Pill>
+            <button
+              ref={(node) => { buttonRefs.current.children = node }}
+              type="button"
+              className="task-disclosure-button pill pill-muted"
+              aria-expanded={tray === 'children'}
+              aria-controls={trayId}
+              onClick={() => toggleTray('children')}
+            >
+              {`${task.breakdownChildren.length} subtask${task.breakdownChildren.length === 1 ? '' : 's'}`}
+            </button>
           )}
         </div>
       </div>
+      {tray && (
+        <TaskCardDisclosure
+          id={trayId}
+          headingId={trayHeadingId}
+          task={task}
+          tray={tray}
+          detail={detail}
+          loading={detailLoading}
+          error={detailError}
+          onRetry={() => { void loadDetail() }}
+          onClose={() => closeTray(true)}
+        />
+      )}
       <div className="task-card-meta">
         <span>{task.repository}</span>
         {showEpic && task.epicIssueNumber != null && (
@@ -502,4 +623,143 @@ export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?
       </div>
     </article>
   )
+}
+
+function TaskCardDisclosure({
+  id,
+  headingId,
+  task,
+  tray,
+  detail,
+  loading,
+  error,
+  onRetry,
+  onClose,
+}: {
+  id: string
+  headingId: string
+  task: TaskNode
+  tray: TaskCardTray
+  detail: TaskDetail | null
+  loading: boolean
+  error: string | null
+  onRetry: () => void
+  onClose: () => void
+}) {
+  const title = tray === 'status' ? 'Current status' : tray === 'dependencies' ? 'Prerequisites' : 'Subtasks'
+  return (
+    <section
+      id={id}
+      className="task-card-disclosure"
+      aria-labelledby={headingId}
+      aria-busy={tray !== 'status' && loading}
+    >
+      <div className="task-card-disclosure__header">
+        <h4 id={headingId}>{title}</h4>
+        <button type="button" className="task-link-button" onClick={onClose}>Close</button>
+      </div>
+      <div aria-live="polite">
+        {tray === 'status' ? (
+          <TaskStatusEvidence task={task} />
+        ) : loading ? (
+          <p role="status" className="subtle-copy">Loading {title.toLowerCase()}…</p>
+        ) : error ? (
+          <div role="alert">
+            <p>{error.includes('404') ? 'This task is no longer available in the current snapshot.' : `Could not load ${title.toLowerCase()}: ${error}`}</p>
+            <button type="button" className="task-link-button" onClick={onRetry}>Retry</button>
+          </div>
+        ) : detail ? (
+          <TaskRelationshipList
+            related={tray === 'dependencies' ? detail.dependencies : detail.children}
+            expectedIds={tray === 'dependencies' ? detail.task.dependencies : detail.task.breakdownChildren}
+            emptyLabel={tray === 'dependencies' ? 'No prerequisites.' : 'No subtasks.'}
+            onRetry={onRetry}
+          />
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
+function TaskStatusEvidence({ task }: { task: TaskNode }) {
+  const label = statusLabel(task)
+  let explanation = 'This task is waiting. One or more current readiness conditions are not met.'
+  if (label === 'Ready') explanation = 'This task is pickable now; all known prerequisites are satisfied.'
+  if (label === 'In progress') explanation = task.isActive
+    ? 'A current claim marks this task as in progress.'
+    : 'Current task metadata reports in progress, but claim evidence is unavailable in this snapshot.'
+  if (label === 'Blocked') explanation = task.isBlocked
+    ? 'A current block prevents this task from being picked up.'
+    : 'Current task metadata reports blocked, but block evidence is unavailable in this snapshot.'
+  if (label === 'Done') explanation = task.completedBy.length > 0
+    ? 'Durable completion evidence exists for this task.'
+    : 'Current task metadata reports done, but completion evidence is unavailable in this snapshot.'
+  return (
+    <div>
+      <p>{explanation}</p>
+      {task.status === 'done' && task.completedBy.length > 0 && (
+        <ul className="task-card-disclosure__list">
+          {task.completedBy.map((sha) => (
+            <li key={sha}>
+              <a href={githubCommitUrl(sha, task.githubRepository)} target="_blank" rel="noopener noreferrer">
+                Completion <code>{sha.slice(0, 10)}</code>
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="subtle-copy">Coverage: current-evidence. This is not complete history.</p>
+    </div>
+  )
+}
+
+function TaskRelationshipList({
+  related,
+  expectedIds,
+  emptyLabel,
+  onRetry,
+}: {
+  related: TaskNode[]
+  expectedIds: string[]
+  emptyLabel: string
+  onRetry: () => void
+}) {
+  const resolved = new Map(related.map((item) => [item.sha, item]))
+  const ordered = [...related].sort(compareTaskAttention)
+  const unavailable = expectedIds.filter((sha) => !resolved.has(sha)).sort()
+  if (ordered.length === 0 && unavailable.length === 0) return <p className="subtle-copy">{emptyLabel}</p>
+  return (
+    <ul className="task-card-disclosure__list">
+      {ordered.map((item) => (
+        <li key={`${item.repository}:${item.sha}`}>
+          <Link to={`/tasks/${item.repository}/task/${item.sha}`}>{item.title}</Link>
+          <span className="subtle-copy">{statusLabel(item)}</span>
+        </li>
+      ))}
+      {unavailable.map((sha) => (
+        <li key={sha}>
+          <span>Unavailable relationship</span>
+          <code>{sha}</code>
+        </li>
+      ))}
+      {unavailable.length > 0 && (
+        <li>
+          <button type="button" className="task-link-button" onClick={onRetry}>Retry unavailable relationships</button>
+        </li>
+      )}
+    </ul>
+  )
+}
+
+function compareTaskAttention(left: TaskNode, right: TaskNode): number {
+  const order = new Map([
+    ['Blocked', 0],
+    ['In progress', 1],
+    ['Ready', 2],
+    ['Waiting', 3],
+    ['Done', 4],
+  ])
+  return (order.get(statusLabel(left)) ?? 5) - (order.get(statusLabel(right)) ?? 5)
+    || left.title.localeCompare(right.title)
+    || `${left.repository}:${left.sha}`.localeCompare(`${right.repository}:${right.sha}`)
 }
