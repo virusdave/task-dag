@@ -12,6 +12,7 @@
  */
 
 import type { Pool, QueryResultRow } from 'pg'
+import { z } from 'zod'
 
 import {
   PendingPurchaseOperatorNoteDocumentSchema,
@@ -125,6 +126,7 @@ async function loadSweedCatalogIndex(pool: Pool): Promise<SweedCatalogIndex> {
 export async function listPendingPurchaseRows(
   pool: Pool,
   packetId: number,
+  liveBrandNames: readonly string[] = [],
 ): Promise<PendingPurchaseRow[]> {
   const [hasLineageColumns, catalogIndex] = await Promise.all([
     hasPendingPurchaseRowLineageColumns(pool),
@@ -198,6 +200,9 @@ export async function listPendingPurchaseRows(
     `,
     [packetId],
   )
+  for (const brandName of liveBrandNames) {
+    catalogIndex.brandNames.add(brandName.trim().toLowerCase())
+  }
   return result.rows.map((row) => mapPendingPurchaseRow(row, catalogIndex))
 }
 
@@ -337,8 +342,11 @@ function mapPendingPurchaseRow(
   const isCatalogCreate = row.mapping_status === 'needs_catalog_create'
   const normalizedBrand = targetBrand?.trim().toLowerCase() ?? ''
   const normalizedGroup = targetGroupName?.trim().toLowerCase() ?? ''
-  const needsNewBrand =
-    isCatalogCreate && normalizedBrand.length > 0 && !catalogIndex.brandNames.has(normalizedBrand)
+  const needsNewBrand = pendingPurchaseNeedsNewBrand(
+    row.mapping_status,
+    targetBrand,
+    catalogIndex.brandNames,
+  )
   const brandGroupKey =
     normalizedBrand.length > 0 && normalizedGroup.length > 0
       ? `${normalizedBrand}\u0001${normalizedGroup}`
@@ -441,6 +449,17 @@ function mapPendingPurchaseRow(
   }
 }
 
+export function pendingPurchaseNeedsNewBrand(
+  mappingStatus: PendingPurchaseMappingStatus,
+  targetBrand: string | null,
+  knownBrandNames: ReadonlySet<string>,
+): boolean {
+  const normalizedBrand = targetBrand?.trim().toLowerCase() ?? ''
+  return mappingStatus === 'needs_catalog_create'
+    && normalizedBrand.length > 0
+    && !knownBrandNames.has(normalizedBrand)
+}
+
 // Pass-through for the `edited_structured_fields` JSONB column on
 // pending_purchase_rows. The api-side `EditedStructuredFieldsSchema`
 // already gated whatever the reviewer PATCHed, and the row contract
@@ -485,6 +504,19 @@ export function readPendingPurchaseHintBundleId(value: JsonValue): string | null
   const classifier = (value as Record<string, JsonValue>).classifier
   if (classifier === null || typeof classifier !== 'object' || Array.isArray(classifier)) return null
   return readOptionalString((classifier as Record<string, JsonValue>).hintBundleId)
+}
+
+export function readPendingPurchaseLiveBrandNames(value: JsonValue): string[] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return []
+  const classifier = (value as Record<string, JsonValue>).classifier
+  if (classifier === null || typeof classifier !== 'object' || Array.isArray(classifier)) return []
+  const liveBrandNames = (classifier as Record<string, JsonValue>).liveBrandNames
+  if (liveBrandNames === undefined) return []
+  const parsed = z.array(z.string().trim().min(1).max(160)).max(10_000).safeParse(liveBrandNames)
+  if (!parsed.success) {
+    throw new Error('Pending-purchase packet has malformed live-brand provenance.')
+  }
+  return parsed.data
 }
 
 export function readPendingPurchaseOperatorNoteDocuments(
@@ -954,8 +986,8 @@ export async function listPendingPurchasePacketListPage(
         c.source_path,
         c.import_file_name,
         c.status,
-        c.state_context_json,
-        c.summary_json,
+        c.state_context_json #- '{classifier,liveBrandNames}' as state_context_json,
+        c.summary_json #- '{classifier,liveBrandNames}' as summary_json,
         c.site_keys_json,
         c.site_labels_json,
         c.generated_at,

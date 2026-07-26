@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   parseThreeWayComparison,
+  pendingPurchaseNeedsNewBrand,
   readLlmClassification,
   readPendingPurchaseHintBundleId,
+  readPendingPurchaseLiveBrandNames,
   readPendingPurchaseOperatorNoteDocuments,
 } from './pendingPurchaseQueries.js'
 
@@ -18,6 +20,36 @@ describe('readPendingPurchaseHintBundleId', () => {
     expect(readPendingPurchaseHintBundleId({})).toBeNull()
     expect(readPendingPurchaseHintBundleId({ classifier: { hintBundleId: null } })).toBeNull()
     expect(readPendingPurchaseHintBundleId({ classifier: { hintBundleId: 42 } })).toBeNull()
+  })
+})
+
+describe('readPendingPurchaseLiveBrandNames', () => {
+  it('reads the exact active brand snapshot used for packet generation', () => {
+    expect(readPendingPurchaseLiveBrandNames({
+      classifier: { liveBrandNames: ['Dabbar', 'Slappz'] },
+    })).toEqual(['Dabbar', 'Slappz'])
+  })
+
+  it('supports legacy packets but fails loudly on malformed provenance', () => {
+    expect(readPendingPurchaseLiveBrandNames({ classifier: {} })).toEqual([])
+    expect(() => readPendingPurchaseLiveBrandNames({
+      classifier: { liveBrandNames: ['Dabbar', 42] },
+    })).toThrow(/malformed live-brand provenance/)
+  })
+})
+
+describe('pendingPurchaseNeedsNewBrand', () => {
+  it('does not mark a live Sweed brand shell as new', () => {
+    expect(pendingPurchaseNeedsNewBrand(
+      'needs_catalog_create',
+      'Dabbar',
+      new Set(['dabbar']),
+    )).toBe(false)
+    expect(pendingPurchaseNeedsNewBrand(
+      'needs_catalog_create',
+      'Actually New',
+      new Set(['dabbar']),
+    )).toBe(true)
   })
 })
 

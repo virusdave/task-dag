@@ -206,7 +206,7 @@ const ProductListShortSchema = z.object({
 const PendingPurchaseBrandRowSchema = z.object({
   enabled: z.boolean().optional(),
   id: z.coerce.number().int().positive(),
-  name: z.string().trim().min(1),
+  name: z.string().trim().min(1).max(160),
 }).passthrough()
 
 export const PendingPurchaseBrandListSchema = z.union([
@@ -668,6 +668,7 @@ async function buildPendingPurchasePacket(input: {
     ...buildPacketSummary(built.rows, liveCollection.orders, fromDate, toDate),
     classifier: built.provenance,
   }
+  const { liveBrandNames: _liveBrandNames, ...stateClassifierProvenance } = built.provenance
 
   return {
     generatedAt: new Date().toISOString(),
@@ -678,7 +679,7 @@ async function buildPendingPurchasePacket(input: {
     siteLabels: sites.map((site) => site.siteLabel),
     stateContext: {
       ...stateContext,
-      classifier: built.provenance,
+      classifier: stateClassifierProvenance,
     },
     summary,
   }
@@ -809,6 +810,7 @@ interface PendingPurchaseClassifierProvenance {
   glossaryEntryCount: number
   catalogCandidateCount: number
   classifierCalls: number
+  liveBrandNames: string[]
   rowCount: number
 }
 
@@ -975,6 +977,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
     glossaryEntryCount: 0,
     catalogCandidateCount: 0,
     classifierCalls: 0,
+    liveBrandNames: [],
     rowCount: 0,
   })
 
@@ -1175,6 +1178,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       glossaryEntryCount: glossaryEntries.length,
       catalogCandidateCount: candidatePool.size,
       classifierCalls,
+      liveBrandNames: liveSweedBrands.map((brand) => brand.brandName),
       rowCount: rows.length,
     },
   }

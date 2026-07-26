@@ -393,7 +393,7 @@ function warnUnavailable(label: string, error: unknown): void {
 }
 
 function normalize(value: string): string { return value.trim().toLocaleLowerCase('en-US') }
-function startsWithBrandPhrase(productName: string, brandName: string): boolean {
+export function startsWithBrandPhrase(productName: string, brandName: string): boolean {
   const productTokens = normalize(productName).split(/[^a-z0-9]+/).filter(Boolean)
   const brandTokens = normalize(brandName).split(/[^a-z0-9]+/).filter(Boolean)
   return brandTokens.length > 0

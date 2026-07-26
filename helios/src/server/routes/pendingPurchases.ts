@@ -51,13 +51,14 @@ import { sha256 } from '../../shared/util/hash.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
-import { loadCatalogStructuredOverrideFacets } from '../db/queries/catalogQueries.js'
+import { loadCatalogStructuredOverrideFacets, mergeCatalogBrandOptions } from '../db/queries/catalogQueries.js'
 import {
   getLatestPendingPurchaseApplyRequest,
   getPendingPurchasePacketSummary,
   listPendingPurchaseEtlComparisonRows,
   listPendingPurchasePacketListPage,
   listPendingPurchaseRows,
+  readPendingPurchaseLiveBrandNames,
 } from '../db/queries/pendingPurchaseQueries.js'
 import { getPendingPurchaseRepriceDebt } from '../db/queries/pendingPurchaseRepriceDebtQueries.js'
 import {
@@ -154,6 +155,9 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const mode: 'packets' | 'rows' = query.mode ?? (query.packetId != null ? 'rows' : 'packets')
     const page = query.page
     const pageSize = query.pageSize
+    const activePacketPromise = query.packetId != null
+      ? getPendingPurchasePacketSummary(db, query.packetId)
+      : Promise.resolve(null)
 
     const [packetsPage, items, activeGenerationJobIdResult, activePacket, latestApplyRequest, overrideOptions] = await Promise.all([
       mode === 'packets'
@@ -171,7 +175,11 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           })
         : Promise.resolve({ items: [], totalCount: 0 }),
       mode === 'rows' && query.packetId != null
-        ? listPendingPurchaseRows(db, query.packetId)
+        ? activePacketPromise.then((packet) => listPendingPurchaseRows(
+            db,
+            query.packetId!,
+            packet === null ? [] : readPendingPurchaseLiveBrandNames(packet.summary),
+          ))
         : Promise.resolve([] as Awaited<ReturnType<typeof listPendingPurchaseRows>>),
       db.query<JobIdRow>(
         `
@@ -183,9 +191,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           limit 1
         `,
       ),
-      query.packetId != null
-        ? getPendingPurchasePacketSummary(db, query.packetId)
-        : Promise.resolve(null),
+      activePacketPromise,
       query.packetId != null
         ? getLatestPendingPurchaseApplyRequest(db, query.packetId)
         : Promise.resolve(null),
@@ -199,6 +205,15 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const activeGenerationJobId = activeGenerationJobIdResult.rows[0]?.id ?? null
     const activeGenerationJob = activeGenerationJobId ? await getJobStatus(db, activeGenerationJobId) : null
     const totalCount = mode === 'packets' ? packetsPage.totalCount : items.length
+    const resolvedOverrideOptions = overrideOptions === null
+      ? null
+      : {
+          ...overrideOptions,
+          brands: mergeCatalogBrandOptions(
+            overrideOptions.brands,
+            activePacket === null ? [] : readPendingPurchaseLiveBrandNames(activePacket.summary),
+          ),
+        }
     return reply.send(PendingPurchaseListResponseSchema.parse({
       activePacket,
       activeGenerationJob,
@@ -207,7 +222,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       items,
       latestApplyRequest,
       mode,
-      overrideOptions,
+      overrideOptions: resolvedOverrideOptions,
       packets: packetsPage.items,
       page,
       pageSize,

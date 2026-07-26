@@ -36,7 +36,16 @@ vi.mock('../../catalog/liveRecentSales.js', () => ({
   loadRecentSalesForGroups: async () => new Map(),
 }))
 
-const { listCatalogGroups } = await import('./catalogQueries.js')
+const { listCatalogGroups, mergeCatalogBrandOptions } = await import('./catalogQueries.js')
+
+describe('mergeCatalogBrandOptions', () => {
+  it('adds brand shells and prefers canonical live Sweed casing', () => {
+    expect(mergeCatalogBrandOptions(
+      ['DABBAR', 'Hashtag Honey'],
+      ['Dabbar', 'Slappz'],
+    )).toEqual(['Dabbar', 'Hashtag Honey', 'Slappz'])
+  })
+})
 
 // Regression for May 2026 prod 5xx on /catalog/browser:
 //

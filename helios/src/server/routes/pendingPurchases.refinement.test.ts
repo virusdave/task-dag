@@ -9,6 +9,7 @@ import { ZodError } from 'zod'
 
 import { hasAtLeastRole } from '../auth/permissions.js'
 import type {
+  PendingPurchasePacketSummary,
   PendingPurchasePacketRevisionSummary,
   PendingPurchasePacketRootSummary,
   PendingPurchaseRefinementTurnSummary,
@@ -55,6 +56,12 @@ const mockState = vi.hoisted(() => {
       turns: PendingPurchaseRefinementTurnSummary[]
     },
     applyGateError: null as null | Error,
+    activePacket: null as PendingPurchasePacketSummary | null,
+    overrideOptions: null as null | {
+      brands: string[]
+      categories: string[]
+      subcategories: string[]
+    },
     pendingPurchaseRows: [] as Array<{
       approval_status: string
       distributor_product_name: string
@@ -110,15 +117,28 @@ vi.mock('../db/queries/jobQueries.js', () => ({
 }))
 
 vi.mock('../db/queries/catalogQueries.js', () => ({
-  loadCatalogStructuredOverrideFacets: vi.fn(async () => null),
+  loadCatalogStructuredOverrideFacets: vi.fn(async () => mockState.overrideOptions),
+  mergeCatalogBrandOptions: (catalogBrands: readonly string[], liveBrandNames: readonly string[]) => {
+    const names = new Map<string, string>()
+    for (const name of catalogBrands) names.set(name.toLowerCase(), name)
+    for (const name of liveBrandNames) names.set(name.toLowerCase(), name)
+    return [...names.values()].sort((left, right) => left.localeCompare(right))
+  },
 }))
 
 vi.mock('../db/queries/pendingPurchaseQueries.js', () => ({
   getLatestPendingPurchaseApplyRequest: vi.fn(async () => null),
-  getPendingPurchasePacketSummary: vi.fn(async () => null),
+  getPendingPurchasePacketSummary: vi.fn(async () => mockState.activePacket),
   listPendingPurchaseEtlComparisonRows: vi.fn(async () => []),
   listPendingPurchasePacketListPage: vi.fn(async () => ({ items: [], totalCount: 0 })),
   listPendingPurchaseRows: vi.fn(async () => []),
+  readPendingPurchaseLiveBrandNames: (summary: unknown) => {
+    if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) return []
+    const classifier = (summary as { classifier?: unknown }).classifier
+    if (classifier === null || typeof classifier !== 'object' || Array.isArray(classifier)) return []
+    const names = (classifier as { liveBrandNames?: unknown }).liveBrandNames
+    return Array.isArray(names) && names.every((name) => typeof name === 'string') ? names : []
+  },
 }))
 
 vi.mock('../db/queries/pendingPurchaseRefinementQueries.js', () => ({
@@ -330,6 +350,7 @@ vi.mock('../../worker/sweed/session.js', () => ({
 import { registerPendingPurchaseRoutes } from './pendingPurchases.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
+import { listPendingPurchaseRows } from '../db/queries/pendingPurchaseQueries.js'
 import {
   assertBaseRowsMatchSnapshot,
   assertPendingPurchasePacketApplyable,
@@ -429,6 +450,8 @@ beforeEach(async () => {
   mockState.auditEventId = 8080
   mockState.schemaAvailable = true
   mockState.applyGateError = null
+  mockState.activePacket = null
+  mockState.overrideOptions = null
   mockState.storedFeedbackText = null
   mockState.pool.query.mockReset()
   mockState.tx.query.mockReset()
@@ -509,6 +532,7 @@ beforeEach(async () => {
   }
   vi.clearAllMocks()
   mockState.pool.query.mockImplementation(async (text: string) => {
+    if (/from job_queue jq/i.test(text)) return { rows: [] }
     if (/select distinct category_name/i.test(text)) return { rows: [{ value: 'Flower' }] }
     if (/select distinct subcategory_name/i.test(text)) return { rows: [{ value: 'Packaged Eighth' }] }
     if (/from catalog_group_products/i.test(text)) return { rows: [{ product_id: 7001 }] }
@@ -540,6 +564,60 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await server.close()
+})
+
+describe('pending-purchase rows route live brand options', () => {
+  const packet = (summary: PendingPurchasePacketSummary['summary']): PendingPurchasePacketSummary => ({
+    createdAt: '2026-07-25T14:14:01.421Z',
+    generatedAt: '2026-07-25T14:14:01.421Z',
+    hasEtlDetails: true,
+    hintBundleId: null,
+    importFileName: null,
+    operatorNoteDocuments: [],
+    packetId: 77,
+    packetTitle: 'Pending purchase packet 77',
+    rowCount: 0,
+    siteKeys: ['midtown'],
+    siteLabels: ['Midtown'],
+    source: 'generated',
+    sourcePath: null,
+    stateContext: {},
+    status: 'ready',
+    summary,
+    updatedAt: '2026-07-25T14:14:01.421Z',
+  })
+
+  it('adds the requested packet live brand shells to override options', async () => {
+    mockState.activePacket = packet({ classifier: { liveBrandNames: ['Dabbar', 'Slappz'] } })
+    mockState.overrideOptions = {
+      brands: ['DABBAR', 'Hashtag Honey'],
+      categories: ['Vapes'],
+      subcategories: ['All In One / Disposable'],
+    }
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/catalog/pending-purchases?mode=rows&packetId=77',
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().overrideOptions.brands).toEqual(['Dabbar', 'Hashtag Honey', 'Slappz'])
+    expect(listPendingPurchaseRows).toHaveBeenCalledWith(mockState.pool, 77, ['Dabbar', 'Slappz'])
+  })
+
+  it('leaves legacy packet options catalog-only', async () => {
+    mockState.activePacket = packet({ classifier: {} })
+    mockState.overrideOptions = {
+      brands: ['Hashtag Honey'],
+      categories: ['Edibles'],
+      subcategories: [],
+    }
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/catalog/pending-purchases?mode=rows&packetId=77',
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().overrideOptions.brands).toEqual(['Hashtag Honey'])
+    expect(listPendingPurchaseRows).toHaveBeenCalledWith(mockState.pool, 77, [])
+  })
 })
 
 describe('pending-purchase refinement feedback route', () => {

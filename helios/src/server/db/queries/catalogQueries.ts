@@ -589,6 +589,16 @@ export async function loadCatalogStructuredOverrideFacets(db: Queryable): Promis
   }
 }
 
+export function mergeCatalogBrandOptions(
+  catalogBrands: readonly string[],
+  liveBrandNames: readonly string[],
+): string[] {
+  const byNormalizedName = new Map<string, string>()
+  for (const name of catalogBrands) byNormalizedName.set(name.trim().toLowerCase(), name)
+  for (const name of liveBrandNames) byNormalizedName.set(name.trim().toLowerCase(), name)
+  return [...byNormalizedName.values()].sort((left, right) => left.localeCompare(right))
+}
+
 async function loadCatalogBrowserFacets(db: Queryable): Promise<{
   brands: string[]
   categories: string[]

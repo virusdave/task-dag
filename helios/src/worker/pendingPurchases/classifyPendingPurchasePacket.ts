@@ -45,7 +45,10 @@ import {
 import { resolveBedrockModel } from '../../server/llm/bedrockModelConfig.js'
 import type { Queryable } from '../../server/db/pool.js'
 import { getWorkerEnv } from '../config/env.js'
-import type { PendingPurchaseRowClassificationEvidence } from './loadPendingPurchaseClassificationEvidence.js'
+import {
+  startsWithBrandPhrase,
+  type PendingPurchaseRowClassificationEvidence,
+} from './loadPendingPurchaseClassificationEvidence.js'
 
 // Bump when the prompt's SEMANTICS change (recorded on the result for
 // audit/replay). Date-stamped like DEFAULT_DESCRIPTION_PROMPT_VERSION.
@@ -761,19 +764,28 @@ function parseAndValidateDraftAttempt(
         assertVendorCandidateAllowed(draft.rowKey, expected, draft.reuseProductIdCandidate, catalogCandidatesById)
       }
 
-      assertVendorTargetBrandAllowed(draft.rowKey, expected, draft.targetBrand)
+      const brandSnappedDraft = snapUniqueLiveSweedBrand(expected, draft)
+      assertVendorTargetBrandAllowed(brandSnappedDraft.rowKey, expected, brandSnappedDraft.targetBrand)
 
-      if (draft.targetCategory !== null && allowedCategories.size > 0 && !allowedCategories.has(normalizeTaxon(draft.targetCategory))) {
+      if (brandSnappedDraft.targetCategory !== null && allowedCategories.size > 0 && !allowedCategories.has(normalizeTaxon(brandSnappedDraft.targetCategory))) {
         throw new PendingPurchaseClassifierError(
-          `draft "${draft.rowKey}" targetCategory "${draft.targetCategory}" is not in the allowed taxonomy.`,
+          `draft "${brandSnappedDraft.rowKey}" targetCategory "${brandSnappedDraft.targetCategory}" is not in the allowed taxonomy.`,
         )
       }
-      if (draft.targetSubcategory !== null && allowedSubcategories.size > 0 && !allowedSubcategories.has(normalizeTaxon(draft.targetSubcategory))) {
+      if (brandSnappedDraft.targetSubcategory !== null && allowedSubcategories.size > 0 && !allowedSubcategories.has(normalizeTaxon(brandSnappedDraft.targetSubcategory))) {
         throw new PendingPurchaseClassifierError(
-          `draft "${draft.rowKey}" targetSubcategory "${draft.targetSubcategory}" is not in the allowed taxonomy.`,
+          `draft "${brandSnappedDraft.rowKey}" targetSubcategory "${brandSnappedDraft.targetSubcategory}" is not in the allowed taxonomy.`,
         )
       }
-      validated.push(downgradeUnassociatedLiveBrandCreation(expected, draft))
+      const postProcessed = PendingPurchaseLlmDraftRowSchema.safeParse(
+        downgradeUnassociatedLiveBrandCreation(expected, brandSnappedDraft),
+      )
+      if (!postProcessed.success) {
+        throw new PendingPurchaseClassifierError(
+          `draft "${brandSnappedDraft.rowKey}" became invalid after live-brand reconciliation: ${postProcessed.error.message}`,
+        )
+      }
+      validated.push(postProcessed.data)
     } catch (error) {
       if (!(error instanceof PendingPurchaseClassifierError)) throw error
       issues.push(draftIssueFromValidationError(expected.rowKey, error.message))
@@ -835,6 +847,35 @@ function buildNeedsReviewDraft(
     citedHintIds: [],
     warningFlags: [warning],
   })
+}
+
+function snapUniqueLiveSweedBrand(
+  row: ClassifierRowInput,
+  draft: PendingPurchaseLlmDraftRow,
+): PendingPurchaseLlmDraftRow {
+  if (row.vendorEvidence.status === 'explicit-override') return draft
+  const candidates = row.classificationEvidence?.sweedBrandCandidates ?? []
+  const prefixCandidates = candidates.filter((brand) =>
+    startsWithBrandPhrase(row.distributorProductName, brand.brandName),
+  )
+  const authoritativeCandidates = prefixCandidates.length > 0 ? prefixCandidates : candidates
+  const candidatesByName = new Map(
+    authoritativeCandidates.map((brand) => [
+      normalizeTaxon(brand.brandName),
+      brand.brandName,
+    ]),
+  )
+  if (candidatesByName.size !== 1) return draft
+  const brandName = [...candidatesByName.values()][0]!
+  if (draft.targetBrand === brandName) return draft
+  return {
+    ...draft,
+    targetBrand: brandName,
+    warningFlags: [
+      ...draft.warningFlags,
+      'Brand matched from the current Sweed brand directory.',
+    ],
+  }
 }
 
 function downgradeUnassociatedLiveBrandCreation(

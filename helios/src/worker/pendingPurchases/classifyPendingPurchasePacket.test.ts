@@ -509,6 +509,71 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
     })
   })
 
+  it('deterministically retains a unique live Sweed brand when the model omits it', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft({
+      targetBrand: null,
+      proposedAction: 'needs-review',
+      reuseProductIdCandidate: null,
+      reuseEvidence: null,
+      rationale: 'Dabbar is not in the vendor brand list.',
+    })] }))
+    const input = buildInput({
+      rows: [{
+        ...buildInput().rows[0]!,
+        distributorProductName: 'Dabbar Blue Dream 2G',
+        vendorEvidence: {
+          allowedBrandNames: ['Hashtag Honey'],
+          allowedCatalogProductIds: [],
+          confidence: 'medium',
+          evidence: ['Sibling line maps Hashtag Honey to this vendor.'],
+          status: 'matched',
+          vendorId: 1,
+          vendorName: 'BCD Innovation LLC',
+        },
+        classificationEvidence: {
+          priorOutcome: null,
+          sweedBrandCandidates: [
+            { sweedBrandId: 100, brandName: 'Hashtag Honey' },
+            { sweedBrandId: 21902, brandName: 'Dabbar' },
+          ],
+          marketBrandCandidates: [],
+          marketCandidates: [],
+        },
+      }],
+    })
+    const result = await classifyPendingPurchasePacketWithLlm(input)
+    expect(result.drafts[0]).toMatchObject({
+      proposedAction: 'needs-review',
+      targetBrand: 'Dabbar',
+      warningFlags: [expect.stringMatching(/current Sweed brand directory/i)],
+    })
+  })
+
+  it('does not snap an ambiguous set of live Sweed brands', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft({
+      targetBrand: null,
+      proposedAction: 'needs-review',
+      reuseProductIdCandidate: null,
+      reuseEvidence: null,
+    })] }))
+    const input = buildInput({
+      rows: [{
+        ...buildInput().rows[0]!,
+        classificationEvidence: {
+          priorOutcome: null,
+          sweedBrandCandidates: [
+            { sweedBrandId: 1, brandName: 'Acme' },
+            { sweedBrandId: 2, brandName: 'Acme Labs' },
+          ],
+          marketBrandCandidates: [],
+          marketCandidates: [],
+        },
+      }],
+    })
+    const result = await classifyPendingPurchasePacketWithLlm(input)
+    expect(result.drafts[0]).toMatchObject({ proposedAction: 'needs-review', targetBrand: null })
+  })
+
   it('rejects a catalog reuse candidate outside the row-scoped vendor evidence', async () => {
     stubFetch(modelResponse({ drafts: [modelDraft({ targetBrand: 'Select' })] }))
     const input = buildInput({
@@ -535,19 +600,28 @@ describe('classifyPendingPurchasePacketWithLlm — fail-loud boundaries', () => 
       reuseEvidence: null,
     })] }))
     const input = buildInput({
-      rows: [rowInput({
-        vendorEvidence: {
-          status: 'explicit-override',
-          vendorId: null,
-          vendorName: null,
-          confidence: 'high',
-          allowedBrandNames: ['Pinned Brand'],
-          allowedCatalogProductIds: [],
-          evidence: ['Explicit distributor-brand override pins this line to “Pinned Brand”.'],
+      rows: [{
+        ...rowInput({
+          vendorEvidence: {
+            status: 'explicit-override',
+            vendorId: null,
+            vendorName: null,
+            confidence: 'high',
+            allowedBrandNames: ['Pinned Brand'],
+            allowedCatalogProductIds: [],
+            evidence: ['Explicit distributor-brand override pins this line to “Pinned Brand”.'],
+          },
+        }),
+        classificationEvidence: {
+          priorOutcome: null,
+          sweedBrandCandidates: [{ sweedBrandId: 21902, brandName: 'Dabbar' }],
+          marketBrandCandidates: [],
+          marketCandidates: [],
         },
-      })],
+      }],
     })
-    await expectQuarantined(input)
+    const result = await expectQuarantined(input)
+    expect(result.drafts[0]?.targetBrand).toBe('Pinned Brand')
   })
 
   it('rejects a draft for an unknown rowKey', async () => {
