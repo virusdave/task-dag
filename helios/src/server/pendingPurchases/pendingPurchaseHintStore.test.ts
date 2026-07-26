@@ -102,7 +102,31 @@ describe('LocalFsHintDocumentStore', () => {
     await expect(fenced.put('some text')).rejects.toThrow(/does not exist/)
   })
 
-  it('retries transient lower-directory failures after revalidating the mounted root', async () => {
+  it('creates each shard component without recursive mkdir', async () => {
+    const calls: Array<{ path: string; recursive: boolean | undefined }> = []
+    const componentWise = createLocalFsHintDocumentStore(root, {
+      mkdir: async (path, options) => {
+        calls.push({
+          path: String(path),
+          recursive: typeof options === 'object' ? options.recursive : undefined,
+        })
+        const { mkdir } = await import('node:fs/promises')
+        return mkdir(path, options)
+      },
+    })
+
+    const pointer = await componentWise.put('component-wise storage')
+    const sha = pointer.contentSha256
+
+    expect(calls.map(({ path }) => path)).toEqual([
+      join(root, 'pending-purchase-hints'),
+      join(root, 'pending-purchase-hints', sha.slice(0, 2)),
+      join(root, 'pending-purchase-hints', sha.slice(0, 2), sha.slice(2, 4)),
+    ])
+    expect(calls.every(({ recursive }) => recursive !== true)).toBe(true)
+  })
+
+  it('retries transient component failures after revalidating the mounted root', async () => {
     const delays: number[] = []
     let attempts = 0
     const retrying = createLocalFsHintDocumentStore(root, {
@@ -123,7 +147,7 @@ describe('LocalFsHintDocumentStore', () => {
 
     const pointer = await retrying.put('eventually stored')
 
-    expect(attempts).toBe(3)
+    expect(attempts).toBe(5)
     expect(delays).toEqual([500, 1_500])
     expect((await retrying.read(pointer)).text).toBe('eventually stored')
   })

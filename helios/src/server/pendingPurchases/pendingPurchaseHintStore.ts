@@ -176,7 +176,16 @@ class LocalFsHintDocumentStore implements HintDocumentStore {
     // Refuse to write if the root (e.g. the /cloud mount) is absent, so a
     // dropped mount can't silently create a local shadow tree. Only the lower
     // shard dirs are created below.
-    await this.ensureShardDirectory(
+    // SSHFS can return ENOENT from Node's recursive mkdir while creating the
+    // first missing component, even though its parent exists. Create each
+    // component explicitly so every operation has one known-existing parent.
+    // This also makes a retry re-attempt one shallow operation rather than the
+    // same opaque recursive traversal.
+    await this.ensureDirectoryComponent(this.resolveKey(KEY_PREFIX))
+    await this.ensureDirectoryComponent(
+      this.resolveKey(`${KEY_PREFIX}/${contentSha256.slice(0, 2)}`),
+    )
+    await this.ensureDirectoryComponent(
       this.resolveKey(`${KEY_PREFIX}/${contentSha256.slice(0, 2)}/${contentSha256.slice(2, 4)}`),
     )
 
@@ -199,17 +208,23 @@ class LocalFsHintDocumentStore implements HintDocumentStore {
     return pointer
   }
 
-  private async ensureShardDirectory(directory: string): Promise<void> {
+  private async ensureDirectoryComponent(directory: string): Promise<void> {
     for (let attempt = 0; ; attempt += 1) {
       // Re-check on every attempt. A transient lower-directory failure may be
-      // retried, but a dropped /cloud mount must remain a loud failure rather
-      // than allowing recursive mkdir to create a local shadow tree.
+      // retried, but a dropped /cloud mount must remain a loud failure.
       await this.assertRootMounted()
       try {
-        await this.makeDirectory(directory, { recursive: true })
+        await this.makeDirectory(directory)
         return
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code
+        if (code === 'EEXIST') {
+          const existing = await stat(directory)
+          if (!existing.isDirectory()) {
+            throw new Error(`hint storage path ${directory} exists but is not a directory.`)
+          }
+          return
+        }
         const delayMs = TRANSIENT_DIRECTORY_RETRY_DELAYS_MS[attempt]
         if (!isTransientDirectoryError(code) || delayMs === undefined) {
           throw error
