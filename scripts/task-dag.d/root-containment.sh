@@ -97,22 +97,53 @@ epic_already_closed_on() {
 # admission check authorizes only the former: the registered root may remain
 # open while children complete.  The dedicated activation floor keeps this
 # path dormant until every participating runtime understands that lifecycle.
-taskdag_typed_root_completion_preflight() { # task [authority-tip]
-    local node=$1 authority=${2:-HEAD} parent epic_id="" msg token floor rows registry master record root
-    local node_epic close_rc
-    msg=$(parse_commit_metadata "$node" 2>/dev/null || true)
-    epic_id=$(extract_field "$msg" Epic-ID 2>/dev/null || true)
-    [ -n "$epic_id" ] || return 0
+taskdag_typed_root_completion_preflight() { # task [authority-tip] [--prepared]
+    local original=$1 authority=${2:-HEAD} mode=${3:-} node=$1 parent epic_id="" msg token floor rows registry master record root
+    local node_epic close_rc advertised_activation expected_activation
+
+    # Discover whether this task belongs to a typed root, but do not treat an
+    # absent child field as legacy until the complete task-only ancestry has
+    # been checked. A typed ancestor makes a missing child field malformed.
+    while :; do
+        msg=$(parse_commit_metadata "$node" 2>/dev/null || true)
+        node_epic=$(extract_field "$msg" Epic-ID 2>/dev/null || true)
+        if [ -n "$node_epic" ]; then epic_id=$node_epic; break; fi
+        parent=$(get_first_parent "$node" 2>/dev/null || true)
+        [ -n "$parent" ] && is_task_commit "$parent" || return 0
+        node=$parent
+    done
     [[ "$epic_id" =~ ^epic-v1:[0-9a-f]{64}$ ]] || return 2
 
-    token=$(taskdag_activation_snapshot_token) || return 3
-    floor=$(jq -er .minimumCompatibleTaskDagCommit <<<"$token") || return 3
+    if [ "$mode" = --prepared ]; then
+        taskdag_consumer_require_prepared || return 2
+        [ "$TASKDAG_CONSUMER_MODE" = canonical ] || return 3
+        token=$TASKDAG_CONSUMER_ACTIVATION
+        floor=$(jq -er .record.minimumCompatibleTaskDagCommit <<<"$token") || return 3
+        expected_activation=$(jq -er .authorityTip <<<"$token") || return 3
+        master=$TASKDAG_CONSUMER_MASTER_TIP
+    elif [ -z "$mode" ]; then
+        token=$(taskdag_activation_snapshot_token) || return 3
+        floor=$(jq -er .minimumCompatibleTaskDagCommit <<<"$token") || return 3
+        expected_activation=$(jq -er .authorityTip <<<"$token") || return 3
+        master=""
+    else
+        return 2
+    fi
     git -C "$TASKDAG_SCRIPT_DIR/.." cat-file -e "$TASKDAG_TYPED_COMPLETION_CUTOVER^{commit}" 2>/dev/null || return 3
     git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor "$TASKDAG_TYPED_COMPLETION_CUTOVER" "$floor" || return 3
 
-    rows=$(git ls-remote --refs origin "$TASKDAG_EPIC_REGISTRY_REF" refs/heads/master) || return 3
+    # One advertisement binds registry and master to the activation generation.
+    # Registry writers advance the same activation guard atomically, so a
+    # registry race cannot remain hidden behind an unchanged authority tip.
+    rows=$(git ls-remote --refs origin "$TASKDAG_ACTIVATION_REF" "$TASKDAG_EPIC_REGISTRY_REF" refs/heads/master) || return 3
+    advertised_activation=$(awk -v r="$TASKDAG_ACTIVATION_REF" '$2==r{print $1}' <<<"$rows")
+    [ "$advertised_activation" = "$expected_activation" ] || return 3
     registry=$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$rows")
-    master=$(awk '$2=="refs/heads/master"{print $1}' <<<"$rows")
+    if [ -n "$master" ]; then
+        [ "$(awk '$2=="refs/heads/master"{print $1}' <<<"$rows")" = "$master" ] || return 3
+    else
+        master=$(awk '$2=="refs/heads/master"{print $1}' <<<"$rows")
+    fi
     [ -n "$registry" ] && [ -n "$master" ] || return 3
     git fetch -q --no-tags origin "$registry" "$master" || return 3
     record=$(taskdag_epic_registry_record "$epic_id" "$registry" "$master") || return 3
@@ -122,6 +153,7 @@ taskdag_typed_root_completion_preflight() { # task [authority-tip]
     # at the first task carrying that field would incorrectly treat the leaf
     # as its own root.  Walk strict first-parent containment to the exact
     # immutable registry root and reject a lineage that changes Epic-ID.
+    node=$original
     while :; do
         [ "$node" = "$root" ] && break
         msg=$(parse_commit_metadata "$node" 2>/dev/null || true)
@@ -136,7 +168,12 @@ taskdag_typed_root_completion_preflight() { # task [authority-tip]
     # A root that was closed before this child acquired a durable completion
     # fact is corrupt/premature; never add work beneath a closed root.
     close_rc=0; epic_already_closed_on "$epic_id" "$root" "$authority" || close_rc=$?
-    case "$close_rc" in 0) return 2 ;; 1) return 0 ;; 2) return 2 ;; *) return 2 ;; esac
+    case "$close_rc" in 0) return 2 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
+    if [ "$authority" != "$master" ]; then
+        close_rc=0; epic_already_closed_on "$epic_id" "$root" "$master" || close_rc=$?
+        case "$close_rc" in 0) return 2 ;; 1) ;; 2) return 2 ;; *) return 2 ;; esac
+    fi
+    return 0
 }
 
 maybe_emit_local_epic_close() {

@@ -77,21 +77,47 @@ public_leaf=$(jq -r '.tasks[0].sha' "$ROOT/public-children.json")
 TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ "$TD" claim "$public_leaf" >/dev/null || exit 1
 echo typed-completion >typed-completion; git add typed-completion; git commit -qm 'Implement typed completion fixture'
 impl=$(git rev-parse HEAD); before=$(git rev-parse HEAD)
-TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ "$TD" complete "$public_leaf" >/dev/null 2>&1; rc=$?
-if [ "$rc" -eq 3 ] && [ "$(git rev-parse HEAD)" = "$before" ]; then
+before_local_refs=$(git for-each-ref refs/heads --format='%(refname) %(objectname)' | sort)
+before_origin_refs=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+real_git=$(command -v git); mkdir -p "$ROOT/git-probe"
+cat >"$ROOT/git-probe/git" <<EOF
+#!/bin/sh
+[ "\$1" != commit-tree ] || echo commit-tree >>"$ROOT/commit-tree.log"
+exec "$real_git" "\$@"
+EOF
+chmod +x "$ROOT/git-probe/git"
+PATH="$ROOT/git-probe:$PATH" TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ "$TD" complete "$public_leaf" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 3 ] && [ "$(git rev-parse HEAD)" = "$before" ] \
+  && [ "$before_local_refs" = "$(git for-each-ref refs/heads --format='%(refname) %(objectname)' | sort)" ] \
+  && [ "$before_origin_refs" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ] \
+  && [ ! -s "$ROOT/commit-tree.log" ]; then
   ok "typed completion remains dormant below its dedicated activation prerequisite"
 else bad "typed completion activated below its prerequisite (rc=$rc)"; fi
 
 if [ "$TASKDAG_TYPED_COMPLETION_CUTOVER" != 0000000000000000000000000000000000000000 ]; then
+  stale_candidate=$(git commit-tree "$(git rev-parse "$impl^{tree}")" -p "$impl" -p "$public_leaf" -m "Implement typed completion fixture
+
+Task-Commit: $public_leaf
+Status: completed")
+  before_origin_refs=$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)
+  "$TD" publish "$stale_candidate" >/dev/null 2>&1; rc=$?
+  if [ "$rc" -ne 0 ] && [ "$before_origin_refs" = "$(git --git-dir="$ROOT/origin" for-each-ref --format='%(refname) %(objectname)' | sort)" ]; then
+    ok "publication independently rejects a typed completion below the activation prerequisite"
+  else bad "publication admitted a typed completion below the activation prerequisite (rc=$rc)"; fi
+
   jq -cS --arg floor "$TASKDAG_TYPED_COMPLETION_CUTOVER" '.minimumCompatibleTaskDagCommit=$floor' "$ROOT/activation-spec" >"$ROOT/typed-completion-spec"
   "$TD" activation apply --spec-file "$ROOT/typed-completion-spec" >/dev/null || exit 1
   TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=fixture TASK_DAG_CLAIMER_PID=$$ "$TD" complete "$public_leaf" >/dev/null 2>&1; rc=$?
   completion=$(git rev-parse HEAD)
   if [ "$rc" -eq 0 ] && [ "$(git rev-parse "$completion^1")" = "$impl" ] \
     && [ "$(git rev-parse "$completion^2")" = "$public_leaf" ] \
-    && ! git show -s --format=%B "$completion" | grep -q '^Closes-Epic-ID:'; then
+    && ! git show -s --format=%B "$completion" | grep -q '^Closes-Epic-ID:' \
+    && [ "$(jq -r .rootCommit <<<"$(taskdag_epic_registry_record "$typed_epic")")" = "$typed_root" ]; then
     ok "activated typed leaf completion uses registry containment and leaves root open"
   else bad "activated typed leaf completion failed or closed its root (rc=$rc)"; fi
+  if git --git-dir="$ROOT/origin" show-ref --verify --quiet "refs/heads/tasks/pending/epic-v1/${typed_epic#epic-v1:}"; then
+    ok "local typed leaf completion preserves the open pending root"
+  else bad "local typed leaf completion retired the open root"; fi
 fi
 public_claimed=$(TASK_DAG_CLAIMER=ambient-worker TASK_DAG_CLAIMER_HOST=ambient-host TASK_DAG_CLAIMER_PID=333 "$TD" epic-create --json --claim \
   --title irrelevant --author irrelevant --description irrelevant \

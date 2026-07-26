@@ -7371,6 +7371,7 @@ sanctioned_tip_requirements_satisfied() {
     else
         status=$(taskdag_task_status_json "task:${TASKDAG_RECON_CUR}@${second}" --include-claimed) || return 2
         [ "$(jq -r '(.complete|not) and .requirementsSatisfied' <<<"$status")" = true ] || return 1
+        taskdag_typed_root_completion_preflight "$second" "$first" --prepared || return $?
     fi
 }
 
