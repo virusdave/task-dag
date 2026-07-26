@@ -375,6 +375,18 @@ completion. Missing, malformed, incompatible, disabled, or disappearing
 activation authority never authorizes a close or a fallback to legacy
 semantics. The other legacy writer classes remain drained.
 
+Canonical graph convergence is not a legacy projection writer. Its three
+entry points (`propagate-completion`, `reconcile-backstop`, and
+`graph-converge`) retain exact migration status 75 before activation. They are
+authorized only by a stable, enabled activation whose minimum-compatible
+task-dag commit descends from
+`73bfe103b6f5e1bddc318e5592085619c7f0f2f4`. Once activation authority exists,
+disabled, malformed, incompatible, disappearing, or moving authority fails
+closed without consulting the legacy policy. Epic-close, materialisation,
+completion-ingest, and legacy projection entry points remain statically
+drained; this cutover neither changes the policy file nor enables those writer
+classes.
+
 An ordinary revert is safe only before any canonical-v1 activation,
 epoch-backed write, or other activation write has occurred. After activation,
 rollback must be fenced against the activated epoch and preserve its durable

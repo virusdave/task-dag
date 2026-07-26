@@ -9,11 +9,6 @@ ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
-if [ "$($TD migration-status --json | jq -r .mode)" = draining-legacy-writers ]; then
-  "$TD" graph-converge --no-fetch >/dev/null 2>&1; rc=$?
-  [ "$rc" -eq 75 ] && { echo "PASS: legacy completed-ref reconciliation integration is drained"; exit 0; }
-  echo "FAIL: expected migration status 75, got $rc"; exit 1
-fi
 
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export TASK_DAG_GIT_NAME=t TASK_DAG_GIT_EMAIL=t@t
@@ -23,6 +18,21 @@ git clone -q "$ROOT/origin.git" "$ROOT/wc"; cd "$ROOT/wc" || exit 1
 git config taskdag.current-repo acme/widgets
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
 EMPTY_TREE=$(git mktree </dev/null)
+
+# Canonical convergence remains independently activation-gated while the
+# static legacy projection policy stays drained. Activate this disposable
+# origin at the exact epoch-13 prerequisite so the fixture exercises the real
+# fenced cleanup path rather than a stubbed helper.
+runtime=$(git -C "$(dirname "$TD")/.." rev-parse HEAD)
+registry_commit=1111111111111111111111111111111111111111
+registry_blob=2222222222222222222222222222222222222222
+registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
+registry_file="$ROOT/registry"; printf '%s\n' "$registry" >"$registry_file"
+registry_id=$(source "$TD" --help >/dev/null; _taskdag_activation_registry_id "$registry_file")
+jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" '{actor:"fixture",authoritativeTimestamp:"2026-07-26T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
+"$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null \
+  || { echo "FAIL: could not activate disposable convergence fixture"; exit 1; }
+activation_before=$(git --git-dir="$ROOT/origin.git" rev-parse refs/heads/tasks/v1/activation)
 
 task_commit() {
     local title="$1"; shift
@@ -41,7 +51,10 @@ claim_commit() {
 
 Task-Commit: ${task}
 Claimer: fixture
-Claimer-Host: fixture-host"
+Claimer-Host: fixture-host
+Claimer-PID: 1
+Claimed-At: 2026-07-26T00:00:00Z
+TTL-Hours: 12"
 }
 
 meta_commit() {
@@ -92,8 +105,10 @@ publish_stale_refs "$A" "$AS"
 git config core.abbrev 16
 
 out=$("$TD" graph-converge --range "$AW" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && all_refs_absent "$A" "$AS"; then
-    ok "push-range backstop removes all stale refs using the observed 12-hex suffix"
+activation_after=$(git --git-dir="$ROOT/origin.git" rev-parse refs/heads/tasks/v1/activation)
+if [ "$rc" -eq 0 ] && all_refs_absent "$A" "$AS" \
+   && [ "$activation_after" != "$activation_before" ]; then
+    ok "push-range backstop atomically advances activation and removes the stale-ref batch"
 else
     bad "push-range backstop failed (rc=$rc out=$out)"
 fi
@@ -202,6 +217,40 @@ if [ "$rc" -eq 0 ] && all_refs_absent "$R" "$RS"; then
     ok "a later strict snapshot retries and converges"
 else
     bad "cleanup retry failed (rc=$rc out=$out)"
+fi
+
+# Advancing activation to disabled after the final consumer snapshot but
+# before its fenced push must preserve the complete scheduling-ref batch.
+X=$(task_commit "activation contention")
+XS=${X:0:12}
+git fetch -q origin master; base=$(git rev-parse origin/master); tree=$(git rev-parse "$base^{tree}")
+XW=$(git commit-tree "$tree" -p "$base" -p "$X" -m "Complete fixture X")
+git update-ref refs/heads/master "$XW"; git push -q origin master:master
+publish_stale_refs "$X" "$XS"
+jq '.state="disabled" | .authoritativeTimestamp="2026-07-26T00:00:01Z"' \
+  "$ROOT/activation-spec" >"$ROOT/activation-disabled"
+export TD ROOT
+taskdag_activation_test_pre_fenced_push_hook() {
+    [ -e "$ROOT/disable-before-cleanup" ] || return 0
+    rm -f "$ROOT/disable-before-cleanup"
+    "$TD" activation apply --spec-file "$ROOT/activation-disabled" >/dev/null
+}
+export -f taskdag_activation_test_pre_fenced_push_hook
+touch "$ROOT/disable-before-cleanup"
+out=$("$TD" graph-converge 2>&1); rc=$?
+unset -f taskdag_activation_test_pre_fenced_push_hook
+disabled_state=$("$TD" activation status --json | jq -r .record.state)
+if [ "$rc" -ne 0 ] && [ "$disabled_state" = disabled ] && all_refs_present "$X" "$XS"; then
+    ok "activation contention preserves the complete scheduling-ref batch"
+else
+    bad "activation contention changed refs or succeeded silently (rc=$rc state=$disabled_state out=$out)"
+fi
+"$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null
+out=$("$TD" graph-converge 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && all_refs_absent "$X" "$XS"; then
+    ok "re-enabled activation permits a fresh fenced cleanup retry"
+else
+    bad "post-contention retry failed (rc=$rc out=$out)"
 fi
 
 # Failure to take the strict origin snapshot must not mutate scheduling refs.

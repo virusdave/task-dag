@@ -70,7 +70,8 @@ taskdag_node_done_in_worktree() {
 }
 
 taskdag_pending_root_for_task_sha() {
-    local task_sha="$1" node="$task_sha" issue="" up="" rc=0
+    local task_sha="$1" node issue="" up="" rc=0
+    node=$task_sha
     while :; do
         issue=$(task_is_pending_root "$node" 2>/dev/null) || rc=$?
         if [ "$rc" -eq 0 ]; then
@@ -84,6 +85,31 @@ taskdag_pending_root_for_task_sha() {
         is_task_commit "$up" || return 1
         node="$up"
     done
+}
+
+taskdag_prepared_task_has_active_claim() {
+    local task="$1" oid ref suffix parents parent trailer claim_tree task_tree
+    [ "$TASKDAG_CHILD_MAP_READY" = true ] || return 2
+    while read -r oid ref; do
+        case "$ref" in refs/heads/tasks/active/*) ;; *) continue ;; esac
+        suffix=${ref##*/}
+        parents=$(git show -s --format='%P' "$oid" 2>/dev/null || true)
+        parent=${parents%% *}
+        if [ "$parent" = "$task" ]; then
+            [ "$parents" = "$task" ] || return 2
+            trailer=$(git log -1 --format='%B' "$oid" | sed -nE 's/^Task-Commit:[[:space:]]*([0-9a-f]+)[[:space:]]*$/\1/p')
+            claim_tree=$(git rev-parse "$oid^{tree}" 2>/dev/null) || return 2
+            task_tree=$(git rev-parse "$task^{tree}" 2>/dev/null) || return 2
+            [ "$trailer" = "$task" ] && [ "$claim_tree" = "$task_tree" ] || return 2
+            return 0
+        fi
+        # A ref suffix that claims to abbreviate this task but points at some
+        # other or malformed object is contradictory authority, not absence.
+        if [[ "$suffix" =~ ^[0-9a-f]{7,64}$ ]] && [[ "$task" = "$suffix"* ]]; then
+            return 2
+        fi
+    done <<< "$TASKDAG_CHILD_MAP_REFS"
+    return 1
 }
 
 taskdag_emit_origin_epic_close() {
@@ -235,7 +261,7 @@ Mailbox-Message-Id: ${mid}"
 
 taskdag_synth_supersede_completion() {
     local from="$1" edge_id="$2" trigger="$3" witness="$4" mid="${5:-}"
-    local cur rest repo task short children="" active_ref base tree msg new_commit lease readback rc=0
+    local cur rest repo task short children="" active_ref base tree msg new_commit lease readback rc=0 expected_generation=""
     from=$(taskdag_normalize_node "$from") || return 2
     case "$from" in task:*) ;; *) echo "Error: cannot synth-complete non-task supersede target: $from" >&2; return 2 ;; esac
     repo=$(taskdag_node_repo "$from") || return 2
@@ -252,10 +278,6 @@ taskdag_synth_supersede_completion() {
     [ -z "$children" ] || { echo "Error: refusing to synth-complete decomposed task/epic ${task:0:12}; supersede completion for epics is not safe in this phase" >&2; return 2; }
 
     taskdag_node_done "$from" >/dev/null 2>&1 && return 0
-    # Canonical complete() already treats the satisfied `satisfies` edge as
-    # authoritative. A second master witness would duplicate that semantic
-    # decision and race an ordinary completion publication.
-    [ "$TASKDAG_CONSUMER_MODE" = canonical ] && return 0
     short=$(git rev-parse --short "$task") || return 2
     active_ref="refs/heads/tasks/active/$short"
     if git show-ref --verify --quiet "$active_ref" || git ls-remote --exit-code origin "$active_ref" >/dev/null 2>&1; then
@@ -263,10 +285,16 @@ taskdag_synth_supersede_completion() {
         return 2
     fi
 
-    taskdag_sync_master || { echo "Error: could not sync origin/master before synth completion" >&2; return 2; }
-    base=$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
-        || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \
-        || git rev-parse --verify -q HEAD^{commit}) || return 2
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        taskdag_canonical_convergence_require_prepared || return 2
+        base=$TASKDAG_CONSUMER_MASTER_TIP
+        expected_generation=$(jq -cS '.observed' <<<"$TASKDAG_CONSUMER_PREPARE_RESULT") || return 2
+    else
+        taskdag_sync_master || { echo "Error: could not sync origin/master before synth completion" >&2; return 2; }
+        base=$(git rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
+            || git rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null \
+            || git rev-parse --verify -q HEAD^{commit}) || return 2
+    fi
     tree=$(git rev-parse "$base^{tree}") || return 2
     msg="Supersede task ${short}
 
@@ -280,8 +308,12 @@ Trigger-Witness: ${witness}"
 Mailbox-Message-Id: ${mid}"
     fi
     new_commit=$(printf '%s' "$msg" | git commit-tree "$tree" -p "$base" -p "$task") || return 1
-    lease="--force-with-lease=refs/heads/master:${base}"
-    git push origin "$lease" "${new_commit}:refs/heads/master" >/dev/null || return 1
+    if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+        taskdag_publish_expected "$new_commit" "$expected_generation" >/dev/null || return 1
+    else
+        lease="--force-with-lease=refs/heads/master:${base}"
+        git push origin "$lease" "${new_commit}:refs/heads/master" >/dev/null || return 1
+    fi
     readback=$(git ls-remote origin refs/heads/master 2>/dev/null | awk '{print $1}')
     [ "$readback" = "$new_commit" ] || { echo "Error: synth completion push for ${short} was not confirmed" >&2; return 1; }
     git fetch --quiet --no-tags origin '+refs/heads/master:refs/remotes/origin/master' 2>/dev/null || true
@@ -291,9 +323,88 @@ Mailbox-Message-Id: ${mid}"
     printf '%s\n' "$new_commit"
 }
 
+taskdag_canonical_fold_satisfies() {
+    local from="$1" edge_id="$2" trigger="$3" witness="$4" mid="${5:-}"
+    local rest repo cur task short children="" claim_rc=0 base master_new tree msg graph_old graph_tree graph_new updates readback
+    from=$(taskdag_normalize_node "$from") || return 2
+    case "$from" in task:*) ;; *) return 2 ;; esac
+    repo=$(taskdag_node_repo "$from") || return 2
+    cur=$(taskdag_current_repo) || return 2
+    [ "$repo" = "$cur" ] || return 2
+    rest="${from#task:}"; task="${rest##*@}"
+    git rev-parse -q --verify "$task^{commit}" >/dev/null 2>&1 || return 2
+    is_task_commit "$task" || return 2
+
+    # The completion witness and removal of the satisfies edge are one
+    # activation-fenced transaction.  A moving semantic generation can
+    # therefore publish neither half, preserving the edge as retry evidence.
+    taskdag_consumer_prepare satisfies-convergence || return 2
+    taskdag_canonical_convergence_require_prepared || return 2
+    children="${TASKDAG_RECON_FP_CHILDREN[$task]:-}"
+    [ -z "$children" ] || {
+        echo "Error: refusing to synth-complete decomposed task/epic ${task:0:12}" >&2
+        return 2
+    }
+    base=$TASKDAG_CONSUMER_MASTER_TIP
+    graph_old=$TASKDAG_CONSUMER_GRAPH_TIP
+    [ -n "$graph_old" ] || return 2
+    git cat-file -e "${graph_old}:edges/${edge_id}.json" 2>/dev/null || return 2
+
+    master_new=$base
+    if ! taskdag_node_done "$from" >/dev/null 2>&1; then
+        short=$(git rev-parse --short "$task") || return 2
+        taskdag_prepared_task_has_active_claim "$task" || claim_rc=$?
+        case "$claim_rc" in
+            0) echo "Error: refusing to auto-complete ${short}; it is actively claimed" >&2; return 2 ;;
+            1) ;;
+            *) echo "Error: contradictory active-claim authority for ${short}" >&2; return 2 ;;
+        esac
+        tree=$(git rev-parse "$base^{tree}") || return 2
+        msg="Supersede task ${short}
+
+Task-Commit: ${task}
+Status: completed
+Superseded-By: ${trigger}
+Supersede-Edge-Id: ${edge_id}
+Trigger-Witness: ${witness}"
+        [ -z "$mid" ] || msg="${msg}
+Mailbox-Message-Id: ${mid}"
+        master_new=$(printf '%s' "$msg" | git commit-tree "$tree" -p "$base" -p "$task") || return 1
+    fi
+
+    graph_tree=$(_taskdag_graph_recompute_tree "$graph_old" remove "edges/${edge_id}.json" "") || return 1
+    [ "$graph_tree" != "$(git rev-parse "${graph_old}^{tree}")" ] || return 2
+    msg="Fold dependency edge ${edge_id:0:12} (satisfies)
+
+Edge-Id: ${edge_id}
+Relation: satisfies
+From: ${from}
+To: ${trigger}
+Trigger-Node: ${trigger}
+Trigger-Witness: ${witness}"
+    [ -z "$mid" ] || msg="${msg}
+Mailbox-Message-Id: ${mid}"
+    graph_new=$(printf '%s' "$msg" | git commit-tree "$graph_tree" -p "$graph_old") || return 1
+    updates=$(jq -ncS --arg graph_ref "$TASKDAG_GRAPH_REF" --arg graph_old "$graph_old" --arg graph_new "$graph_new" \
+        --arg master_old "$base" --arg master_new "$master_new" '
+        ([{ref:$graph_ref,old:$graph_old,new:$graph_new}]
+         + (if $master_old==$master_new then [] else [{ref:"refs/heads/master",old:$master_old,new:$master_new}] end))
+        | sort_by(.ref)') || return 1
+    taskdag_consumer_fenced_scheduling_push fold-satisfies "${TASK_DAG_CLAIMER:-graph-converger}" "$updates" || return 1
+    readback=$(git ls-remote --refs origin refs/heads/master "$TASKDAG_GRAPH_REF" 2>/dev/null) || return 1
+    [ "$(awk '$2=="refs/heads/master" {print $1}' <<<"$readback")" = "$master_new" ] || return 1
+    [ "$(awk -v ref="$TASKDAG_GRAPH_REF" '$2==ref {print $1}' <<<"$readback")" = "$graph_new" ] || return 1
+    git update-ref refs/remotes/origin/master "$master_new" 2>/dev/null || true
+    git update-ref refs/heads/master "$master_new" 2>/dev/null || true
+    git update-ref "$TASKDAG_GRAPH_REF" "$graph_new" 2>/dev/null || true
+    TASKDAG_FACTS_TIP_OID=""
+    printf "${GREEN}✓ Published completion and folded satisfies edge %s${RESET}\n" "${edge_id:0:12}" >&2
+    printf '%s\n' "$master_new"
+}
+
 taskdag_propagate_one_node() {
     local node="$1" witness="$2" mid="${3:-}" do_fetch="${4:-true}"
-    local args=() edges cur nrepo out rc=0
+    local args=() edges cur nrepo out pending_root="" pending_rc=0 rc=0
     [ "$do_fetch" = false ] && args+=(--no-fetch)
     node=$(taskdag_normalize_node "$node") || return 2
     taskdag_verify_completed_node "$node" "$witness" || return $?
@@ -314,8 +425,21 @@ taskdag_propagate_one_node() {
                 # otherwise lose its last non-empty obligation and never emit
                 # the durable Closes-Epic fact. If close emission is due but
                 # fails, leave the edge in place so a later backstop can retry.
-                out=$(taskdag_auto_close_epic_for_task "${from##*@}" "$do_fetch" "$eid") || { rc=1; continue; }
-                [ -n "$out" ] && printf '%s\n' "$out"
+                if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+                    # Canonical convergence activation is deliberately not an
+                    # epic-close policy cutover. Preserve an epic obligation
+                    # until that separate writer class is reviewed/enabled.
+                    pending_rc=0
+                    pending_root=$(taskdag_pending_root_for_task_sha "${from##*@}" 2>/dev/null) || pending_rc=$?
+                    case "$pending_rc" in
+                        0) continue ;;
+                        1) ;;
+                        *) return 2 ;;
+                    esac
+                else
+                    out=$(taskdag_auto_close_epic_for_task "${from##*@}" "$do_fetch" "$eid") || { rc=1; continue; }
+                    [ -n "$out" ] && printf '%s\n' "$out"
+                fi
                 taskdag_graph_prune_edge_with_witness "$eid" "$relation" "$from" "$to" "$node" "$witness" "$mid" || rc=1
                 # If the dependent was already durable-done, cascade from it;
                 # readiness alone is not completion and does not cascade.
@@ -324,6 +448,11 @@ taskdag_propagate_one_node() {
                 fi
                 ;;
             satisfies)
+                if [ "$TASKDAG_CONSUMER_MODE" = canonical ]; then
+                    out=$(taskdag_canonical_fold_satisfies "$from" "$eid" "$node" "$witness" "$mid") || { rc=1; continue; }
+                    [ -n "$out" ] && printf '%s\t%s\n' "$from" "$(printf '%s\n' "$out" | tail -n1)"
+                    continue
+                fi
                 out=$(taskdag_synth_supersede_completion "$from" "$eid" "$node" "$witness" "$mid") || { rc=1; continue; }
                 [ -n "$out" ] && printf '%s\t%s\n' "$from" "$(printf '%s\n' "$out" | tail -n1)"
                 taskdag_graph_prune_edge_with_witness "$eid" "$relation" "$from" "$to" "$node" "$witness" "$mid" || rc=1
@@ -386,7 +515,11 @@ EOF
         [ -n "$remote" ] && [ "$dest" != "$spec" ] && taskdag_norm_owner_repo "$dest" >/dev/null \
             || { echo "Error: --notify-peer expects <remote>:<owner/repo>" >&2; return 2; }
     done
-    taskdag_migration_guard projection || return $?
+    if [ "$do_fetch" = true ]; then
+        taskdag_canonical_convergence_guard || return $?
+    else
+        taskdag_canonical_convergence_guard --no-fetch || return $?
+    fi
     local seen=$'\n' n w cn cw next rc=0 idx=0
     local -a q_nodes=() q_witnesses=()
     q_nodes+=("$normalized_node")
@@ -402,12 +535,14 @@ EOF
         seen+="$n"$'\n'
         case "$n" in
             task:*)
-                next=$(taskdag_auto_close_epic_for_task "${n##*@}" "$do_fetch") || return $?
-                while IFS=$'\t' read -r cn cw; do
-                    [ -n "$cn" ] || continue
-                    q_nodes+=("$cn")
-                    q_witnesses+=("$cw")
-                done <<< "$next"
+                if [ "$TASKDAG_CONSUMER_MODE" != canonical ]; then
+                    next=$(taskdag_auto_close_epic_for_task "${n##*@}" "$do_fetch") || return $?
+                    while IFS=$'\t' read -r cn cw; do
+                        [ -n "$cn" ] || continue
+                        q_nodes+=("$cn")
+                        q_witnesses+=("$cw")
+                    done <<< "$next"
+                fi
                 ;;
         esac
         next=$(taskdag_propagate_one_node "$n" "$w" "$mid" "$do_fetch") || rc=$?
@@ -440,9 +575,13 @@ EOF
         esac
     done
 
-    taskdag_migration_guard projection || return $?
+    if [ "$do_fetch" = true ]; then
+        taskdag_canonical_convergence_guard || return $?
+    else
+        taskdag_canonical_convergence_guard --no-fetch || return $?
+    fi
     local rc=0 helper args=() edges n w helper_fetch_arg=""
-    if [ "$consume" = true ]; then
+    if [ "$consume" = true ] && [ "$do_fetch" = true ]; then
         [ "$do_fetch" = false ] && helper_fetch_arg="--no-fetch"
         helper=$(mktemp "${TMPDIR:-/tmp}/taskdag-fold.XXXXXX") || return 1
         cat > "$helper" <<EOF
@@ -455,13 +594,26 @@ EOF
         [ "$do_fetch" = false ] && mb_args+=(--no-fetch)
         cmd_mailbox consume "${mb_args[@]}" || rc=1
         rm -f "$helper"
+    elif [ "$consume" = true ]; then
+        echo "Note: --no-fetch skips mailbox consumption (the fold helper requires an online-attested snapshot)." >&2
     fi
 
     [ "$do_fetch" = false ] && args+=(--no-fetch)
     edges=$(taskdag_read_edges "${args[@]}") || return 2
     while IFS=$'\t' read -r n w; do
         [ -n "$n" ] || continue
-        if taskdag_verify_completed_node "$n" "$w" >/dev/null 2>&1; then
+        if taskdag_verify_completed_node "$n" "" >/dev/null 2>&1; then
+            local nrepo cur wt
+            nrepo=$(taskdag_node_repo "$n") || { rc=1; continue; }
+            cur=$(taskdag_current_repo) || { rc=1; continue; }
+            if [ "$nrepo" = "$cur" ]; then
+                w=$TASKDAG_CONSUMER_MASTER_TIP
+            else
+                wt=$(taskdag_peer_worktree_for "$nrepo") || { rc=1; continue; }
+                w=$(git -C "$wt" rev-parse --verify -q refs/remotes/origin/master^{commit} 2>/dev/null \
+                    || git -C "$wt" rev-parse --verify -q refs/heads/master^{commit} 2>/dev/null) \
+                    || { rc=1; continue; }
+            fi
             cmd_propagate_completion --node "$n" --witness "$w" "${args[@]}" || rc=1
         fi
     done < <(printf '%s' "$edges" | jq -r '.[] | [.to, .origin.witness] | @tsv' | sort -u)
@@ -523,7 +675,11 @@ EOF
         [ -n "$remote" ] && [ "$dest" != "$spec" ] && taskdag_norm_owner_repo "$dest" >/dev/null \
             || { echo "Error: --notify-peer expects <remote>:<owner/repo>" >&2; return 2; }
     done
-    taskdag_migration_guard projection || return $?
+    if [ "$do_fetch" = true ]; then
+        taskdag_canonical_convergence_guard || return $?
+    else
+        taskdag_canonical_convergence_guard --no-fetch || return $?
+    fi
     local args=() rc=0 n w completed
     [ "$do_fetch" = false ] && args+=(--no-fetch)
     if [ -n "$range" ]; then

@@ -286,3 +286,42 @@ taskdag_consumer_require_prepared() {
     }
 }
 
+# Canonical convergence is the sole activation-authorized successor to the
+# drained legacy projection writer.  Absence of activation retains the exact
+# static-policy response (75); once authority exists, every invalid, disabled,
+# incompatible, or unstable authority fails closed and can never fall back.
+taskdag_canonical_convergence_require_prepared() {
+    local floor state prerequisite=73bfe103b6f5e1bddc318e5592085619c7f0f2f4
+    taskdag_consumer_require_prepared || return 2
+    [ "$TASKDAG_CONSUMER_MODE" = canonical ] || return 2
+    state=$(jq -er '.record.state' <<<"$TASKDAG_CONSUMER_ACTIVATION") || return 2
+    [ "$state" = enabled ] || {
+        echo "Error: canonical convergence requires enabled semantic activation" >&2
+        return 2
+    }
+    floor=$(jq -er '.record.minimumCompatibleTaskDagCommit' <<<"$TASKDAG_CONSUMER_ACTIVATION") || return 2
+    git -C "$TASKDAG_SCRIPT_DIR/.." cat-file -e "$prerequisite^{commit}" 2>/dev/null || return 2
+    git -C "$TASKDAG_SCRIPT_DIR/.." merge-base --is-ancestor "$prerequisite" "$floor" || {
+        echo "Error: canonical convergence activation predates its required task-dag floor" >&2
+        return 2
+    }
+}
+
+taskdag_canonical_convergence_guard() {
+    local nofetch=false
+    case "${1:-}" in
+        '') ;;
+        --no-fetch) nofetch=true ;;
+        *) return 2 ;;
+    esac
+    if [ "$nofetch" = true ]; then
+        taskdag_consumer_prepare canonical-convergence --no-fetch || return $?
+    else
+        taskdag_consumer_prepare canonical-convergence || return $?
+    fi
+    if [ "$TASKDAG_CONSUMER_MODE" = legacy ]; then
+        taskdag_migration_guard projection
+        return $?
+    fi
+    taskdag_canonical_convergence_require_prepared
+}

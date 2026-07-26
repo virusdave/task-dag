@@ -3761,17 +3761,13 @@ verify_task_claim_ownership() {
 # Returns non-zero after attempting all independent tasks if fetch, shape
 # validation, or a CAS cleanup fails.
 reconcile_completed_task_refs() {
-    local remote="${1:-origin}"
-    local master_ref="refs/remotes/${remote}/master"
-    if ! git fetch --quiet --atomic --prune --no-tags "$remote" \
-        "+refs/heads/master:${master_ref}" \
-        '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
-        '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
-        '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
-        '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*'; then
-        echo "Error: could not take an authoritative master/task-ref snapshot; completed-ref reconciliation made no changes." >&2
-        return 2
-    fi
+    # Nested convergence helpers replace the process-global consumer snapshot.
+    # Take and validate the final snapshot here, immediately before deriving
+    # the deletion batch, so the fenced push uses the same enabled generation.
+    taskdag_canonical_convergence_guard || return $?
+    local master_ref="$TASKDAG_CONSUMER_MASTER_TIP"
+    taskdag_canonical_convergence_require_prepared || return 2
+    [ -n "$master_ref" ] || return 2
 
     local -A witness=() frontier_ref=() frontier_oid=() active_ref=() active_oid=()
     local -A blocked_ref=() blocked_oid=() meta_ref=() meta_oid=() invalid_task=() invalid_suffix=() suffix_task=()
@@ -3870,9 +3866,7 @@ reconcile_completed_task_refs() {
                 meta_ref["$task"]="$ref"; meta_oid["$task"]="$oid"
                 ;;
         esac
-    done < <(git for-each-ref --format='%(objectname) %(refname)' \
-        refs/heads/tasks/frontier refs/heads/tasks/active \
-        refs/heads/tasks/blocked refs/heads/tasks/blocked-meta)
+    done <<<"$TASKDAG_CHILD_MAP_REFS"
 
     local -A candidates=()
     for task in "${!frontier_ref[@]}" "${!active_ref[@]}" "${!blocked_ref[@]}" "${!meta_ref[@]}"; do
@@ -3883,9 +3877,13 @@ reconcile_completed_task_refs() {
             [[ "$task" = "$suffix"* ]] && invalid_task["$task"]=1
         done
     done
+    [ "$rc" -eq 0 ] || {
+        echo "Error: malformed scheduling snapshot rejected; completed-ref reconciliation made no changes." >&2
+        return "$rc"
+    }
 
-    local -a leases refs
-    local had_block=false short current read_rc cleanup_ok
+    local had_block=false short cleanup_ok updates='[]'
+    local -a cleaned_tasks=() blocked_tasks=()
     for task in "${!candidates[@]}"; do
         [ -n "${witness[$task]:-}" ] || continue
         [ -z "${invalid_task[$task]:-}" ] || continue
@@ -3895,7 +3893,7 @@ reconcile_completed_task_refs() {
             rc=1; continue
         fi
 
-        leases=(); refs=(); had_block=false
+        had_block=false
         for ref in "${frontier_ref[$task]:-}" "${active_ref[$task]:-}" \
                    "${blocked_ref[$task]:-}" "${meta_ref[$task]:-}"; do
             [ -n "$ref" ] || continue
@@ -3905,29 +3903,20 @@ reconcile_completed_task_refs() {
                 refs/heads/tasks/blocked/*) oid="${blocked_oid[$task]}"; had_block=true ;;
                 refs/heads/tasks/blocked-meta/*) oid="${meta_oid[$task]}" ;;
             esac
-            leases+=("--force-with-lease=$ref:$oid")
-            refs+=(":$ref")
+            updates=$(jq -cS --arg ref "$ref" --arg old "$oid" '. + [{ref:$ref,old:$old,new:""}]' <<<"$updates") || return 2
         done
-        [ "${#refs[@]}" -gt 0 ] || continue
+        cleaned_tasks+=("$task")
+        [ "$had_block" = false ] || blocked_tasks+=("$task")
+    done
 
-        cleanup_ok=false
-        if git push --atomic "$remote" "${leases[@]}" "${refs[@]}" >/dev/null 2>&1; then
-            cleanup_ok=true
-        else
-            # A concurrent idempotent cleaner may have removed every ref after
-            # our snapshot. That is success. A replacement OID or an unchanged
-            # stale ref is a visible retryable conflict; atomic push semantics
-            # guarantee this run did not partially remove the other refs.
-            cleanup_ok=true
-            for ref in "${frontier_ref[$task]:-}" "${active_ref[$task]:-}" \
-                       "${blocked_ref[$task]:-}" "${meta_ref[$task]:-}"; do
-                [ -n "$ref" ] || continue
-                current=""; read_rc=0
-                current=$(remote_ref_sha_checked "$ref") || read_rc=$?
-                if [ "$read_rc" = 3 ] || [ -n "$current" ]; then cleanup_ok=false; fi
-            done
-        fi
-        if [ "$cleanup_ok" = true ]; then
+    [ "$(jq 'length' <<<"$updates")" -gt 0 ] || return "$rc"
+    cleanup_ok=false
+    if taskdag_consumer_fenced_scheduling_push reconcile-completed \
+        "${TASK_DAG_CLAIMER:-graph-converger}" "$updates" >/dev/null 2>&1; then
+        cleanup_ok=true
+    fi
+    if [ "$cleanup_ok" = true ]; then
+        for task in "${cleaned_tasks[@]}"; do
             for ref in "${frontier_ref[$task]:-}" "${active_ref[$task]:-}" \
                        "${blocked_ref[$task]:-}" "${meta_ref[$task]:-}"; do
                 [ -n "$ref" ] && git update-ref -d "$ref" 2>/dev/null || true
@@ -3940,14 +3929,14 @@ reconcile_completed_task_refs() {
             fi
             [ -n "$short" ] || short="${task:0:12}"
             echo "Reconciled completed task refs for $short from master witness ${witness[$task]}"
-            if [ "$had_block" = true ]; then
+            if printf '%s\n' "${blocked_tasks[@]}" | grep -Fxq "$task"; then
                 emit_operator_blocked_dispatch complete "$short"
             fi
-        else
-            echo "Error: CAS cleanup raced or failed for completed task $task; no partial cleanup was accepted." >&2
-            rc=1
-        fi
-    done
+        done
+    else
+        echo "Error: activation-fenced cleanup raced or failed; no partial cleanup was accepted." >&2
+        rc=1
+    fi
     return "$rc"
 }
 

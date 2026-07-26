@@ -1832,6 +1832,13 @@ _xrepo_converge_completion_issue() { # issue parent-repo
     snapshot="$tmp/parent.git"
     _xrepo_capture_parent_snapshot "$issue" "$snapshot" "$tmp/manifest" \
         || { rm -rf "$tmp"; return 2; }
+    # An exact empty advertisement proves there is no delegated obligation
+    # this completion hint can reconcile. The durable receipt is success;
+    # later delegation/reconciliation is owned by the watchdog.
+    if [ ! -s "$tmp/manifest" ]; then
+        rm -rf "$tmp"
+        return 0
+    fi
     status=$(_xrepo_strict_snapshot_status "$snapshot" "$repo" "$issue" "$tmp/peers") \
         || { rm -rf "$tmp"; return 2; }
     root=$(_XREPO_STRICT_SNAPSHOT_GIT_DIR="$snapshot" \

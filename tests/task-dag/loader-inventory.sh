@@ -332,13 +332,13 @@ set -- --version
 source "$TD" >/dev/null
 printf '%s\n' "$TASKDAG_GRAPH_CONVERGE_CLI" >"$ROOT/captured"
 TASKDAG_GRAPH_CONVERGE_CLI="$ROOT/recorder"
-taskdag_migration_guard(){ return 0; }
+taskdag_canonical_convergence_guard(){ return 0; }
 taskdag_read_edges(){ printf '[]\n'; }
 cmd_mailbox(){
   local helper=""; while [ $# -gt 0 ]; do [ "$1" = --fold-cmd ] && { helper=$2; break; }; shift; done
   TASKDAG_MAILBOX_NODE=n TASKDAG_MAILBOX_WITNESS=w TASKDAG_MAILBOX_MESSAGE_ID=m "$helper"
 }
-cmd_reconcile_backstop --no-fetch
+cmd_reconcile_backstop
 EOF
 cat >"$ROOT/recorder" <<'EOF'
 #!/usr/bin/env bash
@@ -348,7 +348,7 @@ EOF
 chmod +x "$ROOT/recorder"
 (cd "$ROOT/peer" && TD="$TD" ROOT="$ROOT" bash "$ROOT/probe.sh")
 if [ "$(cat "$ROOT/captured")" = "$TD" ] && [ "$(cat "$ROOT/subprocess-cwd")" = "$ROOT/peer" ] \
-  && grep -qx 'propagate-completion --node n --witness w --mailbox-message-id m --no-fetch' "$ROOT/subprocess-args"; then
+  && grep -qx 'propagate-completion --node n --witness w --mailbox-message-id m' "$ROOT/subprocess-args"; then
   ok "absolute peer-CWD invocation is preserved through graph-converge helper subprocess"
 else bad "peer/subprocess path characterization failed"; fi
 

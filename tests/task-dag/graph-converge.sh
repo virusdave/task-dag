@@ -33,18 +33,76 @@ git clone -q "$ROOT/close-gate.git" "$ROOT/close-gate"
 ) && ok "typed identity is rejected before origin or HEAD mutation by the legacy close writer" \
   || bad "legacy close writer accepted typed identity or mutated repository state"
 if [ "$($TD migration-status --json | jq -r .mode)" = draining-legacy-writers ]; then
-  "$TD" graph-converge --no-fetch >/dev/null 2>&1; rc=$?
-  [ "$rc" -eq 75 ] && { ok "legacy graph convergence integration is drained"; echo "PASS=$PASS FAIL=$FAIL"; [ "$FAIL" -eq 0 ]; exit; }
-  echo "FAIL: expected migration status 75, got $rc"; exit 1
+  seed=$(git -C "$ROOT/close-gate" rev-parse HEAD)
+  for command in \
+    "propagate-completion --node issue:acme/widgets#1 --witness $seed" \
+    "reconcile-backstop --no-mailbox" \
+    "graph-converge"; do
+    read -r -a args <<<"$command"
+    (cd "$ROOT/close-gate" && "$TD" "${args[@]}" >/dev/null 2>&1); rc=$?
+    [ "$rc" -eq 75 ] && ok "${args[0]} retains exact pre-activation migration drain" \
+      || bad "${args[0]} expected pre-activation status 75, got $rc"
+  done
+  (cd "$ROOT/close-gate" && "$TD" graph-converge --no-fetch >/dev/null 2>&1); rc=$?
+  [ "$rc" -ne 0 ] && [ "$rc" -ne 75 ] \
+    && ok "standalone offline activation absence is unknown and fails closed" \
+    || bad "standalone offline activation absence returned rc=$rc"
+  (
+    cd "$ROOT/close-gate" || exit 1
+    source "$TD" --help >/dev/null
+    taskdag_consumer_prepare() {
+      TASKDAG_CONSUMER_READY=true
+      TASKDAG_CONSUMER_MODE=canonical
+      TASKDAG_CONSUMER_ACTIVATION='{"record":{"minimumCompatibleTaskDagCommit":"73bfe103b6f5e1bddc318e5592085619c7f0f2f4","state":"enabled"}}'
+    }
+    taskdag_canonical_convergence_guard
+  ) && ok "enabled activation at the exact epoch-13 floor authorizes convergence" \
+    || bad "exact epoch-13 floor was denied"
+  (
+    cd "$ROOT/close-gate" || exit 1
+    source "$TD" --help >/dev/null
+    taskdag_consumer_prepare() {
+      TASKDAG_CONSUMER_READY=true
+      TASKDAG_CONSUMER_MODE=canonical
+      TASKDAG_CONSUMER_ACTIVATION='{"record":{"minimumCompatibleTaskDagCommit":"773e2af2694075e49662f17cb84c941217f0b3b1","state":"enabled"}}'
+    }
+    taskdag_canonical_convergence_guard
+  ) >/dev/null 2>&1 && bad "activation below the epoch-13 floor authorized convergence" \
+    || ok "activation below the epoch-13 floor fails closed"
+  (
+    cd "$ROOT/close-gate" || exit 1
+    source "$TD" --help >/dev/null
+    taskdag_consumer_prepare() {
+      TASKDAG_CONSUMER_READY=true
+      TASKDAG_CONSUMER_MODE=canonical
+      TASKDAG_CONSUMER_ACTIVATION='{"record":{"minimumCompatibleTaskDagCommit":"73bfe103b6f5e1bddc318e5592085619c7f0f2f4","state":"disabled"}}'
+    }
+    taskdag_canonical_convergence_guard
+  ) >/dev/null 2>&1 && bad "disabled activation authorized convergence" \
+    || ok "disabled activation fails closed without legacy fallback"
 fi
 
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+runtime=$(git -C "$(dirname "$TD")/.." rev-parse HEAD)
+registry_commit=1111111111111111111111111111111111111111
+registry_blob=2222222222222222222222222222222222222222
+registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]}')
+registry_file="$ROOT/registry"; printf '%s\n' "$registry" >"$registry_file"
+registry_id=$(source "$TD" --help >/dev/null; _taskdag_activation_registry_id "$registry_file")
 
 init_repo() { # <name> <owner/repo>
-    local name="$1" repo="$2"
+    local name="$1" repo="$2" spec
     git init -q --bare "$ROOT/${name}.git"
     git clone -q "$ROOT/${name}.git" "$ROOT/${name}"
-    ( cd "$ROOT/${name}" && echo seed > seed.txt && git add seed.txt && git commit -qm seed && git push -q origin HEAD:master && git config taskdag.current-repo "$repo" && git config "taskdag.${repo}.id" "$(( ${#name} + 100 ))" )
+    (
+      cd "$ROOT/${name}" || exit 1
+      echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
+      git config taskdag.current-repo "$repo"
+      git config "taskdag.${repo}.id" "$(( ${#name} + 100 ))"
+      spec="$ROOT/${name}-activation"
+      jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" '{actor:"fixture",authoritativeTimestamp:"2026-07-26T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"1",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"1",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$spec"
+      "$TD" activation apply --spec-file "$spec" >/dev/null
+    )
 }
 
 mk_task() { # <repo-dir> <message> [parent]
@@ -152,6 +210,110 @@ else
     bad "B1 cascade through synth-completion failed"
 fi
 
+DRIFT_TASK=$(mk_task "$ROOT/same" "Task: drift-sensitive supersede target")
+NDRIFT="task:owner/repo@$DRIFT_TASK"
+EDRIFT=$(edge_id "$ROOT/same" "$NDRIFT" "$NA" satisfies)
+DRIFT_MASTER_BEFORE=$(git -C "$ROOT/same" rev-parse refs/remotes/origin/master)
+if ( cd "$ROOT/same" && source "$TD" --help >/dev/null && \
+    taskdag_activation_test_pre_fenced_push_hook() {
+        local concurrent short token updates
+        unset -f taskdag_activation_test_pre_fenced_push_hook
+        concurrent=$(git commit-tree "$EMPTY_TREE" -m 'Task: concurrent semantic writer') || return 1
+        short=$(git rev-parse --short "$concurrent") || return 1
+        token=$(taskdag_activation_snapshot_token) || return 1
+        updates=$(jq -ncS --arg ref "refs/heads/tasks/frontier/$short" --arg new "$concurrent" \
+            '[{ref:$ref,old:"",new:$new}]') || return 1
+        taskdag_activation_fenced_multi_push "$token" scheduling fixture-contention fixture \
+            2026-07-26T00:00:00Z "$updates" >/dev/null
+    } && \
+    ! cmd_propagate_completion --node "$NA" --witness "$WA" ) >/dev/null 2>&1 \
+    && edge_present "$ROOT/same" "$EDRIFT" \
+    && [ "$(git -C "$ROOT/same" ls-remote origin refs/heads/master | awk '{print $1}')" = "$DRIFT_MASTER_BEFORE" ] \
+    && ! ( cd "$ROOT/same" && "$TD" facts --node "$NDRIFT" --no-fetch >/dev/null 2>&1 ); then
+    ok "B2 activation movement preserves both satisfies edge and absent completion witness"
+else
+    bad "B2 activation movement published partial satisfies convergence"
+fi
+if "$TD" propagate-completion --node "$NA" --witness "$WA" >/dev/null 2>&1 \
+    && edge_absent "$ROOT/same" "$EDRIFT" \
+    && "$TD" facts --node "$NDRIFT" --no-fetch >/dev/null 2>&1; then
+    ok "B3 retry after activation contention atomically persists completion and prunes edge"
+else
+    bad "B3 retry did not converge the preserved satisfies edge"
+fi
+
+DECOMPOSED=$(mk_task "$ROOT/same" "Task: decomposed supersede target")
+DECOMPOSED_CHILD=$(mk_task "$ROOT/same" "Task: decomposed child" "$DECOMPOSED")
+NDECOMPOSED="task:owner/repo@$DECOMPOSED"
+EDECOMPOSED=$(edge_id "$ROOT/same" "$NDECOMPOSED" "$NA" satisfies)
+DECOMPOSED_MASTER=$(git -C "$ROOT/same" ls-remote origin refs/heads/master | awk '{print $1}')
+if ! "$TD" propagate-completion --node "$NA" --witness "$WA" >/dev/null 2>&1 \
+    && edge_present "$ROOT/same" "$EDECOMPOSED" \
+    && [ "$(git -C "$ROOT/same" ls-remote origin refs/heads/master | awk '{print $1}')" = "$DECOMPOSED_MASTER" ] \
+    && ! "$TD" facts --node "$NDECOMPOSED" --no-fetch >/dev/null 2>&1; then
+    ok "B4 decomposed satisfies source remains incomplete with its edge intact"
+else
+    bad "B4 decomposed satisfies source was prematurely completed or pruned"
+fi
+( cd "$ROOT/same" && git push -q origin ":refs/heads/tasks/frontier/$(git rev-parse --short "$DECOMPOSED_CHILD")" )
+
+CLAIMED=$(mk_task "$ROOT/same" "Task: claimed supersede target")
+CLAIM_TRIGGER=$(mk_task "$ROOT/same" "Task: claimed supersede trigger")
+NCLAIMED="task:owner/repo@$CLAIMED"
+NCLAIM_TRIGGER="task:owner/repo@$CLAIM_TRIGGER"
+ECLAIMED=$(edge_id "$ROOT/same" "$NCLAIMED" "$NCLAIM_TRIGGER" satisfies)
+CLAIMED_SHORT=$(git -C "$ROOT/same" rev-parse --short "$CLAIMED")
+( cd "$ROOT/same" && TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=test "$TD" claim "$CLAIMED" >/dev/null )
+( cd "$ROOT/same" && git config core.abbrev 16 )
+WCLAIM_TRIGGER=$(complete_task "$ROOT/same" "$CLAIM_TRIGGER")
+CLAIMED_MASTER=$(git -C "$ROOT/same" ls-remote origin refs/heads/master | awk '{print $1}')
+"$TD" propagate-completion --node "$NCLAIM_TRIGGER" --witness "$WCLAIM_TRIGGER" >/dev/null 2>&1 || true
+if edge_present "$ROOT/same" "$ECLAIMED" \
+    && [ "$(git -C "$ROOT/same" ls-remote origin refs/heads/master | awk '{print $1}')" = "$CLAIMED_MASTER" ] \
+    && [ -n "$(git -C "$ROOT/same" ls-remote origin "refs/heads/tasks/active/$CLAIMED_SHORT")" ]; then
+    ok "B5 active claim prevents completion and preserves the satisfies edge"
+else
+    bad "B5 active claimed source was completed, pruned, or lost its claim"
+fi
+( cd "$ROOT/same" && git config --unset core.abbrev )
+( cd "$ROOT/same" && TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=test "$TD" release "$CLAIMED" >/dev/null )
+
+RACE=$(mk_task "$ROOT/same" "Task: racing claimed supersede target")
+RACE_TRIGGER=$(mk_task "$ROOT/same" "Task: racing claimed supersede trigger")
+NRACE="task:owner/repo@$RACE"; NRACE_TRIGGER="task:owner/repo@$RACE_TRIGGER"
+ERACE=$(edge_id "$ROOT/same" "$NRACE" "$NRACE_TRIGGER" satisfies)
+RACE_SHORT=$(git -C "$ROOT/same" rev-parse --short "$RACE")
+WRACE_TRIGGER=$(complete_task "$ROOT/same" "$RACE_TRIGGER")
+RACE_MASTER=$(git -C "$ROOT/same" ls-remote origin refs/heads/master | awk '{print $1}')
+( cd "$ROOT/same" && source "$TD" --help >/dev/null && \
+    taskdag_activation_test_pre_fenced_push_hook() {
+        local claim token updates
+        unset -f taskdag_activation_test_pre_fenced_push_hook
+        claim=$(build_claim_commit "$RACE" fixture test 12 race $$) || return 1
+        token=$(taskdag_activation_snapshot_token) || return 1
+        updates=$(jq -ncS --arg ar "refs/heads/tasks/active/$RACE_SHORT" --arg an "$claim" \
+            --arg fr "refs/heads/tasks/frontier/$RACE_SHORT" --arg task "$RACE" \
+            '[{ref:$ar,old:"",new:$an},{ref:$fr,old:$task,new:""}] | sort_by(.ref)') || return 1
+        taskdag_activation_fenced_multi_push "$token" scheduling fixture-racing-claim fixture \
+            2026-07-26T00:00:00Z "$updates" >/dev/null
+    } && \
+    ! cmd_propagate_completion --node "$NRACE_TRIGGER" --witness "$WRACE_TRIGGER" ) >/dev/null 2>&1 || true
+if edge_present "$ROOT/same" "$ERACE" \
+    && [ "$(git -C "$ROOT/same" ls-remote origin refs/heads/master | awk '{print $1}')" = "$RACE_MASTER" ] \
+    && [ -n "$(git -C "$ROOT/same" ls-remote origin "refs/heads/tasks/active/$RACE_SHORT")" ]; then
+    ok "B6 canonical claim winning after preparation preserves completion evidence and edge"
+else
+    bad "B6 racing canonical claim was lost or allowed a partial satisfies fold"
+fi
+( cd "$ROOT/same" && TASK_DAG_CLAIMER=fixture TASK_DAG_CLAIMER_HOST=test "$TD" release "$RACE" >/dev/null )
+if "$TD" propagate-completion --node "$NRACE_TRIGGER" --witness "$WRACE_TRIGGER" >/dev/null 2>&1 \
+    && edge_absent "$ROOT/same" "$ERACE" \
+    && "$TD" facts --node "$NRACE" --no-fetch >/dev/null 2>&1; then
+    ok "B7 release followed by retry converges the previously claimed satisfies edge"
+else
+    bad "B7 released racing claim did not converge on retry"
+fi
+
 # ── C. cross-repo hint and lost-hint backstop ──────────────────────────────
 init_repo src owner/src
 init_repo dst owner/dst
@@ -175,7 +337,7 @@ else
 fi
 
 ED=$(edge_id "$ROOT/dst" "$NBD" "$NAS" requires)
-if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
+if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-mailbox >/dev/null 2>&1 ) \
     && edge_absent "$ROOT/dst" "$ED"; then
     ok "C3 lost-hint backstop re-derives foreign completion and folds edge"
 else
@@ -191,11 +353,11 @@ publish_pending_epic "$ROOT/same" 88 "$EP"
 CH=$(mk_task "$ROOT/same" "Task: child
 Type: leaf" "$EP")
 WCH=$(complete_task "$ROOT/same" "$CH")
-if ( cd "$ROOT/same" && "$TD" graph-converge --range "$WCH^..$WCH" --no-fetch >/dev/null 2>&1 ) \
-    && has_close_merge "$ROOT/same" 88 "$EP"; then
-    ok "D1 graph-converge auto-closes an epic whose child obligations are complete"
+if ( cd "$ROOT/same" && "$TD" graph-converge --range "$WCH^..$WCH" >/dev/null 2>&1 ) \
+    && ! has_close_merge "$ROOT/same" 88 "$EP"; then
+    ok "D1 canonical convergence does not activate the drained epic-close writer"
 else
-    bad "D1 graph-converge did not close child-complete epic"
+    bad "D1 canonical convergence unexpectedly closed an epic"
 fi
 
 # The close candidate is valid only for the exact origin-backed semantic
@@ -237,12 +399,12 @@ NXS="task:owner/src@$XS"; NEX="task:owner/dst@$EPX"
 WX=$(complete_task "$ROOT/src" "$XS")
 EX=$(edge_id "$ROOT/dst" "$NEX" "$NXS" requires)
 ( cd "$ROOT/dst" && git config "taskdag.peer-path.owner/src.path" "$ROOT/src" )
-if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
-    && has_close_merge "$ROOT/dst" 89 "$EPX" \
-    && edge_absent "$ROOT/dst" "$EX"; then
-    ok "E1 reconcile-backstop auto-closes a requires-only cross-repo epic before folding the edge"
+( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-mailbox >/dev/null 2>&1 ) || true
+if ! has_close_merge "$ROOT/dst" 89 "$EPX" \
+    && edge_present "$ROOT/dst" "$EX"; then
+    ok "E1 canonical backstop preserves an epic obligation while epic-close remains drained"
 else
-    bad "E1 reconcile-backstop did not close the cross-repo requires-only epic"
+    bad "E1 canonical backstop closed or erased a drained epic obligation"
 fi
 
 # ── F. materialisation intent blocks the independent graph closer ─────────
@@ -280,7 +442,7 @@ MCE_DONE=$(git -C "$ROOT/dst" commit-tree "$MCE_TREE" -p "$MCE_IMPL" -p "$CH_MCE
 git -C "$ROOT/dst" update-ref refs/heads/master "$MCE_DONE"
 git -C "$ROOT/dst" push -q origin master:master
 git -C "$ROOT/dst" fetch -q origin '+refs/heads/master:refs/remotes/origin/master'
-if ( cd "$ROOT/dst" && "$TD" graph-converge --range "$MCE_IMPL^..$MCE_DONE" --no-fetch >/dev/null 2>&1 ) \
+if ( cd "$ROOT/dst" && "$TD" graph-converge --range "$MCE_IMPL^..$MCE_DONE" >/dev/null 2>&1 ) \
     && ! has_close_merge "$ROOT/dst" 91 "$EP_MCE"; then
     ok "F1 graph convergence defers close until materialisation intent is durable"
 else
@@ -347,19 +509,20 @@ Closes-Epic: #99")
 git -C "$ROOT/src" update-ref refs/heads/master "$SRC_CLOSE"
 git -C "$ROOT/src" push -q origin master:master
 git -C "$ROOT/src" fetch -q origin '+refs/heads/master:refs/remotes/origin/master'
-if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
-    && edge_absent "$ROOT/dst" "$EFOLD" \
+if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-mailbox >/dev/null 2>&1 ) \
+    && edge_present "$ROOT/dst" "$EFOLD" \
     && ! has_close_merge "$ROOT/dst" 92 "$EP_FOLD"; then
-    ok "G1 satisfied materialised edge folds while another obligation remains"
+    ok "G1 canonical convergence preserves materialised epic obligations while close is drained"
 else
-    bad "G1 mixed-obligation setup did not fold safely"
+    bad "G1 canonical convergence erased or closed a materialised epic obligation"
 fi
 W_FOLD=$(complete_task "$ROOT/dst" "$CH_FOLD")
-if ( cd "$ROOT/dst" && "$TD" graph-converge --range "$W_FOLD^..$W_FOLD" --no-fetch >/dev/null 2>&1 ) \
-    && has_close_merge "$ROOT/dst" 92 "$EP_FOLD"; then
-    ok "G2 validated fold history permits close after the remaining obligation completes"
+if ( cd "$ROOT/dst" && "$TD" graph-converge --range "$W_FOLD^..$W_FOLD" >/dev/null 2>&1 ) \
+    && edge_present "$ROOT/dst" "$EFOLD" \
+    && ! has_close_merge "$ROOT/dst" 92 "$EP_FOLD"; then
+    ok "G2 later completions still cannot bypass the drained epic-close boundary"
 else
-    bad "G2 folded materialisation state permanently wedged epic closure"
+    bad "G2 later completion bypassed or erased the drained epic-close boundary"
 fi
 
 # ── H. empty-obligations epic never auto-closes ────────────────────────────
@@ -368,7 +531,7 @@ EPE=$(mk_task "$ROOT/dst" "Task: empty epic
 Issue: #90
 Type: epic")
 publish_pending_epic "$ROOT/dst" 90 "$EPE"
-if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-fetch --no-mailbox >/dev/null 2>&1 ) \
+if ( cd "$ROOT/dst" && "$TD" reconcile-backstop --no-mailbox >/dev/null 2>&1 ) \
     && ! has_close_merge "$ROOT/dst" 90 "$EPE"; then
     ok "H1 empty-obligations epic does not auto-close"
 else
