@@ -353,9 +353,10 @@ Operational caveats:
 ## Semantic migration drain (committed state)
 
 The committed `scripts/task-dag.d/semantic-migration-policy.json` is the sole
-authority for the pre-activation drain. It recognizes only the legacy read
-schema and authorizes only `legacy-read-only` semantics. Pre-activation
-epic-close, materialisation, completion-ingest, and projection writers are disabled;
+authority for the migration drain. It recognizes legacy and canonical-v1 read
+schemas and explicitly authorizes `legacy-read-only` plus the narrow
+`canonical-v1-completed-epic-close` semantic. General epic-close,
+materialisation, completion-ingest, and projection writers remain disabled;
 `task-dag migration-status --json` reports the strict policy consumed by every
 guarded entry point. A missing, malformed, or unsupported policy fails closed
 for those writers and for migration status, without disabling unrelated reads
@@ -368,12 +369,14 @@ mutator, guard, and policy from one checkout/archive revision and translate
 only exact status 75 into an explicit deferred-success result. Every other
 policy or runtime failure stays red.
 
-Once an activation authority exists, local epic closure no longer consults
-that legacy drain. It consumes the canonical root-completeness snapshot and
-publishes the close commit through the same activation-generation fence as the
-completion. Missing, malformed, incompatible, disabled, or disappearing
-activation authority never authorizes a close or a fallback to legacy
-semantics. The other legacy writer classes remain drained.
+The completed-decomposed numeric epic closer is the sole positive exception.
+It requires both explicit policy authorization and a stable enabled canonical
+activation, consumes the canonical root-completeness snapshot, and publishes
+through the same activation-generation fence as completion. An absent
+materialisation ref is an empty authority only when a coherent activation/ref
+advertisement proves that absence; a first reservation races through the same
+guard and makes the close retry. Missing, malformed, incompatible, disabled,
+or disappearing activation never authorizes a close or legacy fallback.
 
 Canonical graph convergence is not a legacy projection writer. Its three
 entry points (`propagate-completion`, `reconcile-backstop`, and
@@ -382,10 +385,9 @@ authorized only by a stable, enabled activation whose minimum-compatible
 task-dag commit descends from
 `73bfe103b6f5e1bddc318e5592085619c7f0f2f4`. Once activation authority exists,
 disabled, malformed, incompatible, disappearing, or moving authority fails
-closed without consulting the legacy policy. Epic-close, materialisation,
-completion-ingest, and legacy projection entry points remain statically
-drained; this cutover neither changes the policy file nor enables those writer
-classes.
+closed without consulting the legacy policy. General epic-close,
+materialisation, completion-ingest, and legacy projection entry points remain
+statically drained.
 
 An ordinary revert is safe only before any canonical-v1 activation,
 epoch-backed write, or other activation write has occurred. After activation,

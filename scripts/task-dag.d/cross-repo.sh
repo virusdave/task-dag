@@ -4047,7 +4047,7 @@ EOF
     [ -n "$reason" ] || { _xrepo_die "close-completed-epic: --reason is required to record rollout/done evidence or an approved exception."; return 2; }
     validate_ops_trailer_value "--reason" "$reason" || return 2
 
-    taskdag_migration_guard epic-close || return $?
+    taskdag_prepare_authorized_completed_epic_close close-completed-epic || return $?
 
     _xrepo_ensure_git_identity
 
@@ -4170,8 +4170,10 @@ EOF
         0) _xrepo_log "close-completed-epic: epic #${top_issue} already closed on master (concurrent close); nothing to do."; return 0 ;;
         1) ;; 2) return 2 ;; *) return 2 ;;
     esac
-    if ! taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip"; then
-        _xrepo_die "close-completed-epic: child-epic materialisation intent for #${top_issue} is not durably delegated; refusing to close."
+    local materialisation_rc=0
+    taskdag_materialisation_intents_durable "$top_issue" "$epic_sha" "$master_tip" || materialisation_rc=$?
+    if [ "$materialisation_rc" -ne 0 ]; then
+        _xrepo_die "close-completed-epic: child-epic materialisation intent for #${top_issue} is not durably delegated (rc=${materialisation_rc}); refusing to close."
         return 3
     fi
     master_tree="$(git rev-parse "${master_tip}^{tree}")"
@@ -4185,8 +4187,8 @@ EOF
         printf 'proved from origin/master plus origin task refs that the local DAG\n'
         printf 'subtree is complete with no live frontier, active, blocked, or\n'
         printf 'delegated child work remaining. This tree-equal merge records the\n'
-        printf 'epic SHA as a second parent so close-completed-issues.yml closes\n'
-        printf 'issue #%s and cleans up tasks/pending/%s.\n' "$top_issue" "$top_issue"
+        printf 'canonical close fact. GitHub issue closure and tasks/pending/%s\n' "$top_issue"
+        printf 'retirement remain deferred while projection is migration-drained.\n'
         printf '\n'
         printf 'Reason: %s\n' "$(printf '%s' "$reason" | tr '\n' ' ')"
         printf '\n'
@@ -4197,5 +4199,5 @@ EOF
 
     echo "created close commit ${close_sha}"
     cmd_publish "$close_sha"
-    echo "pushed master — issue #${top_issue} will close via close-completed-issues.yml"
+    echo "published canonical close fact — issue #${top_issue} projection and pending-ref retirement remain migration-drained"
 }

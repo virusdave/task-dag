@@ -8,11 +8,6 @@ ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
-if [ "$($TD migration-status --json | jq -r .mode)" = draining-legacy-writers ]; then
-  "$TD" close-completed-epic --issue 1 --reason fixture --yes >/dev/null 2>&1; rc=$?
-  [ "$rc" -eq 75 ] && { echo "PASS: legacy completed epic-close integration is drained"; exit 0; }
-  echo "FAIL: expected migration status 75, got $rc"; exit 1
-fi
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export TASK_DAG_GIT_NAME=t TASK_DAG_GIT_EMAIL=t@t
 export TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=myhost TASK_DAG_CLAIMER_PID=$$
@@ -20,6 +15,15 @@ export TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=myhost TASK_DAG_CLAIMER_PID=$$
 git init -q --bare "$ROOT/origin.git"
 git clone -q "$ROOT/origin.git" "$ROOT/wc"; cd "$ROOT/wc"
 echo seed > seed.txt; git add seed.txt; git commit -qm seed; git push -q origin HEAD:master
+git config taskdag.current-repo virusdave/task-dag
+runtime=$(git -C "$(dirname "$TD")/.." rev-parse HEAD)
+registry_commit=1111111111111111111111111111111111111111
+registry_blob=2222222222222222222222222222222222222222
+registry=$(jq -ncS --arg commit "$registry_commit" --arg blob "$registry_blob" '{schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$commit,blob:$blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"R_kgDOS8IpZA",name:"task-dag",repairMode:"off",repairBranch:null}]}')
+printf '%s\n' "$registry" >"$ROOT/registry"
+registry_id=$(source "$TD" --help >/dev/null; _taskdag_activation_registry_id "$ROOT/registry")
+jq -ncS --arg runtime "$runtime" --arg registry_commit "$registry_commit" --arg registry_blob "$registry_blob" --arg id "$registry_id" '{actor:"fixture",authoritativeTimestamp:"2026-07-26T00:00:00Z",minimumCompatibleTaskDagCommit:$runtime,registrySnapshot:{id:$id,schema:1,source:{repository:"virusdave/top-level",path:"registry.json",commit:$registry_commit,blob:$registry_blob},repositories:[{repository:"virusdave/task-dag",repositoryId:"R_kgDOS8IpZA",name:"task-dag",repairMode:"off",repairBranch:null}]},sourceTips:[{repository:"virusdave/task-dag",repositoryId:"R_kgDOS8IpZA",ref:"refs/heads/master",commit:$runtime}],state:"enabled"}' >"$ROOT/activation-spec"
+"$TD" activation apply --spec-file "$ROOT/activation-spec" >/dev/null || exit 1
 
 EMPTY_TREE=$(git mktree </dev/null)
 
@@ -99,10 +103,16 @@ if [ "${#L[@]}" = 3 ]; then ok "1a: breakdown published 3 leaves"; else bad "1a:
 complete_regular_leaf "${L[0]}" impl811.txt
 complete_ops_leaf "${L[1]}"
 "$TD" drop "${L[2]}" --yes >/dev/null 2>&1
-if "$TD" close-completed-epic --issue 811 --reason "rollout/done criteria recorded in issue trail" --yes >/dev/null 2>&1; then
+close_output=$("$TD" close-completed-epic --issue 811 --reason "rollout/done criteria recorded in issue trail" --yes 2>&1); close_rc=$?
+if [ "$close_rc" -eq 0 ]; then
   ok "1b: close-completed-epic exits 0 for completed decomposed epic"
 else
-  bad "1b: close-completed-epic failed for completed decomposed epic"
+  bad "1b: close-completed-epic failed for completed decomposed epic: $close_output"
+fi
+if grep -q 'projection and pending-ref retirement remain migration-drained' <<<"$close_output"; then
+  ok "1b2: success reports deferred projection without false issue-closure claim"
+else
+  bad "1b2: success did not report the projection drain: $close_output"
 fi
 if is_close_merge_on_origin_master 811 "$E1"; then
   ok "1c: pushed a Closes-Epic:#811 merge with the epic as a parent"

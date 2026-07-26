@@ -195,9 +195,20 @@ taskdag_materialise_edge_durable() {
 # parent in the validated authority must reach final and retain all exact
 # operation-bound projections before the parent can close.
 taskdag_materialisation_authority_durable() { # issue root-sha
-    local issue=$1 root_sha=$2 remote rc=0 tip token current path declaration slot state_path state peer peer_issue marker marker_sha tmp delegation from to eid
+    local issue=$1 root_sha=$2 remote rc=0 tip token current path declaration slot state_path state peer peer_issue marker marker_sha tmp delegation from to eid readback
     remote=$(git ls-remote --exit-code origin "$TASKDAG_MATERIALISATION_REF" 2>/dev/null) || rc=$?
-    [ "$rc" -ne 2 ] || return 2
+    if [ "$rc" -eq 2 ]; then
+        # Absence is a valid empty authority only when it is bound to one
+        # stable activation generation. Materialisation writers advance the
+        # same guard, so the later close publication CAS cannot race a first
+        # reservation into existence under this observation.
+        token=$(taskdag_activation_snapshot_token) || return 2
+        readback=$(git ls-remote --refs origin "$TASKDAG_ACTIVATION_REF" "$TASKDAG_MATERIALISATION_REF") || return 2
+        [ "$(awk -v r="$TASKDAG_ACTIVATION_REF" '$2==r{print $1}' <<<"$readback")" = "$(jq -r .authorityTip <<<"$token")" ] || return 2
+        [ -z "$(awk -v r="$TASKDAG_MATERIALISATION_REF" '$2==r{print $1}' <<<"$readback")" ] || return 2
+        TASKDAG_MATERIALISATION_VALIDATED_TIP="absent:$(jq -r .authorityTip <<<"$token")"
+        return 0
+    fi
     [ "$rc" -eq 0 ] || return 2
     tip=${remote%%[[:space:]]*}; [ -n "$tip" ] || return 2
     git fetch -q --no-tags origin "$TASKDAG_MATERIALISATION_REF" || return 2
