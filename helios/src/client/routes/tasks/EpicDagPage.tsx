@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import dagre from 'dagre'
-import { Pill } from '../../components/Pill.js'
 import {
   fetchTaskJson,
   usePolledData,
@@ -29,20 +28,32 @@ const STATUS_COLOR: Record<string, string> = {
   done: '#22c55e',
   'in-progress': '#f59e0b',
   blocked: '#ef4444',
-  pending: '#6b7280',
+  waiting: '#6b7280',
 }
 const STATUS_FILL: Record<string, string> = {
   ready: '#bbf7d0',
   done: '#dcfce7',
   'in-progress': '#fef3c7',
   blocked: '#fee2e2',
-  pending: '#f3f4f6',
+  waiting: '#f3f4f6',
 }
+
+export type TaskPlanStatus = 'all' | 'ready' | 'in-progress' | 'blocked' | 'waiting' | 'done'
+const TASK_PLAN_STATUSES = new Set<TaskPlanStatus>(['all', 'ready', 'in-progress', 'blocked', 'waiting', 'done'])
 
 export function EpicDagPage() {
   const { id = '', repository = '' } = useParams<{ id: string; repository: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [view, setView] = useState<'list' | 'graph'>('list')
-  const [selected, setSelected] = useState<TaskNode | null>(null)
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const rawStatus = searchParams.get('status')
+  const status = parseTaskPlanStatus(rawStatus)
+
+  useEffect(() => {
+    const normalized = canonicalTaskPlanSearch(searchParams)
+    if (normalized == null) return
+    setSearchParams(normalized, { replace: true })
+  }, [rawStatus, searchParams, setSearchParams])
 
   const { data, error, loading, refreshing, refresh } = usePolledData<DagResult>(
     () => fetchTaskJson<DagResult>(`/api/tasks/repositories/${repository}/epics/${id}/dag`),
@@ -77,6 +88,17 @@ export function EpicDagPage() {
   }
 
   const taskData = withoutEpicNodes(data)
+  const selected = selectedKey == null
+    ? null
+    : taskData.nodes.find((node) => taskNodeKey(node) === selectedKey) ?? null
+
+  function selectStatus(next: TaskPlanStatus): void {
+    if (next === status) return
+    const updated = new URLSearchParams(searchParams)
+    if (next === 'all') updated.delete('status')
+    else updated.set('status', next)
+    setSearchParams(updated)
+  }
 
   return (
     <section className="task-page" data-helios-capture-target="task-plan" data-helios-capture-ready="true">
@@ -102,22 +124,25 @@ export function EpicDagPage() {
 
       <SourceBanner source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
 
-      <div className="task-summary-row">
+      <div className="task-summary-row" role="group" aria-label="Filter tasks by status">
         {([
-          ['ready', 'Ready', '#22c55e'],
-          ['in-progress', 'In progress', STATUS_COLOR['in-progress']],
-          ['blocked', 'Blocked', STATUS_COLOR.blocked],
-          ['waiting', 'Waiting', STATUS_COLOR.pending],
-          ['done', 'Done', STATUS_COLOR.done],
-        ] as const).map(([status, label, color]) => (
-          <div
-            key={status}
-            className="task-summary-stat"
-            style={{ borderColor: color }}
+          ['all', 'All', taskData.summary.totalTasks],
+          ['ready', 'Ready'],
+          ['in-progress', 'In progress'],
+          ['blocked', 'Blocked'],
+          ['waiting', 'Waiting'],
+          ['done', 'Done'],
+        ] as const).map(([itemStatus, label, explicitCount]) => (
+          <button
+            type="button"
+            key={itemStatus}
+            className={`task-summary-stat${status === itemStatus ? ' task-summary-stat--active' : ''}`}
+            aria-pressed={status === itemStatus}
+            onClick={() => selectStatus(itemStatus)}
           >
-            <span className="task-summary-value">{taskData.summary.statusCounts[status] ?? 0}</span>
+            <span className="task-summary-value">{explicitCount ?? taskData.summary.statusCounts[itemStatus] ?? 0}</span>
             <span className="task-summary-label">{label}</span>
-          </div>
+          </button>
         ))}
       </div>
 
@@ -166,9 +191,15 @@ export function EpicDagPage() {
       </div>
 
       {view === 'list' ? (
-        <DagListView data={taskData} />
+        <DagListView data={taskData} status={status} />
       ) : (
-        <DagGraphView data={taskData} selected={selected} onSelect={setSelected} />
+        <DagGraphView
+          data={taskData}
+          status={status}
+          selected={selected}
+          selectedMissing={selectedKey != null && selected == null}
+          onSelect={(node) => setSelectedKey(node ? taskNodeKey(node) : null)}
+        />
       )}
       <DataStatus source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
 
@@ -176,7 +207,7 @@ export function EpicDagPage() {
   )
 }
 
-function DagListView({ data }: { data: DagResult }) {
+function DagListView({ data, status }: { data: DagResult; status: TaskPlanStatus }) {
   // Order by breakdown depth so parents precede children.
   const bySha = useMemo(() => new Map(data.nodes.map((n) => [n.sha, n])), [data.nodes])
   const ordered = useMemo(() => {
@@ -202,7 +233,7 @@ function DagListView({ data }: { data: DagResult }) {
 
   return (
     <div className="task-group-body">
-      {ordered.map(({ node, depth }) => (
+      {ordered.filter(({ node }) => taskMatchesPlanStatus(node, status)).map(({ node, depth }) => (
         <div
           key={`${node.repository}:${node.sha}`}
           style={{ marginLeft: `${Math.min(depth, 4) * 1.25}rem` }}
@@ -210,24 +241,34 @@ function DagListView({ data }: { data: DagResult }) {
           <TaskCard task={node} />
         </div>
       ))}
+      {ordered.every(({ node }) => !taskMatchesPlanStatus(node, status)) && (
+        <p className="subtle-copy">No {status === 'all' ? '' : `${status} `}tasks in this plan.</p>
+      )}
     </div>
   )
 }
 
 function DagGraphView({
   data,
+  status,
   selected,
+  selectedMissing,
   onSelect,
 }: {
   data: DagResult
+  status: TaskPlanStatus
   selected: TaskNode | null
+  selectedMissing: boolean
   onSelect: (n: TaskNode | null) => void
 }) {
   const layout = useMemo(() => layoutDag(data), [data])
   const selectedPanelRef = useRef<HTMLDivElement>(null)
+  const selectedIdentity = selected ? taskNodeKey(selected) : null
   useEffect(() => {
     if (selected) selectedPanelRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [selected])
+    // Reposition only for an operator selection change, not every polling clone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIdentity])
   if (layout.nodes.length === 0) {
     return (
       <article className="mini-card">
@@ -296,6 +337,7 @@ function DagGraphView({
           {layout.nodes.map((ln) => {
             const isSel = selected?.sha === ln.node.sha
             const visualStatus = graphStatusKey(ln.node)
+            const highlighted = taskMatchesPlanStatus(ln.node, status)
             return (
               <g
                 key={ln.node.sha}
@@ -308,6 +350,7 @@ function DagGraphView({
                   }
                 }}
                 role="button"
+                className={highlighted ? undefined : 'task-graph-node--dimmed'}
                 tabIndex={0}
                 aria-label={`${ln.node.title} (${statusLabel(ln.node)})`}
                 style={{ cursor: 'pointer' }}
@@ -335,28 +378,54 @@ function DagGraphView({
         <div ref={selectedPanelRef} style={{ marginTop: '1rem' }}>
           <div className="inline-row" style={{ justifyContent: 'space-between' }}>
             <strong>Selected task</strong>
-            <button type="button" className="task-link-button" onClick={() => onSelect(null)}>
-              Clear
-            </button>
+            <span className="inline-row wrap-row task-selected-actions" style={{ gap: '0.75rem' }}>
+              <Link className="task-link-button" to={`/tasks/${selected.repository}/task/${selected.sha}`}>
+                View full task details
+              </Link>
+              <button type="button" className="task-link-button" onClick={() => onSelect(null)}>
+                Clear
+              </button>
+            </span>
           </div>
           <div style={{ marginTop: '0.5rem' }}>
             <TaskCard task={selected} />
           </div>
         </div>
       )}
-      <div className="inline-row wrap-row" style={{ marginTop: '0.75rem', gap: '0.5rem' }}>
-        <Pill tone="success">Ready</Pill>
-        <Pill tone="success">Done</Pill>
-        <Pill tone="warning">In progress</Pill>
-        <Pill tone="danger">Blocked</Pill>
-        <Pill tone="muted">Waiting</Pill>
-      </div>
+      {selectedMissing && (
+        <article className="mini-card" style={{ marginTop: '1rem' }}>
+          <p>The selected task is no longer available in the current plan snapshot.</p>
+          <button type="button" className="task-link-button" onClick={() => onSelect(null)}>Clear selection</button>
+        </article>
+      )}
     </>
   )
 }
 
 export function graphStatusKey(task: Pick<TaskNode, 'status' | 'isReady'>): string {
-  return task.isReady ? 'ready' : task.status
+  if (task.status === 'pending') return task.isReady ? 'ready' : 'waiting'
+  return task.status
+}
+
+export function parseTaskPlanStatus(value: string | null): TaskPlanStatus {
+  return value != null && TASK_PLAN_STATUSES.has(value as TaskPlanStatus) ? value as TaskPlanStatus : 'all'
+}
+
+export function canonicalTaskPlanSearch(searchParams: URLSearchParams): URLSearchParams | null {
+  const rawStatus = searchParams.get('status')
+  if (rawStatus == null) return null
+  if (rawStatus !== '' && rawStatus !== 'all' && TASK_PLAN_STATUSES.has(rawStatus as TaskPlanStatus)) return null
+  const normalized = new URLSearchParams(searchParams)
+  normalized.delete('status')
+  return normalized
+}
+
+export function taskMatchesPlanStatus(task: Pick<TaskNode, 'status' | 'isReady'>, status: TaskPlanStatus): boolean {
+  return status === 'all' || graphStatusKey(task) === status
+}
+
+function taskNodeKey(task: Pick<TaskNode, 'repository' | 'sha'>): string {
+  return `${task.repository}:${task.sha}`
 }
 
 export function withoutEpicNodes(data: DagResult): DagResult {
