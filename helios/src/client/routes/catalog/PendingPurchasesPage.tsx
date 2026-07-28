@@ -794,7 +794,7 @@ export function PendingPurchasesPage() {
       // packet out of the archive. The rows-view loader re-runs for the
       // new URL, so we don't also revalidate here.
       if (packetId) {
-        navigate(buildPendingPurchasesHref(filters, { mode: 'rows', packetId, page: 1 }))
+        navigate(buildPendingPurchasesHref(filters, { mode: 'rows', packetId, page: 1, pageSize: 100 }))
         return
       }
     } else {
@@ -823,7 +823,7 @@ export function PendingPurchasesPage() {
 
   const packetsHref = buildPendingPurchasesHref(filters, { mode: 'packets', packetId: null, page: 1 })
   const rowsHref = data.activePacket
-    ? buildPendingPurchasesHref(filters, { mode: 'rows', packetId: data.activePacket.packetId, page: 1 })
+    ? buildPendingPurchasesHref(filters, { mode: 'rows', packetId: data.activePacket.packetId, page: 1, pageSize: 100 })
     : null
   const currentRevisionPacketId = refinementHistory?.root?.currentPacketId ?? null
   const activePacketIsCurrentRevision = !data.activePacket || currentRevisionPacketId === null
@@ -858,7 +858,7 @@ export function PendingPurchasesPage() {
               {`Generation ${generationJobStatus.job.status.replaceAll('_', ' ')}`}
             </Pill>
           ) : null}
-          {isAdmin ? <a className="ghost-button" href="#pp-admin">Admin</a> : null}
+          {isAdmin && !isGenerationInProgress ? <a className="ghost-button" href="#pp-admin">Admin</a> : null}
         </div>
       </header>
 
@@ -1274,7 +1274,7 @@ function PendingPurchasesRowsView({
   const candidateRevision = refinementHistory?.revisions.find(
     (revision) => revision.revisionStatus === 'candidate',
   ) ?? null
-  const isComparingProposedUpdate = candidateRevision?.packetId === activePacket?.packetId
+  const isComparingProposedUpdate = candidateRevision !== null
   const applyRequest = data.latestApplyRequest
   const isApplyingPacket = applyRequest !== null
     && (applyRequest.status === 'queued' || applyRequest.status === 'running')
@@ -1286,6 +1286,8 @@ function PendingPurchasesRowsView({
         pageSize: 100,
       })
     : packetsHref
+  const pendingRowCount = data.items.filter((row) => row.approvalStatus === 'pending').length
+  const allRowsReviewed = data.items.length > 0 && pendingRowCount === 0
 
   return (
     <PendingPurchaseDraftPriceRegistryContext.Provider value={draftPriceRegistry}>
@@ -1396,9 +1398,10 @@ function PendingPurchasesRowsView({
         </div>
       )}
 
-      {canApprove && activePacket && (selectedRowIds.length > 0 || approvedVisibleRowCount > 0) ? (
+      {canApprove && activePacket && allRowsReviewed && approvedVisibleRowCount > 0 ? (
         <div className="pp-apply-bar" role="region" aria-label="Queue apply">
           <div className="inline-row wrap-row pp-apply-bar-meta">
+            <Pill tone="success">All rows reviewed</Pill>
             <Pill tone="muted">{`${approvedVisibleRowCount} approved visible`}</Pill>
             <Pill tone={selectedApprovedRowIds.length > 0 ? 'success' : 'muted'}>{`${selectedApprovedRowIds.length} selected`}</Pill>
           </div>
