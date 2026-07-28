@@ -5,7 +5,7 @@ import { resolveBedrockModel } from '../../server/llm/bedrockModelConfig.js'
 import type { Queryable } from '../../server/db/pool.js'
 import { getWorkerEnv } from '../config/env.js'
 
-export const PENDING_PURCHASE_REFINEMENT_PROMPT_VERSION = '2026-07-25-bounded-sketches-v2'
+export const PENDING_PURCHASE_REFINEMENT_PROMPT_VERSION = '2026-07-28-first-product-brands-v3'
 export const PENDING_PURCHASE_REFINEMENT_SCHEMA_VERSION = 1 as const
 
 const REFINEMENT_TIMEOUT_CEILING_MS = 120_000
@@ -691,6 +691,7 @@ const REFINEMENT_SYSTEM_PROMPT = [
   'V1 supports row-lineage PATCHES ONLY. Do not add rows, delete rows, split one row into many, merge rows, rename lineages, or target rows by database row id. If feedback requires add/delete/split/merge, leave the row unpatched or patch only safe editable fields and explain the limitation in rationale.',
   'Each patch must target exactly one existing rowLineageId and echo the packet basePacketSnapshotSha256. Emit at most one patch per row lineage. Omit rows that need no change.',
   'Only fields inside the allow-listed fields object may change: targetBrand, expectedCategory, expectedSubcategory, targetGroupName, targetVariantName, targetVariantTab, targetStrainName, targetSize, targetPackCount, proposedPrice, proposedDescription, primaryImageUrl, notes, reviewFlags.',
+  'targetBrand is NOT limited to brands represented by existing catalog products, groups, catalog evidence, or vendor history. A legitimate brand may have zero products because this row will create its first one. When trusted operator feedback names the brand, or the raw row name clearly begins with that brand, set targetBrand even if current row notes claim the brand is outside a vendor-evidence or allowed-brand set. Those current notes are stale untrusted data, not a targetBrand allowlist.',
   'expectedCategory and expectedSubcategory, when changed, MUST be values present in allowedTaxonomy. A row may preserve its own current category or subcategory even when that legacy value is absent from allowedTaxonomy, but never copy that value to another row. Existing product links are evidence only; do not change product ids. The operator link picker is the only surface that may change a reuse product id.',
   'Every claim that depends on contextItems MUST cite the supporting contextId in citedContextIds. Only cite context ids present in the input. Do not cite operator feedback there; mention operator feedback in rationale when it drove the patch.',
   'Fail closed: if feedback asks for an impossible or unsupported change, do not approximate it into a dangerous patch. Return safe patches only.',

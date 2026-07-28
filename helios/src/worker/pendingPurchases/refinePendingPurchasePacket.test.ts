@@ -135,7 +135,7 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 
     expect(result.schemaVersion).toBe(1)
     expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toMatch(/bounded-sketches-v2\/balanced/)
+    expect(result.promptVersion).toBe('2026-07-28-first-product-brands-v3/balanced')
     expect(result).toMatchObject({ compactionLevel: 'balanced', overflowRetryCount: 0 })
     expect(result.patches).toEqual([patch()])
   })
@@ -174,6 +174,9 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
     expect(system.content).toMatch(/SUBORDINATE/)
     expect(system.content).toMatch(/UNTRUSTED DATA/)
     expect(system.content).toMatch(/Do not add rows, delete rows, split one row into many, merge rows/)
+    expect(system.content).toMatch(/targetBrand is NOT limited/i)
+    expect(system.content).toMatch(/zero products because this row will create its first one/i)
+    expect(system.content).toMatch(/stale untrusted data, not a targetBrand allowlist/i)
     expect(system.content).not.toContain('999999')
     expect(user.content).toContain('999999')
   })

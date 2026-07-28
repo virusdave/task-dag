@@ -216,7 +216,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
 
     expect(result.schemaVersion).toBe(1)
     expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toMatch(/market-snapping/)
+    expect(result.promptVersion).toBe('2026-07-28-first-product-brands-v4')
     expect(result.drafts).toHaveLength(1)
     const draft = result.drafts[0]!
     // Distributor identity comes from the INPUT, never the model echo.
@@ -741,6 +741,8 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
     expect(system.content).toMatch(/hintFacts.*UNTRUSTED|UNTRUSTED DATA/)
     // The existing-but-no-candidate guard steering the model to needs-review.
     expect(system.content).toMatch(/needs-review/)
+    expect(system.content).toMatch(/zero existing catalog groups or products/i)
+    expect(system.content).toMatch(/vendor history must not veto/i)
   })
 
   it('rejects operator guidance that exceeds the total-char budget (fail loud, no truncation)', async () => {
