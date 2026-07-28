@@ -867,7 +867,7 @@ export async function listPendingPurchaseRefinementHistory(
         ) as diff(field, before, after)
         where c.packet_id = $1
           and c.parent_row_id is not null
-          and diff.before is distinct from diff.after
+          and coalesce(diff.before, 'null'::jsonb) is distinct from coalesce(diff.after, 'null'::jsonb)
         order by c.id asc, diff.field asc
       `,
       [packetId],

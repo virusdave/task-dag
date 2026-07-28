@@ -148,7 +148,7 @@ export function PendingPurchaseVariantLinkOverride({
         Use this when the row should attach to a specific existing Sweed
         variant the generator didn't (or couldn't) match correctly.
       </p>
-      <div className="inline-row wrap-row" style={{ gap: '0.4rem', marginTop: '0.5rem' }} role="radiogroup" aria-label="Link override mode">
+      <div className="inline-row wrap-row" style={{ gap: '0.4rem', marginTop: '0.5rem' }} role="group" aria-label="Link override mode">
         <ModeButton
           active={state.mode === 'inherit'}
           disabled={disabled}

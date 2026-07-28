@@ -1,6 +1,28 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildPendingPurchaseSuggestionVerification } from './applyPendingPurchaseRequestJob.js'
+import {
+  buildPendingPurchaseSuggestionVerification,
+  readInactiveReuseTargetReason,
+} from './applyPendingPurchaseRequestJob.js'
+
+describe('readInactiveReuseTargetReason', () => {
+  const activeProduct = { enabled: true, id: 83257, name: 'Blue Dream 1.5g' }
+  const activeGroup = { brand: { id: 22, name: 'Dumbo' }, enabled: true, name: 'Electric' }
+
+  it('accepts an active product, group, and brand', () => {
+    expect(readInactiveReuseTargetReason(activeProduct, activeGroup)).toBeNull()
+  })
+
+  it.each([
+    [{ ...activeProduct, enabled: false }, activeGroup],
+    [activeProduct, { ...activeGroup, enabled: false }],
+    [{ ...activeProduct, name: 'DEAD - Blue Dream 1.5g' }, activeGroup],
+    [activeProduct, { ...activeGroup, name: 'RETIRED Electric' }],
+    [activeProduct, { ...activeGroup, brand: { id: 22, name: 'DELETED Dumbo' } }],
+  ])('blocks disabled and soft-retired targets', (product, group) => {
+    expect(readInactiveReuseTargetReason(product, group)).toContain('disabled or retired Sweed product 83257')
+  })
+})
 
 describe('buildPendingPurchaseSuggestionVerification', () => {
   it('marks verification as passed when every relevant position suggests the target product', () => {

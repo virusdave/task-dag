@@ -51,6 +51,8 @@ import {
   StructuredOverrideField,
   areStructuredOverridesEqual,
   buildStructuredOverridePayload,
+  effectiveStructured,
+  effectiveStructuredPackCount,
   readInitialDraftStructured,
   type StructuredOverrideKey,
 } from '../../components/canonicalProductRow/index.js'
@@ -399,7 +401,7 @@ export function PendingPurchasesPage() {
     if (mode !== 'rows' || !data.activePacket) {
       setRefinementHistory(null)
       setRefinementJobStatus(null)
-      return
+      return null
     }
     try {
       const history = await loadJson(
@@ -420,12 +422,14 @@ export function PendingPurchasesPage() {
       } else {
         setRefinementJobStatus(null)
       }
+      return history
     } catch (error) {
       setRefinementHistory(null)
       setRefinementJobStatus(null)
       if (error instanceof Error && !error.message.includes('409')) {
         setErrorMessage(error.message)
       }
+      return null
     }
   }, [data.activePacket, mode])
 
@@ -449,7 +453,7 @@ export function PendingPurchasesPage() {
         }
         setRefinementJobStatus(nextJobStatus)
         if (isJobTerminal(nextJobStatus.job.status)) {
-          await loadRefinementHistory()
+          const history = await loadRefinementHistory()
           await revalidator.revalidate()
           setRefinementSuccessMessage(
             nextJobStatus.job.status === 'succeeded'
@@ -458,6 +462,16 @@ export function PendingPurchasesPage() {
           )
           if (nextJobStatus.job.status !== 'succeeded') {
             setErrorMessage(nextJobStatus.job.lastError ?? 'The packet refinement job did not succeed.')
+          } else {
+            const candidate = history?.revisions.find((revision) => revision.revisionStatus === 'candidate')
+            if (candidate) {
+              navigate(buildPendingPurchasesHref(filters, {
+                mode: 'rows',
+                packetId: candidate.packetId,
+                page: 1,
+                pageSize: 100,
+              }))
+            }
           }
           return
         }
@@ -484,7 +498,7 @@ export function PendingPurchasesPage() {
         window.clearTimeout(timeoutId)
       }
     }
-  }, [loadRefinementHistory, refinementJobStatus, revalidator])
+  }, [filters, loadRefinementHistory, navigate, refinementJobStatus, revalidator])
 
   async function handleImport() {
     setIsImporting(true)
@@ -654,28 +668,18 @@ export function PendingPurchasesPage() {
         method: 'POST',
       })
 
-      if (response.jobId) {
-        const jobStatus = await waitForJob(response.jobId)
-        if (jobStatus.job.status !== 'succeeded') {
-          throw new Error(jobStatus.job.lastError ?? 'The pending-purchase apply job did not succeed.')
-        }
-
-        const applyRequestId = jobStatus.linkedRecords.pendingPurchaseApplyRequestId
-        setApplySuccessMessage({
-          jobId: response.jobId,
-          text: applyRequestId
-            ? `Completed pending-purchase apply request #${applyRequestId} (job #${response.jobId}).`
-            : `Completed the pending-purchase apply request (job #${response.jobId}).`,
-        })
-      } else {
-        setApplySuccessMessage({ jobId: null, text: 'Queued the pending-purchase apply request successfully.' })
-      }
+      setApplySuccessMessage({
+        jobId: response.jobId ?? null,
+        text: response.jobId
+          ? `Queued pending-purchase apply job #${response.jobId}.`
+          : 'Queued the pending-purchase apply request successfully.',
+      })
 
       setSelectedRowIds([])
       await revalidator.revalidate()
-      // Teleport the approver to the top so the apply status + job link
-      // they almost certainly want next is in view, instead of leaving
-      // them parked at the now-empty apply bar hunting for the result.
+      // Move to the focused apply-progress state as soon as the queue accepts
+      // the request. That state owns polling and terminal row outcomes; do not
+      // strand the operator in stale review controls while the worker runs.
       scrollToApplyStatus()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Could not queue the pending-purchase apply request.')
@@ -1271,7 +1275,7 @@ function PendingPurchasesRowsView({
   const candidateRevision = refinementHistory?.revisions.find(
     (revision) => revision.revisionStatus === 'candidate',
   ) ?? null
-  const isComparingProposedUpdate = candidateRevision !== null
+  const isComparingProposedUpdate = candidateRevision?.packetId === activePacket?.packetId
   const applyRequest = data.latestApplyRequest
   const isApplyingPacket = applyRequest !== null
     && (applyRequest.status === 'queued' || applyRequest.status === 'running')
@@ -3633,7 +3637,13 @@ function PendingPurchaseRowCard(
         </button>
       ) : null}
       {canApprove && effectiveApprovalStatus !== 'approved' ? (
-        <button className="primary-button" disabled={isApproving || isApplyLocked} onClick={() => handleApprovalChange('approved')} type="button">
+        <button
+          className="primary-button"
+          disabled={isApproving || isApplyLocked || isSaving || hasDraftOverrides}
+          onClick={() => handleApprovalChange('approved')}
+          title={hasDraftOverrides ? 'Save changes before approving this row.' : undefined}
+          type="button"
+        >
           Approve
         </button>
       ) : null}
@@ -3649,6 +3659,21 @@ function PendingPurchaseRowCard(
       ) : null}
     </div>
   ) : null
+  const effectiveBrand = effectiveStructured(item, 'targetBrand') ?? 'No brand'
+  const effectiveVariant = effectiveStructured(item, 'targetVariantName')
+    ?? effectiveStructured(item, 'targetGroupName')
+    ?? 'No target variant'
+  const effectiveCategory = effectiveStructured(item, 'expectedCategory') ?? 'No category'
+  const effectiveSize = effectiveStructured(item, 'targetSize')
+  const effectivePackCount = effectiveStructuredPackCount(item)
+  const collapsedIdentity = [
+    item.siteLabel,
+    effectiveBrand,
+    effectiveVariant,
+    effectiveCategory,
+    effectiveSize,
+    effectivePackCount === null ? null : `${effectivePackCount} pack`,
+  ].filter((value): value is string => value !== null).join(' · ')
 
   return (
     <CanonicalProductRow
@@ -3657,7 +3682,7 @@ function PendingPurchaseRowCard(
       title={<strong>{item.distributorProductName}</strong>}
       subtitle={
         <>
-          {item.siteLabel} · {item.targetBrand ?? 'No brand'} · {item.targetVariantName ?? item.targetGroupName ?? 'No target variant'}
+          {collapsedIdentity}
           {isCollapsed ? ` · ${collapsedSummaryPrice}` : ''}
         </>
       }

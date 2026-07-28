@@ -28,7 +28,7 @@ import {
   type ParsedReuseSnapshot,
 } from '../pendingPurchases/reuseDriftGuard.js'
 import { enqueueMarketRefreshForProducts } from '../litalerts/enqueueMarketRefresh.js'
-import { looksLikeSweedDeadScreenError } from './screensCarouselHelpers.js'
+import { isRetiredRecordName, looksLikeSweedDeadScreenError } from './screensCarouselHelpers.js'
 import { DependencyUnavailableWorkerError, RetryableWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { callSweedRpcForDealer, readSweedDealerContext } from '../sweed/client.js'
@@ -128,6 +128,22 @@ const ProductGroupDetailSchema = z.object({
   strain: NamedIdSchema.nullable().optional(),
   subcategory: NameOnlySchema.nullable().optional(),
 }).passthrough()
+
+export function readInactiveReuseTargetReason(
+  product: Pick<z.infer<typeof ProductSummarySchema>, 'enabled' | 'id' | 'name'>,
+  group: Pick<z.infer<typeof ProductGroupDetailSchema>, 'brand' | 'enabled' | 'name'>,
+): string | null {
+  if (
+    product.enabled !== false
+    && group.enabled !== false
+    && !isRetiredRecordName(product.name)
+    && !isRetiredRecordName(group.name)
+    && !isRetiredRecordName(group.brand?.name)
+  ) {
+    return null
+  }
+  return `targets disabled or retired Sweed product ${product.id}; choose an active product or force catalog creation.`
+}
 
 const ProductListShortResponseSchema = z.object({
   data: z.array(z.object({ id: z.coerce.number().int(), name: z.string().nullable().optional() }).passthrough()).default([]),
@@ -810,6 +826,20 @@ async function applyPendingPurchaseRow(
   }
   const groupBefore = group ? summarizeGroup(group) : null
   const productBefore = product ? summarizeProduct(product) : null
+
+  // Reviewer-forced links are identity-authoritative, but they are not exempt
+  // from Sweed liveness. A product can be disabled or soft-retired after the
+  // operator selects it (and API callers can bypass the picker entirely), so
+  // block every loaded reuse target before any mutation rather than trusting
+  // client-side filtering.
+  const inactiveReuseReason = product !== null && group !== null
+    ? readInactiveReuseTargetReason(product, group)
+    : null
+  if (product !== null && inactiveReuseReason !== null) {
+    const reason = `Pending-purchase row ${row.rowId} ${inactiveReuseReason}`
+    await logMutation('inactive reuse target blocked', { productId: product.id, reason })
+    throw new PendingPurchaseBlockedError(reason)
+  }
 
   if (driftPrecheck.kind === 'compare-live') {
     // A disabled product/group is not a live reuse target even if its identity

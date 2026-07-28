@@ -197,6 +197,7 @@ describe('listPendingPurchaseRefinementHistory', () => {
     expect(diffSql).toMatch(/p\.edited_structured_fields \? 'targetBrand'/)
     expect(diffSql).toMatch(/p\.edited_structured_fields \? 'targetReuseProductId'/)
     expect(diffSql).toMatch(/else p\.raw_row_json -> 'reuseProductId'/)
+    expect(diffSql).toMatch(/coalesce\(diff\.before, 'null'::jsonb\) is distinct from coalesce\(diff\.after, 'null'::jsonb\)/)
   })
 })
 
