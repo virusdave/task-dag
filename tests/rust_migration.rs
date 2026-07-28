@@ -341,6 +341,17 @@ fn migrates_exact_closure_deterministically_and_preserves_unrelated_state() {
         .unwrap()
         .to_owned();
     assert!(body(&f.work, &root_oid)["structuralParent"].is_null());
+    for command in ["context", "deps"] {
+        let out = Fixture::run_raw(&f.work, &[command, root_id], None, None);
+        assert!(
+            out.status.success(),
+            "{command} migrated root: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["taskId"], root_id);
+        assert_eq!(value["taskOid"], root_oid);
+    }
     for name in ["active", "a", "b", "c", "sibling"] {
         let legacy = &f.tasks[name];
         let map_oid = f

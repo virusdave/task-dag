@@ -112,7 +112,7 @@ pub(crate) fn deps(id: &str) -> Result<()> {
         return Err("task must have exactly one lifecycle ref".into());
     }
     repository::materialize(std::slice::from_ref(&found[0].2))?;
-    let task_oid = git_task(&found[0].2)?;
+    let task_oid = lifecycle_task(&found[0].0, &found[0].2, id)?;
     let task = crate::validators::task(&task_oid, id)?;
     let reqs = task["requirements"]
         .as_array()
@@ -148,13 +148,25 @@ pub(crate) fn context(id: &str) -> Result<()> {
         return Err("task must have exactly one lifecycle ref".into());
     }
     repository::materialize(std::slice::from_ref(&found[0].2))?;
-    let task_oid = git_task(&found[0].2)?;
+    let task_oid = lifecycle_task(&found[0].0, &found[0].2, id)?;
     let task = crate::validators::task(&task_oid, id)?;
     print_json(
         &json!({"directRequirements":task["requirements"],"state":found[0].0,"stateOid":found[0].2,"structuralParent":task["structuralParent"],"task":task,"taskId":id,"taskOid":task_oid}),
     )
 }
 
-fn git_task(state: &str) -> Result<String> {
-    crate::git::lifecycle_task(state)
+fn lifecycle_task(state: &str, oid: &str, id: &str) -> Result<String> {
+    let record = if state == "waiting" {
+        crate::validators::waiting(oid, id)?
+    } else {
+        crate::validators::lifecycle(state, oid, id)?
+    };
+    record[if state == "waiting" {
+        "parentTaskOid"
+    } else {
+        "taskOid"
+    }]
+    .as_str()
+    .map(str::to_owned)
+    .ok_or_else(|| format!("{state} record has no Task OID"))
 }
