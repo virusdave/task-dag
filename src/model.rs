@@ -7,7 +7,7 @@ use crate::{Result, git, repository::Snapshot};
 
 pub(crate) const ACTIVATION: &str = "refs/heads/tasks/v2/activation";
 pub(crate) const JOURNAL: &str = "refs/heads/tasks/system/transitions";
-const STATES: [&str; 4] = ["frontier", "active", "waiting", "done"];
+const STATES: [&str; 5] = ["frontier", "active", "blocked", "waiting", "done"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

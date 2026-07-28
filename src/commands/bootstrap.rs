@@ -6,13 +6,16 @@ use crate::{
     model::{self, ACTIVATION, JOURNAL, Update},
     receipts,
     repository::{self},
-    runtime,
+    runtime, runtime_authority,
 };
 use serde_json::{Value, json};
 
 pub(crate) fn init(trusted_floor: &str) -> Result<()> {
     model::oid(trusted_floor)?;
     let runtime = runtime()?;
+    git::output(["cat-file", "-e", &format!("{runtime}^{{commit}}")])
+        .map_err(|_| "embedded runtime must exist locally as a commit")?;
+    runtime_authority::validate(&runtime)?;
     let operation = format!("init-{trusted_floor}");
     let semantic = model::framed_digest("init-semantics", &[trusted_floor, &runtime]);
     if let Some(outputs) = receipts::replay("init", &operation, &semantic)? {
@@ -33,9 +36,9 @@ pub(crate) fn init(trusted_floor: &str) -> Result<()> {
         let journal = git::object_json(j)?;
         return if value
             == json!({"allowedRuntimeCommits":[runtime],"epoch":1,"formatVersion":2,"state":"enabled","trustedFloor":trusted_floor})
+            && crate::validators::activation(a).is_ok()
+            && crate::validators::journal(j, a).is_ok()
             && journal["activation"] == *a
-            && journal["operationId"] == "init"
-            && git::parents(j)?.first() == Some(a)
         {
             Ok(())
         } else {
@@ -54,17 +57,9 @@ pub(crate) fn init(trusted_floor: &str) -> Result<()> {
         return Err("trusted floor must equal advertised master".into());
     }
     repository::materialize(std::slice::from_ref(master))?;
-    git::output(["cat-file", "-e", &format!("{runtime}^{{commit}}")])
-        .map_err(|_| "runtime candidate must already exist locally")?;
-    if git::first_parent(&runtime)? != *master {
-        return Err(
-            "runtime commit immediate first parent must equal trusted floor and advertised master"
-                .into(),
-        );
-    }
     let activation = git::commit(
         &json!({"allowedRuntimeCommits":[runtime],"epoch":1,"formatVersion":2,"state":"enabled","trustedFloor":trusted_floor}),
-        std::slice::from_ref(&runtime),
+        &[runtime, master.clone()],
     )?;
     let result = json!({});
     let (receipt_ref, receipt_oid) = receipts::create(
@@ -108,7 +103,7 @@ pub(crate) fn activate_runtime(candidate: &str, lease: &str, operation: &str) ->
     if let Some(outputs) = receipts::replay("activate-runtime", operation, &semantic)? {
         return print_json(&outputs);
     }
-    let snap = repository::checked_snapshot(vec!["refs/heads/master".into()])?;
+    let snap = repository::checked_snapshot(Vec::new())?;
     let logical = model::framed_digest("activate-runtime-logical", &[candidate, lease, operation]);
     if let Some(current) = snap.refs.get(ACTIVATION) {
         repository::materialize(std::slice::from_ref(current))?;
@@ -121,15 +116,17 @@ pub(crate) fn activate_runtime(candidate: &str, lease: &str, operation: &str) ->
     }
     git::output(["cat-file", "-e", &format!("{candidate}^{{commit}}")])
         .map_err(|_| "candidate must exist locally")?;
-    let master = snap
-        .refs
-        .get("refs/heads/master")
-        .ok_or("origin does not advertise master")?;
-    if git::first_parent(candidate)? != *master {
-        return Err("candidate immediate first parent must equal advertised master".into());
-    }
+    runtime_authority::validate(candidate)?;
     let prior = git::object_json(lease)?;
     let current = runtime()?;
+    if !prior["allowedRuntimeCommits"]
+        .as_array()
+        .ok_or("activation runtimes malformed")?
+        .iter()
+        .any(|value| value.as_str() == Some(&current))
+    {
+        return Err("executing runtime is not authorized by leased activation".into());
+    }
     let epoch = prior["epoch"]
         .as_u64()
         .ok_or("activation epoch malformed")?

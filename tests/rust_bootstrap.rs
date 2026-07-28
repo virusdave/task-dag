@@ -28,6 +28,10 @@ fn cli(cwd: &Path, args: &[&str], token: &str, time: u64) -> Output {
         .env("TASKDAG_TEST_TOKEN", token)
         .env("TASKDAG_TEST_TIME", time.to_string())
         .env("TASKDAG_SESSION_ID", "integration-session")
+        .env(
+            "TASKDAG_TEST_RUNTIME_REMOTE",
+            cwd.parent().unwrap().join("runtime-origin.git"),
+        )
         .output()
         .unwrap()
 }
@@ -49,6 +53,10 @@ fn uncertain(cwd: &Path, args: &[&str], token: &str, time: u64) {
         .env("TASKDAG_TEST_TOKEN", token)
         .env("TASKDAG_TEST_TIME", time.to_string())
         .env("TASKDAG_SESSION_ID", "integration-session")
+        .env(
+            "TASKDAG_TEST_RUNTIME_REMOTE",
+            cwd.parent().unwrap().join("runtime-origin.git"),
+        )
         .env("TASKDAG_TEST_FAIL_AFTER_PUSH", "1")
         .output()
         .unwrap();
@@ -69,10 +77,20 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let origin = root.join("origin.git");
+    let runtime_origin = root.join("runtime-origin.git");
     ok(&root, &["init", "--bare", origin.to_str().unwrap()]);
+    ok(&root, &["init", "--bare", runtime_origin.to_str().unwrap()]);
     let source = Path::new(env!("CARGO_MANIFEST_DIR"));
     let runtime = env!("TASKDAG_BUILD_COMMIT");
-    let floor = ok(source, &["rev-parse", &format!("{runtime}^")]);
+    let floor = ok(
+        source,
+        &[
+            "commit-tree",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "-m",
+            "unrelated peer floor",
+        ],
+    );
     ok(
         source,
         &[
@@ -96,6 +114,12 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         ok(checkout, &["config", "user.email", "test@localhost"]);
     }
     ok(&a, &["fetch", source.to_str().unwrap(), runtime]);
+    success(
+        &a,
+        &["runtime", "publish", "--commit", runtime],
+        "unused-token-000",
+        100,
+    );
 
     uncertain(
         &a,
@@ -109,18 +133,40 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         "unused-token-000",
         100,
     );
-    let activation_lease = ok(
-        &a,
-        &["ls-remote", "origin", "refs/heads/tasks/v2/activation"],
-    )
-    .split_whitespace()
-    .next()
-    .unwrap()
-    .to_owned();
+    let activation_lease = success(&a, &["activation"], "unused-token-000", 100)["activationOid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let intervening_completion = ok(
+        &a,
+        &[
+            "commit-tree",
+            empty_tree,
+            "-p",
+            runtime,
+            "-p",
+            &floor,
+            "-m",
+            "intervening completion merge",
+        ],
+    );
     let candidate_one = ok(
         &a,
-        &["commit-tree", empty_tree, "-p", &floor, "-m", "runtime one"],
+        &[
+            "commit-tree",
+            empty_tree,
+            "-p",
+            &intervening_completion,
+            "-m",
+            "runtime one",
+        ],
+    );
+    success(
+        &a,
+        &["runtime", "publish", "--commit", &candidate_one],
+        "unused-token-000",
+        100,
     );
     let activation_one_args = [
         "activate-runtime",
@@ -143,7 +189,20 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     .to_owned();
     let candidate_two = ok(
         &a,
-        &["commit-tree", empty_tree, "-p", &floor, "-m", "runtime two"],
+        &[
+            "commit-tree",
+            empty_tree,
+            "-p",
+            runtime,
+            "-m",
+            "runtime two",
+        ],
+    );
+    success(
+        &a,
+        &["runtime", "publish", "--commit", &candidate_two],
+        "unused-token-000",
+        100,
     );
     success(
         &a,

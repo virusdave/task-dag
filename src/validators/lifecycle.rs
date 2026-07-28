@@ -9,7 +9,12 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
             oid,
             "frontier",
             &["formatVersion", "operationId", "taskId", "taskOid"],
-            &[&[], &["semanticId"], &["logicalId", "releasedClaim"]],
+            &[
+                &[],
+                &["semanticId"],
+                &["logicalId", "releasedClaim"],
+                &["logicalId", "releasedBlock"],
+            ],
         )?,
         "active" => object(
             oid,
@@ -32,7 +37,23 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 &["operationId"],
                 &["semanticId"],
                 &["operationId", "semanticId"],
+                &["operationId", "reclaimRequired"],
             ],
+        )?,
+        "blocked" => object(
+            oid,
+            "blocked",
+            &[
+                "authorization",
+                "blockedAt",
+                "claimTokenDigest",
+                "formatVersion",
+                "operationId",
+                "reason",
+                "taskId",
+                "taskOid",
+            ],
+            &[&[]],
         )?,
         "done" => object(
             oid,
@@ -48,7 +69,9 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
     };
     let task_oid = id_oid(&value, "taskId", "taskOid", id)?;
     let parents = git::parents(oid)?;
-    let task_position = if (state == "frontier" && value.get("releasedClaim").is_none())
+    let task_position = if (state == "frontier"
+        && value.get("releasedClaim").is_none()
+        && value.get("releasedBlock").is_none())
         || (state == "active" && parents.len() == 1)
     {
         0
@@ -81,14 +104,38 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
             }
         }
         "frontier" => {
-            let expected = if value.get("releasedClaim").is_some() {
-                2
-            } else {
-                1
-            };
+            let expected =
+                if value.get("releasedClaim").is_some() || value.get("releasedBlock").is_some() {
+                    2
+                } else {
+                    1
+                };
             if parents.len() != expected {
                 return Err("frontier record has wrong parent count".into());
             }
+        }
+        "blocked" => {
+            if parents.len() != 2 {
+                return Err("blocked record must have exact parents [active, Task]".into());
+            }
+            let active = lifecycle("active", &parents[0], id)?;
+            if active["taskOid"] != task_oid {
+                return Err("blocked record active parent names wrong Task object".into());
+            }
+            model::bounded(
+                "block reason",
+                value["reason"].as_str().ok_or("block reason malformed")?,
+                16_384,
+            )?;
+            model::bounded(
+                "block authorization",
+                value["authorization"]
+                    .as_str()
+                    .ok_or("block authorization malformed")?,
+                4_096,
+            )?;
+            digest("claimTokenDigest", &value["claimTokenDigest"])?;
+            value["blockedAt"].as_u64().ok_or("blockedAt malformed")?;
         }
         "done" if value.get("publicationCommit").is_some() => {
             validate_done_active_parent(&parents, &task_oid, id)?;

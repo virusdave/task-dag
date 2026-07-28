@@ -1,9 +1,11 @@
+pub(crate) mod blocked;
 pub(crate) mod bootstrap;
 pub(crate) mod breakdown;
 pub(crate) mod claim;
 pub(crate) mod claim_lifecycle;
 pub(crate) mod completion;
 pub(crate) mod readers;
+pub(crate) mod unsupported;
 
 use crate::Result;
 use serde_json::Value;

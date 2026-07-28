@@ -5,7 +5,9 @@ use std::{
 };
 
 fn main() {
-    emit_git_reruns();
+    if Path::new(".git").exists() {
+        emit_git_reruns();
+    }
     for path in ["Cargo.toml", "Cargo.lock", "build.rs", "src"] {
         println!("cargo:rerun-if-changed={path}");
     }

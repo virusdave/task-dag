@@ -8,8 +8,13 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 pub(crate) fn commit(value: &Value, parents: &[String]) -> Result<String> {
     let message = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    commit_with_tree(EMPTY_TREE, &message, parents)
+}
+
+pub(crate) fn commit_with_tree(tree: &str, message: &str, parents: &[String]) -> Result<String> {
+    oid(tree)?;
     let mut cmd = Command::new("git");
-    cmd.args(["commit-tree", EMPTY_TREE]);
+    cmd.args(["commit-tree", tree]);
     for p in parents {
         oid(p)?;
         cmd.args(["-p", p]);

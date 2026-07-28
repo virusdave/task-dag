@@ -15,7 +15,7 @@ pub(crate) struct Snapshot {
 }
 
 pub(crate) fn lifecycle_patterns(id: &str) -> Vec<String> {
-    ["frontier", "active", "waiting", "done"]
+    ["frontier", "active", "blocked", "waiting", "done"]
         .map(|state| model::state_ref(state, id))
         .into()
 }

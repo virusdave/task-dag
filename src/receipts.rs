@@ -76,7 +76,8 @@ fn reconstruct_outputs(domain: &str, parents: &[String]) -> Result<Value> {
             );
         }
         "claim" | "renew" => Some("active"),
-        "release" | "reap" => Some("frontier"),
+        "release" | "reap" | "unblock" => Some("frontier"),
+        "block" => Some("blocked"),
         _ => None,
     };
     if let Some(state) = state {
@@ -95,6 +96,8 @@ fn reconstruct_outputs(domain: &str, parents: &[String]) -> Result<Value> {
             "renew" => {
                 json!({"claimToken":value["claimToken"],"expiresAt":value["expiresAt"],"taskId":id})
             }
+            "block" => json!({"blockLease":parents[0],"taskId":id}),
+            "unblock" => json!({"taskId":id}),
             _ => json!({}),
         });
     } else if domain == "breakdown" {
@@ -137,13 +140,15 @@ fn validate_outputs(domain: &str, outputs: &Value) -> Result<()> {
             "claim" => &["claimToken", "expiresAt", "owner", "stateOid", "taskId"],
             _ => &["claimToken", "expiresAt", "taskId"],
         },
+        "block" => &["blockLease", "taskId"],
+        "unblock" => &["taskId"],
         "init" | "release" | "reap" | "activate-runtime" => &[],
         _ => return Err("operation receipt domain is unsupported".into()),
     };
     if map.len() != required.len() || !required.iter().all(|key| map.contains_key(*key)) {
         return Err("operation receipt output schema is malformed".into());
     }
-    for key in ["stateOid", "taskOid", "manifestOid"] {
+    for key in ["stateOid", "taskOid", "manifestOid", "blockLease"] {
         if let Some(value) = map.get(key) {
             model::oid(value.as_str().ok_or("receipt output OID malformed")?)?;
         }

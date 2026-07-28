@@ -34,10 +34,16 @@ fn activation_record(oid: &str) -> Result<(Value, Vec<String>)> {
         None => {
             if value["epoch"] != 1
                 || runtimes.len() != 1
-                || parents.len() != 1
+                || !matches!(parents.len(), 1 | 2)
                 || parents[0] != runtimes[0].as_str().ok_or("activation runtime malformed")?
             {
                 return Err("activation genesis shape is malformed".into());
+            }
+            let floor = value["trustedFloor"].as_str().unwrap();
+            if (parents.len() == 2 && parents[1] != floor)
+                || (parents.len() == 1 && git::first_parent(&parents[0])? != floor)
+            {
+                return Err("activation genesis trusted-floor relation is malformed".into());
             }
         }
         Some(logical) => {
@@ -82,6 +88,7 @@ pub(crate) fn activation(oid: &str) -> Result<Value> {
                 .as_array()
                 .ok_or("prior activation runtimes malformed")?
                 .contains(&runtimes[0])
+            || parents[0] == parents[1]
             || value["trustedFloor"] != prior["trustedFloor"]
         {
             return Err("activation rollover predecessor relation is malformed".into());

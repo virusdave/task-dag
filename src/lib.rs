@@ -2,9 +2,11 @@ mod cli;
 mod commands;
 mod git;
 mod journal;
+mod migration;
 mod model;
 mod receipts;
 mod repository;
+mod runtime_authority;
 mod validators;
 
 pub type Result<T> = std::result::Result<T, String>;

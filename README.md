@@ -134,19 +134,46 @@ atomic push, and authoritative readback.
 
 ```text
 task-dag init --trusted-floor <OID>
+task-dag runtime publish --commit <LOCAL-OID>
 task-dag create --operation-id <KEY> --title <TEXT> --description <TEXT> [--claim] [--requires <TASK-ID>...]
 task-dag claim <TASK-ID> --owner <OWNER> --operation-id <STABLE-KEY> [--ttl-hours 12]
 task-dag renew <TASK-ID> --claim-token <TOKEN> [--ttl-hours 12]
 task-dag release <TASK-ID> --claim-token <TOKEN>
 task-dag reap <TASK-ID>
+task-dag block <TASK-ID> --claim-token <TOKEN> --reason <TEXT> --authorization <TEXT> --operation-id <KEY>
+task-dag unblock <TASK-ID> --block-lease <OID> --authorization <TEXT> --operation-id <KEY>
 task-dag breakdown <TASK-ID> --spec <STRICT-JSON-FILE> --claim-token <TOKEN>
 task-dag complete <TASK-ID> --commit <PUBLICATION-OID> --claim-token <TOKEN>
 task-dag complete-ops <TASK-ID> --description <TEXT> --authorization <TEXT> --claim-token <TOKEN> [--evidence <URL-OR-TEXT>]...
 task-dag converge <TASK-ID>
 task-dag activate-runtime --commit <LOCAL-OID> --activation-lease <OID>
+task-dag activation
 task-dag show <TASK-ID>
 task-dag frontier
+task-dag blocked
+task-dag deps <TASK-ID>
+task-dag context <TASK-ID>
+task-dag migrate-v1 --root <LEGACY-OID> --operation-id <KEY>
 ```
+
+`block` consumes the exact live claim and publishes a manual blocked record;
+`unblock` consumes the exact block lease only when immutable direct
+requirements are currently done. Both operations publish an immutable receipt
+in the same atomic transition. `blocked`, `deps`, and `context` are direct,
+provider-free readers. Commands that are outside minimal v2 (`comment`,
+`delegate`, dependency mutation, `dag`, epic creation/composition, project,
+and provider operations) fail without network access or mutation and point to
+supported task-dag commands rather than suggesting raw Git edits.
+
+`migrate-v1` is an exceptional, single-repository importer and requires an
+operator-enforced writer freeze for its entire run. It performs one bounded
+legacy discovery (at most 100 closure tasks, 500 refs, and 10 MiB of metadata),
+rejects unsupported or conflicting legacy state before mutation, and atomically
+creates deterministic v2 tasks, lifecycle records, provenance mappings, an
+operation receipt, and a transition-journal entry while deleting the exact
+legacy closure refs. Exact operation replay is checked before discovery. Keep
+the freeze active if post-write readback reports that master or either v1
+authority changed.
 
 `breakdown` accepts
 `{"operationId":"...","children":[{"key":"...","title":"...","description":"...","requires":[],"claim":false}]}`.
@@ -156,11 +183,15 @@ Dependencies on children born in the same breakdown do not establish readiness.
 Run the binary built from the candidate implementation commit. Build identity is
 compile-time only; default builds reject dirty Rust, Cargo, or build inputs.
 Flake package builds inject the exact immutable flake revision without enabling
-the test seam. Initialization and activation accept only a local candidate whose
-immediate first parent is the currently advertised master; their atomic pushes
-carry that candidate. Activation retains both the current and candidate runtime
-for the handoff epoch, allowing the current runtime to publish the next runtime
-and that next runtime to activate a later first-parent candidate.
+the test seam. Publish each runtime first under the canonical immutable
+`refs/tags/task-dag-runtime-v2/<40-hex-commit>` ref. Initialization requires
+the trusted floor to equal the peer's advertised master while independently
+validating the embedded runtime publication; genesis has parents `[runtime,
+trusted floor]`. Activation does not inspect peer master. Its canonically
+published candidate is selected under the exact activation lease. Activation
+retains both the current and candidate runtime for the handoff epoch, allowing
+the current runtime to publish the next runtime and that next runtime to
+activate a later candidate without traversing repository history.
 
 Every claim mutation consumes an exact token. Renewal and release use the live
 token; reap accepts only an expired claim and returns it to frontier under an

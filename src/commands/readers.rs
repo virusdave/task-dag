@@ -21,6 +21,25 @@ pub(crate) fn show(id: &str) -> Result<()> {
     };
     print_json(&json!({"record":record,"ref":r,"state":state,"stateOid":oid,"taskId":id}))
 }
+
+pub(crate) fn activation() -> Result<()> {
+    let snap = repository::checked_snapshot(Vec::new())?;
+    let activation_oid = snap
+        .refs
+        .get(model::ACTIVATION)
+        .ok_or("v2 activation is absent")?;
+    let journal_oid = snap
+        .refs
+        .get(model::JOURNAL)
+        .ok_or("transition journal is absent")?;
+    let record = crate::validators::activation(activation_oid)?;
+    print_json(&json!({
+        "activationOid": activation_oid,
+        "journalOid": journal_oid,
+        "record": record,
+    }))
+}
+
 pub(crate) fn frontier() -> Result<()> {
     let first = repository::advertise(&["refs/heads/tasks/frontier/*".into()])?;
     let frontier_oids: Vec<_> = first.refs.values().cloned().collect();
@@ -67,4 +86,74 @@ pub(crate) fn frontier() -> Result<()> {
         }
     }
     print_json(&json!({"tasks":rows}))
+}
+
+pub(crate) fn blocked() -> Result<()> {
+    let snap = repository::advertise(&["refs/heads/tasks/blocked/*".into()])?;
+    repository::materialize(&snap.refs.values().cloned().collect::<Vec<_>>())?;
+    let mut tasks = Vec::new();
+    for (reference, oid) in &snap.refs {
+        let Some(id) = model::parse_state_ref(reference, "blocked") else {
+            continue;
+        };
+        model::valid_id(id)?;
+        let value = crate::validators::lifecycle("blocked", oid, id)?;
+        tasks.push(json!({"authorization":value["authorization"],"blockLease":oid,"blockedAt":value["blockedAt"],"reason":value["reason"],"taskId":id,"taskOid":value["taskOid"]}));
+    }
+    print_json(&json!({"tasks":tasks}))
+}
+
+pub(crate) fn deps(id: &str) -> Result<()> {
+    model::valid_id(id)?;
+    let first = repository::advertise(&repository::lifecycle_patterns(id))?;
+    let found = model::lifecycle(&first, id);
+    if found.len() != 1 {
+        return Err("task must have exactly one lifecycle ref".into());
+    }
+    repository::materialize(std::slice::from_ref(&found[0].2))?;
+    let task_oid = git_task(&found[0].2)?;
+    let task = crate::validators::task(&task_oid, id)?;
+    let reqs = task["requirements"]
+        .as_array()
+        .ok_or("Task requirements malformed")?;
+    let mut patterns = repository::lifecycle_patterns(id);
+    for req in reqs {
+        patterns.extend(repository::lifecycle_patterns(
+            req["taskId"]
+                .as_str()
+                .ok_or("requirement taskId malformed")?,
+        ));
+    }
+    let snap = repository::advertise(&patterns)?;
+    let mut rows = Vec::new();
+    for req in reqs {
+        let dep = req["taskId"].as_str().unwrap();
+        let states = model::lifecycle(&snap, dep);
+        let ready = states.len() == 1
+            && states[0].0 == "done"
+            && model::readiness(&snap, std::slice::from_ref(req)).is_ok();
+        rows.push(json!({"ready":ready,"state":states.first().map(|v|v.0.as_str()),"taskId":dep,"taskOid":req["taskOid"]}));
+    }
+    print_json(
+        &json!({"ready":rows.iter().all(|v|v["ready"]==true),"requirements":rows,"taskId":id,"taskOid":task_oid}),
+    )
+}
+
+pub(crate) fn context(id: &str) -> Result<()> {
+    model::valid_id(id)?;
+    let first = repository::advertise(&repository::lifecycle_patterns(id))?;
+    let found = model::lifecycle(&first, id);
+    if found.len() != 1 {
+        return Err("task must have exactly one lifecycle ref".into());
+    }
+    repository::materialize(std::slice::from_ref(&found[0].2))?;
+    let task_oid = git_task(&found[0].2)?;
+    let task = crate::validators::task(&task_oid, id)?;
+    print_json(
+        &json!({"directRequirements":task["requirements"],"state":found[0].0,"stateOid":found[0].2,"structuralParent":task["structuralParent"],"task":task,"taskId":id,"taskOid":task_oid}),
+    )
+}
+
+fn git_task(state: &str) -> Result<String> {
+    crate::git::lifecycle_task(state)
 }

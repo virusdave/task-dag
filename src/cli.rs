@@ -11,6 +11,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommands,
+    },
     Init {
         #[arg(long)]
         trusted_floor: String,
@@ -46,6 +50,26 @@ enum Commands {
         #[arg(long)]
         operation_id: String,
     },
+    Block {
+        task_id: String,
+        #[arg(long)]
+        claim_token: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        authorization: String,
+        #[arg(long)]
+        operation_id: String,
+    },
+    Unblock {
+        task_id: String,
+        #[arg(long)]
+        block_lease: String,
+        #[arg(long)]
+        authorization: String,
+        #[arg(long)]
+        operation_id: String,
+    },
     Breakdown {
         task_id: String,
         #[arg(long)]
@@ -77,7 +101,37 @@ enum Commands {
     Show {
         task_id: String,
     },
+    Activation,
+    Blocked,
+    Deps {
+        task_id: String,
+    },
+    Context {
+        task_id: String,
+    },
     Frontier,
+    Comment(Unsupported),
+    Delegate(Unsupported),
+    Dep(Unsupported),
+    Dag(Unsupported),
+    EpicCreate(Unsupported),
+    EpicCompose(Unsupported),
+    Project(Unsupported),
+    Provider(Unsupported),
+    MigrateV1 {
+        #[arg(long)]
+        root: String,
+        #[arg(long)]
+        operation_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommands {
+    Publish {
+        #[arg(long)]
+        commit: String,
+    },
 }
 
 #[derive(Args)]
@@ -107,8 +161,17 @@ pub(crate) struct CompleteOps {
     pub(crate) claim_token: String,
 }
 
+#[derive(Args)]
+struct Unsupported {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
 pub(crate) fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::Runtime {
+            command: RuntimeCommands::Publish { commit },
+        } => crate::runtime_authority::publish(&commit),
         Commands::Init { trusted_floor } => commands::bootstrap::init(&trusted_floor),
         Commands::Create(args) => commands::bootstrap::create(args),
         Commands::Claim {
@@ -132,6 +195,25 @@ pub(crate) fn run() -> Result<()> {
             task_id,
             operation_id,
         } => commands::claim_lifecycle::release(&task_id, None, true, &operation_id),
+        Commands::Block {
+            task_id,
+            claim_token,
+            reason,
+            authorization,
+            operation_id,
+        } => commands::blocked::block(
+            &task_id,
+            &claim_token,
+            &reason,
+            &authorization,
+            &operation_id,
+        ),
+        Commands::Unblock {
+            task_id,
+            block_lease,
+            authorization,
+            operation_id,
+        } => commands::blocked::unblock(&task_id, &block_lease, &authorization, &operation_id),
         Commands::Breakdown {
             task_id,
             spec,
@@ -153,6 +235,19 @@ pub(crate) fn run() -> Result<()> {
             operation_id,
         } => commands::completion::converge(&task_id, &operation_id),
         Commands::Show { task_id } => commands::readers::show(&task_id),
+        Commands::Activation => commands::readers::activation(),
+        Commands::Blocked => commands::readers::blocked(),
+        Commands::Deps { task_id } => commands::readers::deps(&task_id),
+        Commands::Context { task_id } => commands::readers::context(&task_id),
         Commands::Frontier => commands::readers::frontier(),
+        Commands::Comment(_) => commands::unsupported::fail("comment"),
+        Commands::Delegate(_) => commands::unsupported::fail("delegate"),
+        Commands::Dep(_) => commands::unsupported::fail("dep add/drop"),
+        Commands::Dag(_) => commands::unsupported::fail("dag"),
+        Commands::EpicCreate(_) => commands::unsupported::fail("epic-create"),
+        Commands::EpicCompose(_) => commands::unsupported::fail("epic-compose"),
+        Commands::Project(_) => commands::unsupported::fail("project"),
+        Commands::Provider(_) => commands::unsupported::fail("provider"),
+        Commands::MigrateV1 { root, operation_id } => crate::migration::run(&root, &operation_id),
     }
 }
