@@ -800,6 +800,7 @@ interface PendingPurchaseApplyRequestDbRow extends QueryResultRow {
 export async function getLatestPendingPurchaseApplyRequest(
   pool: Pool,
   packetId: number,
+  applyRequestId: number | null = null,
 ): Promise<PendingPurchaseApplyRequestSummary | null> {
   const result = await pool.query<PendingPurchaseApplyRequestDbRow>(
     `
@@ -822,10 +823,11 @@ export async function getLatestPendingPurchaseApplyRequest(
       from pending_purchase_apply_requests a
       left join users u on u.id = a.requested_by_user_id
       where a.packet_id = $1
+        and ($2::bigint is null or a.id = $2)
       order by a.created_at desc, a.id desc
       limit 1
     `,
-    [packetId],
+    [packetId, applyRequestId],
   )
   const row = result.rows[0]
   if (!row) return null

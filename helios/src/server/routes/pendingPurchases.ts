@@ -38,6 +38,7 @@ import {
   PendingPurchaseListResponseSchema,
   PendingPurchaseRepriceDebtResponseSchema,
   PendingPurchaseRowRouteParamsSchema,
+  QueuePendingPurchaseApplyAcceptedResponseSchema,
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
   QueuePendingPurchasePacketImportRequestSchema,
@@ -193,7 +194,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       ),
       activePacketPromise,
       query.packetId != null
-        ? getLatestPendingPurchaseApplyRequest(db, query.packetId)
+        ? getLatestPendingPurchaseApplyRequest(db, query.packetId, query.applyRequestId ?? null)
         : Promise.resolve(null),
       // Only load the dropdown options when the reviewer is on the
       // row-detail view — the archive list doesn't render override
@@ -980,13 +981,14 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           undoPayload: null,
         })
 
-        return { auditEventId, jobId }
+        return { auditEventId, jobId, pendingPurchaseApplyRequestId }
       })
 
       return reply.send(
-        MutationAcceptedResponseSchema.parse({
+        QueuePendingPurchaseApplyAcceptedResponseSchema.parse({
           auditEventId: mutationResult.auditEventId,
           jobId: mutationResult.jobId,
+          pendingPurchaseApplyRequestId: mutationResult.pendingPurchaseApplyRequestId,
           requestId,
         }),
       )

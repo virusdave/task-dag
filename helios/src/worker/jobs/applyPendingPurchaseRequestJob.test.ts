@@ -13,6 +13,10 @@ describe('readInactiveReuseTargetReason', () => {
     expect(readInactiveReuseTargetReason(activeProduct, activeGroup)).toBeNull()
   })
 
+  it('blocks a product whose active group cannot be resolved', () => {
+    expect(readInactiveReuseTargetReason(activeProduct, null)).toContain('active product group could not be resolved')
+  })
+
   it.each([
     [{ ...activeProduct, enabled: false }, activeGroup],
     [activeProduct, { ...activeGroup, enabled: false }],

@@ -19,6 +19,7 @@ import {
   PendingPurchaseRowSchema,
 } from '../domain/pendingPurchases.js'
 import { JobStatusResponseSchema } from './jobs.js'
+import { MutationAcceptedResponseSchema } from './mutations.js'
 
 const BlankStringSchema = z.preprocess(
   (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
@@ -131,6 +132,7 @@ export type PendingPurchaseListMode = z.infer<typeof PendingPurchaseListModeSche
 export const PendingPurchaseListQuerySchema = z.object({
   actionType: BlankStringSchema,
   after: BlankStringSchema,
+  applyRequestId: BlankNumberSchema,
   applyStatus: z.preprocess(
     (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
     PendingPurchaseRowApplyStatusSchema.optional(),
@@ -196,6 +198,13 @@ export const PendingPurchaseListResponseSchema = z.object({
   totalCount: z.number().int().min(0),
 })
 export type PendingPurchaseListResponse = z.infer<typeof PendingPurchaseListResponseSchema>
+
+export const QueuePendingPurchaseApplyAcceptedResponseSchema = MutationAcceptedResponseSchema.extend({
+  pendingPurchaseApplyRequestId: z.number().int().positive(),
+})
+export type QueuePendingPurchaseApplyAcceptedResponse = z.infer<
+  typeof QueuePendingPurchaseApplyAcceptedResponseSchema
+>
 
 /** A created SKU should remain at the sentinel for no longer than this. */
 export const PENDING_PURCHASE_REPRICE_DEBT_THRESHOLD_MINUTES = 30

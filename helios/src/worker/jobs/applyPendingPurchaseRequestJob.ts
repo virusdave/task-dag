@@ -131,8 +131,11 @@ const ProductGroupDetailSchema = z.object({
 
 export function readInactiveReuseTargetReason(
   product: Pick<z.infer<typeof ProductSummarySchema>, 'enabled' | 'id' | 'name'>,
-  group: Pick<z.infer<typeof ProductGroupDetailSchema>, 'brand' | 'enabled' | 'name'>,
+  group: Pick<z.infer<typeof ProductGroupDetailSchema>, 'brand' | 'enabled' | 'name'> | null,
 ): string | null {
+  if (group === null) {
+    return `targets Sweed product ${product.id}, but its active product group could not be resolved; choose another active product or force catalog creation.`
+  }
   if (
     product.enabled !== false
     && group.enabled !== false
@@ -797,9 +800,10 @@ async function applyPendingPurchaseRow(
     // disabled since validation — a drift BLOCK (reviewer must re-confirm), not
     // a generic failure. We convert ONLY that known signal to a null target so
     // the comparison below blocks it; every other error (transient, schema,
-    // unexpected) propagates unchanged, and the legacy/override paths never
-    // swallow load errors (which could otherwise fall into a duplicate create).
-    if (driftPrecheck.kind === 'compare-live' && looksLikeSweedDeadScreenError(fetchError)) {
+    // unexpected) propagates unchanged. Reviewer overrides convert the same
+    // known dead-record signal so the forced-target guard below can block it;
+    // legacy unguarded rows still never swallow load errors.
+    if ((driftPrecheck.kind === 'compare-live' || preserveLinkedVariantIdentity) && looksLikeSweedDeadScreenError(fetchError)) {
       product = null
       group = null
     } else {
@@ -832,7 +836,12 @@ async function applyPendingPurchaseRow(
   // operator selects it (and API callers can bypass the picker entirely), so
   // block every loaded reuse target before any mutation rather than trusting
   // client-side filtering.
-  const inactiveReuseReason = product !== null && group !== null
+  if (preserveLinkedVariantIdentity && product === null) {
+    const reason = `Pending-purchase row ${row.rowId} forced Sweed product ${row.reuseProductId} could not be resolved as an active product; choose another active product or force catalog creation.`
+    await logMutation('forced reuse target missing', { productId: row.reuseProductId, reason })
+    throw new PendingPurchaseBlockedError(reason)
+  }
+  const inactiveReuseReason = product !== null
     ? readInactiveReuseTargetReason(product, group)
     : null
   if (product !== null && inactiveReuseReason !== null) {

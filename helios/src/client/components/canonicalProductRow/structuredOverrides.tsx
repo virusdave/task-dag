@@ -165,10 +165,8 @@ export function buildStructuredOverridePayload(
     }
     if (key === 'targetPackCount') {
       const n = Number.parseInt(draftValue, 10)
-      if (!Number.isInteger(n) || n <= 0 || n > 1000) {
-        // Invalid input — skip rather than emit garbage; the user
-        // sees no diff so they'll notice their input was ignored.
-        continue
+      if (!/^\d+$/.test(draftValue) || !Number.isInteger(n) || n <= 0 || n > 1000) {
+        throw new Error('Pack count must be a whole number from 1 through 1000.')
       }
       result[key] = n
       anyOverride = true

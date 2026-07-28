@@ -15,6 +15,7 @@ import {
   PendingPurchaseListResponseSchema,
   PendingPurchaseRepriceDebtResponseSchema,
   PendingPurchaseRefinementHistoryResponseSchema,
+  QueuePendingPurchaseApplyAcceptedResponseSchema,
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
   QueuePendingPurchasePacketImportRequestSchema,
@@ -463,9 +464,13 @@ export function PendingPurchasesPage() {
           if (nextJobStatus.job.status !== 'succeeded') {
             setErrorMessage(nextJobStatus.job.lastError ?? 'The packet refinement job did not succeed.')
           } else {
-            const candidate = history?.revisions.find((revision) => revision.revisionStatus === 'candidate')
+            const completedTurn = history?.turns.find((turn) => turn.jobId === nextJobStatus.job.jobId)
+            const candidate = history?.revisions.find(
+              (revision) => revision.packetId === completedTurn?.candidatePacketId,
+            )
             if (candidate) {
               navigate(buildPendingPurchasesHref(filters, {
+                applyRequestId: null,
                 mode: 'rows',
                 packetId: candidate.packetId,
                 page: 1,
@@ -663,7 +668,7 @@ export function PendingPurchasesPage() {
         reason: 'Approver pending-purchase apply',
         rowIds: selectedApprovedRowIds,
       })
-      const response = await mutateJson('/api/catalog/pending-purchases/apply', MutationAcceptedResponseSchema, {
+      const response = await mutateJson('/api/catalog/pending-purchases/apply', QueuePendingPurchaseApplyAcceptedResponseSchema, {
         body: JSON.stringify(body),
         method: 'POST',
       })
@@ -676,7 +681,13 @@ export function PendingPurchasesPage() {
       })
 
       setSelectedRowIds([])
-      await revalidator.revalidate()
+      navigate(buildPendingPurchasesHref(filters, {
+        applyRequestId: response.pendingPurchaseApplyRequestId,
+        mode: 'rows',
+        packetId: data.activePacket.packetId,
+        page: 1,
+        pageSize: 100,
+      }))
       // Move to the focused apply-progress state as soon as the queue accepts
       // the request. That state owns polling and terminal row outcomes; do not
       // strand the operator in stale review controls while the worker runs.
@@ -753,7 +764,7 @@ export function PendingPurchasesPage() {
           : `Rolled back to revision r${response.selectedRevision.revisionNumber ?? '?'}.`,
       )
       await loadRefinementHistory()
-      navigate(buildPendingPurchasesHref(filters, { mode: 'rows', packetId: response.selectedRevision.packetId, page: 1 }))
+      navigate(buildPendingPurchasesHref(filters, { applyRequestId: null, mode: 'rows', packetId: response.selectedRevision.packetId, page: 1 }))
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Could not switch pending-purchase revision.')
     } finally {
@@ -795,7 +806,7 @@ export function PendingPurchasesPage() {
       // packet out of the archive. The rows-view loader re-runs for the
       // new URL, so we don't also revalidate here.
       if (packetId) {
-        navigate(buildPendingPurchasesHref(filters, { mode: 'rows', packetId, page: 1, pageSize: 100 }))
+        navigate(buildPendingPurchasesHref(filters, { applyRequestId: null, mode: 'rows', packetId, page: 1, pageSize: 100 }))
         return
       }
     } else {
@@ -822,7 +833,7 @@ export function PendingPurchasesPage() {
     ))
   }
 
-  const packetsHref = buildPendingPurchasesHref(filters, { mode: 'packets', packetId: null, page: 1 })
+  const packetsHref = buildPendingPurchasesHref(filters, { applyRequestId: null, mode: 'packets', packetId: null, page: 1 })
   const rowsHref = data.activePacket
     ? buildPendingPurchasesHref(filters, { mode: 'rows', packetId: data.activePacket.packetId, page: 1, pageSize: 100 })
     : null
@@ -1265,7 +1276,7 @@ function PendingPurchasesRowsView({
   selectedRowIds,
 }: PendingPurchasesRowsViewProps) {
   const filters = data.filters
-  const packetsHref = buildPendingPurchasesHref(filters, { mode: 'packets', packetId: null, page: 1 })
+  const packetsHref = buildPendingPurchasesHref(filters, { applyRequestId: null, mode: 'packets', packetId: null, page: 1 })
   const activePacket = data.activePacket
   const draftPriceRegistry = usePendingPurchaseDraftPriceRegistry()
   const overrideOptions = data.overrideOptions
@@ -1273,7 +1284,7 @@ function PendingPurchasesRowsView({
     (turn) => turn.status === 'queued' || turn.status === 'running',
   ) ?? null
   const candidateRevision = refinementHistory?.revisions.find(
-    (revision) => revision.revisionStatus === 'candidate',
+    (revision) => revision.revisionStatus === 'candidate' && revision.packetId === activePacket?.packetId,
   ) ?? null
   const isComparingProposedUpdate = candidateRevision?.packetId === activePacket?.packetId
   const applyRequest = data.latestApplyRequest
@@ -1281,6 +1292,7 @@ function PendingPurchasesRowsView({
     && (applyRequest.status === 'queued' || applyRequest.status === 'running')
   const currentPacketHref = refinementHistory?.currentRevision
     ? buildPendingPurchasesHref(filters, {
+        applyRequestId: null,
         mode: 'rows',
         packetId: refinementHistory.currentRevision.packetId,
         page: 1,
@@ -1741,7 +1753,10 @@ function PendingPurchaseRefinementPanel({
   const currentPacketId = root?.currentPacketId ?? null
   const activeRevision = history?.revisions.find((revision) => revision.packetId === activePacketId) ?? null
   const activeTurn = history?.turns.find((turn) => turn.status === 'queued' || turn.status === 'running') ?? null
-  const candidateRevision = history?.revisions.find((revision) => revision.revisionStatus === 'candidate') ?? null
+  const latestCandidatePacketId = history?.turns.find((turn) => turn.candidatePacketId !== null)?.candidatePacketId
+  const candidateRevision = history?.revisions.find(
+    (revision) => revision.revisionStatus === 'candidate' && revision.packetId === latestCandidatePacketId,
+  ) ?? null
   const latestFailedTurn = history?.turns[0]?.status === 'failed' ? history.turns[0] : null
   const latestFailureCode = readRefinementFailureCode(latestFailedTurn?.promptContext)
   const staleScopeFailure = latestFailureCode === 'stale_scope'
@@ -2723,6 +2738,7 @@ function hasAdvancedFilters(filters: PendingPurchaseListResponse['filters'], mod
 function buildPendingPurchasesHref(
   filters: PendingPurchaseListResponse['filters'],
   overrides: Partial<{
+    applyRequestId: number | null
     mode: 'packets' | 'rows' | null
     packetId: number | null
     page: number | null
@@ -2730,6 +2746,8 @@ function buildPendingPurchasesHref(
   }> = {},
 ): string {
   const params = new URLSearchParams()
+  const applyRequestId = overrides.applyRequestId === undefined ? filters.applyRequestId : overrides.applyRequestId
+  if (applyRequestId != null) params.set('applyRequestId', String(applyRequestId))
   const mode = overrides.mode === undefined ? filters.mode : overrides.mode
   if (mode) params.set('mode', mode)
   const packetId = overrides.packetId === undefined ? filters.packetId : overrides.packetId
@@ -3096,13 +3114,8 @@ function PendingPurchaseRowCard(
   // Detect whether the reviewer has any in-flight override drafts so we
   // can default the "Overrides" details to open in that case (otherwise
   // it stays collapsed to keep the row scannable on mobile).
-  const hasDraftStructuredOverrides = !areStructuredOverridesEqual(
-    item.editedStructuredFields ?? null,
-    mergeLinkOverrideIntoStructuredPayload(
-      buildStructuredOverridePayload(item, draftStructured),
-      draftLinkOverride,
-    ),
-  )
+  const hasDraftStructuredOverrides = JSON.stringify(draftStructured) !== JSON.stringify(readInitialDraftStructured(item))
+    || JSON.stringify(draftLinkOverride) !== JSON.stringify(readInitialLinkOverrideStateFromRow(item))
   const hasDraftOverrides = (
     draftPrice !== readDraftPrice(item)
     || draftDescription !== (item.editedProposedDescription ?? item.proposedDescription ?? '')
