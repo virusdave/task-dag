@@ -41,6 +41,8 @@ taskdag_capture_child_map_refs() {
 # enter the map.
 taskdag_prepare_child_map_from() {
     local authority_ref=$1
+    local timing
+    taskdag_timing_start timing child-map.prepare
     taskdag_reset_child_map
 
     local master us=$'\x1f' commit tree subject parents first parent map_file
@@ -71,6 +73,7 @@ taskdag_prepare_child_map_from() {
     done <"$map_file"
     rm -f "$map_file"
     TASKDAG_CHILD_MAP_READY=true
+    taskdag_timing_finish timing child-map.prepare ready
 }
 
 task_has_children() {

@@ -25,6 +25,26 @@ EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 unset __taskdag_contract_dir __taskdag_expected_entrypoint \
     __taskdag_contract_caller __taskdag_contract_caller_dir
 
+# Opt-in structured phase timing for diagnosing production command latency.
+# Keep normal command output unchanged; timing records are JSONL on stderr.
+taskdag_timing_start() { # variable phase
+    [ "${TASKDAG_TIMING:-0}" = 1 ] || return 0
+    local variable=$1 phase=$2 now=${EPOCHREALTIME/./}
+    printf -v "$variable" '%s' "$now"
+    jq -ncS --arg phase "$phase" --argjson wallMicros "$now" --argjson pid "$$" \
+      '{event:"start",phase:$phase,pid:$pid,schema:1,wallMicros:$wallMicros}' >&2
+}
+
+taskdag_timing_finish() { # variable phase outcome
+    [ "${TASKDAG_TIMING:-0}" = 1 ] || return 0
+    local variable=$1 phase=$2 outcome=$3 now=${EPOCHREALTIME/./} start
+    start=${!variable:-}
+    [ -n "$start" ] || return 0
+    jq -ncS --arg phase "$phase" --arg outcome "$outcome" --argjson wallMicros "$now" \
+      --argjson durationMicros "$((now - start))" --argjson pid "$$" \
+      '{durationMicros:$durationMicros,event:"finish",outcome:$outcome,phase:$phase,pid:$pid,schema:1,wallMicros:$wallMicros}' >&2
+}
+
 # Colors for output (if supported).
 if [ -t 1 ]; then
     RED='\033[0;31m'

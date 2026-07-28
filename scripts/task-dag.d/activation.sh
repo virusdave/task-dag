@@ -142,10 +142,11 @@ _taskdag_activation_parse_guard() {
 # Prints: active-commit authority-tip record-path record-digest.  A guard tip
 # is accepted only in the one replaceable shape owned above.
 taskdag_activation_validate_history() {
-    local tip=$1 tmp previous="" commit epoch=0 path prior_path record digest pred active authority_tip count tree old_floor new_floor
+    local tip=$1 tmp previous="" commit epoch=0 path prior_path record digest pred active authority_tip count tree old_floor new_floor timing
+    taskdag_timing_start timing activation.validate-history
     authority_tip=$tip
-    _taskdag_activation_full_checkout . || return 1
-    git rev-list --parents "$tip" >/dev/null 2>&1 || return 1
+    _taskdag_activation_full_checkout . || { taskdag_timing_finish timing activation.validate-history error; return 1; }
+    git rev-list --parents "$tip" >/dev/null 2>&1 || { taskdag_timing_finish timing activation.validate-history error; return 1; }
     active=$tip
     if git log -1 --format=%B "$tip" | grep -qx 'Task-Dag-Activation-Guard: v1'; then
         active=$(git rev-parse "$tip^") || return 1
@@ -190,6 +191,7 @@ taskdag_activation_validate_history() {
     [ "$epoch" -gt 0 ] || { rm -rf "$tmp"; return 1; }
     record=$(cat "$tmp/record"); tree=$(git rev-parse "$active^{tree}"); rm -rf "$tmp"
     [ -n "$tree" ] || return 1
+    taskdag_timing_finish timing activation.validate-history ready
     printf '%s\t%s\t%s\t%s\n' "$active" "$authority_tip" "$path" "$digest"
 }
 
@@ -270,10 +272,14 @@ _taskdag_activation_snapshot_token_for_tip() { # authority-tip
 }
 
 taskdag_activation_snapshot_token() {
-    local tip
+    local tip timing
+    taskdag_timing_start timing activation.snapshot-token
     tip=$(_taskdag_activation_fetch_authority) || return $?
     [ -n "$tip" ] || return 3
     _taskdag_activation_snapshot_token_for_tip "$tip"
+    local rc=$?
+    taskdag_timing_finish timing activation.snapshot-token "$rc"
+    return "$rc"
 }
 
 # Compatibility-aware writer snapshot. An absent or canonically disabled

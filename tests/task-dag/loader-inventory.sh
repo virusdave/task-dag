@@ -53,6 +53,21 @@ elif grep -q 'must be loaded by the task-dag entrypoint' "$ROOT/executed-err"; t
   ok "source contract direct execution fails loudly"
 else bad "source contract direct-execution failure was not actionable"; fi
 
+eval "$(source "$TD" --help >/dev/null; declare -f taskdag_timing_start taskdag_timing_finish)"
+unset TASKDAG_TIMING
+taskdag_timing_start quiet timing.fixture 2>"$ROOT/timing-quiet"
+taskdag_timing_finish quiet timing.fixture ready 2>>"$ROOT/timing-quiet"
+TASKDAG_TIMING=1
+taskdag_timing_start measured timing.fixture 2>"$ROOT/timing-jsonl"
+taskdag_timing_finish measured timing.fixture ready 2>>"$ROOT/timing-jsonl"
+unset TASKDAG_TIMING
+if [ ! -s "$ROOT/timing-quiet" ] \
+  && jq -se 'length==2 and .[0].event=="start" and .[1].event=="finish" and
+      all(.[];.schema==1 and .phase=="timing.fixture" and (.wallMicros|type=="number") and (.pid|type=="number")) and
+      .[1].outcome=="ready" and (.[1].durationMicros|type=="number" and .>=0)' "$ROOT/timing-jsonl" >/dev/null; then
+  ok "phase timing is default-quiet and emits strict opt-in JSONL"
+else bad "phase timing output contract changed"; fi
+
 if bash -c 'source "$1"' _ "$REPO_ROOT/scripts/task-dag.d/json.sh" >"$ROOT/json-order-out" 2>"$ROOT/json-order-err"; then
   bad "JSON foundation loaded without its source-contract prerequisite"
 elif grep -q 'requires source-contract.sh to be loaded first' "$ROOT/json-order-err"; then

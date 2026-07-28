@@ -121,7 +121,8 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch] [--expect
     local expected_activation_authority=""
     local candidate_mode local_activation local_graph local_master local_task_refs local_task_refs_digest
     local observed_task_refs observed_task_refs_digest reason max_attempts retry_budget
-    local prior_ready=${TASKDAG_CONSUMER_READY:-false} prior_mode=${TASKDAG_CONSUMER_MODE:-}
+    local prior_ready=${TASKDAG_CONSUMER_READY:-false} prior_mode=${TASKDAG_CONSUMER_MODE:-} timing attempt_timing
+    taskdag_timing_start timing "consumer.$consumer.total"
     [ -n "$consumer" ] || return 2
     shift
     while [ "$#" -gt 0 ]; do
@@ -155,6 +156,7 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch] [--expect
       || { echo "Error: canonical taskdag_cas_sleep backoff helper is unavailable" >&2; return 2; }
     max_attempts=$(( retry_budget + 1 ))
     for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+        taskdag_timing_start attempt_timing "consumer.$consumer.attempt-$attempt"
         TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result error "" "$attempt" "" "" "" "" "" "" "" "" "") || return 2
         candidate_mode=""
         if [ "$nofetch" = true ] && [ "$prior_ready" = true ] && [ "$prior_mode" = legacy ] \
@@ -260,6 +262,7 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch] [--expect
               "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
             local sleep_rc=0
             taskdag_cas_sleep "$attempt" || sleep_rc=$?
+            taskdag_timing_finish attempt_timing "consumer.$consumer.attempt-$attempt" "retry:$reason"
             if [ "$sleep_rc" -ne 0 ]; then
                 TASKDAG_CONSUMER_PREPARE_RESULT=$(_taskdag_consumer_result error "" "$attempt" "$before" "$local_activation" \
                   "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
@@ -281,6 +284,8 @@ _taskdag_consumer_prepare() { # <consumer-id> [--tip TIP] [--no-fetch] [--expect
           "$local_graph" "$local_master" "$local_task_refs_digest" "$after" "$graph_tip" "$master_tip" "$observed_task_refs_digest") || return 2
         TASKDAG_RECON_READY=true
         TASKDAG_CONSUMER_READY=true
+        taskdag_timing_finish attempt_timing "consumer.$consumer.attempt-$attempt" ready
+        taskdag_timing_finish timing "consumer.$consumer.total" ready
         return 0
     done
     echo "Error: semantic consumer preparation ended without a ready or exhausted result" >&2

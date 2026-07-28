@@ -139,15 +139,20 @@ taskdag__registry_binding_record() { # blob digest
 
 taskdag_epic_registry_validate_snapshot() { # commit [authority-tip] [origin-snapshot-json]
     local commit=$1 authority=${2:-} snapshot=${3:-} mode type blob path digest record projection key expected peer
-    local tmp roots epic_bindings provider_bindings
+    local tmp roots epic_bindings provider_bindings timing root_count=0
+    taskdag_timing_start timing "epic-registry.snapshot.$commit"
     tmp=$(mktemp -d) || return 1; roots=$tmp/roots; epic_bindings=$tmp/epic; provider_bindings=$tmp/provider
     : >"$roots"; : >"$epic_bindings"; : >"$provider_bindings"
     while read -r mode type blob path; do
         [ "$mode" = 100644 ] && [ "$type" = blob ] || { rm -rf "$tmp"; return 1; }
         case "$path" in
           roots/*.json)
+            root_count=$((root_count + 1))
             digest=${path#roots/}; digest=${digest%.json}; [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { rm -rf "$tmp"; return 1; }
-            record=$(taskdag__registry_root_record "$blob" "$digest" "$authority" "$snapshot") || { rm -rf "$tmp"; return 1; }
+            if ! record=$(taskdag__registry_root_record "$blob" "$digest" "$authority" "$snapshot"); then
+                taskdag_timing_finish timing "epic-registry.snapshot.$commit" "invalid-root:$root_count:$digest"
+                rm -rf "$tmp"; return 1
+            fi
             printf '%s\t%s\n' "$digest" "$record" >>"$roots";;
           bindings/by-epic/*.json)
             digest=${path#bindings/by-epic/}; digest=${digest%.json}; [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { rm -rf "$tmp"; return 1; }
@@ -185,14 +190,16 @@ taskdag_epic_registry_validate_snapshot() { # commit [authority-tip] [origin-sna
     [ "$(wc -l <"$epic_bindings")" -le "$(wc -l <"$roots")" ] || { rm -rf "$tmp"; return 1; }
     [ "$(wc -l <"$provider_bindings")" -eq "$(wc -l <"$epic_bindings")" ] || { rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
+    taskdag_timing_finish timing "epic-registry.snapshot.$commit" "ready:$root_count"
 }
 
 taskdag_epic_registry_validate_history() { # tip [authority-tip] [origin-snapshot-json]
-    local tip=$1 authority=${2:-} snapshot=${3:-} chain commit first=true parents parent status path
+    local tip=$1 authority=${2:-} snapshot=${3:-} chain commit first=true parents parent status path timing count=0
+    taskdag_timing_start timing epic-registry.validate-history
     chain=$(git rev-list --reverse --first-parent "$tip") || return 1
     [ "$(git rev-list --count "$tip")" = "$(printf '%s\n' "$chain" | sed '/^$/d' | wc -l)" ] || return 1
     while read -r commit; do
-        [ -n "$commit" ] || continue; parents=$(git cat-file -p "$commit" | grep -c '^parent ' || true)
+        [ -n "$commit" ] || continue; count=$((count + 1)); parents=$(git cat-file -p "$commit" | grep -c '^parent ' || true)
         if $first; then [ "$parents" -eq 0 ] || return 1; first=false
         else
             [ "$parents" -eq 1 ] || return 1; parent=$(git rev-parse "$commit^") || return 1
@@ -200,8 +207,12 @@ taskdag_epic_registry_validate_history() { # tip [authority-tip] [origin-snapsho
                 [ -z "$status" ] || [ "$status" = A ] || return 1
             done < <(git diff-tree --no-commit-id --name-status -r "$parent" "$commit")
         fi
-        taskdag_epic_registry_validate_snapshot "$commit" "$authority" "$snapshot" || return 1
+        if ! taskdag_epic_registry_validate_snapshot "$commit" "$authority" "$snapshot"; then
+            taskdag_timing_finish timing epic-registry.validate-history "invalid-snapshot:$count:$commit"
+            return 1
+        fi
     done <<<"$chain"
+    taskdag_timing_finish timing epic-registry.validate-history "ready:$count"
 }
 
 taskdag_epic_registry_tip() { git rev-parse -q --verify "${TASKDAG_EPIC_REGISTRY_REF}^{commit}" 2>/dev/null; }
@@ -358,8 +369,9 @@ taskdag_internal_mint_epic_root() { # spec-json
     local claim claim_id claimer host pid ttl note timestamp registry_old registry_new record binding key
     local rows pending_old active_old issue_old issue_number master_old idx tree record_blob binding_blob token updates result readback existing_record=false
     local scheduling_pending scheduling_active existing provider_existing retired=false adopted_live=false auto_adopt_active=''
-    local discovery snapshot refs_file ref oid snapshot_rows
+    local discovery snapshot refs_file ref oid snapshot_rows timing
     local -a snapshot_args
+    taskdag_timing_start timing epic-create.mint-total
     jq -e 'type=="object" and keys==["actor","authoritativeTimestamp","claim","descriptor","legacyAdoption","parentCommit","schema"] and
       .schema==1 and (.actor|type=="string" and length>0 and (test("[[:cntrl:]]")|not)) and
       (.authoritativeTimestamp|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
@@ -402,7 +414,10 @@ taskdag_internal_mint_epic_root() { # spec-json
     # Discover the immutable registry tip, then enumerate every legacy locator
     # it contains. The second ls-remote is the one exhaustive origin snapshot;
     # it repeats registry/master so movement during discovery fails closed.
+    local discovery_timing
+    taskdag_timing_start discovery_timing epic-create.discover-registry
     discovery=$(git ls-remote --refs origin "$TASKDAG_EPIC_REGISTRY_REF" refs/heads/master) || return 3
+    taskdag_timing_finish discovery_timing epic-create.discover-registry ready
     registry_old=$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$discovery")
     master_old=$(awk '$2=="refs/heads/master"{print $1}' <<<"$discovery"); [ -n "$master_old" ] || return 3
     if [ -n "$registry_old" ]; then
@@ -426,7 +441,10 @@ taskdag_internal_mint_epic_root() { # spec-json
     fi
     [ "$legacy" = null ] || jq -r '.issueRef,.pendingRef' <<<"$legacy" >>"$refs_file"
     mapfile -t snapshot_args < <(sort -u "$refs_file"); rm -f "$refs_file"
+    local snapshot_timing
+    taskdag_timing_start snapshot_timing epic-create.snapshot-refs
     rows=$(git ls-remote --refs origin "${snapshot_args[@]}") || return 3
+    taskdag_timing_finish snapshot_timing epic-create.snapshot-refs ready
     [ "$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$rows")" = "$registry_old" ] || return 3
     [ "$(awk '$2=="refs/heads/master"{print $1}' <<<"$rows")" = "$master_old" ] || return 3
     snapshot_rows=$(mktemp) || return 2
@@ -524,7 +542,10 @@ Note: $note"
     if [ -n "$registry_old" ]; then
         git fetch -q --no-tags origin "$registry_old" || return 3
         [ "$(git rev-parse FETCH_HEAD)" = "$registry_old" ] || return 3
+        local registry_timing
+        taskdag_timing_start registry_timing epic-create.validate-registry
         taskdag_epic_registry_validate_history "$registry_old" "$master_old" "$snapshot" || return 3
+        taskdag_timing_finish registry_timing epic-create.validate-registry ready
         existing=$(taskdag_epic_registry_record "$epic_id" "$registry_old" "$master_old" "$snapshot" 2>/dev/null || true)
         if [ -n "$existing" ]; then [ "$existing" = "$record" ] || return 3; existing_record=true; fi
         if [ "$(jq -r '.projection.issueId==null' <<<"$descriptor")" = false ]; then
@@ -579,7 +600,10 @@ Note: $note"
       '[{ref:$rr,old:$ro,new:$rn}] +
        (if $retired or $adopted then []
         else [{ref:$pr,old:"",new:$root}] + (if $claim=="" then [] else [{ref:$ar,old:"",new:$claim}] end) end)|sort_by(.ref)') || return 2
+    local push_timing
+    taskdag_timing_start push_timing epic-create.fenced-push
     taskdag_activation_fenced_multi_push "$token" scheduling mint-epic-root "$(jq -r .actor <<<"$spec")" "$timestamp" "$updates" || return 3
+    taskdag_timing_finish push_timing epic-create.fenced-push applied
     result=$TASKDAG_ACTIVATION_FENCED_PUSH_RESULT
     jq -e --arg rr "$TASKDAG_EPIC_REGISTRY_REF" --arg rn "$registry_new" '
       . as $result | .outcome=="applied" and any($result.readback.targets[]; .ref==$rr and .oid==$rn)' <<<"$result" >/dev/null || return 3
@@ -590,6 +614,7 @@ Note: $note"
       && [ "$(awk -v r="$TASKDAG_EPIC_REGISTRY_REF" '$2==r{print $1}' <<<"$readback")" = "$registry_new" ] \
       && [ "$(awk -v r="$scheduling_pending" '$2==r{print $1}' <<<"$readback")" = "$([ "$retired" = true ] || printf '%s' "$root")" ] \
       && [ "$(awk -v r="$scheduling_active" '$2==r{print $1}' <<<"$readback")" = "$([ "$retired" = true ] || printf '%s' "$claim")" ] || return 3
+    taskdag_timing_finish timing epic-create.mint-total ready
     jq -ncS --arg epicId "$epic_id" --arg rootCommit "$root" --arg rootRef "$scheduling_pending" --arg claimCommit "$claim" --arg activeRef "$scheduling_active" --argjson retired "$retired" \
       '{activeRef:(if $retired or $claimCommit=="" then null else $activeRef end),claimCommit:(if $retired or $claimCommit=="" then null else $claimCommit end),created:true,epicId:$epicId,rootCommit:$rootCommit,rootRef:$rootRef,schema:1}'
 }
