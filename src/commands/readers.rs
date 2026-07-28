@@ -46,8 +46,9 @@ pub(crate) fn frontier() -> Result<()> {
     repository::materialize(&frontier_oids)?;
     let mut patterns = vec!["refs/heads/tasks/frontier/*".into()];
     for (r, o) in &first.refs {
-        if model::parse_state_ref(r, "frontier").is_some() {
-            let id = model::parse_state_ref(r, "frontier").unwrap();
+        if let Some(id) = model::parse_state_ref(r, "frontier")
+            && model::valid_id(id).is_ok()
+        {
             let lifecycle = crate::validators::lifecycle("frontier", o, id)?;
             let task = lifecycle["taskOid"].as_str().unwrap();
             for req in crate::validators::task(task, id)?["requirements"]

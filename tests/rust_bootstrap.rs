@@ -138,6 +138,22 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         .unwrap()
         .to_owned();
     let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let legacy_frontier = ok(
+        &a,
+        &["commit-tree", empty_tree, "-m", "legacy v1 frontier task"],
+    );
+    ok(
+        &a,
+        &[
+            "push",
+            "origin",
+            &format!("{legacy_frontier}:refs/heads/tasks/frontier/1234567"),
+        ],
+    );
+    assert_eq!(
+        success(&a, &["frontier"], "unused-token-000", 100)["tasks"],
+        serde_json::json!([])
+    );
     let intervening_completion = ok(
         &a,
         &[
