@@ -539,7 +539,21 @@ beforeEach(async () => {
     throw new Error(`Unexpected in-process test query: ${text}`)
   })
   vi.mocked(refinePendingPurchasePacketWithLlm).mockResolvedValue({
+    compactionLevel: 'balanced',
+    contextItemCount: 1,
+    decisions: [{
+      basePacketSnapshotSha256: 'b'.repeat(64),
+      citedContextIds: ['catalog:pprline_501:7001'],
+      disposition: 'changed',
+      fields: { targetBrand: 'Runtz' },
+      rationale: 'The feedback and offered catalog product identify Pink Runtz.',
+      rowLineageId: 'pprline_501',
+    }],
+    degradedProviders: [],
+    estimatedInputTokens: 100,
     model: 'test-model',
+    omittedContextItemCount: 0,
+    overflowRetryCount: 0,
     patches: [{
       basePacketSnapshotSha256: 'b'.repeat(64),
       citedContextIds: ['catalog:pprline_501:7001'],
@@ -548,7 +562,7 @@ beforeEach(async () => {
       rowLineageId: 'pprline_501',
     }],
     promptVersion: 'test-prompt-v1',
-    schemaVersion: 1,
+    schemaVersion: 2,
   })
   server = Fastify()
   server.setErrorHandler((error, _request, reply) => {

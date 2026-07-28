@@ -69,6 +69,14 @@ const prepared = {
 
 const refinement = {
   degradedProviders: [],
+  decisions: [{
+    citedContextIds: ['catalog:pprline_501:7001'],
+    disposition: 'changed' as const,
+    fields: { targetBrand: 'Pink Runtz' },
+    rationale: 'Matches the offered product.',
+    rowLineageId: 'pprline_501',
+    basePacketSnapshotSha256: 'b'.repeat(64),
+  }],
   model: 'test-model',
   patches: [{
     basePacketSnapshotSha256: 'b'.repeat(64),
@@ -78,7 +86,7 @@ const refinement = {
     rowLineageId: 'pprline_501',
   }],
   promptVersion: 'test-prompt-v1',
-  schemaVersion: 1,
+  schemaVersion: 2,
 }
 
 beforeEach(() => {

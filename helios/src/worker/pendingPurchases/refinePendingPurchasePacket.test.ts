@@ -79,7 +79,15 @@ function patch(overrides: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 function modelResponse(body: unknown, finishReason = 'stop'): Response {
-  return modelContentResponse(JSON.stringify(body), finishReason)
+  let normalized = body
+  if (body !== null && typeof body === 'object' && Array.isArray((body as { patches?: unknown }).patches)) {
+    const { patches, ...rest } = body as { patches: Array<Record<string, unknown>> } & Record<string, unknown>
+    normalized = {
+      ...rest,
+      decisions: patches.map((candidate) => ({ ...candidate, disposition: 'changed' })),
+    }
+  }
+  return modelContentResponse(JSON.stringify(normalized), finishReason)
 }
 
 function modelContentResponse(content: string, finishReason = 'stop'): Response {
@@ -133,11 +141,12 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 
     const result = await refinePendingPurchasePacketWithLlm(buildInput())
 
-    expect(result.schemaVersion).toBe(1)
-    expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toBe('2026-07-28-first-product-brands-v3/balanced')
+    expect(result.schemaVersion).toBe(2)
+    expect(result.model).toBe('deepseek.v3.2')
+    expect(result.promptVersion).toBe('2026-07-28-complete-row-decisions-v4/balanced')
     expect(result).toMatchObject({ compactionLevel: 'balanced', overflowRetryCount: 0 })
     expect(result.patches).toEqual([patch()])
+    expect(result.decisions).toEqual([{ ...patch(), disposition: 'changed' }])
   })
 
   it('adds bounded optional evidence to the prompt without authorizing new product ids', async () => {
@@ -147,7 +156,7 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
     const userPayload = JSON.parse((body.messages as Array<{ role: string; content: string }>)[1]!.content)
-    const contextIds = userPayload.evidence.map((item: { contextId: string }) => item.contextId)
+    const contextIds = userPayload.rows[0].evidence.map((item: { contextId: string }) => item.contextId)
     expect(contextIds).toContain('prior-outcome:pprline_1:91')
     expect(contextIds).toContain('current-link:pprline_1:7001')
     expect(contextIds).toContain('litalerts-market:pprline_1:501')
@@ -220,12 +229,39 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
     )
   })
 
-  it('rejects duplicate patches for the same row lineage', async () => {
+  it('rejects duplicate decisions for the same row lineage', async () => {
     stubFetch(modelResponse({ patches: [patch(), patch()] }))
 
     await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(
-      /duplicate patches/,
+      /duplicate decisions/,
     )
+  })
+
+  it('rejects a response that omits any scoped row decision', async () => {
+    stubFetch(modelResponse({ patches: [patch()] }))
+
+    await expect(refinePendingPurchasePacketWithLlm(buildInput({
+      rows: [row(), row({ distributorProductId: 'dist-2', rowLineageId: 'pprline_2' })],
+    }))).rejects.toThrow(/omitted decisions.*pprline_2/)
+  })
+
+  it('rejects citations owned by another scoped row', async () => {
+    stubFetch(modelResponse({ decisions: [
+      { ...patch({ citedContextIds: ['ctx-row-2'] }), disposition: 'changed' },
+      {
+        basePacketSnapshotSha256: SNAPSHOT_HASH,
+        citedContextIds: [],
+        disposition: 'unchanged',
+        fields: null,
+        rationale: 'No change applies.',
+        rowLineageId: 'pprline_2',
+      },
+    ] }))
+
+    await expect(refinePendingPurchasePacketWithLlm(buildInput({
+      contextItems: [contextItem({ contextId: 'ctx-row-2', targetRowLineageId: 'pprline_2' })],
+      rows: [row(), row({ distributorProductId: 'dist-2', rowLineageId: 'pprline_2' })],
+    }))).rejects.toThrow(/cited evidence owned by rowLineageId "pprline_2"/)
   })
 
   it('rejects invalid taxonomy values', async () => {
@@ -343,9 +379,9 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
     const userPayload = JSON.parse(body.messages[1].content)
     expect(userPayload.operatorGuidance.verbatim).toBe(feedbackText)
     expect(userPayload.compaction.level).toBe('balanced')
-    expect(userPayload.evidence).toHaveLength(90)
-    expect(userPayload.evidence.some((item: { targetRowLineageId: string }) => item.targetRowLineageId === 'pprline_late')).toBe(true)
-    expect(userPayload.sketchVersion).toBe(1)
+    expect(userPayload.rows[0].evidence).toHaveLength(89)
+    expect(userPayload.rows[0].evidence.every((item: { contextId: string }) => item.contextId !== 'market-119')).toBe(true)
+    expect(userPayload.sketchVersion).toBe(2)
   })
 
   it('omits an oversized evidence record whole and records the omission', async () => {
@@ -356,16 +392,23 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
 
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
     const userPayload = JSON.parse(body.messages[1].content)
-    expect(userPayload.evidence.some((item: { contextId: string }) => item.contextId === 'ctx-catalog-1')).toBe(false)
+    expect(userPayload.rows[0].evidence.some((item: { contextId: string }) => item.contextId === 'ctx-catalog-1')).toBe(false)
     expect(result.omittedContextItemCount).toBeGreaterThan(0)
   })
 
   it('admits exact-current and accepted evidence for every row before lower-priority market evidence', async () => {
-    const fetchMock = stubFetch(modelResponse({ patches: [] }))
     const rows = Array.from({ length: 30 }, (_, index) => row({
       distributorProductId: `dist-${index}`,
       rowLineageId: `pprline_${String(index).padStart(2, '0')}`,
     }))
+    const fetchMock = stubFetch(modelResponse({ decisions: rows.map((target) => ({
+      basePacketSnapshotSha256: SNAPSHOT_HASH,
+      citedContextIds: [],
+      disposition: 'unchanged',
+      fields: null,
+      rationale: 'No requested change applies.',
+      rowLineageId: target.rowLineageId,
+    })) }))
     const contextItems = rows.flatMap((target) => [
       contextItem({ contextId: `current-${target.rowLineageId}`, priority: 0, targetRowLineageId: target.rowLineageId }),
       contextItem({ contextId: `prior-${target.rowLineageId}`, priority: 1, source: 'prior-packet', targetRowLineageId: target.rowLineageId }),
@@ -380,7 +423,9 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
     await refinePendingPurchasePacketWithLlm(buildInput({ contextItems, rows }))
 
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
-    const evidenceIds: string[] = JSON.parse(body.messages[1].content).evidence.map((item: { contextId: string }) => item.contextId)
+    const evidenceIds: string[] = JSON.parse(body.messages[1].content).rows
+      .flatMap((target: { evidence: Array<{ contextId: string }> }) => target.evidence)
+      .map((item: { contextId: string }) => item.contextId)
     expect(evidenceIds.filter((id) => id.startsWith('current-'))).toHaveLength(30)
     expect(evidenceIds.filter((id) => id.startsWith('prior-'))).toHaveLength(30)
     expect(evidenceIds).not.toContain('market-pprline_29')

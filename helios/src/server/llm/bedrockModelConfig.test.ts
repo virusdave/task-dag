@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   DEFAULT_AGENT_WASTE_CLUSTERER_MODEL,
+  DEFAULT_PENDING_PURCHASE_REFINEMENT_MODEL,
   DEFAULT_STANDARD_REASONING_MODEL,
 } from '../../shared/domain/bedrockModels.js'
 import type { Queryable } from '../db/pool.js'
@@ -39,6 +40,11 @@ describe('resolveBedrockModel', () => {
   it('falls back to the code default when no override row exists', async () => {
     const model = await resolveBedrockModel(dbWithSetting(null), 'pending_purchase_classifier')
     expect(model).toBe(DEFAULT_STANDARD_REASONING_MODEL)
+  })
+
+  it('uses the stronger refinement-only default model', async () => {
+    const model = await resolveBedrockModel(dbWithSetting(null), 'pending_purchase_refinement')
+    expect(model).toBe(DEFAULT_PENDING_PURCHASE_REFINEMENT_MODEL)
   })
 
   it('returns the operator override when one is set', async () => {

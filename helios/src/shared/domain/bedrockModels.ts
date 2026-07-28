@@ -21,6 +21,7 @@
 // classifier inherits it so all Helios LLM calls move together when this is
 // bumped; the per-context override page is for rare exceptions.
 export const DEFAULT_STANDARD_REASONING_MODEL = 'google.gemma-3-27b-it'
+export const DEFAULT_PENDING_PURCHASE_REFINEMENT_MODEL = 'deepseek.v3.2'
 
 // The default for the agent-waste clusterer (issue #68, parent
 // virusdave/top-level#51). Unlike the other use-points, this one deliberately
@@ -68,8 +69,8 @@ export const BEDROCK_MODEL_CONTEXTS: readonly BedrockModelContextDefinition[] = 
     key: 'pending_purchase_refinement',
     label: 'Pending-purchase refinement',
     description:
-      'Turns operator feedback on a pending-purchase packet into strict row-lineage patches. Output is schema-validated before any candidate revision can use it.',
-    defaultModel: DEFAULT_STANDARD_REASONING_MODEL,
+      'Turns operator feedback on a pending-purchase packet into complete row-lineage decisions. Output is schema-validated before any candidate revision can use it.',
+    defaultModel: DEFAULT_PENDING_PURCHASE_REFINEMENT_MODEL,
   },
   {
     key: 'agent_waste_clusterer',

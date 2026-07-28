@@ -167,6 +167,12 @@ export interface PendingPurchaseCandidateRefinement {
   readonly compactionLevel: string
   readonly contextItemCount: number
   readonly degradedProviders: readonly string[]
+  readonly decisions: readonly {
+    readonly citedContextIds: readonly string[]
+    readonly disposition: 'changed' | 'unchanged' | 'not_applicable' | 'needs_review'
+    readonly rationale: string
+    readonly rowLineageId: string
+  }[]
   readonly estimatedInputTokens: number
   readonly model: string
   readonly omittedContextItemCount: number
@@ -746,11 +752,23 @@ export async function createPendingPurchaseCandidateRevision(
       JSON.stringify({
         compactionLevel: refinement.compactionLevel,
         contextItemCount: refinement.contextItemCount,
+        decisionCounts: Object.fromEntries(
+          ['changed', 'unchanged', 'not_applicable', 'needs_review'].map((disposition) => [
+            disposition,
+            refinement.decisions.filter((decision) => decision.disposition === disposition).length,
+          ]),
+        ),
         degradedProviders: refinement.degradedProviders,
         estimatedInputTokens: refinement.estimatedInputTokens,
         omittedContextItemCount: refinement.omittedContextItemCount,
         overflowRetryCount: refinement.overflowRetryCount,
         patchCount: refinement.patches.length,
+        rowDecisions: refinement.decisions.map((decision) => ({
+          citedContextIds: decision.citedContextIds,
+          disposition: decision.disposition,
+          rationale: decision.rationale,
+          rowLineageId: decision.rowLineageId,
+        })),
         schemaVersion: refinement.schemaVersion,
       }),
     ],
