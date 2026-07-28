@@ -849,20 +849,20 @@ export async function listPendingPurchaseRefinementHistory(
         join pending_purchase_rows p on p.id = c.parent_row_id
         cross join lateral (
           values
-            ('proposedPrice', to_jsonb(p.proposed_price), to_jsonb(c.proposed_price)),
-            ('proposedDescription', to_jsonb(p.proposed_description), to_jsonb(c.proposed_description)),
-            ('primaryImageUrl', to_jsonb(p.primary_image_url), to_jsonb(c.primary_image_url)),
+            ('proposedPrice', to_jsonb(coalesce(p.edited_proposed_price, p.proposed_price)), to_jsonb(coalesce(c.edited_proposed_price, c.proposed_price))),
+            ('proposedDescription', to_jsonb(coalesce(p.edited_proposed_description, p.proposed_description)), to_jsonb(coalesce(c.edited_proposed_description, c.proposed_description))),
+            ('primaryImageUrl', to_jsonb(coalesce(p.edited_primary_image_url, p.primary_image_url)), to_jsonb(coalesce(c.edited_primary_image_url, c.primary_image_url))),
             ('notes', to_jsonb(p.notes), to_jsonb(c.notes)),
-            ('targetBrand', to_jsonb(p.target_brand), to_jsonb(c.target_brand)),
-            ('targetGroupName', to_jsonb(p.target_group_name), to_jsonb(c.target_group_name)),
-            ('targetVariantName', to_jsonb(p.target_variant_name), to_jsonb(c.target_variant_name)),
-            ('expectedCategory', to_jsonb(p.expected_category), to_jsonb(c.expected_category)),
-            ('expectedSubcategory', to_jsonb(p.expected_subcategory), to_jsonb(c.expected_subcategory)),
-            ('targetVariantTab', p.raw_row_json -> 'targetVariantTab', c.raw_row_json -> 'targetVariantTab'),
-            ('targetStrainName', p.raw_row_json -> 'targetStrain', c.raw_row_json -> 'targetStrain'),
-            ('targetSize', p.raw_row_json -> 'targetSize', c.raw_row_json -> 'targetSize'),
-            ('targetPackCount', p.raw_row_json -> 'targetPackCount', c.raw_row_json -> 'targetPackCount'),
-            ('targetReuseProductId', p.edited_structured_fields -> 'targetReuseProductId', c.edited_structured_fields -> 'targetReuseProductId'),
+            ('targetBrand', case when p.edited_structured_fields ? 'targetBrand' then p.edited_structured_fields -> 'targetBrand' else to_jsonb(p.target_brand) end, case when c.edited_structured_fields ? 'targetBrand' then c.edited_structured_fields -> 'targetBrand' else to_jsonb(c.target_brand) end),
+            ('targetGroupName', case when p.edited_structured_fields ? 'targetGroupName' then p.edited_structured_fields -> 'targetGroupName' else to_jsonb(p.target_group_name) end, case when c.edited_structured_fields ? 'targetGroupName' then c.edited_structured_fields -> 'targetGroupName' else to_jsonb(c.target_group_name) end),
+            ('targetVariantName', case when p.edited_structured_fields ? 'targetVariantName' then p.edited_structured_fields -> 'targetVariantName' else to_jsonb(p.target_variant_name) end, case when c.edited_structured_fields ? 'targetVariantName' then c.edited_structured_fields -> 'targetVariantName' else to_jsonb(c.target_variant_name) end),
+            ('expectedCategory', case when p.edited_structured_fields ? 'expectedCategory' then p.edited_structured_fields -> 'expectedCategory' else to_jsonb(p.expected_category) end, case when c.edited_structured_fields ? 'expectedCategory' then c.edited_structured_fields -> 'expectedCategory' else to_jsonb(c.expected_category) end),
+            ('expectedSubcategory', case when p.edited_structured_fields ? 'expectedSubcategory' then p.edited_structured_fields -> 'expectedSubcategory' else to_jsonb(p.expected_subcategory) end, case when c.edited_structured_fields ? 'expectedSubcategory' then c.edited_structured_fields -> 'expectedSubcategory' else to_jsonb(c.expected_subcategory) end),
+            ('targetVariantTab', case when p.edited_structured_fields ? 'targetVariantTab' then p.edited_structured_fields -> 'targetVariantTab' else p.raw_row_json -> 'targetVariantTab' end, case when c.edited_structured_fields ? 'targetVariantTab' then c.edited_structured_fields -> 'targetVariantTab' else c.raw_row_json -> 'targetVariantTab' end),
+            ('targetStrainName', case when p.edited_structured_fields ? 'targetStrainName' then p.edited_structured_fields -> 'targetStrainName' else p.raw_row_json -> 'targetStrain' end, case when c.edited_structured_fields ? 'targetStrainName' then c.edited_structured_fields -> 'targetStrainName' else c.raw_row_json -> 'targetStrain' end),
+            ('targetSize', case when p.edited_structured_fields ? 'targetSize' then p.edited_structured_fields -> 'targetSize' else p.raw_row_json -> 'targetSize' end, case when c.edited_structured_fields ? 'targetSize' then c.edited_structured_fields -> 'targetSize' else c.raw_row_json -> 'targetSize' end),
+            ('targetPackCount', case when p.edited_structured_fields ? 'targetPackCount' then p.edited_structured_fields -> 'targetPackCount' else p.raw_row_json -> 'targetPackCount' end, case when c.edited_structured_fields ? 'targetPackCount' then c.edited_structured_fields -> 'targetPackCount' else c.raw_row_json -> 'targetPackCount' end),
+            ('targetReuseProductId', case when p.edited_structured_fields ? 'targetReuseProductId' then p.edited_structured_fields -> 'targetReuseProductId' else p.raw_row_json -> 'reuseProductId' end, case when c.edited_structured_fields ? 'targetReuseProductId' then c.edited_structured_fields -> 'targetReuseProductId' else c.raw_row_json -> 'reuseProductId' end),
             ('reviewFlags', p.review_flags_json, c.review_flags_json)
         ) as diff(field, before, after)
         where c.packet_id = $1

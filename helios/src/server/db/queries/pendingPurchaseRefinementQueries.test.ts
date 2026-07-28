@@ -193,6 +193,10 @@ describe('listPendingPurchaseRefinementHistory', () => {
     ]) {
       expect(diffSql).toContain(`('${field}'`)
     }
+    expect(diffSql).toMatch(/coalesce\(p\.edited_proposed_price, p\.proposed_price\)/)
+    expect(diffSql).toMatch(/p\.edited_structured_fields \? 'targetBrand'/)
+    expect(diffSql).toMatch(/p\.edited_structured_fields \? 'targetReuseProductId'/)
+    expect(diffSql).toMatch(/else p\.raw_row_json -> 'reuseProductId'/)
   })
 })
 
