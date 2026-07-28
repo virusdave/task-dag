@@ -111,8 +111,9 @@ tests, or migration docs change.
 
 ## Native Rust bootstrap
 
-The native CLI is an incremental migration target; `scripts/task-dag` remains
-the canonical production CLI until the migration is complete. Do not install
+The `task-dag` Rust binary implements the minimal v2 self-hosting path;
+`scripts/task-dag` remains the canonical production CLI until the migration is
+complete. Do not install
 Rust, Cargo, or native libraries imperatively. The repository's flake provides
 the pinned development and build environment:
 
@@ -125,6 +126,48 @@ nix build                       # reproducible native package in result/
 nix run                         # run the flake's native package directly
 nix flake check                 # evaluate and build the package check
 ```
+
+The bootstrap command surface is intentionally small. Every command has
+side-effect-free `--help`; mutation commands use one origin advertisement,
+an activation-fenced append-only transition journal, explicit ref leases, one
+atomic push, and authoritative readback.
+
+```text
+task-dag init --trusted-floor <OID>
+task-dag create --operation-id <KEY> --title <TEXT> --description <TEXT> [--claim] [--requires <TASK-ID>...]
+task-dag claim <TASK-ID> --owner <OWNER> --operation-id <STABLE-KEY> [--ttl-hours 12]
+task-dag renew <TASK-ID> --claim-token <TOKEN> [--ttl-hours 12]
+task-dag release <TASK-ID> --claim-token <TOKEN>
+task-dag reap <TASK-ID>
+task-dag breakdown <TASK-ID> --spec <STRICT-JSON-FILE> --claim-token <TOKEN>
+task-dag complete <TASK-ID> --commit <PUBLICATION-OID> --claim-token <TOKEN>
+task-dag complete-ops <TASK-ID> --description <TEXT> --authorization <TEXT> --claim-token <TOKEN> [--evidence <URL-OR-TEXT>]...
+task-dag converge <TASK-ID>
+task-dag activate-runtime --commit <LOCAL-OID> --activation-lease <OID>
+task-dag show <TASK-ID>
+task-dag frontier
+```
+
+`breakdown` accepts
+`{"operationId":"...","children":[{"key":"...","title":"...","description":"...","requires":[],"claim":false}]}`.
+Requirements may be child keys or full v2 Task-IDs. Zero or more independently
+ready children may set `claim` to true; each receives a distinct claim token.
+Dependencies on children born in the same breakdown do not establish readiness.
+Run the binary built from the candidate implementation commit. Build identity is
+compile-time only; default builds reject dirty Rust, Cargo, or build inputs.
+Flake package builds inject the exact immutable flake revision without enabling
+the test seam. Initialization and activation accept only a local candidate whose
+immediate first parent is the currently advertised master; their atomic pushes
+carry that candidate. Activation retains both the current and candidate runtime
+for the handoff epoch, allowing the current runtime to publish the next runtime
+and that next runtime to activate a later first-parent candidate.
+
+Every claim mutation consumes an exact token. Renewal and release use the live
+token; reap accepts only an expired claim and returns it to frontier under an
+exact ref lease. Direct child completion creates an idempotent reconciliation
+marker for its structural parent. `converge` consumes one such marker only after
+reading the waiting manifest and exact done evidence for every direct child,
+then queues at most the next structural generation.
 
 `flake.lock` pins the same `nixpkgs` revision already used by the production
 development host. The flake deliberately uses nixpkgs' standard
@@ -139,15 +182,9 @@ filters; do not create a second scheduler. The aggregate
 `tests/task-dag/run-all.sh` gate invokes this command before its shell checks
 and fixtures.
 
-The planned canonical Rust stack is `clap` for root/command/subcommand parsing,
-`proptest` for shrinkable semantic and invariant tests, and `git2` for direct
-Git operations. `proptest` is provisioned now as test infrastructure; `clap`
-and `git2` will be added only with the first code that uses them, avoiding
-unused build, security, and platform cost. When remote Git transport is
-introduced, `git2` must enable both `https` and `ssh`. The same change must
-deliberately choose and encode a vendored-versus-system-library policy,
-including the platform-specific Nix inputs it actually requires, rather than
-relying on ambient system libraries.
+The bootstrap uses `clap`, `serde`, `sha2`, and the system `git` command. Using
+Git itself preserves receive-pack, atomic push, and force-with-lease behavior
+without adding libgit2 and its native transport dependency surface.
 ## Cross-repository composition
 
 `task-dag epic-compose` is the provider-free cross-repository coordinator. It

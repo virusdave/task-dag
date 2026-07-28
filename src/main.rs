@@ -1,3 +1,6 @@
 fn main() {
-    println!("task-dag native bootstrap: hello world");
+    if let Err(error) = task_dag::run() {
+        eprintln!("task-dag: {error}");
+        std::process::exit(1);
+    }
 }

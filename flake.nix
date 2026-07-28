@@ -23,7 +23,7 @@
         let
           pkgs = pkgsFor system;
           taskDagNative = pkgs.rustPlatform.buildRustPackage {
-            pname = "task-dag-native";
+            pname = "task-dag";
             version = "0.1.0";
             src = pkgs.lib.fileset.toSource {
               root = ./.;
@@ -31,21 +31,25 @@
                 ./Cargo.toml
                 ./Cargo.lock
                 ./src
+                ./build.rs
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
-            meta.mainProgram = "task-dag-native";
+            postPatch = ''
+              printf '%s\n' '${self.rev or (throw "task-dag production builds require an immutable flake source revision")}' > .taskdag-build-revision
+            '';
+            meta.mainProgram = "task-dag";
           };
         in
         {
           default = taskDagNative;
-          task-dag-native = taskDagNative;
+          task-dag = taskDagNative;
         });
 
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/task-dag-native";
+          program = "${self.packages.${system}.default}/bin/task-dag";
         };
       });
 
