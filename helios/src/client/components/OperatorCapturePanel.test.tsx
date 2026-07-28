@@ -41,6 +41,10 @@ describe('parseOperatorCaptureQuery', () => {
     expect(parseOperatorCaptureQuery(`${search()}&captureExtra=1`)).toMatchObject({ mode: 'invalid' })
     expect(parseOperatorCaptureQuery(search({ captureRedirect: 'https://evil.example/steal' }))).toMatchObject({ mode: 'invalid' })
     expect(parseOperatorCaptureQuery(search())).toMatchObject({ mode: 'capture' })
+    expect(parseOperatorCaptureQuery(search({ captureTarget: 'pending-purchases-review' }))).toMatchObject({
+      mode: 'capture',
+      value: { target: 'pending-purchases-review' },
+    })
   })
 })
 

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 const CAPTURE_TARGETS = [
+  'pending-purchases-review',
   'tasks-overview',
   'tasks-queue',
   'task-detail',

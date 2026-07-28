@@ -834,7 +834,11 @@ export function PendingPurchasesPage() {
     : `${data.totalCount} row${data.totalCount === 1 ? '' : 's'}`
 
   return (
-    <section className="pending-purchases-page">
+    <section
+      className="pending-purchases-page"
+      data-helios-capture-ready="true"
+      data-helios-capture-target="pending-purchases-review"
+    >
       {/* Reviewer-first chrome: tight title, the canonical answer (packets
           archive or rows for a packet) is the only thing prominent at the
           top. Generation / import / job status / methodology all live in
