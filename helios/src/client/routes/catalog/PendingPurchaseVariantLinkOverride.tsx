@@ -368,7 +368,7 @@ function VariantSearchPanel({
             >
               <button
                 className="ghost-button"
-                disabled={disabled}
+                disabled={disabled || hit.isDisabled}
                 onClick={() => onPick(hit)}
                 style={{
                   textAlign: 'left',
@@ -378,7 +378,9 @@ function VariantSearchPanel({
                   alignItems: 'flex-start',
                   background: forcedProductId === hit.productId ? 'rgba(255, 204, 0, 0.12)' : undefined,
                 }}
-                title={`Link this row to Sweed product ${hit.productId}`}
+                title={hit.isDisabled
+                  ? `Sweed product ${hit.productId} is disabled and cannot be selected.`
+                  : `Link this row to Sweed product ${hit.productId}`}
                 type="button"
               >
                 {hit.imageUrl ? (

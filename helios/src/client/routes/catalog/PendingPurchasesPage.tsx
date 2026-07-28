@@ -35,6 +35,7 @@ import {
   type PendingPurchaseOperatorNoteDocument,
   type PendingPurchasePacketRevisionSummary,
   type PendingPurchaseRefinementHistoryResponse,
+  type PendingPurchaseRefinementTurnSummary,
   type PendingPurchaseRevisionRowDiff,
   type PendingPurchaseRow,
   type PendingPurchaseRowSnapshotRef,
@@ -832,6 +833,8 @@ export function PendingPurchasesPage() {
   const totalLabel = mode === 'packets'
     ? `${data.totalCount} packet${data.totalCount === 1 ? '' : 's'}`
     : `${data.totalCount} row${data.totalCount === 1 ? '' : 's'}`
+  const isGenerationInProgress = generationJobStatus !== null
+    && !isJobTerminal(generationJobStatus.job.status)
 
   return (
     <section
@@ -892,7 +895,7 @@ export function PendingPurchasesPage() {
         </div>
       ) : null}
 
-      {isAdmin ? (
+      {isAdmin && mode === 'packets' && !isGenerationInProgress ? (
         <details className="pp-generate-packet-top" open>
           <summary>
             <strong>Generate live pending-purchase packet</strong>
@@ -967,7 +970,7 @@ export function PendingPurchasesPage() {
         </details>
       ) : null}
 
-      <nav className="pp-mode-tabs" aria-label="Pending purchases view">
+      {!isGenerationInProgress ? <nav className="pp-mode-tabs" aria-label="Pending purchases view">
         <Link
           className={`pp-mode-tab ${mode === 'packets' ? 'pp-mode-tab-active' : ''}`}
           to={packetsHref}
@@ -985,7 +988,7 @@ export function PendingPurchasesPage() {
         ) : (
           <span className="pp-mode-tab pp-mode-tab-disabled" title="Open a packet to review rows">Rows</span>
         )}
-      </nav>
+      </nav> : null}
 
       {applySuccessMessage ? (
         <p className="pp-toast pp-toast-success">
@@ -1027,7 +1030,7 @@ export function PendingPurchasesPage() {
         <PendingPurchaseGenerationStatusPanel jobStatus={generationJobStatus} />
       ) : null}
 
-      {mode === 'packets' ? (
+      {!isGenerationInProgress && (mode === 'packets' ? (
         <PendingPurchasesPacketsView
           data={data}
         />
@@ -1057,9 +1060,9 @@ export function PendingPurchasesPage() {
           selectedApprovedRowIds={selectedApprovedRowIds}
           selectedRowIds={selectedRowIds}
         />
-      )}
+      ))}
 
-      <details className="pp-admin-details" id="pp-admin">
+      {!isGenerationInProgress && mode === 'packets' ? <details className="pp-admin-details" id="pp-admin">
         <summary>Admin &amp; methodology</summary>
         <div className="pp-admin-body stacked-list">
           <p className="subtle-copy">
@@ -1168,7 +1171,7 @@ export function PendingPurchasesPage() {
             </article>
           ) : null}
         </div>
-      </details>
+      </details> : null}
     </section>
   )
 }
@@ -1265,10 +1268,51 @@ function PendingPurchasesRowsView({
   const activePacket = data.activePacket
   const draftPriceRegistry = usePendingPurchaseDraftPriceRegistry()
   const overrideOptions = data.overrideOptions
+  const activeTurn = refinementHistory?.turns.find(
+    (turn) => turn.status === 'queued' || turn.status === 'running',
+  ) ?? null
+  const candidateRevision = refinementHistory?.revisions.find(
+    (revision) => revision.revisionStatus === 'candidate',
+  ) ?? null
+  const isComparingProposedUpdate = candidateRevision?.packetId === activePacket?.packetId
+  const applyRequest = data.latestApplyRequest
+  const isApplyingPacket = applyRequest !== null
+    && (applyRequest.status === 'queued' || applyRequest.status === 'running')
+  const currentPacketHref = refinementHistory?.currentRevision
+    ? buildPendingPurchasesHref(filters, {
+        mode: 'rows',
+        packetId: refinementHistory.currentRevision.packetId,
+        page: 1,
+        pageSize: 100,
+      })
+    : packetsHref
 
   return (
     <PendingPurchaseDraftPriceRegistryContext.Provider value={draftPriceRegistry}>
     <PendingPurchaseOverrideOptionsContext.Provider value={overrideOptions}>
+      {activeTurn ? (
+        <PendingPurchaseRefinementProgress
+          jobStatus={refinementJobStatus}
+          packetTitle={activePacket?.packetTitle ?? 'Pending-purchase packet'}
+          turn={activeTurn}
+        />
+      ) : isComparingProposedUpdate && candidateRevision ? (
+        <PendingPurchaseProposedUpdateComparison
+          currentPacketHref={currentPacketHref}
+          diffs={refinementHistory?.rowDiffs ?? []}
+          isSwitchingRevision={isSwitchingRevision}
+          onUseUpdate={() => onSwitchRevision(candidateRevision, 'accept')}
+          rows={data.items}
+          turn={refinementHistory?.turns.find((turn) => turn.candidatePacketId === candidateRevision.packetId) ?? null}
+        />
+      ) : isApplyingPacket ? (
+        <PendingPurchaseApplyProgress
+          onRefresh={onRefreshRefinement}
+          request={applyRequest}
+          rows={data.items}
+        />
+      ) : (
+      <>
       <div className="pp-breadcrumb inline-row wrap-row">
         <Link className="ghost-button" to={packetsHref}>← All packets</Link>
         {activePacket ? (
@@ -1382,8 +1426,190 @@ function PendingPurchasesRowsView({
           ) : null}
         </div>
       ) : null}
+      </>
+      )}
     </PendingPurchaseOverrideOptionsContext.Provider>
     </PendingPurchaseDraftPriceRegistryContext.Provider>
+  )
+}
+
+function PendingPurchaseRefinementProgress({
+  jobStatus,
+  packetTitle,
+  turn,
+}: {
+  jobStatus: JobStatusResponse | null
+  packetTitle: string
+  turn: PendingPurchaseRefinementTurnSummary
+}) {
+  const scopeCount = readRefinementScopeCount(turn.promptContext)
+  return (
+    <section className="pp-focused-state" aria-labelledby="pp-refinement-progress-title">
+      <p className="eyebrow">{packetTitle}</p>
+      <h3 id="pp-refinement-progress-title">Creating proposed update</h3>
+      <p className="pp-focused-lead" role="status" aria-live="polite">
+        The analyst is reviewing {scopeCount ?? 'the selected'} row{scopeCount === 1 ? '' : 's'}. This page updates automatically.
+      </p>
+      <div className="pp-focused-summary">
+        <PendingPurchaseCountStat label="State" value={turn.status === 'running' ? 'Running' : 'Queued'} />
+        <PendingPurchaseCountStat label="Rows" value={scopeCount ?? 'Selected'} />
+        <PendingPurchaseCountStat label="Turn" value={`#${turn.turnId}`} />
+      </div>
+      {turn.feedbackText ? (
+        <details>
+          <summary>Submitted feedback</summary>
+          <p>{turn.feedbackText}</p>
+        </details>
+      ) : null}
+      <div className="pp-focused-actions">
+        {turn.jobId ? <Link className="primary-button" to={`/jobs/${turn.jobId}`}>Open worker details</Link> : null}
+        {jobStatus ? <Pill tone="warning">{jobStatus.job.status.replaceAll('_', ' ')}</Pill> : null}
+      </div>
+      <p className="subtle-copy">
+        Started {nyLongDateTime(new Date(turn.startedAt ?? turn.createdAt).getTime())}. You can leave this page and return later without interrupting the work.
+      </p>
+    </section>
+  )
+}
+
+function PendingPurchaseProposedUpdateComparison({
+  currentPacketHref,
+  diffs,
+  isSwitchingRevision,
+  onUseUpdate,
+  rows,
+  turn,
+}: {
+  currentPacketHref: string
+  diffs: readonly PendingPurchaseRevisionRowDiff[]
+  isSwitchingRevision: boolean
+  onUseUpdate: () => void
+  rows: readonly PendingPurchaseRow[]
+  turn: PendingPurchaseRefinementTurnSummary | null
+}) {
+  const rowsByLineage = new Map(rows.map((row) => [row.rowLineageId, row]))
+  const diffsByLineage = new Map<string, PendingPurchaseRevisionRowDiff[]>()
+  for (const diff of diffs) {
+    const existing = diffsByLineage.get(diff.rowLineageId)
+    if (existing) existing.push(diff)
+    else diffsByLineage.set(diff.rowLineageId, [diff])
+  }
+  const scopedLineages = readRefinementScopeLineageIds(turn?.promptContext)
+  const unchangedLineages = scopedLineages.filter((lineageId) => !diffsByLineage.has(lineageId))
+  const changedRows = diffsByLineage.size
+  const canUseUpdate = diffs.length > 0
+
+  return (
+    <section className="pp-focused-state pp-comparison" aria-labelledby="pp-comparison-title">
+      <p className="eyebrow">Pending purchases</p>
+      <h3 id="pp-comparison-title">Review proposed update</h3>
+      <p className="pp-focused-lead">
+        {canUseUpdate
+          ? `${changedRows} of ${scopedLineages.length || changedRows} selected rows changed across ${diffs.length} fields.`
+          : 'No usable changes were proposed. Your current review remains unchanged.'}
+      </p>
+      <div className="pp-focused-summary">
+        <PendingPurchaseCountStat label="Rows changed" value={changedRows} tone={changedRows > 0 ? 'warning' : 'muted'} />
+        <PendingPurchaseCountStat label="Fields changed" value={diffs.length} tone={diffs.length > 0 ? 'warning' : 'muted'} />
+        <PendingPurchaseCountStat label="Rows unchanged" value={unchangedLineages.length} />
+      </div>
+
+      {turn?.feedbackText ? (
+        <details>
+          <summary>Feedback used for this update</summary>
+          <p>{turn.feedbackText}</p>
+        </details>
+      ) : null}
+
+      <div className="pp-comparison-rows" aria-label="Proposed field changes">
+        {[...diffsByLineage.entries()].map(([rowLineageId, rowDiffs]) => (
+          <article className="pp-comparison-row" key={rowLineageId}>
+            <h4>{rowsByLineage.get(rowLineageId)?.distributorProductName ?? `Row ${rowLineageId}`}</h4>
+            <dl>
+              {rowDiffs.map((diff) => (
+                <div className="pp-comparison-field" key={`${diff.candidateRowId}-${diff.field}`}>
+                  <dt>{pendingPurchaseDiffFieldLabel(diff.field)}</dt>
+                  <dd><span>Current</span><strong>{formatCompactDiffValue(diff.before)}</strong></dd>
+                  <dd><span>Proposed</span><strong>{formatCompactDiffValue(diff.after)}</strong></dd>
+                </div>
+              ))}
+            </dl>
+          </article>
+        ))}
+        {unchangedLineages.map((lineageId) => (
+          <article className="pp-comparison-row pp-comparison-row-unchanged" key={lineageId}>
+            <h4>{rowsByLineage.get(lineageId)?.distributorProductName ?? `Row ${lineageId}`}</h4>
+            <p className="subtle-copy">No change was proposed for this selected row.</p>
+          </article>
+        ))}
+      </div>
+
+      <div className="pp-comparison-decision" role="region" aria-label="Proposed update decision">
+        <div>
+          <strong>{canUseUpdate ? 'Use this update for a fresh row review?' : 'Keep the current packet and refine again.'}</strong>
+          {canUseUpdate ? <p>Using this update opens all rows for a fresh review. It does not apply catalog changes.</p> : null}
+        </div>
+        <div className="pp-focused-actions">
+          {canUseUpdate ? (
+            <button className="primary-button" disabled={isSwitchingRevision} onClick={onUseUpdate} type="button">
+              {isSwitchingRevision ? 'Using update…' : 'Use this update'}
+            </button>
+          ) : null}
+          <Link className="ghost-button" to={currentPacketHref}>Keep current packet for now</Link>
+        </div>
+      </div>
+
+      <details>
+        <summary>How this update was produced</summary>
+        <p className="subtle-copy">
+          The analyst proposed changes only for the selected rows. Helios validated the response and rejected unsupported catalog links before constructing this comparison.
+        </p>
+        {turn?.jobId ? <Link to={`/jobs/${turn.jobId}`}>Open worker details for job #{turn.jobId}</Link> : null}
+      </details>
+    </section>
+  )
+}
+
+function PendingPurchaseApplyProgress({
+  onRefresh,
+  request,
+  rows,
+}: {
+  onRefresh: () => void
+  request: NonNullable<PendingPurchaseListResponse['latestApplyRequest']>
+  rows: readonly PendingPurchaseRow[]
+}) {
+  useEffect(() => {
+    const timer = window.setInterval(onRefresh, 1500)
+    return () => window.clearInterval(timer)
+  }, [onRefresh])
+  const requestRows = rows.filter((row) => row.lastApplyRequestId === request.requestId)
+  return (
+    <section className="pp-focused-state" aria-labelledby="pp-apply-progress-title">
+      <p className="eyebrow">Pending purchases</p>
+      <h3 id="pp-apply-progress-title">Applying accepted changes</h3>
+      <p className="pp-focused-lead" role="status" aria-live="polite">
+        {request.appliedRowCount} of {request.selectedRowCount} selected rows applied. This page updates automatically.
+      </p>
+      <div className="pp-focused-summary">
+        <PendingPurchaseCountStat label="Applied" value={request.appliedRowCount} tone="success" />
+        <PendingPurchaseCountStat label="Needs attention" value={request.failedRowCount + request.blockedRowCount} tone={request.failedRowCount + request.blockedRowCount > 0 ? 'warning' : 'muted'} />
+        <PendingPurchaseCountStat label="Remaining" value={Math.max(0, request.selectedRowCount - request.appliedRowCount - request.failedRowCount - request.blockedRowCount)} />
+      </div>
+      <div className="pp-apply-progress-rows">
+        {requestRows.map((row) => (
+          <details key={row.rowId} open={row.lastApplyStatus === 'failed' || row.lastApplyStatus === 'blocked'}>
+            <summary>
+              <span>{row.distributorProductName}</span>
+              <Pill tone={applyStatusTone(row.lastApplyStatus)}>{row.lastApplyStatus.replaceAll('_', ' ')}</Pill>
+            </summary>
+            {row.lastApplyError ? <p className="error-text">{row.lastApplyError}</p> : null}
+            {readLastApplySummaryText(row) ? <p>{readLastApplySummaryText(row)}</p> : null}
+          </details>
+        ))}
+      </div>
+      {request.jobId ? <Link className="primary-button" to={`/jobs/${request.jobId}`}>Open full job details</Link> : null}
+    </section>
   )
 }
 
@@ -2019,12 +2245,19 @@ function revisionLabel(revision: PendingPurchasePacketRevisionSummary): string {
       : revision.revisionStatus.replaceAll('_', ' ')
 }
 
-function readRefinementScopeCount(promptContext: unknown): number | null {
-  if (promptContext === null || typeof promptContext !== 'object' || Array.isArray(promptContext)) return null
+function readRefinementScopeLineageIds(promptContext: unknown): string[] {
+  if (promptContext === null || typeof promptContext !== 'object' || Array.isArray(promptContext)) return []
   const scope = (promptContext as Record<string, unknown>).scope
-  if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return null
+  if (scope === null || typeof scope !== 'object' || Array.isArray(scope)) return []
   const rowLineageIds = (scope as Record<string, unknown>).rowLineageIds
-  return Array.isArray(rowLineageIds) ? rowLineageIds.length : null
+  return Array.isArray(rowLineageIds)
+    ? rowLineageIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : []
+}
+
+function readRefinementScopeCount(promptContext: unknown): number | null {
+  const rowLineageIds = readRefinementScopeLineageIds(promptContext)
+  return rowLineageIds.length > 0 ? rowLineageIds.length : null
 }
 
 function readRefinementFailureCode(promptContext: unknown): string | null {
@@ -2074,6 +2307,11 @@ function formatCompactDiffValue(value: unknown): string {
     throw new Error('Pending-purchase diff contains a non-JSON value.')
   }
   return serialized
+}
+
+function pendingPurchaseDiffFieldLabel(field: string): string {
+  const label = field.replaceAll('_', ' ').trim()
+  return label.length > 0 ? `${label[0]?.toUpperCase()}${label.slice(1)}` : field
 }
 
 function FamilyBulkPriceControl({ rowIds }: { rowIds: readonly number[] }) {
@@ -2454,7 +2692,7 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
 interface PendingPurchaseCountStatProps {
   label: string
   tone?: 'muted' | 'success' | 'warning'
-  value: number
+  value: number | string
 }
 
 function PendingPurchaseCountStat({ label, tone = 'muted', value }: PendingPurchaseCountStatProps) {
@@ -2484,6 +2722,7 @@ function buildPendingPurchasesHref(
     mode: 'packets' | 'rows' | null
     packetId: number | null
     page: number | null
+    pageSize: number | null
   }> = {},
 ): string {
   const params = new URLSearchParams()
@@ -2503,7 +2742,8 @@ function buildPendingPurchasesHref(
   if (filters.actionType) params.set('actionType', filters.actionType)
   const page = overrides.page === undefined ? filters.page : overrides.page
   if (page && page > 1) params.set('page', String(page))
-  if (filters.pageSize && filters.pageSize !== 25) params.set('pageSize', String(filters.pageSize))
+  const pageSize = overrides.pageSize === undefined ? filters.pageSize : overrides.pageSize
+  if (pageSize && pageSize !== 25) params.set('pageSize', String(pageSize))
   const query = params.toString()
   return query.length > 0 ? `/catalog/pending-purchases?${query}` : '/catalog/pending-purchases'
 }
@@ -3025,7 +3265,7 @@ function PendingPurchaseRowCard(
           ) : null}
         </details>
       ) : null}
-      <details open={item.needsNewBrand || item.needsNewGroup || item.needsNewVariant}>
+      <details open>
         <summary>
           Product hierarchy{' '}
           {item.needsNewBrand || item.needsNewGroup || item.needsNewVariant ? (
@@ -3746,7 +3986,7 @@ function PendingPurchaseGenerationStatusPanel({ jobStatus }: { jobStatus: JobSta
   const inProgress = !isJobTerminal(jobStatus.job.status)
 
   return (
-    <article className="detail-panel job-progress-panel" style={{ marginBottom: '1rem' }}>
+    <article className={`detail-panel job-progress-panel${inProgress ? ' pp-focused-state' : ''}`} style={{ marginBottom: '1rem' }}>
       <div className="page-header" style={{ marginBottom: '0.75rem' }}>
         <div>
           <h3 style={{ margin: 0 }}>Live packet generation status</h3>

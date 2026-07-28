@@ -1662,6 +1662,134 @@ pre {
   gap: 0.4rem;
 }
 
+.pp-focused-state {
+  display: grid;
+  gap: 1rem;
+  width: min(100%, 960px);
+  margin: 0 auto;
+  padding: clamp(1rem, 3vw, 2rem);
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: rgba(255, 250, 241, 0.82);
+}
+
+.pp-focused-state h3,
+.pp-focused-state h4,
+.pp-focused-state p {
+  margin: 0;
+}
+
+.pp-focused-lead {
+  max-width: 68ch;
+  font-size: 1.05rem;
+  line-height: 1.5;
+}
+
+.pp-focused-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 0.55rem;
+}
+
+.pp-focused-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.pp-focused-state details {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.pp-focused-state details > summary {
+  min-height: 32px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.pp-comparison-rows,
+.pp-apply-progress-rows {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.pp-comparison-row {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.pp-comparison-row dl {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.pp-comparison-field {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.7fr) repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  align-items: start;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--panel-border);
+}
+
+.pp-comparison-field dt {
+  font-weight: 650;
+}
+
+.pp-comparison-field dd {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pp-comparison-field dd span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pp-comparison-field dd:last-child {
+  color: var(--accent-strong, #0a7a35);
+}
+
+.pp-comparison-row-unchanged {
+  opacity: 0.75;
+}
+
+.pp-comparison-decision {
+  position: sticky;
+  bottom: 0.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 250, 241, 0.97);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+  z-index: 5;
+}
+
+.pp-apply-progress-rows details > summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .pp-admin-details {
   margin-top: 0.6rem;
   padding: 0.65rem 0.85rem;
@@ -1764,6 +1892,35 @@ pre {
 
   .pp-refinement-revisions {
     grid-template-columns: 1fr;
+  }
+
+  .pp-focused-state {
+    padding: 0.8rem;
+  }
+
+  .pp-comparison-field {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .pp-comparison-field dt {
+    grid-column: 1 / -1;
+  }
+
+  .pp-comparison-decision {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pp-focused-actions,
+  .pp-focused-actions > .primary-button,
+  .pp-focused-actions > .ghost-button {
+    width: 100%;
+  }
+
+  .pp-focused-actions > .primary-button,
+  .pp-focused-actions > .ghost-button {
+    min-height: 44px;
+    justify-content: center;
   }
 }
 
