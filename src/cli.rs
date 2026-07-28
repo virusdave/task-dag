@@ -128,6 +128,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum RuntimeCommands {
+    Identity,
     Publish {
         #[arg(long)]
         commit: String,
@@ -169,6 +170,9 @@ struct Unsupported {
 
 pub(crate) fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::Runtime {
+            command: RuntimeCommands::Identity,
+        } => crate::runtime_authority::identity(),
         Commands::Runtime {
             command: RuntimeCommands::Publish { commit },
         } => crate::runtime_authority::publish(&commit),

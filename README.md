@@ -134,6 +134,7 @@ atomic push, and authoritative readback.
 
 ```text
 task-dag init --trusted-floor <OID>
+task-dag runtime identity
 task-dag runtime publish --commit <LOCAL-OID>
 task-dag create --operation-id <KEY> --title <TEXT> --description <TEXT> [--claim] [--requires <TASK-ID>...]
 task-dag claim <TASK-ID> --owner <OWNER> --operation-id <STABLE-KEY> [--ttl-hours 12]

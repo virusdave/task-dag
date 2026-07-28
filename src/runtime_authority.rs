@@ -23,6 +23,13 @@ pub(crate) fn runtime_ref(commit: &str) -> Result<String> {
     Ok(format!("{REF_PREFIX}{commit}"))
 }
 
+pub(crate) fn identity() -> Result<()> {
+    crate::commands::print_json(&serde_json::json!({
+        "canonicalIdentity": CANONICAL_IDENTITY,
+        "compiledCommit": crate::runtime()?,
+    }))
+}
+
 fn advertise(reference: &str) -> Result<BTreeMap<String, String>> {
     let out = Command::new("git")
         .args(["ls-remote", "--refs", remote(), reference])
