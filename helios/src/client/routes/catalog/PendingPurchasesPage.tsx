@@ -870,6 +870,9 @@ export function PendingPurchasesPage() {
   const totalLabel = mode === 'packets'
     ? `${data.totalCount} packet${data.totalCount === 1 ? '' : 's'}`
     : `${data.totalCount} row${data.totalCount === 1 ? '' : 's'}`
+  const resumablePacket = mode === 'packets'
+    ? data.packets.find((packet) => packet.status === 'ready' && isPendingPurchasePacketActionable(packet)) ?? null
+    : null
 
   return (
     <section
@@ -930,8 +933,20 @@ export function PendingPurchasesPage() {
         </div>
       ) : null}
 
+      {resumablePacket ? (
+        <aside className="pp-resume-callout">
+          <div>
+            <strong>Continue your current purchase review</strong>
+            <p>{pendingPurchasePacketNextAction(resumablePacket)} · {resumablePacket.siteLabels.join(', ')}</p>
+          </div>
+          <Link className="primary-button" to={buildPendingPurchasesHref(filters, {
+            mode: 'rows', packetId: resumablePacket.packetId, page: 1, pageSize: 100,
+          })}>Resume packet #{resumablePacket.packetId}</Link>
+        </aside>
+      ) : null}
+
       {isAdmin && mode === 'packets' && !isGenerationInProgress ? (
-        <details className="pp-generate-packet-top" open>
+        <details className="pp-generate-packet-top" open={resumablePacket === null}>
           <summary>
             <strong>Generate live pending-purchase packet</strong>
             <Pill tone="warning">admin</Pill>
@@ -1341,6 +1356,12 @@ function PendingPurchasesRowsView({
       })
     : packetsHref
   const pendingRowCount = data.items.filter((row) => row.approvalStatus === 'pending').length
+  const approvedRowCount = data.items.filter((row) => row.approvalStatus === 'approved').length
+  const rejectedRowCount = data.items.filter((row) => row.approvalStatus === 'rejected').length
+  const appliedRowCount = data.items.filter((row) => row.lastApplyStatus === 'applied').length
+  const attentionRowCount = data.items.filter(
+    (row) => row.lastApplyStatus === 'failed' || row.lastApplyStatus === 'blocked',
+  ).length
   const allRowsReviewed = data.items.length > 0 && pendingRowCount === 0
 
   return (
@@ -1380,6 +1401,17 @@ function PendingPurchasesRowsView({
           <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(activePacket.packetId)}>ETL details</Link>
         ) : null}
       </div>
+
+      <section className="pp-packet-orientation" aria-label="Packet review summary">
+        <div className="pp-focused-summary">
+          <PendingPurchaseCountStat label="Needs review" value={pendingRowCount} tone={pendingRowCount > 0 ? 'warning' : 'muted'} />
+          <PendingPurchaseCountStat label="Approved" value={approvedRowCount} tone={approvedRowCount > 0 ? 'success' : 'muted'} />
+          <PendingPurchaseCountStat label="Rejected" value={rejectedRowCount} />
+          <PendingPurchaseCountStat label="Applied" value={appliedRowCount} tone={appliedRowCount > 0 ? 'success' : 'muted'} />
+          <PendingPurchaseCountStat label="Needs repair" value={attentionRowCount} tone={attentionRowCount > 0 ? 'warning' : 'muted'} />
+        </div>
+        <strong>{pendingPurchaseRowsNextAction(pendingRowCount, attentionRowCount, approvedRowCount, allRowsReviewed)}</strong>
+      </section>
 
       {activePacket?.hintBundleId && canViewGenerationNotes ? (
         <PendingPurchaseGenerationNotes
@@ -1555,7 +1587,8 @@ function PendingPurchaseProposedUpdateComparison({
     else diffsByLineage.set(diff.rowLineageId, [diff])
   }
   const scopedLineages = readRefinementScopeLineageIds(turn?.promptContext)
-  const unchangedLineages = scopedLineages.filter((lineageId) => !diffsByLineage.has(lineageId))
+  const comparisonLineages = scopedLineages.length > 0 ? scopedLineages : [...diffsByLineage.keys()]
+  const unchangedLineages = comparisonLineages.filter((lineageId) => !diffsByLineage.has(lineageId))
   const changedRows = diffsByLineage.size
   const canUseUpdate = diffs.length > 0
 
@@ -1581,27 +1614,27 @@ function PendingPurchaseProposedUpdateComparison({
         </details>
       ) : null}
 
-      <div className="pp-comparison-rows" aria-label="Proposed field changes">
-        {[...diffsByLineage.entries()].map(([rowLineageId, rowDiffs]) => (
-          <article className="pp-comparison-row" key={rowLineageId}>
-            <h4>{rowsByLineage.get(rowLineageId)?.distributorProductName ?? `Row ${rowLineageId}`}</h4>
-            <dl>
-              {rowDiffs.map((diff) => (
-                <div className="pp-comparison-field" key={`${diff.candidateRowId}-${diff.field}`}>
-                  <dt>{pendingPurchaseDiffFieldLabel(diff.field)}</dt>
-                  <dd><span>Current</span><strong>{formatCompactDiffValue(diff.before)}</strong></dd>
-                  <dd><span>Proposed</span><strong>{formatCompactDiffValue(diff.after)}</strong></dd>
-                </div>
-              ))}
-            </dl>
-          </article>
-        ))}
-        {unchangedLineages.map((lineageId) => (
-          <article className="pp-comparison-row pp-comparison-row-unchanged" key={lineageId}>
-            <h4>{rowsByLineage.get(lineageId)?.distributorProductName ?? `Row ${lineageId}`}</h4>
-            <p className="subtle-copy">No change was proposed for this selected row.</p>
-          </article>
-        ))}
+      <div className="pp-comparison-rows" aria-label="Complete proposed row comparison">
+        {comparisonLineages.map((rowLineageId) => {
+          const row = rowsByLineage.get(rowLineageId)
+          const rowDiffs = diffsByLineage.get(rowLineageId) ?? []
+          return (
+            <article className={`pp-comparison-row${rowDiffs.length === 0 ? ' pp-comparison-row-unchanged' : ''}`} key={rowLineageId}>
+              <h4>{row?.distributorProductName ?? `Row ${rowLineageId}`}</h4>
+              {row ? (
+                <dl>
+                  {buildPendingPurchaseComparisonFields(row, rowDiffs).map((field) => (
+                    <div className={`pp-comparison-field${field.changed ? '' : ' pp-comparison-field-unchanged'}`} key={field.field}>
+                      <dt>{field.label}{field.changed ? null : <span>unchanged</span>}</dt>
+                      <dd><span>Current</span><strong>{formatCompactDiffValue(field.before)}</strong></dd>
+                      <dd><span>Proposed</span><strong>{formatCompactDiffValue(field.after)}</strong></dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : <p className="subtle-copy">This row is outside the loaded comparison page.</p>}
+            </article>
+          )
+        })}
       </div>
 
       <div className="pp-comparison-decision" role="region" aria-label="Proposed update decision">
@@ -2419,9 +2452,46 @@ function formatCompactDiffValue(value: unknown): string {
   return serialized
 }
 
-function pendingPurchaseDiffFieldLabel(field: string): string {
-  const label = field.replaceAll('_', ' ').trim()
-  return label.length > 0 ? `${label[0]?.toUpperCase()}${label.slice(1)}` : field
+interface PendingPurchaseComparisonField {
+  after: unknown
+  before: unknown
+  changed: boolean
+  field: string
+  label: string
+}
+
+function buildPendingPurchaseComparisonFields(
+  row: PendingPurchaseRow,
+  diffs: readonly PendingPurchaseRevisionRowDiff[],
+): PendingPurchaseComparisonField[] {
+  const diffsByField = new Map(diffs.map((diff) => [diff.field, diff]))
+  const values: Array<{ field: string; label: string; value: unknown }> = [
+    { field: 'targetBrand', label: 'Brand', value: effectiveStructured(row, 'targetBrand') },
+    { field: 'targetGroupName', label: 'Group / line', value: effectiveStructured(row, 'targetGroupName') },
+    { field: 'targetVariantName', label: 'Variant', value: effectiveStructured(row, 'targetVariantName') },
+    { field: 'targetVariantTab', label: 'Variant tab', value: effectiveStructured(row, 'targetVariantTab') },
+    { field: 'expectedCategory', label: 'Category', value: effectiveStructured(row, 'expectedCategory') },
+    { field: 'expectedSubcategory', label: 'Subcategory', value: effectiveStructured(row, 'expectedSubcategory') },
+    { field: 'targetSize', label: 'Unit size', value: effectiveStructured(row, 'targetSize') },
+    { field: 'targetPackCount', label: 'Pack size', value: effectiveStructuredPackCount(row) },
+    { field: 'targetStrainName', label: 'Strain', value: effectiveStructured(row, 'targetStrainName') },
+    { field: 'targetReuseProductId', label: 'Existing product link', value: row.reuseProductId },
+    { field: 'proposedPrice', label: 'Price', value: row.effectiveProposedPrice },
+    { field: 'proposedDescription', label: 'Description', value: row.effectiveProposedDescription },
+    { field: 'primaryImageUrl', label: 'Image', value: row.effectivePrimaryImageUrl },
+    { field: 'notes', label: 'Reviewer notes', value: row.notes },
+    { field: 'reviewFlags', label: 'Review flags', value: row.reviewFlags },
+  ]
+  return values.map(({ field, label, value }) => {
+    const diff = diffsByField.get(field)
+    return {
+      after: diff?.after ?? value,
+      before: diff?.before ?? value,
+      changed: diff !== undefined,
+      field,
+      label,
+    }
+  })
 }
 
 function FamilyBulkPriceControl({ rowIds }: { rowIds: readonly number[] }) {
@@ -2750,6 +2820,7 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
   const inFlightApply = apply.queued + apply.running
   const remainingApply = apply.notRequested + apply.failed + apply.blocked
   const latestApply = packet.latestApplyRequest
+  const actionLabel = pendingPurchasePacketActionLabel(packet)
 
   return (
     <article className="pp-packet-card">
@@ -2789,7 +2860,7 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
         </p>
       ) : null}
       <div className="inline-row wrap-row pp-packet-card-actions">
-        <Link className="primary-button" to={openHref}>Review rows</Link>
+        <Link className="primary-button" to={openHref}>{actionLabel}</Link>
         {packet.hasEtlDetails ? (
           <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(packet.packetId)}>ETL details</Link>
         ) : null}
@@ -2797,6 +2868,45 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
       </div>
     </article>
   )
+}
+
+function isPendingPurchasePacketActionable(packet: PendingPurchasePacketListItem): boolean {
+  return packet.approvalCounts.pending > 0
+    || packet.applyCounts.queued > 0
+    || packet.applyCounts.running > 0
+    || packet.applyCounts.failed > 0
+    || packet.applyCounts.blocked > 0
+    || (packet.approvalCounts.approved > 0 && packet.applyCounts.notRequested > 0)
+}
+
+function pendingPurchasePacketActionLabel(packet: PendingPurchasePacketListItem): string {
+  if (packet.applyCounts.queued + packet.applyCounts.running > 0) return 'Continue apply'
+  if (packet.applyCounts.failed + packet.applyCounts.blocked > 0) return `Repair ${packet.applyCounts.failed + packet.applyCounts.blocked} rows`
+  if (packet.approvalCounts.pending > 0) return 'Resume review'
+  return 'View completed packet'
+}
+
+function pendingPurchasePacketNextAction(packet: PendingPurchasePacketListItem): string {
+  const applying = packet.applyCounts.queued + packet.applyCounts.running
+  const attention = packet.applyCounts.failed + packet.applyCounts.blocked
+  if (applying > 0) return 'Catalog changes are being applied'
+  if (attention > 0) return `${attention} row${attention === 1 ? ' needs' : 's need'} repair`
+  if (packet.approvalCounts.pending > 0) {
+    return `${packet.approvalCounts.pending} row${packet.approvalCounts.pending === 1 ? ' needs' : 's need'} review`
+  }
+  return 'Review completed work'
+}
+
+function pendingPurchaseRowsNextAction(
+  pending: number,
+  attention: number,
+  approved: number,
+  allReviewed: boolean,
+): string {
+  if (attention > 0) return `Next: repair ${attention} row${attention === 1 ? '' : 's'} before retrying.`
+  if (pending > 0) return `Next: review ${pending} remaining row${pending === 1 ? '' : 's'}.`
+  if (allReviewed && approved > 0) return 'Next: select approved rows and apply catalog changes.'
+  return 'This packet has no remaining review decisions.'
 }
 
 interface PendingPurchaseCountStatProps {
@@ -3390,6 +3500,16 @@ function PendingPurchaseRowCard(
     </details>
   )
 
+  const visibleCategory = draftStructured.expectedCategory.trim()
+    || effectiveStructured(item, 'expectedCategory')
+    || 'No category'
+  const visibleSubcategory = draftStructured.expectedSubcategory.trim()
+    || effectiveStructured(item, 'expectedSubcategory')
+    || 'No subcategory'
+  const visibleSize = draftStructured.targetSize.trim() || effectiveStructured(item, 'targetSize')
+  const visiblePackCount = draftStructured.targetPackCount.trim()
+    || (effectiveStructuredPackCount(item) === null ? null : String(effectiveStructuredPackCount(item)))
+
   const bodyExtras = (
     <>
       {structuredDataSection}
@@ -3405,10 +3525,10 @@ function PendingPurchaseRowCard(
 
       <div className="inline-row wrap-row" style={{ marginBottom: '0.85rem' }}>
         <Pill tone="muted">{item.actionType}</Pill>
-        <Pill tone="muted">{item.expectedCategory ?? 'No category'}</Pill>
-        <Pill tone="muted">{item.expectedSubcategory ?? 'No subcategory'}</Pill>
-        {item.targetSize ? <Pill tone="muted">{item.targetSize}</Pill> : null}
-        {item.targetPackCount ? <Pill tone="muted">{`${item.targetPackCount} pack`}</Pill> : null}
+        <Pill tone="muted">{visibleCategory}</Pill>
+        <Pill tone="muted">{visibleSubcategory}</Pill>
+        {visibleSize ? <Pill tone="muted">{visibleSize}</Pill> : null}
+        {visiblePackCount ? <Pill tone="muted">{`${visiblePackCount} pack`}</Pill> : null}
         {item.targetPrevalence ? <Pill tone="muted">{item.targetPrevalence}</Pill> : null}
         {item.reviewFlags.map((flag) => (
           <Pill key={flag} tone="warning">{flag}</Pill>
@@ -4029,6 +4149,16 @@ function PendingPurchaseGenerationStatusPanel({ jobStatus }: { jobStatus: JobSta
   const packetId = jobStatus.linkedRecords.pendingPurchasePacketId
   const percentComplete = computeJobProgressPercent(jobStatus)
   const inProgress = !isJobTerminal(jobStatus.job.status)
+  const [, setElapsedTick] = useState(0)
+
+  useEffect(() => {
+    if (!inProgress) return
+    const timer = window.setInterval(() => setElapsedTick((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [inProgress])
+
+  const elapsedFrom = jobStatus.job.startedAt ?? jobStatus.job.createdAt
+  const elapsedTo = jobStatus.job.finishedAt ?? new Date().toISOString()
 
   return (
     <article className={`detail-panel job-progress-panel${inProgress ? ' pp-focused-state' : ''}`} style={{ marginBottom: '1rem' }}>
@@ -4043,8 +4173,11 @@ function PendingPurchaseGenerationStatusPanel({ jobStatus }: { jobStatus: JobSta
         </div>
       </div>
 
-      <div className="job-progress-track" aria-hidden="true">
-        <div className={`job-progress-fill${jobStatus.job.status === 'failed' || jobStatus.job.status === 'dead_letter' ? ' failed' : ''}`} style={{ width: `${percentComplete}%` }} />
+      <div className={`job-progress-track${percentComplete === null ? ' is-indeterminate' : ''}`} aria-hidden="true">
+        <div
+          className={`job-progress-fill${jobStatus.job.status === 'failed' || jobStatus.job.status === 'dead_letter' ? ' failed' : ''}`}
+          style={percentComplete === null ? undefined : { width: `${percentComplete}%` }}
+        />
       </div>
 
       <div className="pricing-metric-grid" style={{ marginTop: '0.9rem' }}>
@@ -4052,6 +4185,9 @@ function PendingPurchaseGenerationStatusPanel({ jobStatus }: { jobStatus: JobSta
         <PendingValuePanel label="Progress" value={readJobProgressSummary(jobStatus)} />
         <PendingValuePanel label="Queued" value={formatTimestamp(jobStatus.job.createdAt)} />
         <PendingValuePanel label="Started" value={formatTimestamp(jobStatus.job.startedAt)} />
+        <PendingValuePanel label="Elapsed" value={formatElapsedTime(elapsedFrom, elapsedTo)} />
+        <PendingValuePanel label="Worker pool" value={jobStatus.job.executionPool} />
+        <PendingValuePanel label="Attempt" value={String(jobStatus.job.attemptCount + 1)} />
       </div>
 
       <div className="inline-row wrap-row module-card-links" style={{ marginTop: '0.9rem' }}>
@@ -4204,19 +4340,22 @@ function jobStatusTone(status: JobStatusResponse['job']['status']): 'danger' | '
   }
 }
 
-function computeJobProgressPercent(jobStatus: JobStatusResponse): number {
+function computeJobProgressPercent(jobStatus: JobStatusResponse): number | null {
   if (jobStatus.job.status === 'succeeded') {
     return 100
   }
   if (jobStatus.job.status === 'failed' || jobStatus.job.status === 'dead_letter') {
     return Math.max(10, computeJobProgressPercentFromStages(jobStatus.progress))
   }
+  if (!jobStatus.progress) {
+    return null
+  }
   return computeJobProgressPercentFromStages(jobStatus.progress)
 }
 
 function computeJobProgressPercentFromStages(progress: JobStatusResponse['progress']): number {
   if (!progress) {
-    return 12
+    return 0
   }
 
   const phaseOffset = (progress.phaseIndex - 1) / progress.phaseCount
@@ -4224,6 +4363,13 @@ function computeJobProgressPercentFromStages(progress: JobStatusResponse['progre
     ? Math.min(progress.completed / progress.total, 1)
     : 0.35
   return Math.max(5, Math.min(99, Math.round((phaseOffset + (phaseFraction / progress.phaseCount)) * 100)))
+}
+
+function formatElapsedTime(from: string, to: string): string {
+  const elapsedSeconds = Math.max(0, Math.floor((new Date(to).getTime() - new Date(from).getTime()) / 1000))
+  const minutes = Math.floor(elapsedSeconds / 60)
+  const seconds = elapsedSeconds % 60
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`
 }
 
 function readJobProgressMessage(jobStatus: JobStatusResponse): string {
