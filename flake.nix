@@ -35,6 +35,7 @@
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
+            nativeCheckInputs = [ pkgs.git ];
             postPatch = ''
               printf '%s\n' '${self.rev or (throw "task-dag production builds require an immutable flake source revision")}' > .taskdag-build-revision
             '';
