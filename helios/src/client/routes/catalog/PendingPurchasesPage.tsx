@@ -876,6 +876,7 @@ export function PendingPurchasesPage() {
 
   return (
     <section
+      id="top"
       className="pending-purchases-page"
       data-helios-capture-ready="true"
       data-helios-capture-target="pending-purchases-review"
@@ -948,7 +949,7 @@ export function PendingPurchasesPage() {
       {isAdmin && mode === 'packets' && !isGenerationInProgress ? (
         <details className="pp-generate-packet-top" open={resumablePacket === null}>
           <summary>
-            <strong>Generate live pending-purchase packet</strong>
+            <strong>Create a review from an outstanding purchase</strong>
             <Pill tone="warning">admin</Pill>
           </summary>
           <p className="subtle-copy">
@@ -1000,7 +1001,7 @@ export function PendingPurchasesPage() {
                 : null}
             </fieldset>
             <label className="stack-field" style={{ flexBasis: '100%', minWidth: '100%' }}>
-              <span>Notes / hints for the classifier (optional)</span>
+              <span>Extra context for product matching (optional)</span>
               <textarea
                 onChange={(event) => setGenerateNotes(event.currentTarget.value)}
                 placeholder="e.g. This PO is all Stiiizy 1g carts; expect the new Blue Dream and Skywalker OG SKUs. Paste a wholesale menu or a sibling store's PO here."
@@ -1026,7 +1027,7 @@ export function PendingPurchasesPage() {
               onClick={() => void handleGenerate()}
               type="button"
             >
-              {isGenerating ? 'Generating live packet…' : 'Generate live packet'}
+              {isGenerating ? 'Starting review…' : 'Start review'}
             </button>
           </div>
         </details>
@@ -1037,18 +1038,18 @@ export function PendingPurchasesPage() {
           className={`pp-mode-tab ${mode === 'packets' ? 'pp-mode-tab-active' : ''}`}
           to={packetsHref}
         >
-          Packets
+          Reviews
         </Link>
         {rowsHref ? (
           <Link
             className={`pp-mode-tab ${mode === 'rows' ? 'pp-mode-tab-active' : ''}`}
             to={rowsHref}
           >
-            Rows
+            Items
             {data.activePacket ? <span className="pp-mode-tab-meta">{` · packet #${data.activePacket.packetId}`}</span> : null}
           </Link>
         ) : (
-          <span className="pp-mode-tab pp-mode-tab-disabled" title="Open a packet to review rows">Rows</span>
+          <span className="pp-mode-tab pp-mode-tab-disabled" title="Open a review to inspect items">Items</span>
         )}
       </nav> : null}
 
@@ -1246,6 +1247,8 @@ interface PendingPurchasesPacketsViewProps {
 
 function PendingPurchasesPacketsView({ data }: PendingPurchasesPacketsViewProps) {
   const filters = data.filters
+  const currentPackets = data.packets.filter((packet) => packet.status !== 'superseded')
+  const archivedPackets = data.packets.filter((packet) => packet.status === 'superseded')
   const prevHref = data.page > 1
     ? buildPendingPurchasesHref(filters, { mode: 'packets', page: data.page - 1 })
     : null
@@ -1258,13 +1261,25 @@ function PendingPurchasesPacketsView({ data }: PendingPurchasesPacketsViewProps)
       <PendingPurchasesFilterBar mode="packets" filters={filters} />
 
       {data.packets.length === 0 ? (
-        <p className="empty-state">No packets match the current filters. Generate or import a packet from the admin section below.</p>
+        <p className="empty-state">No reviews match the current filters. Start a review from an outstanding purchase above.</p>
       ) : (
-        <div className="pp-packet-list">
-          {data.packets.map((packet) => (
-            <PendingPurchasePacketCard key={packet.packetId} filters={filters} packet={packet} />
-          ))}
-        </div>
+        <>
+          <div className="pp-packet-list">
+            {currentPackets.map((packet) => (
+              <PendingPurchasePacketCard key={packet.packetId} filters={filters} packet={packet} />
+            ))}
+          </div>
+          {archivedPackets.length > 0 ? (
+            <details className="pp-archived-reviews">
+              <summary><strong>{`Archived reviews (${archivedPackets.length})`}</strong></summary>
+              <div className="pp-archived-review-list">
+                {archivedPackets.map((packet) => (
+                  <PendingPurchasePacketCard compact key={packet.packetId} filters={filters} packet={packet} />
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </>
       )}
 
       <nav className="pp-pager" aria-label="Pagination">
@@ -1363,6 +1378,9 @@ function PendingPurchasesRowsView({
     (row) => row.lastApplyStatus === 'failed' || row.lastApplyStatus === 'blocked',
   ).length
   const allRowsReviewed = data.items.length > 0 && pendingRowCount === 0
+  const approvedNotAppliedCount = data.items.filter(
+    (row) => row.approvalStatus === 'approved' && row.lastApplyStatus !== 'applied',
+  ).length
 
   return (
     <PendingPurchaseDraftPriceRegistryContext.Provider value={draftPriceRegistry}>
@@ -1398,7 +1416,7 @@ function PendingPurchasesRowsView({
           </span>
         ) : null}
         {activePacket?.hasEtlDetails ? (
-          <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(activePacket.packetId)}>ETL details</Link>
+          <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(activePacket.packetId)}>Processing details</Link>
         ) : null}
       </div>
 
@@ -1410,8 +1428,21 @@ function PendingPurchasesRowsView({
           <PendingPurchaseCountStat label="Applied" value={appliedRowCount} tone={appliedRowCount > 0 ? 'success' : 'muted'} />
           <PendingPurchaseCountStat label="Needs repair" value={attentionRowCount} tone={attentionRowCount > 0 ? 'warning' : 'muted'} />
         </div>
-        <strong>{pendingPurchaseRowsNextAction(pendingRowCount, attentionRowCount, approvedRowCount, allRowsReviewed)}</strong>
+        <strong>{pendingPurchaseRowsNextAction(pendingRowCount, attentionRowCount, approvedNotAppliedCount)}</strong>
       </section>
+
+      {applyRequest && !isApplyingPacket ? (
+        <aside className="pp-last-action" role="status">
+          <div>
+            <strong>Last apply</strong>
+            <span>{` ${applyRequest.appliedRowCount}/${applyRequest.selectedRowCount} applied`}</span>
+            {applyRequest.failedRowCount + applyRequest.blockedRowCount > 0
+              ? <span className="error-text">{` · ${applyRequest.failedRowCount + applyRequest.blockedRowCount} need attention`}</span>
+              : null}
+          </div>
+          {applyRequest.jobId ? <Link to={`/jobs/${applyRequest.jobId}`}>View job #{applyRequest.jobId}</Link> : null}
+        </aside>
+      ) : null}
 
       {activePacket?.hintBundleId && canViewGenerationNotes ? (
         <PendingPurchaseGenerationNotes
@@ -1446,6 +1477,17 @@ function PendingPurchasesRowsView({
       {data.items.length === 0 ? (
         <p className="empty-state">No rows in this packet match the current filters.</p>
       ) : (
+        <>
+        {rowsByFamily.length > 1 ? (
+          <details className="pp-family-jump">
+            <summary>Jump to product family</summary>
+            <nav aria-label="Product families">
+              {rowsByFamily.map((group) => (
+                <a href={`#${buildPendingPurchaseFamilyAnchorId(group)}`} key={group.familyKeyString}>{group.familyLabel}</a>
+              ))}
+            </nav>
+          </details>
+        ) : null}
         <div className="pp-rows-list stacked-list">
           {rowsByFamily.map((group) => (
             <section key={group.familyKeyString} id={buildPendingPurchaseFamilyAnchorId(group)} className="pp-rows-family-group">
@@ -1454,7 +1496,7 @@ function PendingPurchasesRowsView({
                   <strong>{group.familyLabel}</strong>
                   <Pill tone="muted">{`${group.rows.length} row${group.rows.length === 1 ? '' : 's'}`}</Pill>
                 </div>
-                {canEdit ? (
+                {canEdit && group.rows.some((row) => row.approvalStatus !== 'approved' && row.lastApplyStatus !== 'queued' && row.lastApplyStatus !== 'running') ? (
                   <div className="pp-rows-family-controls inline-row wrap-row" style={{ gap: '0.75rem' }}>
                     <FamilyBulkPriceControl
                       rowIds={group.rows.map((row) => row.rowId)}
@@ -1485,6 +1527,8 @@ function PendingPurchasesRowsView({
             </section>
           ))}
         </div>
+        <a className="pp-top-link" href="#top" aria-label="Back to top">Top ↑</a>
+        </>
       )}
 
       {canApprove && activePacket && allRowsReviewed && approvedVisibleRowCount > 0 ? (
@@ -2808,11 +2852,12 @@ function PendingPurchasesFilterBar({ filters, mode }: PendingPurchasesFilterBarP
 }
 
 interface PendingPurchasePacketCardProps {
+  compact?: boolean
   filters: PendingPurchaseListResponse['filters']
   packet: PendingPurchasePacketListItem
 }
 
-function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCardProps) {
+function PendingPurchasePacketCard({ compact = false, filters, packet }: PendingPurchasePacketCardProps) {
   const openHref = buildPendingPurchasesHref(filters, { mode: 'rows', packetId: packet.packetId, page: 1 })
   const generatedAbs = nyLongDateTime(new Date(packet.generatedAt).getTime())
   const apply = packet.applyCounts
@@ -2823,26 +2868,20 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
   const actionLabel = pendingPurchasePacketActionLabel(packet)
 
   return (
-    <article className="pp-packet-card">
+    <article className={`pp-packet-card${compact ? ' pp-packet-card-compact' : ''}`}>
       <header className="pp-packet-card-header">
         <div className="pp-packet-card-title">
           <Link to={openHref} className="pp-packet-card-title-link">
-            <strong>{packet.packetTitle}</strong>
+            <strong>{compact ? pendingPurchaseArchiveTitle(packet) : packet.packetTitle}</strong>
           </Link>
           <span className="subtle-copy">Packet #{packet.packetId} · generated {generatedAbs}</span>
         </div>
         <div className="inline-row wrap-row pp-packet-card-status">
-          <Pill tone={packet.status === 'ready' ? 'success' : 'muted'}>{packet.status === 'ready' ? 'live' : packet.status}</Pill>
-          {/*
-            Source is metadata, not a status — muted so it doesn't
-            look like a green 'all good' badge alongside the actual
-            status pill.
-          */}
-          <Pill tone="muted">{`source: ${packet.source}`}</Pill>
+          <Pill tone={packet.status === 'ready' ? 'success' : 'muted'}>{packet.status === 'ready' ? 'current' : packet.status === 'superseded' ? 'archived' : packet.status}</Pill>
           {packet.siteLabels.map((label) => <Pill key={label} tone="muted">{label}</Pill>)}
         </div>
       </header>
-      <div className="pp-packet-card-grid">
+      {!compact ? <div className="pp-packet-card-grid">
         <PendingPurchaseCountStat label="Rows" value={packet.rowCount} />
         <PendingPurchaseCountStat label="Approved" value={approval.approved} tone={approval.approved > 0 ? 'success' : 'muted'} />
         <PendingPurchaseCountStat label="Pending" value={approval.pending} tone={approval.pending > 0 ? 'warning' : 'muted'} />
@@ -2850,8 +2889,10 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
         <PendingPurchaseCountStat label="Applied" value={apply.applied} tone={apply.applied > 0 ? 'success' : 'muted'} />
         <PendingPurchaseCountStat label="In-flight" value={inFlightApply} tone={inFlightApply > 0 ? 'warning' : 'muted'} />
         <PendingPurchaseCountStat label="Not applied" value={remainingApply} tone="muted" />
-      </div>
-      {latestApply ? (
+      </div> : (
+        <p className="subtle-copy pp-packet-card-apply">{pendingPurchaseArchiveSummary(packet)}</p>
+      )}
+      {!compact && latestApply ? (
         <p className="subtle-copy pp-packet-card-apply">
           Latest apply: <Pill tone={applyRequestTone(latestApply.status)}>{latestApply.status.replaceAll('_', ' ')}</Pill>
           {` · ${latestApply.appliedRowCount}/${latestApply.selectedRowCount} applied`}
@@ -2860,9 +2901,9 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
         </p>
       ) : null}
       <div className="inline-row wrap-row pp-packet-card-actions">
-        <Link className="primary-button" to={openHref}>{actionLabel}</Link>
-        {packet.hasEtlDetails ? (
-          <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(packet.packetId)}>ETL details</Link>
+        <Link className={compact ? 'ghost-button' : 'primary-button'} to={openHref}>{compact ? 'View archive' : actionLabel}</Link>
+        {!compact && packet.hasEtlDetails ? (
+          <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(packet.packetId)}>Processing details</Link>
         ) : null}
         {packet.importFileName ? <span className="subtle-copy">{packet.importFileName}</span> : null}
       </div>
@@ -2876,7 +2917,17 @@ function isPendingPurchasePacketActionable(packet: PendingPurchasePacketListItem
     || packet.applyCounts.running > 0
     || packet.applyCounts.failed > 0
     || packet.applyCounts.blocked > 0
-    || (packet.approvalCounts.approved > 0 && packet.applyCounts.notRequested > 0)
+    || (packet.approvalCounts.approved > packet.applyCounts.applied && packet.applyCounts.notRequested > 0)
+}
+
+function pendingPurchaseArchiveTitle(packet: PendingPurchasePacketListItem): string {
+  return `${packet.siteLabels.join(', ') || 'Unknown site'} review #${packet.packetId}`
+}
+
+function pendingPurchaseArchiveSummary(packet: PendingPurchasePacketListItem): string {
+  const attention = packet.applyCounts.failed + packet.applyCounts.blocked
+  if (attention > 0) return `${attention} item${attention === 1 ? '' : 's'} failed or blocked · ${packet.applyCounts.applied} applied`
+  return `${packet.applyCounts.applied} of ${packet.rowCount} items applied`
 }
 
 function pendingPurchasePacketActionLabel(packet: PendingPurchasePacketListItem): string {
@@ -2900,12 +2951,11 @@ function pendingPurchasePacketNextAction(packet: PendingPurchasePacketListItem):
 function pendingPurchaseRowsNextAction(
   pending: number,
   attention: number,
-  approved: number,
-  allReviewed: boolean,
+  approvedNotApplied: number,
 ): string {
   if (attention > 0) return `Next: repair ${attention} row${attention === 1 ? '' : 's'} before retrying.`
   if (pending > 0) return `Next: review ${pending} remaining row${pending === 1 ? '' : 's'}.`
-  if (allReviewed && approved > 0) return 'Next: select approved rows and apply catalog changes.'
+  if (approvedNotApplied > 0) return `Next: select ${approvedNotApplied} approved item${approvedNotApplied === 1 ? '' : 's'} and apply catalog changes.`
   return 'This packet has no remaining review decisions.'
 }
 
@@ -3345,7 +3395,7 @@ function PendingPurchaseRowCard(
           }
           type="button"
         >
-          {isCollapsed ? 'Reopen ▾' : 'Collapse ▴'}
+          {isCollapsed ? 'Show details ▾' : 'Collapse ▴'}
         </button>
       ) : null}
       <a
@@ -3367,8 +3417,10 @@ function PendingPurchaseRowCard(
       {imageSkip ? (
         <Pill tone="warning" title={imageSkip.message}>no image, backfill needed</Pill>
       ) : null}
-      <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
-      <Pill tone="muted">{`v${item.version}`}</Pill>
+      {!isCollapsed || item.lastApplyStatus !== 'applied' ? (
+        <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
+      ) : null}
+      {!isCollapsed ? <Pill tone="muted">{`v${item.version}`}</Pill> : null}
     </>
   )
 
@@ -3907,7 +3959,7 @@ function PendingPurchaseRowCard(
       subtitle={
         <>
           {collapsedIdentity}
-          {isCollapsed ? ` · ${collapsedSummaryPrice}` : ''}
+          {` · Retail ${collapsedSummaryPrice} · Cost ${formatCurrency(item.effectiveUnitCost)}`}
         </>
       }
       statusPills={statusPills}
@@ -4160,11 +4212,27 @@ function PendingPurchaseGenerationStatusPanel({ jobStatus }: { jobStatus: JobSta
   const elapsedFrom = jobStatus.job.startedAt ?? jobStatus.job.createdAt
   const elapsedTo = jobStatus.job.finishedAt ?? new Date().toISOString()
 
+  if (!inProgress) {
+    return (
+      <aside className="pp-last-action" role="status">
+        <div>
+          <strong>Last review creation</strong>
+          <span>{` · ${jobStatus.job.status.replaceAll('_', ' ')} · ${formatElapsedTime(elapsedFrom, elapsedTo)}`}</span>
+          {jobStatus.job.lastError ? <span className="error-text">{` · ${jobStatus.job.lastError}`}</span> : null}
+        </div>
+        <div className="inline-row wrap-row">
+          <Link to={`/jobs/${jobStatus.job.jobId}`}>View job #{jobStatus.job.jobId}</Link>
+          {packetId ? <Link to={buildHeliosModulePath('catalog', `pending-purchases?packetId=${packetId}`)}>Open review</Link> : null}
+        </div>
+      </aside>
+    )
+  }
+
   return (
     <article className={`detail-panel job-progress-panel${inProgress ? ' pp-focused-state' : ''}`} style={{ marginBottom: '1rem' }}>
       <div className="page-header" style={{ marginBottom: '0.75rem' }}>
         <div>
-          <h3 style={{ margin: 0 }}>Live packet generation status</h3>
+          <h3 style={{ margin: 0 }}>Creating review</h3>
           <p className="subtle-copy">{readJobProgressMessage(jobStatus)}</p>
         </div>
         <div className="inline-row wrap-row">

@@ -1399,6 +1399,42 @@ pre {
   min-height: 44px;
 }
 
+.pp-archived-reviews {
+  margin-top: 0.9rem;
+}
+
+.pp-archived-reviews > summary {
+  cursor: pointer;
+  padding: 0.65rem 0;
+}
+
+.pp-archived-review-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.pp-packet-card-compact {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 0.65rem 0.8rem;
+}
+
+.pp-packet-card-compact .pp-packet-card-header {
+  grid-column: 1 / -1;
+}
+
+.pp-last-action {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.7rem 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
 .pp-resume-callout,
 .pp-packet-orientation {
   display: flex;
@@ -1681,6 +1717,42 @@ pre {
   flex-wrap: wrap;
 }
 
+.pp-family-jump {
+  margin: 0.7rem 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+}
+
+.pp-family-jump > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.pp-family-jump nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.pp-top-link {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 6;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: rgba(255, 250, 241, 0.95);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.12);
+  text-decoration: none;
+}
+
+.pp-rows-list {
+  padding-bottom: 3.5rem;
+}
+
 .pp-pager {
   display: flex;
   justify-content: space-between;
@@ -1894,12 +1966,23 @@ pre {
     justify-content: center;
   }
 
+  .pp-mode-tab-meta {
+    display: none;
+  }
+
   .pp-filter-row {
     flex-direction: column;
   }
 
   .pp-packet-card-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .pp-packet-card-compact,
+  .pp-last-action {
+    display: flex;
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .pp-refinement-panel {
