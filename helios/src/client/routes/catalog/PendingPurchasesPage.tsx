@@ -3206,6 +3206,14 @@ function PendingPurchaseRowCard(
       : ` · cost ${formatCurrency(item.effectiveUnitCost)}/unit${item.effectiveUnitCostSource ? ` (${item.effectiveUnitCostSource})` : ''}`
   )
   const hasPricingLadder = hasPendingPurchasePricingLadder(item, displayedPrice)
+  const forcedMatchProductId = draftLinkOverride.mode === 'forced'
+    ? draftLinkOverride.forcedProductId
+    : null
+  const matchesExistingProduct = forcedMatchProductId !== null
+  const inheritedMatchProductId = draftLinkOverride.mode === 'inherit' ? item.reuseProductId : null
+  const forcedMatchLabel = matchesExistingProduct
+    ? (draftLinkOverride.forcedDisplay?.productName ?? 'Existing Sweed product')
+    : null
 
   useEffect(() => {
     // Per-field "preserve user edits across revalidation" pattern.
@@ -3366,13 +3374,14 @@ function PendingPurchaseRowCard(
   // can default the "Overrides" details to open in that case (otherwise
   // it stays collapsed to keep the row scannable on mobile).
   const hasDraftStructuredOverrides = JSON.stringify(draftStructured) !== JSON.stringify(readInitialDraftStructured(item))
-    || JSON.stringify(draftLinkOverride) !== JSON.stringify(readInitialLinkOverrideStateFromRow(item))
+  const hasDraftLinkOverride = JSON.stringify(draftLinkOverride) !== JSON.stringify(readInitialLinkOverrideStateFromRow(item))
   const hasDraftOverrides = (
     draftPrice !== readDraftPrice(item)
     || draftDescription !== (item.editedProposedDescription ?? item.proposedDescription ?? '')
     || draftImageUrl !== (item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
     || draftNotes !== (item.notes ?? '')
     || hasDraftStructuredOverrides
+    || hasDraftLinkOverride
   )
   const reviewDetailsHref = buildHeliosModulePath('catalog', `review-details/pending_purchase_row/${item.rowId}`)
 
@@ -3417,7 +3426,9 @@ function PendingPurchaseRowCard(
       {imageSkip ? (
         <Pill tone="warning" title={imageSkip.message}>no image, backfill needed</Pill>
       ) : null}
-      {!isCollapsed || item.lastApplyStatus !== 'applied' ? (
+      {matchesExistingProduct ? (
+        <Pill tone={hasDraftLinkOverride ? 'warning' : 'success'}>{hasDraftLinkOverride ? 'DRAFT MATCH' : 'MATCH EXISTING'}</Pill>
+      ) : !isCollapsed || item.lastApplyStatus !== 'applied' ? (
         <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
       ) : null}
       {!isCollapsed ? <Pill tone="muted">{`v${item.version}`}</Pill> : null}
@@ -3519,22 +3530,14 @@ function PendingPurchaseRowCard(
         />
         <PendingValuePanel label="Prevalence" value={item.targetPrevalence ?? '—'} />
       </div>
-      <PendingPurchaseVariantLinkOverride
-        disabled={!canEdit || editingLocked}
-        onChange={setDraftLinkOverride}
-        parserReuseProductId={item.reuseProductId}
-        parserReuseProductName={item.reuseProductName}
-        siteDealerId={item.siteDealerId}
-        state={draftLinkOverride}
-      />
     </>
   )
 
   const structuredDataSection = (
-    <details open>
+    <details open={!matchesExistingProduct}>
       <summary>
-        Product identity{' '}
-        {item.needsNewBrand || item.needsNewGroup || item.needsNewVariant ? (
+        {matchesExistingProduct ? 'Parser / model details' : 'Product identity'}{' '}
+        {!matchesExistingProduct && (item.needsNewBrand || item.needsNewGroup || item.needsNewVariant) ? (
           <Pill tone="danger">
             {[
               item.needsNewBrand ? 'new brand' : null,
@@ -3545,11 +3548,60 @@ function PendingPurchaseRowCard(
               .join(' · ')}
           </Pill>
         ) : null}
-        {hasDraftStructuredOverrides ? <Pill tone="warning">unsaved</Pill> : null}
+        {hasDraftStructuredOverrides || hasDraftLinkOverride ? <Pill tone="warning">unsaved</Pill> : null}
       </summary>
-      <p className="subtle-copy">Review and edit the canonical product identity here. Parser values remain visible beside edited values.</p>
+      <p className="subtle-copy">
+        {matchesExistingProduct
+          ? 'These extraction results remain available for audit and future guidance, but apply preserves the matched product identity.'
+          : 'Review and edit the canonical product identity here. Parser values remain visible beside edited values.'}
+      </p>
       {structuredDataEditor}
+      <div className="inline-row wrap-row" style={{ marginTop: '0.7rem' }}>
+        {item.llmClassification ? (
+          <Pill tone={confidenceTone(item.llmClassification.confidence)}>
+            {`model ${formatConfidencePercent(item.llmClassification.confidence)}`}
+          </Pill>
+        ) : null}
+        {item.llmClassification?.warningFlags.map((flag) => (
+          <Pill key={`llm-${flag}`} tone="danger">{`model: ${flag}`}</Pill>
+        ))}
+      </div>
     </details>
+  )
+
+  const catalogPlanSection = (
+    <section className={`pp-catalog-plan ${matchesExistingProduct ? 'pp-catalog-plan-match' : 'pp-catalog-plan-create'}`}>
+      <div>
+        <Pill tone={matchesExistingProduct ? (hasDraftLinkOverride ? 'warning' : 'success') : inheritedMatchProductId !== null ? 'warning' : 'muted'}>
+          {matchesExistingProduct ? (hasDraftLinkOverride ? 'DRAFT MATCH' : 'MATCH EXISTING') : inheritedMatchProductId !== null ? 'UPDATE EXISTING' : 'CREATE NEW'}
+        </Pill>
+        <strong>
+          {matchesExistingProduct
+            ? `${forcedMatchLabel} · #${forcedMatchProductId}`
+            : inheritedMatchProductId !== null
+              ? `${item.reuseProductName ?? 'Existing Sweed product'} · #${inheritedMatchProductId}`
+              : 'Create a new catalog product'}
+        </strong>
+        <p className="subtle-copy">
+          {matchesExistingProduct
+            ? 'Existing name, group, strain, size, tab, and pack identity will be preserved. Parser classification does not need correction before apply.'
+            : inheritedMatchProductId !== null
+              ? 'The generator found an existing product, but parser identity can still overwrite it. Review classification or choose Preserve this existing product’s identity below.'
+              : 'No existing product is forced. Product identity must be correct before apply.'}
+        </p>
+      </div>
+      <details open={!matchesExistingProduct}>
+        <summary>{matchesExistingProduct ? 'Change or clear match' : 'Choose catalog action'}</summary>
+        <PendingPurchaseVariantLinkOverride
+          disabled={!canEdit || editingLocked}
+          onChange={setDraftLinkOverride}
+          parserReuseProductId={item.reuseProductId}
+          parserReuseProductName={item.reuseProductName}
+          siteDealerId={item.siteDealerId}
+          state={draftLinkOverride}
+        />
+      </details>
+    </section>
   )
 
   const visibleCategory = draftStructured.expectedCategory.trim()
@@ -3564,6 +3616,7 @@ function PendingPurchaseRowCard(
 
   const bodyExtras = (
     <>
+      {catalogPlanSection}
       {structuredDataSection}
       <div className="comparison-grid">{summaryTiles}</div>
       {pricingLadderSlot}
@@ -3584,22 +3637,6 @@ function PendingPurchaseRowCard(
         {item.targetPrevalence ? <Pill tone="muted">{item.targetPrevalence}</Pill> : null}
         {item.reviewFlags.map((flag) => (
           <Pill key={flag} tone="warning">{flag}</Pill>
-        ))}
-        {item.llmClassification ? (
-          <Pill tone={confidenceTone(item.llmClassification.confidence)}>
-            {`model ${formatConfidencePercent(item.llmClassification.confidence)}`}
-          </Pill>
-        ) : null}
-        {/*
-          The model's own warning flags (new brand / new group / no comps,
-          etc.) are LOUD by design — surface them inline next to the
-          deterministic reviewFlags rather than burying them in the
-          collapsed model panel, so a reviewer can't miss them. They carry a
-          "model:" prefix so they're never mistaken for a deterministic C5
-          safety finding in this regulated catalog-review UI.
-        */}
-        {item.llmClassification?.warningFlags.map((flag) => (
-          <Pill key={`llm-${flag}`} tone="danger">{`model: ${flag}`}</Pill>
         ))}
       </div>
       {item.approvedByUser ? <p className="subtle-copy">Approved by {item.approvedByUser}</p> : null}
@@ -3944,11 +3981,11 @@ function PendingPurchaseRowCard(
   const effectivePackCount = effectiveStructuredPackCount(item)
   const collapsedIdentity = [
     item.siteLabel,
-    effectiveBrand,
-    effectiveVariant,
-    effectiveCategory,
-    effectiveSize,
-    effectivePackCount === null ? null : `${effectivePackCount} pack`,
+    matchesExistingProduct ? forcedMatchLabel : effectiveBrand,
+    matchesExistingProduct ? `Sweed #${forcedMatchProductId}` : effectiveVariant,
+    matchesExistingProduct ? null : effectiveCategory,
+    matchesExistingProduct ? null : effectiveSize,
+    matchesExistingProduct || effectivePackCount === null ? null : `${effectivePackCount} pack`,
   ].filter((value): value is string => value !== null).join(' · ')
 
   return (

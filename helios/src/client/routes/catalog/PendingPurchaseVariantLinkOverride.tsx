@@ -71,27 +71,15 @@ export function readInitialLinkOverrideState(args: {
   if (args.overrideValue === null) {
     return { mode: 'cleared', forcedProductId: null, forcedDisplay: null }
   }
-  // Override forces a product id. We don't have the rich display
-  // metadata (image/group/brand) on the row, but we DO know the
-  // product id and — if the row's reuseProductName matches that id —
-  // the name. (The row loader sets reuseProductName from the
-  // generator's lookup; if the operator's override id matches the
-  // parser id, this gives a free name.) Otherwise the picker shows
-  // just the id and lets the reviewer re-confirm by searching.
-  const matchesParserId = args.parserReuseProductId === args.overrideValue
-  const forcedDisplay: VariantLinkOverrideDisplay | null = matchesParserId && args.parserReuseProductName
-    ? {
-      productName: args.parserReuseProductName,
-      groupName: null,
-      brandName: null,
-      strainName: null,
-      imageUrl: null,
-    }
-    : null
+  // The row's reuseProductName remains parser metadata even when the
+  // effective id comes from an override, so pairing the two after a
+  // reload can display the wrong product name. Keep the persisted
+  // forced id authoritative and show its numeric identity until a
+  // fresh picker selection supplies trustworthy display metadata.
   return {
     mode: 'forced',
     forcedProductId: args.overrideValue,
-    forcedDisplay,
+    forcedDisplay: null,
   }
 }
 
@@ -168,6 +156,30 @@ export function PendingPurchaseVariantLinkOverride({
           onClick={() => onChange({ mode: 'cleared', forcedProductId: null, forcedDisplay: null })}
         />
       </div>
+
+      {state.mode === 'inherit' && parserReuseProductId !== null ? (
+        <button
+          className="primary-button"
+          disabled={disabled}
+          onClick={() => onChange({
+            mode: 'forced',
+            forcedProductId: parserReuseProductId,
+            forcedDisplay: parserReuseProductName
+              ? {
+                productName: parserReuseProductName,
+                groupName: null,
+                brandName: null,
+                strainName: null,
+                imageUrl: null,
+              }
+              : null,
+          })}
+          style={{ marginTop: '0.6rem' }}
+          type="button"
+        >
+          Preserve this existing product&apos;s identity
+        </button>
+      ) : null}
 
       {state.mode === 'forced' ? (
         <VariantSearchPanel

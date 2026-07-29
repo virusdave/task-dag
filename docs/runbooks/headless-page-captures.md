@@ -19,10 +19,12 @@ cookie, and asks headless Chromium for a full-page screenshot.
   either. Remove the Chromium profile and temporary controller afterward.
 - Chromium is a large action. Wrap the entire server/browser/capture lifecycle
   in `large-action-lock --name chromium-capture`, not only browser startup.
-- Also run Chromium in a transient user systemd unit with resource bounds. A
-  reasonable single-capture default is `MemoryMax=1200M`, `CPUQuota=150%`, and
-  `TasksMax=64`, plus `--renderer-process-limit=2`. Increase a bound only after
-  observing a real failure; do not allow concurrent unbounded browsers.
+- The named lock is currently the tested resource control: it prevents several
+  agents from launching Chromium concurrently. A transient user-systemd cgroup
+  was tested, but Chromium 148's zygote repeatedly crashed before opening its
+  debugging port, including with single-process flags. Do not copy that broken
+  setup or claim cgroup coverage. If capture concurrency is ever desired,
+  investigate and validate a cgroup-compatible launch separately first.
 
 ## Procedure
 
@@ -42,10 +44,12 @@ cookie, and asks headless Chromium for a full-page screenshot.
      --label 'authenticated Helios captures' -- /tmp/run-helios-captures.sh
    ```
 
-   The script should use `trap` to stop its loopback Helios process, stop the
-   transient Chromium unit, and remove its temporary profile. Start Helios from
-   the compiled checkout with the sanctioned production `DATABASE_URL`, these
-   additional variables, and an unused loopback port:
+   The script should use `trap` to stop its loopback Helios process, terminate
+   every Chromium child carrying its unique `--user-data-dir` argument, wait,
+   and remove its temporary profile. Killing only the wrapper PID can leave
+   Chromium children writing into the profile. Start Helios from the compiled
+   checkout with the sanctioned production `DATABASE_URL`, these additional
+   variables, and an unused loopback port:
 
    ```sh
    export NODE_ENV=test
@@ -57,16 +61,20 @@ cookie, and asks headless Chromium for a full-page screenshot.
      "import('./dist/server/server/app/buildServer.js').then(async ({buildServer}) => { const server=await buildServer(); await server.listen({host:'127.0.0.1',port:4355}); })" &
    ```
 
-3. Start bounded headless Chromium. Use a unique unit name, profile, and debug
-   port when another capture could plausibly exist:
+3. Start headless Chromium inside the already-held lifecycle lock. Use a unique
+   profile and debug port when another capture could plausibly exist. On NixOS,
+   resolve the current Chromium store binary rather than assuming it is linked
+   into PATH:
 
    ```sh
-   systemd-run --user --unit="helios-capture-chromium-$$" --collect \
-     -p MemoryMax=1200M -p CPUQuota=150% -p TasksMax=64 -- \
-     chromium --headless=new --no-sandbox --disable-gpu \
-     --renderer-process-limit=2 --remote-debugging-port=9223 \
+   CHROMIUM=$(find /nix/store -maxdepth 4 -type f -path '*/bin/chromium' -print -quit)
+   test -n "$CHROMIUM"
+   "$CHROMIUM" --headless=new --no-sandbox --disable-gpu \
+     --remote-debugging-port=9223 \
      --user-data-dir="/tmp/helios-capture-profile-$$" \
-     --no-first-run --noerrdialogs about:blank
+     --no-first-run --noerrdialogs --ozone-platform=headless \
+     --ozone-override-screen-size=800,600 --use-angle=swiftshader-webgl \
+     about:blank &
    ```
 
 4. A small Node controller can use the built-in `fetch` and `WebSocket` APIs;
@@ -92,6 +100,14 @@ cookie, and asks headless Chromium for a full-page screenshot.
    test-mode renders can show OAuth, Sweed, worker, or configuration warnings
    because the harness intentionally lacks production service credentials.
    Do not report those as production defects without corroboration.
+
+   Do **not** hand several tall, full-page captures to Oracle with an open-ended
+   request to inspect them. Oracle may launch highly parallel Tesseract OCR;
+   one such review saturated the host and risked OOM reaping other workers.
+   First crop or downscale evidence under `large-action-lock`, then tell Oracle
+   explicitly not to launch OCR-heavy subprocesses. If OCR is actually needed,
+   run it directly under the same named lock and a bounded systemd unit rather
+   than delegating it to an unconstrained review process.
 
 6. For operator review, do not link directly to `upload-to-mss` image objects:
    that service can return them as binary downloads. Upload an HTML index that

@@ -1435,6 +1435,38 @@ pre {
   background: rgba(255, 255, 255, 0.45);
 }
 
+.pp-catalog-plan {
+  display: grid;
+  gap: 0.7rem;
+  margin-bottom: 0.85rem;
+  padding: 0.8rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+}
+
+.pp-catalog-plan-match {
+  border-color: rgba(10, 122, 53, 0.4);
+  background: rgba(111, 183, 140, 0.12);
+}
+
+.pp-catalog-plan-create {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.pp-catalog-plan > div:first-child {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.pp-catalog-plan p {
+  margin: 0;
+}
+
+.pp-catalog-plan > details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .pp-resume-callout,
 .pp-packet-orientation {
   display: flex;
