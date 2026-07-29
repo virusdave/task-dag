@@ -76,6 +76,7 @@ _taskdag_consumer_local_task_refs() {
 
 _taskdag_consumer_advertised_task_refs() {
     awk '$2 ~ /^refs\/heads\/(tasks\/(frontier|active|blocked|blocked-meta|root-active|pending)\/|gh\/issues\/)/ {print $1" "$2}' <<<"$1" \
+      | taskdag_normalize_v1_task_refs \
       | LC_ALL=C sort
 }
 

@@ -27,12 +27,18 @@ taskdag_prepare_child_map() {
     taskdag_prepare_child_map_from refs/remotes/origin/master
 }
 
+taskdag_normalize_v1_task_refs() {
+    awk '$2 !~ /^refs\/heads\/tasks\/(frontier|active|blocked|blocked-meta)\/v2-[0-9a-f]{64}$/'
+}
+
 taskdag_capture_child_map_refs() {
     git for-each-ref --format='%(objectname) %(refname)' \
         refs/heads/tasks/frontier/ refs/heads/tasks/active/ \
         refs/heads/tasks/blocked/ refs/heads/tasks/blocked-meta/ \
         refs/heads/tasks/root-active/ refs/heads/tasks/pending/ \
-        refs/heads/gh/issues/ | LC_ALL=C sort
+        refs/heads/gh/issues/ \
+        | taskdag_normalize_v1_task_refs \
+        | LC_ALL=C sort
 }
 
 # Build only from the selected authority and the normalized task-ref snapshot.

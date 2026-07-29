@@ -160,11 +160,28 @@ A=$(mk_task "$ROOT/same" "Task: A")
 B=$(mk_task "$ROOT/same" "Task: B")
 NA="task:owner/repo@$A"; NB="task:owner/repo@$B"
 EAB=$(edge_id "$ROOT/same" "$NB" "$NA" requires)
-WA=$(complete_task "$ROOT/same" "$A")
-if "$TD" graph-converge --range "$WA" >/dev/null 2>&1 && edge_absent "$ROOT/same" "$EAB"; then
-    ok "A1 push-reaction graph-converge folds same-repo requires edge"
+V2_ID="v2-$(printf 'a%.0s' {1..64})"
+V2_STATE=$(git commit-tree "$EMPTY_TREE" -p "$A" -m "native v2 lifecycle fixture")
+git update-ref "refs/heads/tasks/frontier/$V2_ID" "$V2_STATE"
+git push -q origin "refs/heads/tasks/frontier/$V2_ID"
+MALFORMED_V2_ID="v2-$(printf 'b%.0s' {1..63})"
+git update-ref "refs/heads/tasks/frontier/$MALFORMED_V2_ID" "$V2_STATE"
+CHILD_MAP_REFS=$(source "$TD" --help >/dev/null; taskdag_capture_child_map_refs)
+if ! grep -qF "refs/heads/tasks/frontier/$V2_ID" <<<"$CHILD_MAP_REFS" \
+    && grep -qF "refs/heads/tasks/frontier/$MALFORMED_V2_ID" <<<"$CHILD_MAP_REFS" \
+    && [ "$(git ls-remote origin "refs/heads/tasks/frontier/$V2_ID" | awk '{print $1}')" = "$V2_STATE" ]; then
+    ok "A0 child-map excludes only exact native v2 lifecycle IDs without mutation"
 else
-    bad "A1 push-reaction same-repo requires edge did not fold"
+    bad "A0 child-map hid malformed state or captured/changed a native v2 lifecycle ref"
+fi
+git update-ref -d "refs/heads/tasks/frontier/$MALFORMED_V2_ID"
+WA=$(complete_task "$ROOT/same" "$A")
+if "$TD" graph-converge --range "$WA" >/dev/null 2>&1 \
+    && edge_absent "$ROOT/same" "$EAB" \
+    && [ "$(git ls-remote origin "refs/heads/tasks/frontier/$V2_ID" | awk '{print $1}')" = "$V2_STATE" ]; then
+    ok "A1 convergence folds v1 edges while preserving native v2 lifecycle refs"
+else
+    bad "A1 convergence failed or changed a native v2 lifecycle ref"
 fi
 if "$TD" propagate-completion --node "$NA" --witness "$WA" >/dev/null 2>&1; then
     ok "A2 same-repo fold is idempotent"
