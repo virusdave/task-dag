@@ -1,5 +1,6 @@
 use crate::{Result, git, model, repository};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone)]
@@ -24,9 +25,10 @@ pub(super) struct Frozen {
     pub(super) activation_digest: String,
     pub(super) graph: String,
     pub(super) digest: String,
+    pub(super) terminal_edges: Vec<String>,
 }
 
-pub(super) fn discover(root: &str) -> Result<Frozen> {
+pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> {
     let patterns = vec![
         "refs/heads/master".into(),
         "refs/heads/tasks/v1/activation".into(),
@@ -108,7 +110,9 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         .map(|task| Ok((task.clone(), git::parents(task)?)))
         .collect::<Result<_>>()?;
     let closure = descendant_closure(root, &task_parents, 100)?;
-    inspect_graph(&graph, &closure, &mut metadata)?;
+    let repository = current_repository()?;
+    let observed_terminal_edges = inspect_graph(&graph, &closure, &repository, &mut metadata)?;
+    validate_terminal_edges(&observed_terminal_edges, terminal_edges)?;
     let guard = parse_guard(&activation)?;
     let mut tasks = Vec::new();
     tasks.push(LegacyTask {
@@ -186,6 +190,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         activation_digest: guard.digest,
         graph,
         digest,
+        terminal_edges: observed_terminal_edges,
     })
 }
 
@@ -242,9 +247,65 @@ fn owner(oid: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::descendant_closure;
+    use super::{descendant_closure, edge_id_for_value, inspect_edges, validate_terminal_edges};
     use proptest::prelude::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn malformed_terminal_edges_are_rejected() {
+        let task = "1".repeat(40);
+        let closure = BTreeSet::from([task.clone()]);
+        let valid = serde_json::json!({
+            "from":format!("task:owner/repo@{task}"),
+            "mode":"all",
+            "origin":{"repo-id":1,"witness":"fixture"},
+            "relation":"requires",
+            "schema":1,
+            "to":"issue:owner/repo#1"
+        });
+        assert_eq!(inspect_edges(&valid, &closure, "owner/repo").unwrap(), true);
+        let mut wrong_schema = valid.clone();
+        wrong_schema["schema"] = serde_json::json!(999);
+        let mut wrong_mode = valid.clone();
+        wrong_mode["mode"] = serde_json::json!("any");
+        let mut missing_origin = valid.clone();
+        missing_origin["origin"] = serde_json::Value::Null;
+        let mut zero_repository = valid.clone();
+        zero_repository["origin"]["repo-id"] = serde_json::json!(0);
+        let mut extra_field = valid.clone();
+        extra_field["extra"] = serde_json::json!(true);
+        let mut reversed = valid.clone();
+        reversed["from"] = valid["to"].clone();
+        reversed["to"] = valid["from"].clone();
+        let tombstone = serde_json::json!({"from":valid["from"],"mode":"all","origin":valid["origin"],"relation":"requires","schema":1,"to":valid["to"],"tombstone":true});
+        for malformed in [
+            wrong_schema,
+            wrong_mode,
+            missing_origin,
+            zero_repository,
+            extra_field,
+        ] {
+            assert!(inspect_edges(&malformed, &closure, "owner/repo").is_err());
+        }
+        assert!(inspect_edges(&reversed, &closure, "owner/repo").is_err());
+        assert!(inspect_edges(&tombstone, &closure, "owner/repo").is_err());
+        assert!(edge_id_for_value(&tombstone, true).is_ok());
+        let mut foreign = valid.clone();
+        foreign["from"] = serde_json::json!(format!("task:other/repo@{task}"));
+        assert!(inspect_edges(&foreign, &closure, "owner/repo").is_err());
+        let mut empty_issue = valid.clone();
+        empty_issue["to"] = serde_json::json!("issue:owner/repo#");
+        assert!(inspect_edges(&empty_issue, &closure, "owner/repo").is_err());
+        let unrelated_64 = serde_json::json!({
+            "from":format!("task:owner/repo@{}", "2".repeat(64)),
+            "mode":"all",
+            "origin":{"repo-id":1,"witness":"fixture"},
+            "relation":"requires",
+            "schema":1,
+            "to":"issue:owner/repo#2"
+        });
+        assert!(!inspect_edges(&unrelated_64, &closure, "owner/repo").unwrap());
+    }
 
     proptest! {
         #[test]
@@ -271,6 +332,24 @@ mod tests {
             for (task, task_parents) in &parents {
                 let has_reachable_parent = task_parents.iter().any(|parent| closure.contains(parent));
                 prop_assert_eq!(closure.contains(task), has_reachable_parent);
+            }
+        }
+
+        #[test]
+        fn terminal_edge_resolution_requires_exact_set(mut values in prop::collection::btree_set(any::<u64>(), 0..32)) {
+            let observed: Vec<_> = values
+                .iter()
+                .map(|value| format!("{value:040x}"))
+                .collect();
+            prop_assert!(validate_terminal_edges(&observed, &observed).is_ok());
+            let extra = values.iter().next_back().copied().unwrap_or(0).saturating_add(1);
+            values.insert(extra);
+            let changed: Vec<_> = values
+                .iter()
+                .map(|value| format!("{value:040x}"))
+                .collect();
+            if changed != observed {
+                prop_assert!(validate_terminal_edges(&observed, &changed).is_err());
             }
         }
     }
@@ -360,24 +439,27 @@ fn parse_guard(oid: &str) -> Result<Guard> {
     })
 }
 
-fn inspect_graph(graph: &str, closure: &BTreeSet<String>, total: &mut u64) -> Result<()> {
+fn inspect_graph(
+    graph: &str,
+    closure: &BTreeSet<String>,
+    repository: &str,
+    total: &mut u64,
+) -> Result<Vec<String>> {
     let tree = git::output(["show", "-s", "--format=%T", graph])?
         .trim()
         .to_owned();
     model::oid(&tree)?;
     add_object_size(&tree, total)?;
-    let listing = git::output(["ls-tree", "-rtl", "--full-tree", &tree])?;
+    let listing = git::output(["ls-tree", "-rl", "--full-tree", &tree])?;
+    let mut edges = BTreeMap::new();
+    let mut tombstones = BTreeSet::new();
     for line in listing.lines() {
-        let (meta, _) = line.split_once('\t').ok_or("malformed graph tree entry")?;
+        let (meta, path) = line.split_once('\t').ok_or("malformed graph tree entry")?;
         let parts: Vec<_> = meta.split_whitespace().collect();
-        if parts.len() != 4 || !matches!(parts[1], "blob" | "tree") {
+        if parts.len() != 4 || parts[0] != "100644" || parts[1] != "blob" {
             return Err("graph tree contains malformed entry".into());
         }
         model::oid(parts[2])?;
-        if parts[1] == "tree" {
-            add_object_size(parts[2], total)?;
-            continue;
-        }
         let size = parts[3]
             .parse::<u64>()
             .map_err(|_| "graph blob size malformed")?;
@@ -389,9 +471,48 @@ fn inspect_graph(graph: &str, closure: &BTreeSet<String>, total: &mut u64) -> Re
         }
         let value: Value = serde_json::from_str(&git::output(["cat-file", "blob", parts[2]])?)
             .map_err(|_| "graph edge blob is malformed JSON")?;
-        inspect_edges(&value, closure)?;
+        let (kind, edge_id) = graph_path(path)?;
+        let recomputed = edge_id_for_value(&value, kind == "tombstones")?;
+        if recomputed != edge_id {
+            return Err("graph edge path does not match its semantic edge ID".into());
+        }
+        if kind == "tombstones" {
+            tombstones.insert(edge_id.to_owned());
+        } else if edges
+            .insert(edge_id.to_owned(), (parts[2].to_owned(), value))
+            .is_some()
+        {
+            return Err("graph contains duplicate semantic edge ID".into());
+        }
     }
-    Ok(())
+    let mut terminal_edges = Vec::new();
+    for (edge_id, (blob_oid, value)) in edges {
+        if !tombstones.contains(&edge_id) && inspect_edges(&value, closure, repository)? {
+            terminal_edges.push(blob_oid);
+        }
+    }
+    terminal_edges.sort();
+    Ok(terminal_edges)
+}
+
+fn graph_path(path: &str) -> Result<(&str, &str)> {
+    let (kind, file) = path
+        .split_once('/')
+        .ok_or("graph tree contains malformed path")?;
+    if !matches!(kind, "edges" | "tombstones") || !file.ends_with(".json") {
+        return Err("graph tree contains unexpected path".into());
+    }
+    let edge_id = file
+        .strip_suffix(".json")
+        .ok_or("graph tree contains malformed path")?;
+    if edge_id.len() != 64
+        || !edge_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("graph tree path has malformed semantic edge ID".into());
+    }
+    Ok((kind, edge_id))
 }
 fn add_object_size(oid: &str, total: &mut u64) -> Result<()> {
     let size = git::output(["cat-file", "-s", oid])?
@@ -407,43 +528,120 @@ fn add_object_size(oid: &str, total: &mut u64) -> Result<()> {
     Ok(())
 }
 
-fn inspect_edges(value: &Value, closure: &BTreeSet<String>) -> Result<()> {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                inspect_edges(item, closure)?;
-            }
-        }
-        Value::Object(map) => {
-            if map.contains_key("from") || map.contains_key("to") {
-                let from = map
-                    .get("from")
-                    .and_then(Value::as_str)
-                    .ok_or("graph edge from is malformed")?;
-                let to = map
-                    .get("to")
-                    .and_then(Value::as_str)
-                    .ok_or("graph edge to is malformed")?;
-                if endpoint_in_closure(from, closure)? || endpoint_in_closure(to, closure)? {
-                    return Err("v1 graph has an edge touching migration closure".into());
-                }
-            } else {
-                for child in map.values() {
-                    inspect_edges(child, closure)?;
-                }
-            }
-        }
-        _ => return Err("graph edge JSON has malformed shape".into()),
+fn inspect_edges(value: &Value, closure: &BTreeSet<String>, repository: &str) -> Result<bool> {
+    let map = value
+        .as_object()
+        .ok_or("graph edge JSON has malformed shape")?;
+    validate_edge_shape(map, false)?;
+    let from = map["from"].as_str().unwrap();
+    let to = map["to"].as_str().unwrap();
+    let from_in_closure = endpoint_in_closure(from, closure, repository)?;
+    let to_in_closure = endpoint_in_closure(to, closure, repository)?;
+    if !from_in_closure && !to_in_closure {
+        return Ok(false);
     }
-    Ok(())
+    if !from_in_closure
+        || to_in_closure
+        || !to.starts_with("issue:")
+        || map["relation"] != "requires"
+        || map["mode"] != "all"
+    {
+        return Err(
+            "v1 graph edge touching migration closure is not a terminal external requirement"
+                .into(),
+        );
+    }
+    Ok(true)
 }
-fn endpoint_in_closure(value: &str, closure: &BTreeSet<String>) -> Result<bool> {
+
+fn edge_id_for_value(value: &Value, tombstone: bool) -> Result<String> {
+    let map = value
+        .as_object()
+        .ok_or("graph edge JSON has malformed shape")?;
+    validate_edge_shape(map, tombstone)?;
+    let mut digest = Sha256::new();
+    for field in ["from", "to", "relation", "mode"] {
+        digest.update(map[field].as_str().unwrap().as_bytes());
+        if field != "mode" {
+            digest.update([0]);
+        }
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn validate_edge_shape(map: &serde_json::Map<String, Value>, tombstone: bool) -> Result<()> {
+    let expected = if tombstone {
+        vec![
+            "from",
+            "mode",
+            "origin",
+            "relation",
+            "schema",
+            "to",
+            "tombstone",
+        ]
+    } else {
+        vec!["from", "mode", "origin", "relation", "schema", "to"]
+    };
+    let origin = map.get("origin").and_then(Value::as_object);
+    let repo_id = origin
+        .and_then(|value| value.get("repo-id"))
+        .and_then(Value::as_u64);
+    if map.keys().map(String::as_str).collect::<Vec<_>>() != expected
+        || map.get("schema").and_then(Value::as_u64) != Some(1)
+        || tombstone
+            != map
+                .get("tombstone")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        || origin.map(|value| value.keys().map(String::as_str).collect::<Vec<_>>())
+            != Some(vec!["repo-id", "witness"])
+        || repo_id.is_none_or(|value| value == 0)
+        || origin
+            .and_then(|value| value.get("witness"))
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err("graph edge blob is not canonical schema 1".into());
+    }
+    let from = map
+        .get("from")
+        .and_then(Value::as_str)
+        .ok_or("graph edge from is malformed")?;
+    let to = map
+        .get("to")
+        .and_then(Value::as_str)
+        .ok_or("graph edge to is malformed")?;
+    endpoint_in_closure(from, &BTreeSet::new(), "")?;
+    endpoint_in_closure(to, &BTreeSet::new(), "")?;
+    match (
+        map.get("relation").and_then(Value::as_str),
+        map.get("mode").and_then(Value::as_str),
+    ) {
+        (Some("requires"), Some("all")) | (Some("satisfies"), Some("any")) => Ok(()),
+        _ => Err("graph edge relation and mode are not canonical".into()),
+    }
+}
+
+fn validate_terminal_edges(observed: &[String], supplied: &[String]) -> Result<()> {
+    if observed == supplied {
+        Ok(())
+    } else {
+        Err("terminal external edge resolutions must exactly match graph edges touching migration closure".into())
+    }
+}
+fn endpoint_in_closure(
+    value: &str,
+    closure: &BTreeSet<String>,
+    current_repository: &str,
+) -> Result<bool> {
     if let Some(issue) = value.strip_prefix("issue:") {
         let (repository, number) = issue
             .rsplit_once('#')
             .ok_or("graph issue endpoint is malformed")?;
-        if repository.is_empty()
+        if !canonical_repository(repository)
             || number.is_empty()
+            || number.starts_with('0')
             || !number.bytes().all(|byte| byte.is_ascii_digit())
         {
             return Err("graph issue endpoint is malformed".into());
@@ -456,9 +654,60 @@ fn endpoint_in_closure(value: &str, closure: &BTreeSet<String>) -> Result<bool> 
     let (repository, oid) = task
         .rsplit_once('@')
         .ok_or("graph task endpoint is malformed")?;
-    if repository.is_empty() {
+    if !canonical_repository(repository) {
         return Err("graph task endpoint is malformed".into());
     }
-    model::oid(oid).map_err(|_| "graph edge endpoint is malformed")?;
-    Ok(closure.contains(oid))
+    if !matches!(oid.len(), 40 | 64)
+        || !oid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("graph edge endpoint is malformed".into());
+    }
+    if closure.contains(oid) && repository != current_repository {
+        return Err("graph task endpoint names the migration closure in another repository".into());
+    }
+    Ok(repository == current_repository && closure.contains(oid))
+}
+
+fn canonical_repository(value: &str) -> bool {
+    let Some((owner, repository)) = value.split_once('/') else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repository.is_empty()
+        && !repository.contains('/')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'-' | b'/')
+        })
+}
+
+fn current_repository() -> Result<String> {
+    #[cfg(feature = "test-seam")]
+    if let Ok(value) = std::env::var("TASKDAG_TEST_CURRENT_REPOSITORY") {
+        if canonical_repository(&value) {
+            return Ok(value);
+        }
+        return Err("test current repository identity is malformed".into());
+    }
+    let remote = git::output(["remote", "get-url", "origin"])?;
+    let remote = remote.trim().trim_end_matches(".git");
+    let path = if let Some(path) = remote.strip_prefix("https://github.com/") {
+        path
+    } else if remote.starts_with("git@") {
+        remote
+            .split_once(':')
+            .map(|(_, path)| path)
+            .ok_or("origin URL does not contain a repository path")?
+    } else {
+        return Err("origin URL does not identify a canonical GitHub repository".into());
+    };
+    let value = path.to_ascii_lowercase();
+    if canonical_repository(&value) {
+        Ok(value)
+    } else {
+        Err("origin URL has malformed GitHub repository identity".into())
+    }
 }

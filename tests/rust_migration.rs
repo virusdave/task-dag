@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -135,7 +136,7 @@ impl Fixture {
             "Task-Dag-Activation-Guard: v1\nActivation-Epoch: 7\nActivation-Record-Digest: {digest}\nGuard-Version: 1\nActivation-Commit: {record}\nExpected-Authority-Tip: {record}\nWriter-Class: fixture\nOperation: seed\nActor: migration-test\nAuthoritative-Timestamp: 2026-07-28T00:00:00Z\nTarget-Updates: []"
         );
         let activation = commit(&work, &guard_message, &[&record]);
-        let graph = Self::graph_commit(&work, &other_frontier);
+        let graph = Self::graph_commit(&work, &other_frontier, None);
 
         let mut refs = BTreeMap::new();
         refs.insert("refs/heads/tasks/pending/root".into(), root.clone());
@@ -196,8 +197,24 @@ impl Fixture {
         }
     }
 
-    fn graph_commit(work: &Path, task: &str) -> String {
-        let edge = json!({"from":format!("task:owner/repo@{task}"),"to":"issue:owner/repo#42"});
+    fn graph_commit(work: &Path, task: &str, parent: Option<&str>) -> String {
+        let edge = json!({"from":format!("task:owner/repo@{task}"),"mode":"all","origin":{"repo-id":1,"witness":"fixture"},"relation":"requires","schema":1,"to":"issue:owner/repo#42"});
+        let mut edge_id = Sha256::new();
+        for (index, value) in [
+            edge["from"].as_str().unwrap(),
+            edge["to"].as_str().unwrap(),
+            "requires",
+            "all",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            edge_id.update(value.as_bytes());
+            if index < 3 {
+                edge_id.update([0]);
+            }
+        }
+        let edge_id = format!("{:x}", edge_id.finalize());
         let blob: String = {
             let mut child = Command::new("git")
                 .current_dir(work)
@@ -218,6 +235,25 @@ impl Fixture {
                 .trim()
                 .into()
         };
+        let edges_tree: String = {
+            let mut child = Command::new("git")
+                .current_dir(work)
+                .args(["mktree"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            writeln!(
+                child.stdin.as_mut().unwrap(),
+                "100644 blob {blob}\t{edge_id}.json"
+            )
+            .unwrap();
+            String::from_utf8(child.wait_with_output().unwrap().stdout)
+                .unwrap()
+                .trim()
+                .into()
+        };
         let tree: String = {
             let mut child = Command::new("git")
                 .current_dir(work)
@@ -229,7 +265,7 @@ impl Fixture {
             use std::io::Write;
             writeln!(
                 child.stdin.as_mut().unwrap(),
-                "100644 blob {blob}\tedge.json"
+                "040000 tree {edges_tree}\tedges"
             )
             .unwrap();
             String::from_utf8(child.wait_with_output().unwrap().stdout)
@@ -237,7 +273,10 @@ impl Fixture {
                 .trim()
                 .into()
         };
-        ok(work, &["commit-tree", &tree, "-m", "graph"])
+        match parent {
+            Some(parent) => ok(work, &["commit-tree", &tree, "-p", parent, "-m", "graph"]),
+            None => ok(work, &["commit-tree", &tree, "-m", "graph"]),
+        }
     }
 
     fn run_raw(
@@ -251,6 +290,7 @@ impl Fixture {
             .args(args)
             .env("TASKDAG_TEST_TIME", "1785196800")
             .env("TASKDAG_TEST_LEGACY_ACTIVATION", "1")
+            .env("TASKDAG_TEST_CURRENT_REPOSITORY", "owner/repo")
             .env("TASKDAG_SESSION_ID", "migration-integration")
             .env(
                 "TASKDAG_TEST_RUNTIME_REMOTE",
@@ -275,6 +315,26 @@ impl Fixture {
                 operation,
             ],
             extra,
+            Some("migration-token-0001"),
+        )
+    }
+    fn migrate_with_terminal_edge(&self, operation: &str, edge: &str) -> Output {
+        Self::run_raw(
+            &self.work,
+            &[
+                "migrate-v1",
+                "--root",
+                &self.root,
+                "--operation-id",
+                operation,
+                "--terminal-external-edge",
+                edge,
+                "--resolution-authorization",
+                "operator-approved terminal legacy prerequisite",
+                "--resolution-evidence",
+                "https://example.invalid/closed-prerequisite",
+            ],
+            None,
             Some("migration-token-0001"),
         )
     }
@@ -308,6 +368,19 @@ impl Fixture {
                 &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
             )
             .is_empty()
+        );
+    }
+
+    fn assert_graph_guard(&self, prior: &str) {
+        let current = self.remote("refs/heads/tasks/v1/graph").unwrap();
+        assert_ne!(current, prior);
+        assert_eq!(
+            ok(&self.work, &["show", "-s", "--format=%P", &current]),
+            prior
+        );
+        assert_eq!(
+            ok(&self.work, &["show", "-s", "--format=%T", &current]),
+            ok(&self.work, &["show", "-s", "--format=%T", prior])
         );
     }
 }
@@ -470,10 +543,7 @@ fn migrates_exact_closure_deterministically_and_preserves_unrelated_state() {
             "closure lifecycle ref survived: {reference}"
         );
     }
-    assert_eq!(
-        f.remote("refs/heads/tasks/v1/graph").as_deref(),
-        Some(f.graph.as_str())
-    );
+    f.assert_graph_guard(&f.graph);
     let replacement = f.remote("refs/heads/tasks/v1/activation").unwrap();
     assert_ne!(replacement, f.activation);
     let guard = ok(&f.work, &["show", "-s", "--format=%B", &replacement]);
@@ -522,7 +592,7 @@ fn ambiguous_success_replays_identical_result() {
 #[test]
 fn malformed_closure_and_touching_graph_fail_without_mutation() {
     let f = Fixture::new(true, false);
-    let touching = Fixture::graph_commit(&f.work, &f.root);
+    let touching = Fixture::graph_commit(&f.work, &f.root, Some(&f.graph));
     ok(
         &f.work,
         &[
@@ -534,7 +604,9 @@ fn malformed_closure_and_touching_graph_fail_without_mutation() {
     );
     let out = f.migrate("touching-graph", None);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("edge touching migration closure"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("resolutions must exactly match graph edges")
+    );
     ok(
         &f.work,
         &[
@@ -547,6 +619,52 @@ fn malformed_closure_and_touching_graph_fail_without_mutation() {
     let out = f.migrate("blocked-closure", None);
     assert!(String::from_utf8_lossy(&out.stderr).contains("blocked legacy state"));
     f.assert_failure_untouched(&out);
+}
+
+#[test]
+fn exact_terminal_external_edge_is_preserved_as_immutable_provenance() {
+    let f = Fixture::new(false, true);
+    let touching = Fixture::graph_commit(&f.work, &f.root, Some(&f.graph));
+    ok(
+        &f.work,
+        &[
+            "push",
+            &format!("--force-with-lease=refs/heads/tasks/v1/graph:{}", f.graph),
+            "origin",
+            &format!("{touching}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let edge = ok(
+        &f.work,
+        &["ls-tree", "-r", "--format=%(objectname)", &touching],
+    );
+    let out = f.migrate_with_terminal_edge("terminal-edge", &edge);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["terminalExternalEdges"], json!([edge]));
+    let mapping = f
+        .remote(&format!("refs/heads/tasks/v2/imports/v1/by-sha/{}", f.root))
+        .unwrap();
+    assert_eq!(
+        body(&f.work, &mapping)["provenance"]["terminalExternalEdges"],
+        json!({
+            "authorization":"operator-approved terminal legacy prerequisite",
+            "disposition":"terminal",
+            "edgeBlobOids":[edge],
+            "evidence":["https://example.invalid/closed-prerequisite"]
+        })
+    );
+    assert!(
+        ok(&f.work, &["show", "-s", "--format=%P", &mapping])
+            .split_whitespace()
+            .any(|parent| parent == touching),
+        "root import mapping must retain the frozen graph and its exact edge blobs"
+    );
+    f.assert_graph_guard(&touching);
 }
 
 #[test]
@@ -583,5 +701,38 @@ fn activation_race_rejects_all_migration_updates() {
             Some(oid.as_str()),
             "changed {reference}"
         );
+    }
+}
+
+#[test]
+fn graph_race_rejects_all_migration_updates() {
+    let f = Fixture::new(false, false);
+    let raced = commit(&f.work, "concurrent graph", &[]);
+    let out = f.migrate("graph-race", Some(("TASKDAG_TEST_RACE_V1_GRAPH", &raced)));
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("conflicting or indeterminate"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        f.remote("refs/heads/tasks/v1/graph").as_deref(),
+        Some(raced.as_str())
+    );
+    assert_eq!(
+        f.remote("refs/heads/tasks/v1/activation").as_deref(),
+        Some(f.activation.as_str())
+    );
+    assert!(
+        ok(
+            &f.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+    for (reference, oid) in &f.refs {
+        if !reference.contains("tasks/v1/") {
+            assert_eq!(f.remote(reference).as_deref(), Some(oid.as_str()));
+        }
     }
 }

@@ -133,6 +133,12 @@ enum Commands {
         root: String,
         #[arg(long)]
         operation_id: String,
+        #[arg(long, requires = "resolution_authorization")]
+        terminal_external_edge: Vec<String>,
+        #[arg(long, requires = "terminal_external_edge")]
+        resolution_authorization: Option<String>,
+        #[arg(long, requires = "terminal_external_edge")]
+        resolution_evidence: Vec<String>,
     },
 }
 
@@ -372,6 +378,18 @@ pub(crate) fn run() -> Result<()> {
         }
         Commands::Project(_) => commands::unsupported::fail("project"),
         Commands::Provider(_) => commands::unsupported::fail("provider"),
-        Commands::MigrateV1 { root, operation_id } => crate::migration::run(&root, &operation_id),
+        Commands::MigrateV1 {
+            root,
+            operation_id,
+            terminal_external_edge,
+            resolution_authorization,
+            resolution_evidence,
+        } => crate::migration::run(
+            &root,
+            &operation_id,
+            &terminal_external_edge,
+            resolution_authorization.as_deref(),
+            &resolution_evidence,
+        ),
     }
 }
