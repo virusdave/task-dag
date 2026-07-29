@@ -101,7 +101,8 @@ checks only when the staged files touch a package: helios server
 typecheck + client typecheck + in-process SPA smoke when `helios/`
 changes, and the `ads/google` typecheck when `ads/google/` changes. The
 heavy helios checks (full vitest suite, `vite build`) are **not** in the
-hook — CI owns them (see [Dev-loop checks](#dev-loop-checks) below).
+hook — the final-gate path owns them (see [Dev-loop checks](#dev-loop-checks)
+below).
 
 The hook needs the touched package's `node_modules/` populated
 (`npm install` inside `helios/` and/or `ads/google/`). Do not bypass it
@@ -111,13 +112,14 @@ stop and report.
 ## Dev-loop checks
 
 Iterate with the **smallest check that covers the files you touched**;
-CI owns the heavy full-suite gates. Do not hand-run heavy local gates
-repeatedly — if you need one to debug a CI failure or a harness change,
-run it **once** under `large-action-lock` and record why (canon:
-rules/QUALITY_GATES.md "Green tree"). Timings below are warm/incremental
+the final-gate path owns the heavy full-suite gates. GitHub CI normally runs
+that path, but is advisory and may be unavailable under the private-repo plan;
+in that case run the relevant heavy gate **once** under `large-action-lock`
+near the end and record why (canon: rules/QUALITY_GATES.md "Green tree"). Do
+not hand-run heavy local gates repeatedly. Timings below are warm/incremental
 from a fresh ephemeral checkout on a prod host; cold runs are slower.
 
-| Touched area | Fast/targeted local gate | Commit gate (pre-commit hook) | Heavy / CI-owned final gate |
+| Touched area | Fast/targeted local gate | Commit gate (pre-commit hook) | Heavy final gate (normally run by CI) |
 | --- | --- | --- | --- |
 | Repo-wide scripts / docs / gates | `bash scripts/scan-explicit-any.sh`; `scan-disabled-gates.sh`; `scan-test-resources.sh` (<1s each) | all three scanners, every commit | CI `scanners` job |
 | `helios/` server (`src/server`, `src/worker`, node-only `src/shared`) | `cd helios && npm run typecheck` (~3s); focused tests `npm run test -- <file-or-pattern>` | server compile + smoke when `helios/` staged | CI `helios` job (`npm run check`) |
@@ -134,8 +136,8 @@ Focused vitest accepts a path or pattern, e.g.
 GitHub branch protection / required status checks are **unavailable** on
 this private repo under the current plan: the API returns `403 "Upgrade
 to GitHub Pro or make this repository public"`. CI (`.github/workflows/ci.yml`)
-still runs on every push to `master` and on PRs and must be kept green,
-but it is **advisory, not a blocking merge/push gate**. Agents push
+is configured on pushes to `master` and on PRs, but it is **advisory, not a
+blocking merge/push or completion gate**. Agents push
 straight to `master` and then `self-deploy-helios`, which does not wait
 for CI; so the **pre-commit hook is the only enforcement that runs before
 code reaches `master` and is deployed**.
@@ -147,10 +149,11 @@ or `self-deploy-helios` learns to wait for CI-green on the pushed commit):
   replacement — the two-gate "CI backstops a light hook" model does not
   fully hold here, so the hook intentionally keeps the ~28s client
   typecheck rather than punting it to non-blocking CI.
-- After pushing, **confirm the post-push CI run is green** for your
-  commit and record it (run URL/SHA) in your Agent Gate Record; a red
-  `master` is a stop-everything master-repair task (canon:
-  rules/WORKFLOW.md).
+- After pushing, inspect and record the post-push CI run when GitHub executes
+  it. A code/test failure is a red-`master` repair task, but a provider refusal
+  before any step runs (for example billing/plan unavailability) is not code
+  evidence and does not block completion. Run and record the relevant local
+  final gates instead.
 
 Closing this window for real (branch protection or a CI-green-gated
 deploy) is tracked as follow-up under
