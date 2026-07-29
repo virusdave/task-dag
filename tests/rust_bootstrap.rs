@@ -142,17 +142,69 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         &a,
         &["commit-tree", empty_tree, "-m", "legacy v1 frontier task"],
     );
+    let legacy_blocked = ok(
+        &a,
+        &["commit-tree", empty_tree, "-m", "legacy v1 blocked task"],
+    );
     ok(
         &a,
         &[
             "push",
             "origin",
             &format!("{legacy_frontier}:refs/heads/tasks/frontier/1234567"),
+            &format!("{legacy_blocked}:refs/heads/tasks/blocked/1234567"),
         ],
     );
     assert_eq!(
         success(&a, &["frontier"], "unused-token-000", 100)["tasks"],
         serde_json::json!([])
+    );
+    assert_eq!(
+        success(&a, &["blocked"], "unused-token-000", 100)["tasks"],
+        serde_json::json!([])
+    );
+    let non_repo = root.join("not-a-repository");
+    fs::create_dir(&non_repo).unwrap();
+    for args in [["dep", "add", "ignored"], ["dep", "drop", "ignored"]] {
+        let rejected = cli(&non_repo, &args, "unused-token-000", 100);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("requirements are immutable"));
+    }
+    let legacy_compose = cli(
+        &non_repo,
+        &["epic-compose", "--source-checkout", "/tmp/source"],
+        "unused-token-000",
+        100,
+    );
+    assert!(!legacy_compose.status.success());
+    assert!(String::from_utf8_lossy(&legacy_compose.stderr).contains("unexpected argument"));
+    let malformed_id = format!("v2-{}", "f".repeat(64));
+    let malformed = ok(
+        &a,
+        &[
+            "commit-tree",
+            empty_tree,
+            "-m",
+            "malformed v2 blocked record",
+        ],
+    );
+    ok(
+        &a,
+        &[
+            "push",
+            "origin",
+            &format!("{malformed}:refs/heads/tasks/blocked/{malformed_id}"),
+        ],
+    );
+    let malformed_read = cli(&a, &["blocked"], "unused-token-000", 100);
+    assert!(!malformed_read.status.success());
+    ok(
+        &a,
+        &[
+            "push",
+            "origin",
+            &format!(":refs/heads/tasks/blocked/{malformed_id}"),
+        ],
     );
     let intervening_completion = ok(
         &a,
@@ -457,20 +509,32 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
             .next(),
         Some(publication.as_str())
     );
-    let created = success(
-        &a,
-        &[
-            "create",
-            "--operation-id",
-            "root-op",
-            "--title",
-            "Root",
-            "--description",
-            "Root task",
-            "--claim",
-        ],
-        "parent-token-000",
-        100,
+    let create_alias_args = [
+        "epic-create",
+        "--operation-id",
+        "root-op",
+        "--title",
+        "Root",
+        "--description",
+        "Root task",
+        "--claim",
+    ];
+    let created_raw = cli(&a, &create_alias_args, "parent-token-000", 100);
+    assert!(created_raw.status.success());
+    let created: serde_json::Value = serde_json::from_slice(&created_raw.stdout).unwrap();
+    let canonical_create_args = [
+        "create",
+        "--operation-id",
+        "root-op",
+        "--title",
+        "Root",
+        "--description",
+        "Root task",
+        "--claim",
+    ];
+    assert_eq!(
+        cli(&a, &canonical_create_args, "other-token-000", 100).stdout,
+        created_raw.stdout
     );
     let id = created["taskId"].as_str().unwrap();
     assert_eq!(created["claimToken"], "parent-token-000");
@@ -510,7 +574,7 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     let spec = root.join("breakdown.json");
     fs::write(&spec, r#"{"operationId":"split","children":[{"key":"a","title":"A","description":"A","requires":[],"claim":true},{"key":"b","title":"B","description":"B","requires":[],"claim":true},{"key":"c","title":"C","description":"C","requires":["a"],"claim":false}]}"#).unwrap();
     let breakdown_args = [
-        "breakdown",
+        "epic-compose",
         id,
         "--spec",
         spec.to_str().unwrap(),
@@ -518,8 +582,40 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         "parent-token-000",
     ];
     uncertain(&a, &breakdown_args, "child-token-0000", 102);
-    let split = success(&a, &breakdown_args, "child-token-0000", 102);
+    let split_raw = cli(&a, &breakdown_args, "child-token-0000", 102);
+    assert!(split_raw.status.success());
+    let split: serde_json::Value = serde_json::from_slice(&split_raw.stdout).unwrap();
+    let canonical_breakdown_args = [
+        "breakdown",
+        id,
+        "--spec",
+        spec.to_str().unwrap(),
+        "--claim-token",
+        "parent-token-000",
+    ];
+    assert_eq!(
+        cli(&a, &canonical_breakdown_args, "other-token-000", 102).stdout,
+        split_raw.stdout
+    );
     let children = split["children"].as_array().unwrap();
+    let dag_raw = cli(&a, &["dag", id], "unused-token-000", 102);
+    let context_raw = cli(&a, &["context", id], "unused-token-000", 102);
+    assert!(dag_raw.status.success() && context_raw.status.success());
+    assert_eq!(dag_raw.stdout, context_raw.stdout);
+    let neighborhood: serde_json::Value = serde_json::from_slice(&dag_raw.stdout).unwrap();
+    assert_eq!(neighborhood["state"], "waiting");
+    assert_eq!(neighborhood["directChildren"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        neighborhood["directChildren"],
+        serde_json::Value::Array(
+            children
+                .iter()
+                .map(
+                    |child| serde_json::json!({"taskId":child["taskId"],"taskOid":child["taskOid"]})
+                )
+                .collect()
+        )
+    );
     assert_eq!(
         children
             .iter()
@@ -638,6 +734,10 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         502,
     );
     let grandchild = &nested["children"][0];
+    let direct = success(&a, &["dag", converging_id], "unused-token-000", 502);
+    assert_eq!(direct["directChildren"].as_array().unwrap().len(), 1);
+    assert_eq!(direct["directChildren"][0]["taskId"], only["taskId"]);
+    assert_ne!(direct["directChildren"][0]["taskId"], grandchild["taskId"]);
     success(
         &a,
         &[

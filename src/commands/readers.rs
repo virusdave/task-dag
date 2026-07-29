@@ -1,6 +1,6 @@
 use super::print_json;
 use crate::{Result, model, repository};
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub(crate) fn show(id: &str) -> Result<()> {
     model::valid_id(id)?;
@@ -91,13 +91,24 @@ pub(crate) fn frontier() -> Result<()> {
 
 pub(crate) fn blocked() -> Result<()> {
     let snap = repository::advertise(&["refs/heads/tasks/blocked/*".into()])?;
-    repository::materialize(&snap.refs.values().cloned().collect::<Vec<_>>())?;
+    let v2: Vec<_> = snap
+        .refs
+        .iter()
+        .filter_map(|(reference, oid)| {
+            model::parse_state_ref(reference, "blocked")
+                .filter(|id| model::valid_id(id).is_ok())
+                .map(|_| oid.clone())
+        })
+        .collect();
+    repository::materialize(&v2)?;
     let mut tasks = Vec::new();
     for (reference, oid) in &snap.refs {
         let Some(id) = model::parse_state_ref(reference, "blocked") else {
             continue;
         };
-        model::valid_id(id)?;
+        if model::valid_id(id).is_err() {
+            continue;
+        }
         let value = crate::validators::lifecycle("blocked", oid, id)?;
         tasks.push(json!({"authorization":value["authorization"],"blockLease":oid,"blockedAt":value["blockedAt"],"reason":value["reason"],"taskId":id,"taskOid":value["taskOid"]}));
     }
@@ -112,7 +123,8 @@ pub(crate) fn deps(id: &str) -> Result<()> {
         return Err("task must have exactly one lifecycle ref".into());
     }
     repository::materialize(std::slice::from_ref(&found[0].2))?;
-    let task_oid = lifecycle_task(&found[0].0, &found[0].2, id)?;
+    let record = lifecycle_record(&found[0].0, &found[0].2, id)?;
+    let task_oid = record_task(&record, &found[0].0)?;
     let task = crate::validators::task(&task_oid, id)?;
     let reqs = task["requirements"]
         .as_array()
@@ -141,6 +153,14 @@ pub(crate) fn deps(id: &str) -> Result<()> {
 }
 
 pub(crate) fn context(id: &str) -> Result<()> {
+    print_json(&neighborhood(id)?)
+}
+
+pub(crate) fn dag(id: &str) -> Result<()> {
+    print_json(&neighborhood(id)?)
+}
+
+fn neighborhood(id: &str) -> Result<serde_json::Value> {
     model::valid_id(id)?;
     let first = repository::advertise(&repository::lifecycle_patterns(id))?;
     let found = model::lifecycle(&first, id);
@@ -148,19 +168,33 @@ pub(crate) fn context(id: &str) -> Result<()> {
         return Err("task must have exactly one lifecycle ref".into());
     }
     repository::materialize(std::slice::from_ref(&found[0].2))?;
-    let task_oid = lifecycle_task(&found[0].0, &found[0].2, id)?;
+    let record = lifecycle_record(&found[0].0, &found[0].2, id)?;
+    let task_oid = record_task(&record, &found[0].0)?;
     let task = crate::validators::task(&task_oid, id)?;
-    print_json(
-        &json!({"directRequirements":task["requirements"],"state":found[0].0,"stateOid":found[0].2,"structuralParent":task["structuralParent"],"task":task,"taskId":id,"taskOid":task_oid}),
+    let direct_children = if found[0].0 == "waiting" {
+        record["children"]
+            .as_array()
+            .ok_or("waiting children malformed")?
+            .iter()
+            .map(|child| json!({"taskId":child["taskId"],"taskOid":child["taskOid"]}))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    Ok(
+        json!({"directChildren":direct_children,"directRequirements":task["requirements"],"state":found[0].0,"stateOid":found[0].2,"structuralParent":task["structuralParent"],"task":task,"taskId":id,"taskOid":task_oid}),
     )
 }
 
-fn lifecycle_task(state: &str, oid: &str, id: &str) -> Result<String> {
-    let record = if state == "waiting" {
+fn lifecycle_record(state: &str, oid: &str, id: &str) -> Result<Value> {
+    Ok(if state == "waiting" {
         crate::validators::waiting(oid, id)?
     } else {
         crate::validators::lifecycle(state, oid, id)?
-    };
+    })
+}
+
+fn record_task(record: &Value, state: &str) -> Result<String> {
     record[if state == "waiting" {
         "parentTaskOid"
     } else {

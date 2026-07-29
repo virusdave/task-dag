@@ -70,13 +70,7 @@ enum Commands {
         #[arg(long)]
         operation_id: String,
     },
-    Breakdown {
-        task_id: String,
-        #[arg(long)]
-        spec: String,
-        #[arg(long)]
-        claim_token: String,
-    },
+    Breakdown(BreakdownArgs),
     Complete {
         task_id: String,
         #[arg(long)]
@@ -112,10 +106,15 @@ enum Commands {
     Frontier,
     Comment(Unsupported),
     Delegate(Unsupported),
-    Dep(Unsupported),
-    Dag(Unsupported),
-    EpicCreate(Unsupported),
-    EpicCompose(Unsupported),
+    Dep {
+        #[command(subcommand)]
+        command: DepCommands,
+    },
+    Dag {
+        task_id: String,
+    },
+    EpicCreate(Create),
+    EpicCompose(BreakdownArgs),
     Project(Unsupported),
     Provider(Unsupported),
     MigrateV1 {
@@ -133,6 +132,12 @@ enum RuntimeCommands {
         #[arg(long)]
         commit: String,
     },
+}
+
+#[derive(Subcommand)]
+enum DepCommands {
+    Add(Unsupported),
+    Drop(Unsupported),
 }
 
 #[derive(Args)]
@@ -160,6 +165,15 @@ pub(crate) struct CompleteOps {
     pub(crate) evidence: Vec<String>,
     #[arg(long)]
     pub(crate) claim_token: String,
+}
+
+#[derive(Args)]
+struct BreakdownArgs {
+    task_id: String,
+    #[arg(long)]
+    spec: String,
+    #[arg(long)]
+    claim_token: String,
 }
 
 #[derive(Args)]
@@ -218,11 +232,9 @@ pub(crate) fn run() -> Result<()> {
             authorization,
             operation_id,
         } => commands::blocked::unblock(&task_id, &block_lease, &authorization, &operation_id),
-        Commands::Breakdown {
-            task_id,
-            spec,
-            claim_token,
-        } => commands::breakdown::breakdown(&task_id, &spec, &claim_token),
+        Commands::Breakdown(args) => {
+            commands::breakdown::breakdown(&args.task_id, &args.spec, &args.claim_token)
+        }
         Commands::Complete {
             task_id,
             commit,
@@ -246,10 +258,21 @@ pub(crate) fn run() -> Result<()> {
         Commands::Frontier => commands::readers::frontier(),
         Commands::Comment(_) => commands::unsupported::fail("comment"),
         Commands::Delegate(_) => commands::unsupported::fail("delegate"),
-        Commands::Dep(_) => commands::unsupported::fail("dep add/drop"),
-        Commands::Dag(_) => commands::unsupported::fail("dag"),
-        Commands::EpicCreate(_) => commands::unsupported::fail("epic-create"),
-        Commands::EpicCompose(_) => commands::unsupported::fail("epic-compose"),
+        Commands::Dep {
+            command: DepCommands::Add(_),
+        } => commands::unsupported::fail(
+            "dep add; v2 requirements are immutable: declare them with create --requires or breakdown child requirements",
+        ),
+        Commands::Dep {
+            command: DepCommands::Drop(_),
+        } => commands::unsupported::fail(
+            "dep drop; v2 requirements are immutable: decompose a replacement task instead",
+        ),
+        Commands::Dag { task_id } => commands::readers::dag(&task_id),
+        Commands::EpicCreate(args) => commands::bootstrap::create(args),
+        Commands::EpicCompose(args) => {
+            commands::breakdown::breakdown(&args.task_id, &args.spec, &args.claim_token)
+        }
         Commands::Project(_) => commands::unsupported::fail("project"),
         Commands::Provider(_) => commands::unsupported::fail("provider"),
         Commands::MigrateV1 { root, operation_id } => crate::migration::run(&root, &operation_id),
