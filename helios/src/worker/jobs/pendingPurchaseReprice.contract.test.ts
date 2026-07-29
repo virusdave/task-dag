@@ -4,12 +4,11 @@ import {
   CatalogPendingPurchasesApplyJobPayloadSchema,
   CatalogPendingPurchasesQueueRepriceJobPayloadSchema,
 } from '../../shared/contracts/index.js'
-import { mayIssueCreatedSkuAdd, PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE } from './applyPendingPurchaseRequestJob.js'
+import { mayIssueCreatedSkuAdd } from './applyPendingPurchaseRequestJob.js'
 import { __test__ } from './queuePendingPurchaseRepriceJob.js'
 
 describe('pending-purchase created SKU repricing contract', () => {
-  it('exports the exact global sentinel and keeps compatibility false parseable', () => {
-    expect(PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE).toBe(1000.00)
+  it('keeps compatibility false parseable', () => {
     expect(CatalogPendingPurchasesApplyJobPayloadSchema.parse({
       pendingPurchaseApplyRequestId: 4,
       enqueueMarketRefreshForCreatedProducts: false,

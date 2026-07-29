@@ -4,7 +4,6 @@ import type { QueryResultRow } from 'pg'
 import { z } from 'zod'
 
 import type { CatalogPendingPurchasesApplyJobPayload, JsonValue } from '../../shared/contracts/index.js'
-import { PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE } from '../../shared/domain/pendingPurchasePricing.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { getPool, type Queryable } from '../../server/db/pool.js'
 import {
@@ -35,7 +34,6 @@ import { callSweedRpcForDealer, readSweedDealerContext } from '../sweed/client.j
 
 const ALLOWED_SALE_TYPE_ID = 1
 
-export { PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE }
 const SUBCATEGORY_ALIASES = new Map<string, string>([
   ['vapes:disposable', 'All In One / Disposable'],
 ])
@@ -241,7 +239,7 @@ interface AppliedImageSkip {
 
 const CREATED_SKU_CHECKPOINT_KEY = 'pendingPurchaseCreatedSku'
 const CreatedSkuCheckpointSchema = z.object({
-  appliedPrice: z.literal(PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE),
+  appliedPrice: z.number().finite().nonnegative(),
   createdAt: z.string().datetime(),
   groupId: z.number().int().positive().optional(),
   phase: z.enum(['group_create_pending', 'group_created', 'product_create_pending', 'product_created']),
@@ -893,7 +891,7 @@ async function applyPendingPurchaseRow(
       })
     }
     const brand = await ensureBrand(stateDealerId, dictionaries, requireNonEmptyString(row.targetBrand, 'target brand'))
-    const productPrice = PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE
+    const productPrice = requirePendingPurchasePrice(row)
     if (row.effectivePrimaryImageUrl && createdGroupId === null) {
       // Image attachment is NON-FATAL by operator directive: it is better to
       // create the product without an image (so the inventory can go on sale
@@ -939,6 +937,7 @@ async function applyPendingPurchaseRow(
         throw new DependencyUnavailableWorkerError(`Refusing to repeat Sweed group creation for pending-purchase row ${row.rowId}.`)
       }
       await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+        appliedPrice: productPrice,
         createdAt: checkpointCreatedAt,
         phase: 'group_create_pending',
       })
@@ -947,6 +946,7 @@ async function applyPendingPurchaseRow(
       )
       createdGroupId = groupResult.id
       await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+        appliedPrice: productPrice,
         createdAt: checkpointCreatedAt,
         groupId: createdGroupId,
         phase: 'group_created',
@@ -988,6 +988,7 @@ async function applyPendingPurchaseRow(
         )
       }
       await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+        appliedPrice: productPrice,
         createdAt: checkpointCreatedAt,
         groupId: createdGroupId,
         phase: 'product_create_pending',
@@ -998,6 +999,7 @@ async function applyPendingPurchaseRow(
       createdProductId = productResult.id
     }
     await persistCreatedSkuCheckpoint(row.rowId, applyRequestId, {
+      appliedPrice: productPrice,
       createdAt: checkpointCreatedAt,
       groupId: createdGroupId,
       phase: 'product_created',
@@ -1113,7 +1115,7 @@ async function applyPendingPurchaseRow(
     createdGroupId,
     createdProductId,
     ...(createdProductId !== null ? {
-      appliedPrice: PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE,
+      appliedPrice: requirePendingPurchasePrice(row),
       repriceRequired: true,
       repriceState: 'pending_queue',
     } : {}),
@@ -1643,10 +1645,9 @@ async function reconcileCheckpointedGroupProduct(
 async function persistCreatedSkuCheckpoint(
   rowId: number,
   requestId: number,
-  ids: { createdAt: string; groupId?: number; phase: CreatedSkuCheckpoint['phase']; productId?: number },
+  ids: { appliedPrice: number; createdAt: string; groupId?: number; phase: CreatedSkuCheckpoint['phase']; productId?: number },
 ): Promise<void> {
   const checkpoint = CreatedSkuCheckpointSchema.parse({
-    appliedPrice: PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE,
     ...ids,
     repriceRequired: true,
     requestId,
