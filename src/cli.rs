@@ -18,6 +18,10 @@ enum Commands {
     Init {
         #[arg(long)]
         trusted_floor: String,
+        #[arg(long, requires = "fleet_repository_id")]
+        repository_id: Option<String>,
+        #[arg(long, requires = "repository_id")]
+        fleet_repository_id: Vec<String>,
     },
     Create(Create),
     Claim {
@@ -86,6 +90,10 @@ enum Commands {
         activation_lease: String,
         #[arg(long)]
         operation_id: String,
+        #[arg(long, requires = "fleet_repository_id")]
+        repository_id: Option<String>,
+        #[arg(long, requires = "repository_id")]
+        fleet_repository_id: Vec<String>,
     },
     Converge {
         task_id: String,
@@ -190,7 +198,15 @@ pub(crate) fn run() -> Result<()> {
         Commands::Runtime {
             command: RuntimeCommands::Publish { commit },
         } => crate::runtime_authority::publish(&commit),
-        Commands::Init { trusted_floor } => commands::bootstrap::init(&trusted_floor),
+        Commands::Init {
+            trusted_floor,
+            repository_id,
+            fleet_repository_id,
+        } => commands::bootstrap::init(
+            &trusted_floor,
+            repository_id.as_deref(),
+            &fleet_repository_id,
+        ),
         Commands::Create(args) => commands::bootstrap::create(args),
         Commands::Claim {
             task_id,
@@ -245,7 +261,15 @@ pub(crate) fn run() -> Result<()> {
             commit,
             activation_lease,
             operation_id,
-        } => commands::bootstrap::activate_runtime(&commit, &activation_lease, &operation_id),
+            repository_id,
+            fleet_repository_id,
+        } => commands::bootstrap::activate_runtime(
+            &commit,
+            &activation_lease,
+            &operation_id,
+            repository_id.as_deref(),
+            &fleet_repository_id,
+        ),
         Commands::Converge {
             task_id,
             operation_id,

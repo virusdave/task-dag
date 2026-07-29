@@ -10,14 +10,77 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-pub(crate) fn init(trusted_floor: &str) -> Result<()> {
+fn legacy_v2_test_write() -> bool {
+    cfg!(feature = "test-seam") && std::env::var_os("TASKDAG_TEST_LEGACY_ACTIVATION").is_some()
+}
+
+fn identity_fields(repository_id: &str, fleet: &[String]) -> Result<Value> {
+    model::repository_id(repository_id)?;
+    if fleet.is_empty() || fleet.len() > 256 {
+        return Err("fleet repository IDs must contain 1 through 256 entries".into());
+    }
+    let mut canonical = fleet.to_vec();
+    for id in &canonical {
+        model::repository_id(id)?;
+    }
+    canonical.sort();
+    canonical.dedup();
+    if canonical.len() != fleet.len()
+        || canonical != fleet
+        || !canonical.iter().any(|id| id == repository_id)
+    {
+        return Err(
+            "fleet repository IDs must be sorted, unique, and contain repository-id".into(),
+        );
+    }
+    let parts: Vec<_> = canonical.iter().map(String::as_str).collect();
+    Ok(json!({
+        "fleetDigest": model::framed_digest("fleet-repository-ids-v1", &parts),
+        "fleetRepositoryIds": canonical,
+        "repositoryId": repository_id,
+    }))
+}
+
+pub(crate) fn init(
+    trusted_floor: &str,
+    repository_id: Option<&str>,
+    fleet: &[String],
+) -> Result<()> {
     model::oid(trusted_floor)?;
     let runtime = runtime()?;
     git::output(["cat-file", "-e", &format!("{runtime}^{{commit}}")])
         .map_err(|_| "embedded runtime must exist locally as a commit")?;
     runtime_authority::validate(&runtime)?;
     let operation = format!("init-{trusted_floor}");
-    let semantic = model::framed_digest("init-semantics", &[trusted_floor, &runtime]);
+    let identity = repository_id
+        .map(|id| identity_fields(id, fleet))
+        .transpose()?;
+    if identity.is_none() {
+        let legacy_semantic = model::framed_digest("init-semantics", &[trusted_floor, &runtime]);
+        if let Some(outputs) = receipts::replay("init", &operation, &legacy_semantic)? {
+            return print_json(&outputs);
+        }
+        if !legacy_v2_test_write() {
+            return Err(
+                "new v2 initialization is disabled; repository and fleet identity are required"
+                    .into(),
+            );
+        }
+    }
+    let semantic = identity.as_ref().map_or_else(
+        || model::framed_digest("init-semantics", &[trusted_floor, &runtime]),
+        |identity| {
+            model::framed_digest(
+                "init-semantics",
+                &[
+                    trusted_floor,
+                    &runtime,
+                    identity["repositoryId"].as_str().unwrap(),
+                    identity["fleetDigest"].as_str().unwrap(),
+                ],
+            )
+        },
+    );
     if let Some(outputs) = receipts::replay("init", &operation, &semantic)? {
         return print_json(&outputs);
     }
@@ -34,8 +97,11 @@ pub(crate) fn init(trusted_floor: &str) -> Result<()> {
         repository::materialize(&[a.clone(), j.clone()])?;
         let value = git::object_json(a)?;
         let journal = git::object_json(j)?;
-        return if value
-            == json!({"allowedRuntimeCommits":[runtime],"epoch":1,"formatVersion":2,"state":"enabled","trustedFloor":trusted_floor})
+        let expected = identity.as_ref().map_or_else(
+            || json!({"allowedRuntimeCommits":[runtime],"epoch":1,"formatVersion":2,"state":"enabled","trustedFloor":trusted_floor}),
+            |identity| json!({"allowedRuntimeCommits":[runtime],"epoch":1,"fleetDigest":identity["fleetDigest"],"fleetRepositoryIds":identity["fleetRepositoryIds"],"formatVersion":3,"repositoryId":identity["repositoryId"],"state":"enabled","trustedFloor":trusted_floor}),
+        );
+        return if value == expected
             && crate::validators::activation(a).is_ok()
             && crate::validators::journal(j, a).is_ok()
             && journal["activation"] == *a
@@ -57,10 +123,11 @@ pub(crate) fn init(trusted_floor: &str) -> Result<()> {
         return Err("trusted floor must equal advertised master".into());
     }
     repository::materialize(std::slice::from_ref(master))?;
-    let activation = git::commit(
-        &json!({"allowedRuntimeCommits":[runtime],"epoch":1,"formatVersion":2,"state":"enabled","trustedFloor":trusted_floor}),
-        &[runtime, master.clone()],
-    )?;
+    let activation_value = identity.as_ref().map_or_else(
+        || json!({"allowedRuntimeCommits":[runtime],"epoch":1,"formatVersion":2,"state":"enabled","trustedFloor":trusted_floor}),
+        |identity| json!({"allowedRuntimeCommits":[runtime],"epoch":1,"fleetDigest":identity["fleetDigest"],"fleetRepositoryIds":identity["fleetRepositoryIds"],"formatVersion":3,"repositoryId":identity["repositoryId"],"state":"enabled","trustedFloor":trusted_floor}),
+    );
+    let activation = git::commit(&activation_value, &[runtime, master.clone()])?;
     let result = json!({});
     let (receipt_ref, receipt_oid) = receipts::create(
         "init",
@@ -95,16 +162,78 @@ pub(crate) fn init(trusted_floor: &str) -> Result<()> {
     print_json(&result)
 }
 
-pub(crate) fn activate_runtime(candidate: &str, lease: &str, operation: &str) -> Result<()> {
+pub(crate) fn activate_runtime(
+    candidate: &str,
+    lease: &str,
+    operation: &str,
+    repository_id: Option<&str>,
+    fleet: &[String],
+) -> Result<()> {
     model::oid(candidate)?;
     model::oid(lease)?;
     model::bounded("operation-id", operation, 256)?;
-    let semantic = model::framed_digest("activate-runtime-semantics", &[candidate, lease]);
+    let requested_identity = repository_id
+        .map(|id| identity_fields(id, fleet))
+        .transpose()?;
+    repository::materialize(&[lease.into()])?;
+    let prior = crate::validators::activation(lease)?;
+    if prior["formatVersion"] == 2 && requested_identity.is_none() {
+        let legacy_semantic =
+            model::framed_digest("activate-runtime-semantics", &[candidate, lease]);
+        if let Some(outputs) = receipts::replay("activate-runtime", operation, &legacy_semantic)? {
+            return print_json(&outputs);
+        }
+    }
+    let identity = match (prior["formatVersion"].as_u64(), requested_identity) {
+        (Some(2), Some(value)) => value,
+        (Some(2), None) if legacy_v2_test_write() => Value::Null,
+        (Some(2), None) => {
+            return Err("v2 activation rollover requires repository and fleet identity".into());
+        }
+        (Some(3), None) => json!({
+            "fleetDigest": prior["fleetDigest"],
+            "fleetRepositoryIds": prior["fleetRepositoryIds"],
+            "repositoryId": prior["repositoryId"],
+        }),
+        (Some(3), Some(value)) => {
+            if value["repositoryId"] != prior["repositoryId"] {
+                return Err("activation repository identity cannot change".into());
+            }
+            value
+        }
+        _ => return Err("activation formatVersion malformed".into()),
+    };
+    let semantic = if identity.is_null() {
+        model::framed_digest("activate-runtime-semantics", &[candidate, lease])
+    } else {
+        model::framed_digest(
+            "activate-runtime-semantics-v3",
+            &[
+                candidate,
+                lease,
+                identity["repositoryId"].as_str().unwrap(),
+                identity["fleetDigest"].as_str().unwrap(),
+            ],
+        )
+    };
     if let Some(outputs) = receipts::replay("activate-runtime", operation, &semantic)? {
         return print_json(&outputs);
     }
     let snap = repository::checked_snapshot(Vec::new())?;
-    let logical = model::framed_digest("activate-runtime-logical", &[candidate, lease, operation]);
+    let logical = if identity.is_null() {
+        model::framed_digest("activate-runtime-logical", &[candidate, lease, operation])
+    } else {
+        model::framed_digest(
+            "activate-runtime-logical-v3",
+            &[
+                candidate,
+                lease,
+                operation,
+                identity["repositoryId"].as_str().unwrap(),
+                identity["fleetDigest"].as_str().unwrap(),
+            ],
+        )
+    };
     if let Some(current) = snap.refs.get(ACTIVATION) {
         repository::materialize(std::slice::from_ref(current))?;
         if git::object_json(current)?["logicalId"] == logical {
@@ -117,7 +246,6 @@ pub(crate) fn activate_runtime(candidate: &str, lease: &str, operation: &str) ->
     git::output(["cat-file", "-e", &format!("{candidate}^{{commit}}")])
         .map_err(|_| "candidate must exist locally")?;
     runtime_authority::validate(candidate)?;
-    let prior = git::object_json(lease)?;
     let current = runtime()?;
     if !prior["allowedRuntimeCommits"]
         .as_array()
@@ -132,10 +260,16 @@ pub(crate) fn activate_runtime(candidate: &str, lease: &str, operation: &str) ->
         .ok_or("activation epoch malformed")?
         .checked_add(1)
         .ok_or("activation epoch overflow")?;
-    let activation = git::commit(
-        &json!({"allowedRuntimeCommits":[current,candidate],"epoch":epoch,"formatVersion":2,"logicalId":logical,"operationId":operation,"state":"enabled","trustedFloor":prior["trustedFloor"]}),
-        &[lease.into(), candidate.into()],
-    )?;
+    let activation_value = if identity.is_null() {
+        json!({"allowedRuntimeCommits":[current,candidate],"epoch":epoch,"formatVersion":2,"logicalId":logical,"operationId":operation,"state":"enabled","trustedFloor":prior["trustedFloor"]})
+    } else {
+        let mut runtimes = vec![current.clone()];
+        if candidate != current {
+            runtimes.push(candidate.into());
+        }
+        json!({"allowedRuntimeCommits":runtimes,"epoch":epoch,"fleetDigest":identity["fleetDigest"],"fleetRepositoryIds":identity["fleetRepositoryIds"],"formatVersion":3,"logicalId":logical,"operationId":operation,"repositoryId":identity["repositoryId"],"state":"enabled","trustedFloor":prior["trustedFloor"]})
+    };
+    let activation = git::commit(&activation_value, &[lease.into(), candidate.into()])?;
     let result = json!({});
     let (receipt_ref, receipt_oid) = receipts::create(
         "activate-runtime",

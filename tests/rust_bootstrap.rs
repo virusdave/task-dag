@@ -27,6 +27,7 @@ fn cli(cwd: &Path, args: &[&str], token: &str, time: u64) -> Output {
         .args(args)
         .env("TASKDAG_TEST_TOKEN", token)
         .env("TASKDAG_TEST_TIME", time.to_string())
+        .env("TASKDAG_TEST_LEGACY_ACTIVATION", "1")
         .env("TASKDAG_SESSION_ID", "integration-session")
         .env(
             "TASKDAG_TEST_RUNTIME_REMOTE",
@@ -52,6 +53,7 @@ fn uncertain(cwd: &Path, args: &[&str], token: &str, time: u64) {
         .args(args)
         .env("TASKDAG_TEST_TOKEN", token)
         .env("TASKDAG_TEST_TIME", time.to_string())
+        .env("TASKDAG_TEST_LEGACY_ACTIVATION", "1")
         .env("TASKDAG_SESSION_ID", "integration-session")
         .env(
             "TASKDAG_TEST_RUNTIME_REMOTE",
@@ -285,6 +287,72 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         ],
         "unused-token-000",
         100,
+    );
+    let identity_lease = ok(
+        &a,
+        &["ls-remote", "origin", "refs/heads/tasks/v2/activation"],
+    )
+    .split_whitespace()
+    .next()
+    .unwrap()
+    .to_owned();
+    success(
+        &a,
+        &[
+            "activate-runtime",
+            "--commit",
+            runtime,
+            "--activation-lease",
+            &identity_lease,
+            "--operation-id",
+            "activation-identity",
+            "--repository-id",
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--fleet-repository-id",
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--fleet-repository-id",
+            "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+        "unused-token-000",
+        100,
+    );
+    let identity = success(&a, &["activation"], "unused-token-000", 100);
+    assert_eq!(identity["record"]["formatVersion"], 3);
+    assert_eq!(
+        identity["record"]["repositoryId"],
+        "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(
+        identity["record"]["fleetRepositoryIds"],
+        serde_json::json!([
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ])
+    );
+    assert_eq!(
+        identity["record"]["allowedRuntimeCommits"],
+        serde_json::json!([runtime])
+    );
+    let inherit_lease = identity["activationOid"].as_str().unwrap();
+    let inherit_args = [
+        "activate-runtime",
+        "--commit",
+        runtime,
+        "--activation-lease",
+        inherit_lease,
+        "--operation-id",
+        "activation-inherit-identity",
+    ];
+    uncertain(&a, &inherit_args, "unused-token-000", 100);
+    success(&a, &inherit_args, "unused-token-000", 100);
+    let inherited = success(&a, &["activation"], "unused-token-000", 100);
+    assert_eq!(
+        inherited["record"]["repositoryId"],
+        identity["record"]["repositoryId"]
+    );
+    assert_eq!(
+        inherited["record"]["fleetDigest"],
+        identity["record"]["fleetDigest"]
     );
     assert_eq!(
         success(

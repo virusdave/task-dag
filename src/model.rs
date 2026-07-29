@@ -52,6 +52,20 @@ pub(crate) fn canonical_updates(mut updates: Vec<Update>) -> Vec<Update> {
     updates
 }
 
+pub(crate) fn repository_id(value: &str) -> Result<()> {
+    let digest = value
+        .strip_prefix("repo-v2-")
+        .ok_or("repository ID must start with repo-v2-")?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("repository ID must end with 64 lowercase hex characters".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn state_ref(state: &str, id: &str) -> String {
     format!("refs/heads/tasks/{state}/{id}")
 }

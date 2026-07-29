@@ -5,8 +5,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    process::Command,
 };
 
 #[derive(Debug, Clone)]
@@ -26,15 +25,55 @@ pub(crate) fn task_snapshot(id: &str, mut extras: Vec<String>) -> Result<Snapsho
 }
 
 pub(crate) fn advertise(patterns: &[String]) -> Result<Snapshot> {
-    if patterns.is_empty()
-        || patterns
-            .iter()
-            .any(|p| p == "*" || p == "refs/heads/*" || p == "refs/*")
+    advertise_remote("origin", patterns)
+}
+
+fn valid_exact_ref(reference: &str) -> bool {
+    Command::new("git")
+        .args(["check-ref-format", reference])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn valid_scope(pattern: &str) -> bool {
+    if !pattern.starts_with("refs/") || matches!(pattern, "refs/*" | "refs/heads/*" | "refs/tags/*")
     {
+        return false;
+    }
+    let metacharacters = pattern
+        .bytes()
+        .filter(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
+        .count();
+    let shape = metacharacters == 0
+        || (metacharacters == 1
+            && pattern.ends_with("/*")
+            && pattern
+                .strip_prefix("refs/heads/tasks/")
+                .and_then(|rest| rest.strip_suffix("/*"))
+                .is_some_and(|scope| !scope.is_empty()));
+    let check = if metacharacters == 0 {
+        pattern.to_owned()
+    } else {
+        pattern.replace('*', "scope")
+    };
+    shape && valid_exact_ref(&check)
+}
+
+fn in_scope(reference: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| {
+        pattern
+            .strip_suffix('*')
+            .map_or(reference == pattern, |prefix| reference.starts_with(prefix))
+    })
+}
+
+pub(crate) fn advertise_remote(remote: &str, patterns: &[String]) -> Result<Snapshot> {
+    model::bounded("remote", remote, 4096)?;
+    if patterns.is_empty() || patterns.iter().any(|pattern| !valid_scope(pattern)) {
         return Err("scoped advertisement requires non-global exact refs or prefixes".into());
     }
     let out = Command::new("git")
-        .args(["ls-remote", "--refs", "origin"])
+        .args(["ls-remote", "--refs", "--", remote])
         .args(patterns)
         .output()
         .map_err(|e| format!("run ls-remote: {e}"))?;
@@ -48,7 +87,15 @@ pub(crate) fn advertise(patterns: &[String]) -> Result<Snapshot> {
             .split_once('\t')
             .ok_or_else(|| format!("malformed ls-remote line: {line}"))?;
         model::oid(o)?;
-        refs.insert(r.into(), o.into());
+        if !valid_exact_ref(r) {
+            return Err(format!("remote advertised malformed ref {r}"));
+        }
+        if !in_scope(r, patterns) {
+            return Err(format!("remote advertised out-of-scope ref {r}"));
+        }
+        if refs.insert(r.into(), o.into()).is_some() {
+            return Err(format!("remote advertised duplicate ref {r}"));
+        }
     }
     Ok(Snapshot { refs })
 }
@@ -78,27 +125,28 @@ pub(crate) fn checked_snapshot(mut patterns: Vec<String>) -> Result<Snapshot> {
     Ok(snap)
 }
 pub(crate) fn materialize(oids: &[String]) -> Result<()> {
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    materialize_remote("origin", oids)
+}
+
+pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
+    model::bounded("remote", remote, 4096)?;
     let unique: BTreeSet<_> = oids.iter().cloned().collect();
     if unique.is_empty() {
         return Ok(());
     }
-    let prefix = format!(
-        "refs/taskdag-private/{}-{}",
-        std::process::id(),
-        SERIAL.fetch_add(1, Ordering::Relaxed)
-    );
+    for oid in &unique {
+        model::oid(oid)?;
+    }
     let mut fetch = Command::new("git");
-    fetch.args(["fetch", "--no-tags", "--quiet", "origin"]);
-    let refs: Vec<_> = unique
-        .iter()
-        .enumerate()
-        .map(|(i, oid)| {
-            let r = format!("{prefix}/{i}");
-            fetch.arg(format!("+{oid}:{r}"));
-            (r, oid)
-        })
-        .collect();
+    fetch.args([
+        "fetch",
+        "--no-tags",
+        "--quiet",
+        "--no-write-fetch-head",
+        "--",
+        remote,
+    ]);
+    fetch.args(&unique);
     let out = fetch
         .output()
         .map_err(|e| format!("run bounded fetch: {e}"))?;
@@ -108,26 +156,9 @@ pub(crate) fn materialize(oids: &[String]) -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let verified = refs.iter().all(|(r, expected)| {
-        git::output(["rev-parse", r])
-            .map(|v| v.trim() == *expected)
-            .unwrap_or(false)
-    });
-    let mut cleanup = Command::new("git");
-    cleanup
-        .args(["update-ref", "--stdin"])
-        .stdin(Stdio::piped());
-    let mut child = cleanup
-        .spawn()
-        .map_err(|e| format!("start private-ref cleanup: {e}"))?;
-    use std::io::Write;
-    for (r, _) in &refs {
-        writeln!(child.stdin.as_mut().unwrap(), "delete {r}").map_err(|e| e.to_string())?;
-    }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err("private-ref cleanup failed".into());
-    }
+    let verified = unique
+        .iter()
+        .all(|oid| git::output(["cat-file", "-e", &format!("{oid}^{{commit}}")]).is_ok());
     if !verified {
         return Err("fetched object did not equal captured advertisement OID".into());
     }
@@ -220,5 +251,31 @@ pub(crate) fn absent(s: &Snapshot, r: &str) -> Result<()> {
         Err(format!("ref {r} must be absent"))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{valid_exact_ref, valid_scope};
+
+    #[test]
+    fn remote_advertisement_scopes_are_bounded_and_well_formed() {
+        assert!(valid_scope("refs/heads/master"));
+        assert!(valid_scope("refs/heads/tasks/frontier/*"));
+        assert!(valid_scope("refs/heads/tasks/delegation/intent/*"));
+        for invalid in [
+            "refs/*",
+            "refs/heads/*",
+            "refs/tags/*",
+            "refs/heads/tasks/*",
+            "refs/heads/tasks/frontier/**",
+            "refs/heads/tasks/frontier/?",
+            "refs/heads/tasks/frontier/[a]",
+            "refs/heads/tasks//frontier",
+        ] {
+            assert!(!valid_scope(invalid), "accepted invalid scope {invalid}");
+        }
+        assert!(!valid_exact_ref("refs/heads/tasks/frontier/a..b"));
+        assert!(!valid_exact_ref("refs/heads/tasks/frontier/a\tb"));
     }
 }
