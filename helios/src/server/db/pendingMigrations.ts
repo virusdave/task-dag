@@ -1866,8 +1866,9 @@ const SENTINELS: MigrationSentinel[] = [
                 and n.nspname not like 'pg_%'
                 and c.relkind = 'S'
                 and (
-                  has_sequence_privilege(r.oid, c.oid, 'select')
-                  or has_sequence_privilege(r.oid, c.oid, 'usage')
+                  -- SELECT permits sequence metadata reads only. USAGE and
+                  -- UPDATE authorize persistent nextval/setval mutations.
+                  has_sequence_privilege(r.oid, c.oid, 'usage')
                   or has_sequence_privilege(r.oid, c.oid, 'update')
                 )
            )

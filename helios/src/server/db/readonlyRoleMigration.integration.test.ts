@@ -126,6 +126,38 @@ describe('migration 107 read-only role PostgreSQL integration', () => {
     expect(await sentinelApplied()).toBe(true)
   })
 
+  it('allows sequence metadata reads but detects sequence mutation privileges', async () => {
+    try {
+      await adminPool.query('grant select on sequence ungranted_sequence to public')
+      expect(await sentinelApplied()).toBe(true)
+      await expect(readonlyPool.query('select last_value from ungranted_sequence')).resolves.toMatchObject({
+        rowCount: 1,
+      })
+      await expect(readonlyPool.query("select nextval('ungranted_sequence')")).rejects.toMatchObject({
+        code: '42501',
+      })
+      await expect(
+        readonlyPool.query("select setval('ungranted_sequence', 10)"),
+      ).rejects.toMatchObject({ code: '42501' })
+
+      await adminPool.query('grant usage on sequence ungranted_sequence to public')
+      expect(await sentinelApplied()).toBe(false)
+      await expect(readonlyPool.query("select nextval('ungranted_sequence')")).resolves.toMatchObject({
+        rowCount: 1,
+      })
+      await adminPool.query('revoke usage on sequence ungranted_sequence from public')
+
+      await adminPool.query('grant update on sequence ungranted_sequence to public')
+      expect(await sentinelApplied()).toBe(false)
+      await expect(
+        readonlyPool.query("select setval('ungranted_sequence', 20)"),
+      ).resolves.toMatchObject({ rowCount: 1 })
+    } finally {
+      await adminPool.query('revoke all privileges on sequence ungranted_sequence from public')
+    }
+    expect(await sentinelApplied()).toBe(true)
+  })
+
   it('does not allowlist a same-signature non-extension SECURITY DEFINER', async () => {
     await rootTsdbPool.query(`
       create function public.hypertable_detailed_size(regclass)
