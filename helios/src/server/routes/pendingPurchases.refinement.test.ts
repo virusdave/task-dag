@@ -637,6 +637,24 @@ describe('outstanding pending-purchase picker route', () => {
   })
 })
 
+describe('pending-purchase apply repair guidance', () => {
+  it('preserves the last apply error when an approved row returns to pending', async () => {
+    mockState.pendingPurchaseRows[0].last_apply_status = 'blocked'
+
+    const res = await server.inject({
+      method: 'POST',
+      payload: { approvalStatus: 'pending', expectedVersion: 3 },
+      url: '/api/catalog/pending-purchases/501/approval',
+    })
+
+    expect(res.statusCode).toBe(200)
+    const approvalUpdate = mockState.tx.query.mock.calls.find(([text]) =>
+      typeof text === 'string' && text.includes("when $2 = 'pending' then last_apply_error"),
+    )
+    expect(approvalUpdate).toBeDefined()
+  })
+})
+
 describe('pending-purchase rows route live brand options', () => {
   const packet = (summary: PendingPurchasePacketSummary['summary']): PendingPurchasePacketSummary => ({
     createdAt: '2026-07-25T14:14:01.421Z',

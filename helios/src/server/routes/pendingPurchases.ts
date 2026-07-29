@@ -883,7 +883,15 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
                 approval_updated_at = now(),
                 last_apply_request_id = null,
                 last_apply_status = 'not_requested',
-                last_apply_error = null,
+                -- A failed/blocked apply error often contains exact repair
+                -- values. Keep it while returning the row to pending so the
+                -- operator can follow that guidance while editing. Saving an
+                -- override or queueing the retry clears it through the
+                -- existing mutation paths. Rejection still dismisses it.
+                last_apply_error = case
+                  when $2 = 'pending' then last_apply_error
+                  else null
+                end,
                 last_apply_summary_json = jsonb_strip_nulls(jsonb_build_object(
                   'pendingPurchaseCreatedSku', last_apply_summary_json->'pendingPurchaseCreatedSku'
                 )),
