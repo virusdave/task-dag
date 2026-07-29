@@ -1,17 +1,70 @@
+import { createHash } from 'node:crypto'
+
 import { describe, expect, it } from 'vitest'
 
 import type { Queryable } from '../pool.js'
 import {
+  appendPendingPurchaseGlobalConvention,
   assertBaseRowsMatchSnapshot,
   assertPendingPurchasePacketApplyable,
   createPendingPurchaseCandidateRevision,
   hashJsonForPendingPurchaseRefinement,
   listPendingPurchaseRefinementHistory,
+  loadPendingPurchaseGlobalConventions,
   lockPendingPurchasePacketRootForApply,
   markPendingPurchaseRefinementTurnFailed,
   PendingPurchaseRefinementConflictError,
   switchPendingPurchaseCurrentRevision,
 } from './pendingPurchaseRefinementQueries.js'
+
+describe('pending-purchase global conventions', () => {
+  it('loads every accepted global instruction without silently dropping older guidance', async () => {
+    const instructions = [
+      convention('a'.repeat(20_000), 1),
+      convention('b'.repeat(20_000), 2),
+      convention('c'.repeat(20_000), 3),
+    ]
+    const db = {
+      async query() {
+        return resultRows([{ value: { instructions, version: 1 } }])
+      },
+    } as unknown as Queryable
+
+    await expect(loadPendingPurchaseGlobalConventions(db)).resolves.toEqual(instructions)
+  })
+
+  it('serializes appends and deduplicates exact guidance', async () => {
+    const existing = convention('Never repeat the brand.', 10)
+    const calls: RecordedQuery[] = []
+    const db = {
+      async query(text: string, params?: unknown[]) {
+        calls.push({ text, params })
+        if (/from app_settings/i.test(text)) {
+          return resultRows([{ value: { instructions: [existing], version: 1 } }])
+        }
+        return resultRows([])
+      },
+    } as unknown as Queryable
+
+    await expect(appendPendingPurchaseGlobalConvention(db, {
+      createdBy: 'operator@example.com',
+      sourcePacketId: 11,
+      text: existing.text,
+    })).resolves.toMatchObject({ added: false })
+    expect(calls[0]?.text).toMatch(/pg_advisory_xact_lock/)
+    expect(calls.some((call) => /insert into app_settings/i.test(call.text))).toBe(false)
+  })
+})
+
+function convention(text: string, sourcePacketId: number) {
+  return {
+    createdAt: '2026-07-29T12:00:00.000Z',
+    createdBy: 'operator@example.com',
+    id: createHash('sha256').update(text).digest('hex'),
+    sourcePacketId,
+    text,
+  }
+}
 
 describe('assertBaseRowsMatchSnapshot', () => {
   const row = {

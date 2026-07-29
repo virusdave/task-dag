@@ -2,11 +2,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { Queryable } from '../pool.js'
 import {
+  assertOperatorGuidanceBundleCapacity,
   deletePendingPurchaseHintDocument,
   loadExtractedPendingPurchaseHintFactsForBundle,
   loadExtractedPendingPurchaseHintGlossaryForBundle,
   loadPendingPurchaseHintOperatorNotesForBundle,
 } from './pendingPurchaseHintQueries.js'
+
+describe('assertOperatorGuidanceBundleCapacity', () => {
+  it('accepts the 50th bounded operator note', () => {
+    expect(() => assertOperatorGuidanceBundleCapacity(49, 249_000, 1_000)).not.toThrow()
+  })
+
+  it('rejects a 51st operator note', () => {
+    expect(() => assertOperatorGuidanceBundleCapacity(50, 50_000, 1_000)).toThrow(/at most 50 documents/)
+  })
+})
 
 // The loader parses every stored `extracted_facts` JSONB blob with the current
 // contract. It must keep flattening PRE-EXISTING v1 rows even after the

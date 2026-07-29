@@ -4,6 +4,7 @@ import type { QueryResultRow } from 'pg'
 import { z } from 'zod'
 
 import type { CatalogPendingPurchasesApplyJobPayload, JsonValue } from '../../shared/contracts/index.js'
+import { applyCatalogCreationConventions } from '../../shared/domain/pendingPurchaseCatalogConventions.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { getPool, type Queryable } from '../../server/db/pool.js'
 import {
@@ -79,6 +80,7 @@ const CATEGORIES_REQUIRING_CANNABINOID_FIELDS = new Set<string>([
 ])
 
 const NamedIdSchema = z.object({
+  enabled: z.boolean().optional(),
   id: z.coerce.number().int(),
   name: z.string().trim().min(1),
 }).passthrough()
@@ -874,6 +876,10 @@ async function applyPendingPurchaseRow(
     await logMutation('reuse drift guard passed', { productId: row.reuseProductId })
   }
 
+  if (!product || !group) {
+    await assertCatalogCreationConventions(row)
+  }
+
   // Resolve the distributor only AFTER the drift guard has run. This RPC
   // (store.purchase.order.get) can fail transiently; running it first would
   // surface a deterministic `blocked` row (malformed/mismatched snapshot,
@@ -1450,24 +1456,25 @@ async function ensureBrand(
   }
 
   try {
-    const created = NamedIdSchema.parse(
+    const addResponse = NamedIdSchema.safeParse(
       await callSweedRpcForDealer(stateDealerId, 'store.product.brand.add', { name: brandName }),
     )
-    dictionaries.brandsByName.set(created.name.toLowerCase(), created)
-    return created
-  } catch {
-    const resolved = await findExactNamedRow(
-      stateDealerId,
-      'store.product.brand.list',
-      brandName,
-      ListResponseSchema(NamedIdSchema),
-    )
-    if (!resolved) {
-      throw new Error(`Unable to resolve brand \`${brandName}\` after create.`)
+    if (addResponse.success && addResponse.data.enabled === true) {
+      dictionaries.brandsByName.set(addResponse.data.name.toLowerCase(), addResponse.data)
+      return addResponse.data
     }
-    dictionaries.brandsByName.set(resolved.name.toLowerCase(), resolved)
-    return resolved
+  } catch { /* Resolve a duplicate-name race or a partially successful add below. */ }
+  const resolved = await findExactNamedRowWithRetry(
+    stateDealerId,
+    'store.product.brand.list',
+    brandName,
+    ListResponseSchema(NamedIdSchema),
+  )
+  if (!resolved || resolved.enabled !== true) {
+    throw new Error(`Unable to resolve brand \`${brandName}\` as explicitly enabled after create.`)
   }
+  dictionaries.brandsByName.set(resolved.name.toLowerCase(), resolved)
+  return resolved
 }
 
 async function ensureTargetStrain(
@@ -1492,9 +1499,12 @@ async function ensureTargetStrain(
     normalizedName,
     ListResponseSchema(StrainRowSchema),
   )
-  if (existing) {
+  if (existing?.enabled === true) {
     dictionaries.strainsByName.set(existing.name.toLowerCase(), existing)
     return existing
+  }
+  if (existing) {
+    throw new Error(`Strain \`${normalizedName}\` exists in Sweed but is not explicitly enabled.`)
   }
 
   const resolvedPrevalenceName = normalizeNullableString(prevalenceName)
@@ -1523,7 +1533,7 @@ async function ensureTargetStrain(
       normalizedName,
       ListResponseSchema(StrainRowSchema),
     )
-    if (!fallback) {
+    if (!fallback || fallback.enabled !== true) {
       throw new Error(`Unable to resolve strain \`${normalizedName}\` after create.`)
     }
     dictionaries.strainsByName.set(fallback.name.toLowerCase(), fallback)
@@ -1538,7 +1548,7 @@ async function ensureTargetStrain(
   // we can; fall back to a retrying list lookup if it isn't shaped
   // like a strain row.
   const parsedFromResponse = StrainRowSchema.safeParse(addResponse)
-  if (parsedFromResponse.success) {
+  if (parsedFromResponse.success && parsedFromResponse.data.enabled === true) {
     dictionaries.strainsByName.set(parsedFromResponse.data.name.toLowerCase(), parsedFromResponse.data)
     return parsedFromResponse.data
   }
@@ -1548,7 +1558,7 @@ async function ensureTargetStrain(
     normalizedName,
     ListResponseSchema(StrainRowSchema),
   )
-  if (!created) {
+  if (!created || created.enabled !== true) {
     throw new Error(`Unable to resolve strain \`${normalizedName}\` after create (response shape: ${typeof addResponse}; list lookup retries exhausted).`)
   }
   dictionaries.strainsByName.set(created.name.toLowerCase(), created)
@@ -1711,12 +1721,61 @@ async function loadStateDictionaries(stateDealerId: number): Promise<StateDictio
   )
 
   return {
-    brandsByName: lowerNameMap(brands),
-    categoriesByName: lowerNameMap(categories),
-    prevalencesByName: lowerNameMap(prevalences),
-    sizesByName: lowerNameMap(sizes),
-    strainsByName: lowerNameMap(strains),
+    brandsByName: lowerNameMap(brands.filter((brand) => brand.enabled === true)),
+    categoriesByName: lowerNameMap(categories
+      .filter((category) => category.enabled === true)
+      .map((category) => ({
+        ...category,
+        subcategories: category.subcategories.filter((subcategory) => subcategory.enabled === true),
+      }))),
+    prevalencesByName: lowerNameMap(prevalences.filter((prevalence) => prevalence.enabled === true)),
+    sizesByName: lowerNameMap(sizes.filter((size) => size.enabled === true)),
+    strainsByName: lowerNameMap(strains.filter((strain) => strain.enabled === true)),
   }
+}
+
+async function assertCatalogCreationConventions(row: LoadedPendingPurchaseRow): Promise<void> {
+  const brand = requireNonEmptyString(row.targetBrand, 'target brand')
+  const aliases = await loadCatalogCreationBrandAliases(brand)
+  const convention = applyCatalogCreationConventions({
+    brand,
+    brandAliases: aliases,
+    category: row.expectedCategory,
+    groupName: row.targetGroupName ?? row.targetVariantName,
+    packCount: row.targetPackCount,
+    size: row.targetSize,
+    strainName: row.targetStrain,
+    variantName: row.targetVariantName,
+  })
+  const currentGroupName = normalizeNullableString(row.targetGroupName ?? row.targetVariantName)
+  const currentVariantName = normalizeNullableString(row.targetVariantName)
+  const currentVariantTab = normalizeNullableString(row.targetVariantTab)
+  if (
+    convention.issues.length > 0
+    || convention.groupName !== currentGroupName
+    || convention.variantName !== currentVariantName
+    || convention.variantTab !== currentVariantTab
+  ) {
+    const issues = convention.issues.length > 0 ? ` ${convention.issues.join('; ')}.` : ''
+    throw new PendingPurchaseBlockedError(
+      `Pending-purchase row ${row.rowId} violates catalog-creation naming conventions.${issues} ` +
+      `Review the row using group "${convention.groupName ?? ''}", variant "${convention.variantName ?? ''}", and tab "${convention.variantTab ?? ''}".`,
+    )
+  }
+}
+
+async function loadCatalogCreationBrandAliases(brand: string): Promise<string[]> {
+  const result = await getPool().query<{ alias_value: string }>(
+    `select distinct ba.alias_value
+       from pending_purchase_brand_aliases ba
+       join pending_purchase_brand_profiles bp on bp.id = ba.brand_profile_id
+      where lower(bp.display_brand_name) = lower($1)
+        and ba.status in ('active', 'provisional')
+        and ba.alias_type in ('exact', 'prefix')
+      order by ba.alias_value`,
+    [brand],
+  )
+  return result.rows.map((row) => row.alias_value)
 }
 
 async function findExactNamedRow<T extends { name: string }>(

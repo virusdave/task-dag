@@ -340,7 +340,11 @@ vi.mock('../jobs/concurrency.js', () => ({
 }))
 
 vi.mock('../../worker/sweed/rpc.js', () => ({
-  callSweedRpc: vi.fn(),
+  callSweedRpc: vi.fn(async () => [{
+    enabled: true,
+    name: 'Flower',
+    subcategories: [{ enabled: true, name: 'Packaged Eighth' }],
+  }]),
 }))
 
 vi.mock('../../worker/sweed/session.js', () => ({

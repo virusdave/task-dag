@@ -63,6 +63,7 @@ import {
 } from '../db/queries/pendingPurchaseQueries.js'
 import { getPendingPurchaseRepriceDebt } from '../db/queries/pendingPurchaseRepriceDebtQueries.js'
 import {
+  appendPendingPurchaseGlobalConvention,
   assertBaseRowsMatchSnapshot,
   assertPendingPurchasePacketApplyable,
   attachJobToPendingPurchaseRefinementTurn,
@@ -293,6 +294,16 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           || body.scopeRowLineageIds.some((lineageId) => !availableLineages.has(lineageId))) {
           throw new PendingPurchaseRefinementConflictError('The selected refinement scope is stale. Refresh and choose the rows again.')
         }
+        if (body.persistForFuturePurchases && user.role !== 'admin') {
+          throw new PendingPurchaseRefinementConflictError('Only an administrator may save guidance for all future purchases.')
+        }
+        const globalConvention = body.persistForFuturePurchases
+          ? await appendPendingPurchaseGlobalConvention(db, {
+              createdBy: user.email,
+              sourcePacketId: params.packetId,
+              text: body.feedbackText,
+            })
+          : null
         const turn = await createPendingPurchaseRefinementTurn(db, {
           expectedRootVersion: body.expectedRootVersion,
           feedbackText: body.feedbackText,
@@ -329,6 +340,8 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           module: 'catalog',
           payload: {
             feedbackSha256: turn.feedbackSha256,
+            globalConventionId: globalConvention?.convention.id ?? null,
+            globalConventionSaved: globalConvention?.added ?? false,
             packetId: params.packetId,
             packetRootId: snapshot.root.packetRootId,
             queuedJobId: jobId,
@@ -342,9 +355,12 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           scope,
           undoPayload: null,
         })
-        return { auditEventId, jobId, turn: { ...turn, jobId } }
+        return { auditEventId, globalConventionSaved: globalConvention?.added ?? false, jobId, turn: { ...turn, jobId } }
       })
-      return reply.send(SubmitPendingPurchaseRefinementResponseSchema.parse({ turn: mutation.turn }))
+      return reply.send(SubmitPendingPurchaseRefinementResponseSchema.parse({
+        globalConventionSaved: mutation.globalConventionSaved,
+        turn: mutation.turn,
+      }))
     } catch (error) {
       if (error instanceof PendingPurchaseRefinementConflictError) {
         return reply.status(conflictStatusForPendingPurchaseRefinement(error)).send({ error: error.message })
@@ -1244,7 +1260,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const body = AddPendingPurchaseHintDocumentBodySchema.parse(request.body ?? {})
     // Cheap preflight so an obviously-bad request (missing / archived bundle)
     // doesn't write a blob to /cloud first. NOT authoritative — the
-    // transactional FOR SHARE check inside addPendingPurchaseHintDocument is.
+    // transactional row lock inside addPendingPurchaseHintDocument is.
     const preflight = await getPendingPurchaseHintBundle(getPool(), params.hintBundleId)
     if (!preflight) {
       return reply.status(404).send({ error: 'Hint bundle not found.', code: 'bundle_not_found' })
@@ -1291,7 +1307,8 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         .send(PendingPurchaseHintDocumentAddResponseSchema.parse(result))
     } catch (error) {
       if (error instanceof HintBundleMutationError) {
-        // bundle_not_found → 404; bundle_archived → 409.
+        // Missing bundles are 404; archived or over-budget bundles conflict
+        // with the requested mutation and remain operator-actionable 409s.
         const status = error.code === 'bundle_not_found' ? 404 : 409
         return reply.status(status).send({ error: error.message, code: error.code })
       }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { ReconciledPendingPurchaseClassification } from '../pendingPurchases/reconcilePendingPurchaseDrafts.js'
 import {
+  buildPendingPurchaseAllowedTaxonomy,
   collectPendingPurchaseLiveBrands,
   downgradeExplicitBrandConflict,
   PendingPurchaseBrandListSchema,
@@ -40,6 +41,30 @@ describe('PendingPurchaseCategoryListSchema', () => {
   it('normalizes both empty shapes to an empty array (the loader enforces non-empty)', () => {
     expect(PendingPurchaseCategoryListSchema.parse([])).toEqual([])
     expect(PendingPurchaseCategoryListSchema.parse({})).toEqual([])
+  })
+})
+
+describe('buildPendingPurchaseAllowedTaxonomy', () => {
+  it('allows only explicitly enabled categories and subcategories', () => {
+    expect(buildPendingPurchaseAllowedTaxonomy(PendingPurchaseCategoryListSchema.parse([
+      {
+        enabled: true,
+        name: 'Flower',
+        subcategories: [
+          { enabled: true, name: 'Infused' },
+          { enabled: false, name: 'Disabled Flower Type' },
+          { name: 'Unknown Flower Type' },
+        ],
+      },
+      { enabled: false, name: 'Edibles', subcategories: [{ enabled: true, name: 'Gummies' }] },
+      { name: 'Vapes', subcategories: [] },
+    ]))).toEqual({ categories: ['Flower'], subcategories: ['Infused'] })
+  })
+
+  it('fails closed when enabled state is absent', () => {
+    expect(() => buildPendingPurchaseAllowedTaxonomy(
+      PendingPurchaseCategoryListSchema.parse([{ name: 'Flower', subcategories: [] }]),
+    )).toThrow('explicitly mark any supported pending-purchase category as enabled')
   })
 })
 

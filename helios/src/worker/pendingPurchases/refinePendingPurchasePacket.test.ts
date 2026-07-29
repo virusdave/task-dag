@@ -178,7 +178,7 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 
     expect(result.schemaVersion).toBe(3)
     expect(result.model).toBe('deepseek.v3.2')
-    expect(result.promptVersion).toBe('2026-07-28-model-capacity-windows-v6/balanced')
+    expect(result.promptVersion).toBe('2026-07-29-global-catalog-conventions-v7/balanced')
     expect(result).toMatchObject({ compactionLevel: 'balanced', overflowRetryCount: 0 })
     expect(result.patches).toEqual([patch()])
     expect(result.decisions).toEqual([{
@@ -215,6 +215,37 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
     expect(result.patches[0]?.fields).toMatchObject({
       targetBrand: 'Happy Heads',
       targetVariantName: 'Blue Dream',
+    })
+  })
+
+  it('enforces catalog conventions for the production create action shape', async () => {
+    const createRow = row({
+      current: {
+        actionType: 'create',
+        catalogAction: 'create_group_and_product',
+        expectedCategory: 'Pre-Rolls',
+        targetBrand: 'Freshly Baked',
+        targetGroupName: 'Freshly Baked Pre-Rolls Cosmic Dream 2pk 0.5g',
+        targetPackCount: 2,
+        targetSize: '0.5g',
+        targetStrainName: 'Cosmic Dream',
+        targetVariantName: 'Freshly Baked PR Cosmic Dream 0.5g',
+      },
+      distributorProductName: 'Freshly Baked Cosmic Dream 2pk 0.5g',
+    })
+    stubFetchSequence([
+      () => modelResponse({ patches: [{
+        ...patch(),
+        fields: { notes: 'Keep the proposal.' },
+      }] }),
+    ])
+
+    const result = await refinePendingPurchasePacketWithLlm(buildInput({ rows: [createRow] }))
+
+    expect(result.patches[0]?.fields).toMatchObject({
+      targetGroupName: 'Cosmic Dream',
+      targetVariantName: 'Cosmic Dream',
+      targetVariantTab: '2x 0.5g',
     })
   })
 

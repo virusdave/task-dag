@@ -13,12 +13,14 @@ import {
   type PreparedPendingPurchaseRefinement,
 } from '../../server/db/queries/pendingPurchaseRefinementQueries.js'
 import { withTransaction } from '../../server/db/tx.js'
+import { getWorkerEnv } from '../config/env.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import {
   refinePendingPurchasePacketWithLlm,
   type PendingPurchaseRefinementContextItem,
   type PendingPurchaseRefinementRowInput,
 } from '../pendingPurchases/refinePendingPurchasePacket.js'
+import { callSweedRpc } from '../sweed/rpc.js'
 
 const CandidateSchema = z.object({
   productId: z.number().int().positive(),
@@ -85,7 +87,7 @@ export async function runCatalogPendingPurchasesRefineJob(
     const db = getPool()
     const contextStartedAt = Date.now()
     await updateRefinementJobProgress(context.id, 2, 'Loading taxonomy, aliases, and bounded row evidence.')
-    const taxonomy = await loadRefinementTaxonomy(db)
+    const taxonomy = await loadRefinementTaxonomy()
     let { contextItems, rows } = buildRefinementModelRows(prepared)
     const scopeLineages = new Set(payload.scopeRowLineageIds)
     rows = rows.filter((row) => scopeLineages.has(row.rowLineageId))
@@ -365,36 +367,34 @@ async function loadCurrentCatalogProductIds(
   return new Set(result.rows.map((row) => row.product_id))
 }
 
-async function loadRefinementTaxonomy(db: ReturnType<typeof getPool>): Promise<{
+async function loadRefinementTaxonomy(): Promise<{
   categories: string[]
   subcategories: string[]
 }> {
-  const [categories, subcategories] = await Promise.all([
-    db.query<{ value: string }>(
-      `
-        select distinct category_name as value
-        from catalog_groups
-        where category_name is not null and category_name <> ''
-          and lower(live_state_json ->> 'enabled') = 'true'
-          and upper(trim(coalesce(group_name, ''))) !~ '^(DEAD[[:space:]]*-?|DELETED|RETIRED)'
-          and upper(trim(coalesce(brand_name, ''))) !~ '^(DEAD[[:space:]]*-?|DELETED|RETIRED)'
-        order by category_name asc
-      `,
-    ),
-    db.query<{ value: string }>(
-      `
-        select distinct subcategory_name as value
-        from catalog_groups
-        where subcategory_name is not null and subcategory_name <> ''
-          and lower(live_state_json ->> 'enabled') = 'true'
-          and upper(trim(coalesce(group_name, ''))) !~ '^(DEAD[[:space:]]*-?|DELETED|RETIRED)'
-          and upper(trim(coalesce(brand_name, ''))) !~ '^(DEAD[[:space:]]*-?|DELETED|RETIRED)'
-        order by subcategory_name asc
-      `,
-    ),
+  const categorySchema = z.object({
+    enabled: z.boolean().optional(),
+    name: z.string().trim().min(1),
+    subcategories: z.array(z.object({
+      enabled: z.boolean().optional(),
+      name: z.string().trim().min(1),
+    }).passthrough()).default([]),
+  }).passthrough()
+  const responseSchema = z.union([
+    z.array(categorySchema),
+    z.object({ data: z.array(categorySchema).default([]) }).passthrough().transform((value) => value.data),
   ])
+  const categories = responseSchema.parse(await callSweedRpc(
+    getWorkerEnv().sweedStateDealerId,
+    'store.product.category.list',
+    {},
+  )).filter((category) => category.enabled === true)
+  if (categories.length === 0) {
+    throw new Error('Sweed returned no explicitly enabled categories for pending-purchase refinement.')
+  }
   return {
-    categories: categories.rows.map((row) => row.value),
-    subcategories: subcategories.rows.map((row) => row.value),
+    categories: categories.map((category) => category.name),
+    subcategories: [...new Set(categories.flatMap((category) => category.subcategories
+      .filter((subcategory) => subcategory.enabled === true)
+      .map((subcategory) => subcategory.name)))],
   }
 }

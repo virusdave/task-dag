@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import type { PoolClient, QueryResultRow } from 'pg'
+import { z } from 'zod'
 
 import type {
   JsonValue,
@@ -16,6 +17,83 @@ import type { Queryable } from '../pool.js'
 import { pendingPurchaseRefinementSchemaApplied } from '../pendingPurchaseRefinementSchema.js'
 
 export class PendingPurchaseRefinementConflictError extends Error {}
+
+const PENDING_PURCHASE_GLOBAL_CONVENTIONS_KEY = 'pending_purchase_global_conventions'
+const MAX_PENDING_PURCHASE_GLOBAL_CONVENTIONS = 50
+const MAX_PENDING_PURCHASE_GLOBAL_CONVENTION_CHARS = 40_000
+const PendingPurchaseGlobalConventionSchema = z.object({
+  createdAt: z.iso.datetime(),
+  createdBy: z.string().email(),
+  id: z.string().regex(/^[0-9a-f]{64}$/),
+  sourcePacketId: z.number().int().positive(),
+  text: z.string().trim().min(1).max(20_000),
+}).strict()
+const PendingPurchaseGlobalConventionsSchema = z.object({
+  instructions: z.array(PendingPurchaseGlobalConventionSchema).max(MAX_PENDING_PURCHASE_GLOBAL_CONVENTIONS),
+  version: z.literal(1),
+}).strict()
+export type PendingPurchaseGlobalConvention = z.infer<typeof PendingPurchaseGlobalConventionSchema>
+
+export async function loadPendingPurchaseGlobalConventions(
+  db: Queryable,
+): Promise<PendingPurchaseGlobalConvention[]> {
+  const result = await db.query<{ value: unknown }>(
+    `select value from app_settings where key = $1`,
+    [PENDING_PURCHASE_GLOBAL_CONVENTIONS_KEY],
+  )
+  if (!result.rows[0]) return []
+  return PendingPurchaseGlobalConventionsSchema.parse(result.rows[0].value).instructions
+}
+
+export async function appendPendingPurchaseGlobalConvention(
+  db: Queryable,
+  input: { createdBy: string; sourcePacketId: number; text: string },
+): Promise<{ added: boolean; convention: PendingPurchaseGlobalConvention }> {
+  const text = input.text.trim()
+  const convention = PendingPurchaseGlobalConventionSchema.parse({
+    createdAt: new Date().toISOString(),
+    createdBy: input.createdBy,
+    id: sha256(text),
+    sourcePacketId: input.sourcePacketId,
+    text,
+  })
+  await db.query(`select pg_advisory_xact_lock(hashtext($1))`, [PENDING_PURCHASE_GLOBAL_CONVENTIONS_KEY])
+  const existingResult = await db.query<{ value: unknown }>(
+    `select value from app_settings where key = $1 for update`,
+    [PENDING_PURCHASE_GLOBAL_CONVENTIONS_KEY],
+  )
+  const existing = existingResult.rows[0]
+    ? PendingPurchaseGlobalConventionsSchema.parse(existingResult.rows[0].value).instructions
+    : []
+  if (existing.some((candidate) => candidate.id === convention.id)) {
+    return { added: false, convention }
+  }
+  const totalChars = existing.reduce((sum, candidate) => sum + candidate.text.length, 0) + convention.text.length
+  if (totalChars > MAX_PENDING_PURCHASE_GLOBAL_CONVENTION_CHARS) {
+    throw new PendingPurchaseRefinementConflictError(
+      `Saved global purchase guidance would exceed the ${MAX_PENDING_PURCHASE_GLOBAL_CONVENTION_CHARS}-character safety limit; consolidate the existing guidance before adding this instruction.`,
+    )
+  }
+  if (existing.length >= MAX_PENDING_PURCHASE_GLOBAL_CONVENTIONS) {
+    throw new PendingPurchaseRefinementConflictError(
+      `The global purchase-convention list already contains ${MAX_PENDING_PURCHASE_GLOBAL_CONVENTIONS} instructions; review it before adding another.`,
+    )
+  }
+  await db.query(
+    `insert into app_settings (key, value, updated_by, updated_at)
+          values ($1, $2::jsonb, $3, now())
+     on conflict (key) do update
+            set value = excluded.value,
+                updated_by = excluded.updated_by,
+                updated_at = now()`,
+    [
+      PENDING_PURCHASE_GLOBAL_CONVENTIONS_KEY,
+      JSON.stringify({ instructions: [...existing, convention], version: 1 }),
+      input.createdBy,
+    ],
+  )
+  return { added: true, convention }
+}
 
 interface PacketRootDbRow extends QueryResultRow {
   current_packet_id: number | null

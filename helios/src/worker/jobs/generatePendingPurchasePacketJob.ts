@@ -13,6 +13,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { sha256 } from '../../shared/util/hash.js'
 import { getPool, type Queryable } from '../../server/db/pool.js'
+import { loadPendingPurchaseGlobalConventions } from '../../server/db/queries/pendingPurchaseRefinementQueries.js'
 import {
   buildPendingPurchaseBrandAliasCandidates,
   buildPendingPurchaseParseRuleFingerprint,
@@ -841,8 +842,10 @@ interface CandidatePoolEntry {
 }
 
 const PendingPurchaseCategoryRowSchema = z.object({
+  enabled: z.boolean().optional(),
   name: z.string().nullable().optional(),
   subcategories: z.array(z.object({
+    enabled: z.boolean().optional(),
     name: z.string().nullable().optional(),
   }).passthrough()).default([]),
 }).passthrough()
@@ -873,6 +876,12 @@ async function loadPendingPurchaseAllowedTaxonomy(stateDealerId: number): Promis
   const categories = PendingPurchaseCategoryListSchema.parse(
     await callSweedRpc(stateDealerId, 'store.product.category.list', {}),
   )
+  return buildPendingPurchaseAllowedTaxonomy(categories)
+}
+
+export function buildPendingPurchaseAllowedTaxonomy(
+  categories: z.infer<typeof PendingPurchaseCategoryListSchema>,
+): ClassifierAllowedTaxonomy {
   // Fail loud on an empty taxonomy rather than silently shipping an
   // all-`needs-review` packet built from an empty subcategory allow-list. The
   // union schema above accepts `{}`/`[]` (back-compat with the wrapped shape),
@@ -882,9 +891,24 @@ async function loadPendingPurchaseAllowedTaxonomy(stateDealerId: number): Promis
       'Sweed `store.product.category.list` returned no categories; refusing to classify pending purchases against an empty taxonomy.',
     )
   }
+  const enabledCategories = new Set(
+    categories
+      .filter((category) => category.enabled === true)
+      .map((category) => normalizeNonEmptyString(category.name))
+      .filter((name): name is string => name !== null)
+      .map((name) => name.toLocaleLowerCase('en-US')),
+  )
+  const allowedCategories = [...AUTO_CLASSIFIABLE_PENDING_PURCHASE_CATEGORIES]
+    .filter((name) => enabledCategories.has(name.toLocaleLowerCase('en-US')))
+  if (allowedCategories.length === 0) {
+    throw new Error(
+      'Sweed did not explicitly mark any supported pending-purchase category as enabled; refusing to classify against unknown or disabled taxonomy.',
+    )
+  }
   const subcategories = new Set<string>()
-  for (const category of categories) {
+  for (const category of categories.filter((candidate) => candidate.enabled === true)) {
     for (const subcategory of category.subcategories) {
+      if (subcategory.enabled !== true) continue
       const name = normalizeNonEmptyString(subcategory.name)
       if (name !== null) {
         subcategories.add(name)
@@ -892,7 +916,7 @@ async function loadPendingPurchaseAllowedTaxonomy(stateDealerId: number): Promis
     }
   }
   return {
-    categories: [...AUTO_CLASSIFIABLE_PENDING_PURCHASE_CATEGORIES],
+    categories: allowedCategories,
     subcategories: [...subcategories],
   }
 }
@@ -925,7 +949,7 @@ export async function collectPendingPurchaseLiveBrands(
     if (pageRows.length === 0 || newRows === 0) break
     page += 1
   }
-  const active = brands.filter((brand) => brand.enabled !== false && !isRetiredRecordName(brand.name))
+  const active = brands.filter((brand) => brand.enabled === true && !isRetiredRecordName(brand.name))
   if (active.length === 0) {
     throw new Error(
       'Sweed `store.product.brand.list` returned no active brands; refusing to classify pending purchases against an empty brand directory.',
@@ -1044,6 +1068,12 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
     db,
     hintBundleId,
   )
+  const globalConventions = await loadPendingPurchaseGlobalConventions(db)
+  const durableOperatorGuidance: ClassifierOperatorGuidance[] = globalConventions.map((convention) => ({
+    hintDocumentId: `global-convention:${convention.id}`,
+    sourceLabel: `Saved catalog convention from packet #${convention.sourcePacketId}`,
+    text: convention.text,
+  }))
   const allowedTaxonomy = await loadPendingPurchaseAllowedTaxonomy(stateDealerId)
   const liveSweedBrands = await loadPendingPurchaseLiveBrands(stateDealerId)
 
@@ -1108,7 +1138,7 @@ async function buildLlmDrivenPendingPurchaseRows(input: {
       catalogCandidates,
       hintFacts,
       glossaryEntries,
-      operatorGuidance,
+      operatorGuidance: [...durableOperatorGuidance, ...operatorGuidance],
       allowedTaxonomy,
     })
 

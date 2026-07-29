@@ -69,6 +69,7 @@ export const SubmitPendingPurchaseRefinementRequestSchema = z.object({
   baseRows: z.array(PendingPurchaseRowSnapshotRefSchema).min(1).max(500),
   expectedRootVersion: z.number().int().positive(),
   feedbackText: z.string().max(20000).refine((value) => value.trim().length > 0, 'Feedback must not be blank.'),
+  persistForFuturePurchases: z.boolean().optional().default(false),
   scopeRowLineageIds: z.array(z.string().trim().min(1)).min(1).max(30),
 })
 export type SubmitPendingPurchaseRefinementRequest = z.infer<
@@ -76,6 +77,7 @@ export type SubmitPendingPurchaseRefinementRequest = z.infer<
 >
 
 export const SubmitPendingPurchaseRefinementResponseSchema = z.object({
+  globalConventionSaved: z.boolean(),
   turn: PendingPurchaseRefinementTurnSummarySchema,
 })
 export type SubmitPendingPurchaseRefinementResponse = z.infer<

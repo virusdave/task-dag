@@ -42,6 +42,7 @@ import {
   type PendingPurchaseLlmDraftRow,
   type PendingPurchaseReuseEvidenceSource,
 } from '../../shared/contracts/index.js'
+import { applyCatalogCreationConventions } from '../../shared/domain/pendingPurchaseCatalogConventions.js'
 import { resolveBedrockModel } from '../../server/llm/bedrockModelConfig.js'
 import type { Queryable } from '../../server/db/pool.js'
 import { getWorkerEnv } from '../config/env.js'
@@ -52,7 +53,7 @@ import {
 
 // Bump when the prompt's SEMANTICS change (recorded on the result for
 // audit/replay). Date-stamped like DEFAULT_DESCRIPTION_PROMPT_VERSION.
-export const PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION = '2026-07-28-first-product-brands-v4'
+export const PENDING_PURCHASE_CLASSIFIER_PROMPT_VERSION = '2026-07-29-catalog-create-conventions-v5'
 
 // Event-level: one deliberate, rare call gets generous room but stays bounded.
 const CLASSIFIER_TIMEOUT_CEILING_MS = 120_000
@@ -90,8 +91,8 @@ const CLASSIFIER_MAX_GLOSSARY_ENTRIES = 5000
 // Trusted operator notes are fed VERBATIM, so bound both count and total size
 // and fail loud rather than silently truncate (a truncated note can drop an
 // "except…" clause and invert the operator's intent).
-const CLASSIFIER_MAX_OPERATOR_GUIDANCE_DOCS = 50
-const CLASSIFIER_MAX_OPERATOR_GUIDANCE_CHARS = 40_000
+const CLASSIFIER_MAX_OPERATOR_GUIDANCE_DOCS = 100
+const CLASSIFIER_MAX_OPERATOR_GUIDANCE_CHARS = 300_000
 const CLASSIFIER_MAX_INPUT_CHARS = 600_000
 
 // Field-length ceilings for INPUT row identity, matching the output contract's
@@ -440,6 +441,9 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'A live Sweed sweedBrandCandidate is valid even when that brand has zero existing catalog groups or products and is absent from vendorEvidence.allowedBrandNames. Every brand eventually has a first product. When a distributor product name begins with exactly one live Sweed brand candidate, use that brand; vendor history must not veto the exact leading brand.',
   'Produce EXACTLY ONE draft per input row, echoing its "rowKey", "distributorProductId", and "distributorProductName" verbatim.',
   'For each row set the structured target taxonomy (targetBrand, targetCategory, targetSubcategory, targetGroupName, targetVariantName, targetVariantTab, targetStrainName, targetSize, targetPackCount); use null for any field you cannot determine. targetCategory and targetSubcategory, when set, MUST be values present in the allowed taxonomy.',
+  'For catalog-create proposals, do not repeat the brand, a brand abbreviation/alias, the category, unit size, or pack size in targetGroupName or targetVariantName. targetGroupName must include the salient targetVariantName because purchase receiving matches against the group/line name.',
+  'For catalog-create proposals, targetVariantTab is structural and exact: when targetPackCount is 1 it equals targetSize; when targetPackCount is greater than 1 it equals "PACK_COUNTx TARGET_SIZE" (for example "10x 10mg" or "2x 0.5g"). No other multi-unit tab format is valid.',
+  'Never propose a disabled category, subcategory, brand, or attribute. The allowed taxonomy and live brand candidates contain only enabled choices; absent values are forbidden, not suggestions.',
   'Make each row decision in this concise order: brand, taxonomy, pack size, unit size, then differentiator/variant. Row classificationEvidence contains an exact sanctioned prior outcome, live Sweed brand candidates, and/or LitAlerts market brand/SKU candidates. Prefer a reasonable live Sweed brand, existing prior, or market brand/SKU; choose de novo/catalog-create only when none reasonably matches. Older market evidence is explicitly timestamped and remains useful, but the live Sweed brand directory is authoritative for whether a brand already exists in our catalog.',
   'LitAlerts evidence is market evidence only. Its litalertsProductId is NOT a Sweed/catalog product id and NEVER authorizes reuseProductIdCandidate. Only the separately offered catalog/current-link/Sweed ids may be proposed for reuse.',
   'Choose proposedAction: "mapping-only" when the row clearly IS an existing live product (then set reuseProductIdCandidate to that product\'s id and provide reuseEvidence); "catalog-create" when it is a genuinely new product (then reuseProductIdCandidate MUST be null); "needs-review" when you are not confident either way.',
@@ -778,8 +782,31 @@ function parseAndValidateDraftAttempt(
           `draft "${brandSnappedDraft.rowKey}" targetSubcategory "${brandSnappedDraft.targetSubcategory}" is not in the allowed taxonomy.`,
         )
       }
+      let conventionDraft = brandSnappedDraft
+      if (brandSnappedDraft.proposedAction === 'catalog-create') {
+        const convention = applyCatalogCreationConventions({
+          brand: brandSnappedDraft.targetBrand,
+          category: brandSnappedDraft.targetCategory,
+          groupName: brandSnappedDraft.targetGroupName,
+          packCount: brandSnappedDraft.targetPackCount,
+          size: brandSnappedDraft.targetSize,
+          strainName: brandSnappedDraft.targetStrainName,
+          variantName: brandSnappedDraft.targetVariantName,
+        })
+        if (convention.issues.length > 0) {
+          throw new PendingPurchaseClassifierError(
+            `draft "${brandSnappedDraft.rowKey}" violates catalog-creation conventions: ${convention.issues.join('; ')}.`,
+          )
+        }
+        conventionDraft = {
+          ...brandSnappedDraft,
+          targetGroupName: convention.groupName,
+          targetVariantName: convention.variantName,
+          targetVariantTab: convention.variantTab,
+        }
+      }
       const postProcessed = PendingPurchaseLlmDraftRowSchema.safeParse(
-        downgradeUnassociatedLiveBrandCreation(expected, brandSnappedDraft),
+        downgradeUnassociatedLiveBrandCreation(expected, conventionDraft),
       )
       if (!postProcessed.success) {
         throw new PendingPurchaseClassifierError(

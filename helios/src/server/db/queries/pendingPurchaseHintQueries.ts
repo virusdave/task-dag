@@ -27,7 +27,26 @@ import { withTransaction } from '../tx.js'
 
 // ── error type ────────────────────────────────────────────────────────
 
-export type HintBundleMutationErrorCode = 'bundle_not_found' | 'bundle_archived'
+export type HintBundleMutationErrorCode = 'bundle_not_found' | 'bundle_archived' | 'operator_guidance_too_large'
+
+const MAX_OPERATOR_GUIDANCE_BUNDLE_BYTES = 250_000
+const MAX_OPERATOR_GUIDANCE_BUNDLE_DOCUMENTS = 50
+
+export function assertOperatorGuidanceBundleCapacity(
+  existingDocumentCount: number,
+  existingByteSize: number,
+  newDocumentByteSize: number,
+): void {
+  if (
+    existingByteSize + newDocumentByteSize > MAX_OPERATOR_GUIDANCE_BUNDLE_BYTES
+    || existingDocumentCount + 1 > MAX_OPERATOR_GUIDANCE_BUNDLE_DOCUMENTS
+  ) {
+    throw new HintBundleMutationError(
+      'operator_guidance_too_large',
+      `Operator notes in one hint bundle may total at most ${MAX_OPERATOR_GUIDANCE_BUNDLE_DOCUMENTS} documents and ${MAX_OPERATOR_GUIDANCE_BUNDLE_BYTES} bytes; consolidate the guidance before adding this note.`,
+    )
+  }
+}
 
 /** Thrown when a document is added to a missing or archived bundle. */
 export class HintBundleMutationError extends Error {
@@ -309,7 +328,8 @@ export interface AddHintDocumentResult {
 /**
  * Insert a pointer row for a hint document already written to the out-of-band
  * blob store. Fail-closed: the bundle must exist AND be active (locked FOR
- * SHARE so a concurrent archive can't race the insert), else throws
+ * UPDATE so concurrent document adds and archival cannot race the insert or
+ * aggregate operator-guidance budget), else throws
  * {@link HintBundleMutationError}. Idempotent on the per-bundle content hash —
  * re-adding identical text returns the existing row with `deduped: true`
  * instead of a 23505 (and the blob, being content-addressed, is the same).
@@ -321,7 +341,7 @@ export async function addPendingPurchaseHintDocument(
 
   return withTransaction(async (client) => {
     const bundle = await client.query<{ id: string; status: string }>(
-      `select id, status from pending_purchase_hint_bundles where hint_bundle_id = $1 for share`,
+      `select id, status from pending_purchase_hint_bundles where hint_bundle_id = $1 for update`,
       [input.hintBundleId],
     )
     if (bundle.rows.length === 0) {
@@ -337,6 +357,23 @@ export async function addPendingPurchaseHintDocument(
       )
     }
     const bundleId = bundle.rows[0]!.id
+
+    if (input.kind === 'operator_note') {
+      const aggregate = await client.query<{ document_count: string; total_bytes: string }>(
+        `select count(*)::text as document_count,
+                coalesce(sum(byte_size), 0)::text as total_bytes
+           from pending_purchase_hint_documents
+          where bundle_id = $1
+            and kind = 'operator_note'
+            and content_sha256 <> $2`,
+        [bundleId, input.contentSha256],
+      )
+      assertOperatorGuidanceBundleCapacity(
+        Number.parseInt(aggregate.rows[0]?.document_count ?? '0', 10),
+        Number.parseInt(aggregate.rows[0]?.total_bytes ?? '0', 10),
+        input.byteSize,
+      )
+    }
 
     const inserted = await client.query<HintDocumentRow>(
       `

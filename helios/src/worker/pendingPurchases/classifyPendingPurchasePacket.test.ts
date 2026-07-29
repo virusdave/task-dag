@@ -216,7 +216,7 @@ describe('classifyPendingPurchasePacketWithLlm — happy path', () => {
 
     expect(result.schemaVersion).toBe(1)
     expect(result.model).toBe('google.gemma-3-27b-it')
-    expect(result.promptVersion).toBe('2026-07-28-first-product-brands-v4')
+    expect(result.promptVersion).toBe('2026-07-29-catalog-create-conventions-v5')
     expect(result.drafts).toHaveLength(1)
     const draft = result.drafts[0]!
     // Distributor identity comes from the INPUT, never the model echo.
@@ -747,7 +747,7 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
 
   it('rejects operator guidance that exceeds the total-char budget (fail loud, no truncation)', async () => {
     stubFetch(modelResponse({ drafts: [modelDraft()] }))
-    const huge = operatorGuidance({ text: 'x'.repeat(40_001) })
+    const huge = operatorGuidance({ text: 'x'.repeat(300_001) })
     await expect(
       classifyPendingPurchasePacketWithLlm(buildInput({ operatorGuidance: [huge] })),
     ).rejects.toThrow(/operator guidance is \d+ chars/)
@@ -755,12 +755,22 @@ describe('classifyPendingPurchasePacketWithLlm — glossary evidence (issue #69)
 
   it('rejects too many operator notes', async () => {
     stubFetch(modelResponse({ drafts: [modelDraft()] }))
-    const many = Array.from({ length: 51 }, (_unused, i) =>
+    const many = Array.from({ length: 101 }, (_unused, i) =>
       operatorGuidance({ hintDocumentId: `pphdoc_2026-07-09_0000${String(i).padStart(2, '0')}_ff00aa`, text: 'ok' }),
     )
     await expect(
       classifyPendingPurchasePacketWithLlm(buildInput({ operatorGuidance: many })),
     ).rejects.toThrow(/operator notes \(limit/)
+  })
+
+  it('accepts the combined 50 bundle notes plus 50 global-convention boundary', async () => {
+    stubFetch(modelResponse({ drafts: [modelDraft()] }))
+    const guidance = Array.from({ length: 100 }, (_unused, i) =>
+      operatorGuidance({ hintDocumentId: `guidance-${i}`, text: 'bounded guidance' }),
+    )
+    await expect(
+      classifyPendingPurchasePacketWithLlm(buildInput({ operatorGuidance: guidance })),
+    ).resolves.toMatchObject({ drafts: [expect.objectContaining({ rowKey: 'r1' })] })
   })
 
   it('rejects a fabricated glossary cited id', async () => {

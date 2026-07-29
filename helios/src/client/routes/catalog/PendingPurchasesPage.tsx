@@ -264,6 +264,7 @@ export function PendingPurchasesPage() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [refinementFeedback, setRefinementFeedback] = useState('')
+  const [persistRefinementForFuture, setPersistRefinementForFuture] = useState(false)
   const [refinementHistory, setRefinementHistory] = useState<PendingPurchaseRefinementHistoryResponse | null>(null)
   const [refinementJobStatus, setRefinementJobStatus] = useState<JobStatusResponse | null>(null)
   const [refinementSuccessMessage, setRefinementSuccessMessage] = useState<string | null>(null)
@@ -712,6 +713,7 @@ export function PendingPurchasesPage() {
         baseRows: buildPendingPurchaseRowSnapshotRefs(data.items),
         expectedRootVersion: refinementHistory.root.version,
         feedbackText: refinementFeedback,
+        persistForFuturePurchases: persistRefinementForFuture,
         scopeRowLineageIds,
       })
       const response = await mutateJson(
@@ -719,7 +721,10 @@ export function PendingPurchasesPage() {
         SubmitPendingPurchaseRefinementResponseSchema,
         { body: JSON.stringify(body), method: 'POST' },
       )
-      setRefinementSuccessMessage(`Queued refinement turn #${response.turn.turnId}. Feedback stays here until a candidate succeeds.`)
+      setRefinementSuccessMessage(
+        `Queued refinement turn #${response.turn.turnId}.${response.globalConventionSaved ? ' Saved this guidance for future purchases.' : ''} Feedback stays here until a candidate succeeds.`,
+      )
+      if (response.globalConventionSaved) setPersistRefinementForFuture(false)
       if (response.turn.jobId) {
         const jobStatus = await loadJobStatus(response.turn.jobId)
         setRefinementJobStatus(jobStatus)
@@ -1059,12 +1064,14 @@ export function PendingPurchasesPage() {
           onClearSelection={() => setSelectedRowIds([])}
           onQueueApply={() => void handleApplySelectedRows()}
           onRefinementFeedbackChange={setRefinementFeedback}
+          onPersistRefinementForFutureChange={setPersistRefinementForFuture}
           onRefreshRefinement={() => void revalidator.revalidate()}
           onSubmitRefinement={(scopeRowLineageIds) => void handleSubmitRefinement(scopeRowLineageIds)}
           onSwitchRevision={(revision, action) => void handleSwitchRevision(revision, action)}
           onSelectApprovedVisible={() => setSelectedRowIds(approvedVisibleRows.map((item) => item.rowId))}
           onToggleSelected={toggleSelectedRow}
           refinementFeedback={refinementFeedback}
+          persistRefinementForFuture={persistRefinementForFuture}
           refinementHistory={refinementHistory}
           refinementJobStatus={refinementJobStatus}
           rowsByFamily={rowsByFamily}
@@ -1237,12 +1244,14 @@ interface PendingPurchasesRowsViewProps {
   onClearSelection: () => void
   onQueueApply: () => void
   onRefinementFeedbackChange: (value: string) => void
+  onPersistRefinementForFutureChange: (value: boolean) => void
   onRefreshRefinement: () => void
   onSelectApprovedVisible: () => void
   onSubmitRefinement: (scopeRowLineageIds: readonly string[]) => void
   onSwitchRevision: (revision: PendingPurchasePacketRevisionSummary, action: 'accept' | 'rollback') => void
   onToggleSelected: (rowId: number) => void
   refinementFeedback: string
+  persistRefinementForFuture: boolean
   refinementHistory: PendingPurchaseRefinementHistoryResponse | null
   refinementJobStatus: JobStatusResponse | null
   rowsByFamily: FamilyGroup[]
@@ -1263,12 +1272,14 @@ function PendingPurchasesRowsView({
   onClearSelection,
   onQueueApply,
   onRefinementFeedbackChange,
+  onPersistRefinementForFutureChange,
   onRefreshRefinement,
   onSelectApprovedVisible,
   onSubmitRefinement,
   onSwitchRevision,
   onToggleSelected,
   refinementFeedback,
+  persistRefinementForFuture,
   refinementHistory,
   refinementJobStatus,
   rowsByFamily,
@@ -1358,10 +1369,13 @@ function PendingPurchasesRowsView({
           isSwitchingRevision={isSwitchingRevision}
           jobStatus={refinementJobStatus}
           onFeedbackChange={onRefinementFeedbackChange}
+          onPersistForFutureChange={onPersistRefinementForFutureChange}
           onRefresh={onRefreshRefinement}
           onSubmit={onSubmitRefinement}
           onSwitchRevision={onSwitchRevision}
           rows={data.items}
+          canPersistForFuture={canViewGenerationNotes}
+          persistForFuture={persistRefinementForFuture}
         />
       ) : null}
 
@@ -1725,29 +1739,35 @@ function PendingPurchaseGenerationNotes({
 function PendingPurchaseRefinementPanel({
   activePacketId,
   canEdit,
+  canPersistForFuture,
   feedback,
   history,
   isRefining,
   isSwitchingRevision,
   jobStatus,
   onFeedbackChange,
+  onPersistForFutureChange,
   onRefresh,
   onSubmit,
   onSwitchRevision,
   rows,
+  persistForFuture,
 }: {
   activePacketId: number
   canEdit: boolean
+  canPersistForFuture: boolean
   feedback: string
   history: PendingPurchaseRefinementHistoryResponse | null
   isRefining: boolean
   isSwitchingRevision: boolean
   jobStatus: JobStatusResponse | null
   onFeedbackChange: (value: string) => void
+  onPersistForFutureChange: (value: boolean) => void
   onRefresh: () => void
   onSubmit: (scopeRowLineageIds: readonly string[]) => void
   onSwitchRevision: (revision: PendingPurchasePacketRevisionSummary, action: 'accept' | 'rollback') => void
   rows: readonly PendingPurchaseRow[]
+  persistForFuture: boolean
 }) {
   const root = history?.root ?? null
   const currentPacketId = root?.currentPacketId ?? null
@@ -1870,6 +1890,20 @@ function PendingPurchaseRefinementPanel({
                   value={feedback}
                 />
               </label>
+              {canPersistForFuture ? (
+                <label className="pp-refinement-scope-checkbox">
+                  <input
+                    checked={persistForFuture}
+                    disabled={!canEdit || !!activeTurn}
+                    onChange={(event) => onPersistForFutureChange(event.currentTarget.checked)}
+                    type="checkbox"
+                  />
+                  <span>
+                    Apply this guidance to future purchases
+                    <small className="subtle-copy"> Saves the feedback as trusted global catalog guidance. Deterministic safety rules still take precedence.</small>
+                  </span>
+                </label>
+              ) : null}
               <div className="stack-field pp-refinement-scope">
                 <div className="pp-refinement-scope-heading">
                   <span>Rows to refine</span>
