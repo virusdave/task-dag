@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Queryable } from '../../server/db/pool.js'
+import { getBedrockModelCapabilities } from '../../shared/domain/bedrockModels.js'
 import {
   loadOptionalRefinementEvidence,
   PendingPurchaseRefinementError,
@@ -174,7 +175,7 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
 
     expect(result.schemaVersion).toBe(3)
     expect(result.model).toBe('deepseek.v3.2')
-    expect(result.promptVersion).toBe('2026-07-28-directive-coverage-critic-v5/balanced')
+    expect(result.promptVersion).toBe('2026-07-28-model-capacity-windows-v6/balanced')
     expect(result).toMatchObject({ compactionLevel: 'balanced', overflowRetryCount: 0 })
     expect(result.patches).toEqual([patch()])
     expect(result.decisions).toEqual([{
@@ -284,6 +285,48 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
     expect(system.content).toMatch(/stale untrusted data, not a targetBrand allowlist/i)
     expect(system.content).not.toContain('999999')
     expect(user.content).toContain('999999')
+  })
+
+  it('budgets output for both scoped rows and compiled directives', async () => {
+    const feedbackText = 'Fix brand. Fix group. Fix variant. Fix tab. Fix size. Fix category.'
+    const rows = Array.from({ length: 6 }, (_, index) => row({
+      distributorProductId: `dist-${index + 1}`,
+      rowLineageId: `pprline_${index + 1}`,
+    }))
+    const decisions = rows.map((candidate) => ({
+      basePacketSnapshotSha256: SNAPSHOT_HASH,
+      citedContextIds: [],
+      directiveCoverage: directiveCoverage(feedbackText),
+      disposition: 'unchanged',
+      fields: null,
+      rationale: 'The current row already satisfies the supplied directives.',
+      rowLineageId: candidate.rowLineageId,
+    }))
+    const fetchMock = stubFetch(modelResponse({ decisions }))
+
+    const result = await refinePendingPurchasePacketWithLlm(buildInput({ feedbackText, rows }))
+
+    const primaryBody = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body)
+    expect(primaryBody.max_tokens).toBe(5400)
+    expect(result.decisions).toHaveLength(6)
+  })
+})
+
+describe('pending-purchase model capabilities', () => {
+  it('uses the selected DeepSeek model capacity', () => {
+    expect(getBedrockModelCapabilities('deepseek.v3.2')).toMatchObject({
+      contextWindowTokens: 164_000,
+      maxOutputTokens: 8_000,
+      source: 'known-model',
+    })
+  })
+
+  it('uses a conservative budget for an unknown operator override', () => {
+    expect(getBedrockModelCapabilities('operator.experimental-model')).toMatchObject({
+      contextWindowTokens: 48_000,
+      maxOutputTokens: 8_000,
+      source: 'conservative-fallback',
+    })
   })
 })
 
@@ -416,14 +459,58 @@ describe('refinePendingPurchasePacketWithLlm — fail-loud output boundaries', (
     )
   })
 
-  it('does not repair-retry a truncated response', async () => {
+  it('retries a truncated response at the selected model maximum', async () => {
     const fetchMock = stubFetchSequence([
       () => modelResponse({ patches: [patch()] }, 'length'),
       () => modelResponse({ patches: [patch()] }),
     ])
 
-    await expect(refinePendingPurchasePacketWithLlm(buildInput())).rejects.toThrow(/too large to validate safely/)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const result = await refinePendingPurchasePacketWithLlm(buildInput())
+
+    expect(result).toMatchObject({ outputRetryCount: 1, requestedMaxOutputTokens: 8000, windowCount: 1 })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const retryBody = JSON.parse((fetchMock.mock.calls[1]![1] as { body: string }).body)
+    expect(retryBody.max_tokens).toBe(8000)
+  })
+
+  it('falls back to deterministic atomic row windows after the full-scope retry truncates', async () => {
+    const feedbackText = 'Apply the requested brand correction.'
+    const coverage = directiveCoverage(feedbackText)
+    const fetchMock = stubFetchSequence([
+      () => modelResponse({ decisions: [] }, 'length'),
+      () => modelResponse({ decisions: [] }, 'length'),
+      () => modelResponse({ decisions: [{
+        basePacketSnapshotSha256: SNAPSHOT_HASH,
+        citedContextIds: [],
+        directiveCoverage: coverage,
+        disposition: 'unchanged',
+        fields: null,
+        rationale: 'The first row already satisfies the directive.',
+        rowLineageId: 'pprline_1',
+      }] }),
+      () => modelResponse({ decisions: [{
+        basePacketSnapshotSha256: SNAPSHOT_HASH,
+        citedContextIds: [],
+        directiveCoverage: coverage,
+        disposition: 'unchanged',
+        fields: null,
+        rationale: 'The second row already satisfies the directive.',
+        rowLineageId: 'pprline_2',
+      }] }),
+    ])
+
+    const result = await refinePendingPurchasePacketWithLlm(buildInput({
+      feedbackText,
+      rows: [row(), row({ distributorProductId: 'dist-2', rowLineageId: 'pprline_2' })],
+    }))
+
+    expect(result.decisions.map((decision) => decision.rowLineageId)).toEqual(['pprline_1', 'pprline_2'])
+    expect(result).toMatchObject({ outputRetryCount: 1, requestedMaxOutputTokens: 8000, windowCount: 2 })
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    const firstWindowBody = JSON.parse((fetchMock.mock.calls[2]![1] as { body: string }).body)
+    const secondWindowBody = JSON.parse((fetchMock.mock.calls[3]![1] as { body: string }).body)
+    expect(JSON.parse(firstWindowBody.messages[1].content).rows.map((candidate: { rowLineageId: string }) => candidate.rowLineageId)).toEqual(['pprline_1'])
+    expect(JSON.parse(secondWindowBody.messages[1].content).rows.map((candidate: { rowLineageId: string }) => candidate.rowLineageId)).toEqual(['pprline_2'])
   })
 
   it('retries one context overflow with tighter compaction and hides provider internals', async () => {

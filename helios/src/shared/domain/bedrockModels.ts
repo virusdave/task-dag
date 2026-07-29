@@ -35,6 +35,32 @@ export const DEFAULT_PENDING_PURCHASE_REFINEMENT_MODEL = 'deepseek.v3.2'
 // #51 asks for. Operator-overridable via the Bedrock model-override UI.
 export const DEFAULT_AGENT_WASTE_CLUSTERER_MODEL = 'deepseek.v3.2'
 
+export interface BedrockModelCapabilities {
+  readonly contextWindowTokens: number
+  readonly estimatedCharsPerToken: number
+  readonly maxOutputTokens: number
+  readonly safetyReserveTokens: number
+  readonly source: 'known-model' | 'conservative-fallback'
+}
+
+const CONSERVATIVE_BEDROCK_MODEL_CAPABILITIES: BedrockModelCapabilities = {
+  contextWindowTokens: 48_000,
+  estimatedCharsPerToken: 3,
+  maxOutputTokens: 8_000,
+  safetyReserveTokens: 4_000,
+  source: 'conservative-fallback',
+}
+
+const BEDROCK_MODEL_CAPABILITIES: Readonly<Record<string, BedrockModelCapabilities>> = {
+  'deepseek.v3.2': {
+    contextWindowTokens: 164_000,
+    estimatedCharsPerToken: 3,
+    maxOutputTokens: 8_000,
+    safetyReserveTokens: 8_000,
+    source: 'known-model',
+  },
+}
+
 // The LLM use-points whose model an operator may override. C4 exposed the
 // pending-purchase classifier; issue #68 adds the agent-waste clusterer.
 // C3's hint extraction/intent calls still use their hardcoded default; they
@@ -118,4 +144,9 @@ export function getBedrockModelContextDefinition(
 
 export function getBedrockModelContextDefault(key: BedrockModelContextKey): string {
   return getBedrockModelContextDefinition(key).defaultModel
+}
+
+export function getBedrockModelCapabilities(model: string): BedrockModelCapabilities {
+  return BEDROCK_MODEL_CAPABILITIES[model.trim().toLocaleLowerCase('en-US')]
+    ?? CONSERVATIVE_BEDROCK_MODEL_CAPABILITIES
 }

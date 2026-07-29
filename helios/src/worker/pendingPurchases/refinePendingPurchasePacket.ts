@@ -4,15 +4,16 @@ import { z } from 'zod'
 
 import { resolveBedrockModel } from '../../server/llm/bedrockModelConfig.js'
 import type { Queryable } from '../../server/db/pool.js'
+import { getBedrockModelCapabilities } from '../../shared/domain/bedrockModels.js'
 import { getWorkerEnv } from '../config/env.js'
 
-export const PENDING_PURCHASE_REFINEMENT_PROMPT_VERSION = '2026-07-28-directive-coverage-critic-v5'
+export const PENDING_PURCHASE_REFINEMENT_PROMPT_VERSION = '2026-07-28-model-capacity-windows-v6'
 export const PENDING_PURCHASE_REFINEMENT_SCHEMA_VERSION = 3 as const
 
 const REFINEMENT_TIMEOUT_CEILING_MS = 120_000
 const REFINEMENT_OUTPUT_BASE_TOKENS = 1200
 const REFINEMENT_OUTPUT_TOKENS_PER_ROW = 220
-const REFINEMENT_OUTPUT_TOKENS_CEILING = 8_000
+const REFINEMENT_OUTPUT_TOKENS_PER_ROW_DIRECTIVE = 80
 const REFINEMENT_MAX_REPAIR_ATTEMPTS = 1
 const REFINEMENT_MAX_DIRECTIVES = 12
 const REFINEMENT_TRACE_MAX_BYTES = 700_000
@@ -20,9 +21,6 @@ const REFINEMENT_TRACE_MAX_BYTES = 700_000
 const REFINEMENT_MAX_ROWS = 30
 const REFINEMENT_MAX_CONTEXT_ITEMS = 5000
 const REFINEMENT_MAX_FEEDBACK_CHARS = 20_000
-const REFINEMENT_BALANCED_TOKEN_BUDGET = 48_000
-const REFINEMENT_ESTIMATED_CHARS_PER_TOKEN = 3
-const REFINEMENT_MAX_INPUT_CHARS = REFINEMENT_BALANCED_TOKEN_BUDGET * REFINEMENT_ESTIMATED_CHARS_PER_TOKEN
 const REFINEMENT_MAX_OUTPUT_CHARS = 1_000_000
 const REFINEMENT_OPTIONAL_EVIDENCE_MAX_ITEMS = 270
 const REFINEMENT_OPTIONAL_EVIDENCE_MAX_CHARS = 1_000_000
@@ -35,9 +33,19 @@ export interface PendingPurchaseRefinementAttemptProvenance {
   readonly compactionLevel: PendingPurchaseRefinementCompactionLevel
   readonly contextItemCount: number
   readonly degradedProviders: readonly string[]
+  readonly directiveCount: number
   readonly estimatedInputTokens: number
+  readonly failureKind: 'context_overflow' | 'output_truncated' | 'validation' | 'provider' | null
+  readonly model: string
+  readonly modelCapabilitySource: 'known-model' | 'conservative-fallback'
+  readonly modelContextWindowTokens: number
+  readonly modelMaxOutputTokens: number
   readonly omittedContextItemCount: number
+  readonly outputRetryCount: number
   readonly overflowRetryCount: number
+  readonly requestedMaxOutputTokens: number
+  readonly rowCount: number
+  readonly windowCount: number
 }
 
 export class PendingPurchaseRefinementError extends Error {
@@ -50,6 +58,15 @@ export class PendingPurchaseRefinementError extends Error {
 }
 
 class PendingPurchaseRefinementContextOverflowError extends PendingPurchaseRefinementError {}
+class PendingPurchaseRefinementOutputTruncatedError extends PendingPurchaseRefinementError {
+  constructor(
+    message: string,
+    readonly outputRetryCount = 0,
+    readonly windowCount = 0,
+  ) {
+    super(message)
+  }
+}
 class PendingPurchaseRefinementRetryableError extends PendingPurchaseRefinementError {}
 
 export type PendingPurchaseRefinementCompactionLevel = 'rich' | 'balanced' | 'compact' | 'emergency'
@@ -201,8 +218,16 @@ export interface PendingPurchaseRefinementResult {
   readonly contextItemCount: number
   readonly degradedProviders: readonly string[]
   readonly estimatedInputTokens: number
+  readonly modelCapabilities: {
+    readonly contextWindowTokens: number
+    readonly maxOutputTokens: number
+    readonly source: 'known-model' | 'conservative-fallback'
+  }
   readonly omittedContextItemCount: number
+  readonly outputRetryCount: number
   readonly overflowRetryCount: number
+  readonly requestedMaxOutputTokens: number
+  readonly windowCount: number
   readonly directives: readonly RefinementDirective[]
   readonly critic: RefinementCriticState
   readonly quarantineReasons: Readonly<Record<string, readonly string[]>>
@@ -294,6 +319,13 @@ export async function refinePendingPurchasePacketWithLlm(
     throw new PendingPurchaseRefinementError('The refinement critic must use a different configured model family.')
   }
   const directives = compileDirectives(input.feedbackText)
+  const modelCapabilities = getBedrockModelCapabilities(model)
+  const inputTokenBudget = Math.max(
+    1,
+    modelCapabilities.contextWindowTokens
+      - modelCapabilities.maxOutputTokens
+      - modelCapabilities.safetyReserveTokens,
+  )
   const trace: ModelTraceEntry[] = []
   const optionalContextItems = await loadOptionalRefinementEvidence(input.db, input.rows)
   const combinedInput: RefinePendingPurchasePacketInput = {
@@ -302,10 +334,12 @@ export async function refinePendingPurchasePacketWithLlm(
   }
   assertWithinInputGuards(combinedInput)
   const maxTokens = Math.min(
-    REFINEMENT_OUTPUT_BASE_TOKENS + input.rows.length * REFINEMENT_OUTPUT_TOKENS_PER_ROW,
-    REFINEMENT_OUTPUT_TOKENS_CEILING,
+    REFINEMENT_OUTPUT_BASE_TOKENS
+      + input.rows.length * REFINEMENT_OUTPUT_TOKENS_PER_ROW
+      + input.rows.length * directives.length * REFINEMENT_OUTPUT_TOKENS_PER_ROW_DIRECTIVE,
+    modelCapabilities.maxOutputTokens,
   )
-  let attempt = buildPromptAttempt(combinedInput, 'balanced')
+  let attempt = buildPromptAttempt(combinedInput, 'balanced', inputTokenBudget, modelCapabilities.estimatedCharsPerToken)
   let overflowRetryCount = 0
   const degradedProviders = combinedInput.contextItems
     .filter((item) => item.contextId.startsWith('context-unavailable:'))
@@ -314,13 +348,31 @@ export async function refinePendingPurchasePacketWithLlm(
 
   for (;;) {
     try {
-      let decisions = await runRefinementAttempt(model, maxTokens, attempt, directives, trace)
+      const primary = await runPrimaryWithCapacity({
+        attempt,
+        directives,
+        estimatedCharsPerToken: modelCapabilities.estimatedCharsPerToken,
+        inputTokenBudget,
+        maxTokens,
+        model,
+        modelMaxOutputTokens: modelCapabilities.maxOutputTokens,
+        trace,
+      })
+      let decisions = primary.decisions
       const aliases = await loadLeadingBrandAliases(input.db, combinedInput.rows)
       const safeguard = applySemanticSafeguards(decisions, attempt.input, aliases)
       decisions = safeguard.decisions
-      const critic = await runCritic(criticModel, maxTokens, attempt, decisions, trace)
+      const critic = await runCritic(criticModel, primary.requestedMaxOutputTokens, attempt, decisions, trace)
       if (critic.findings.length > 0) {
-        decisions = await runCriticRepair(model, maxTokens, attempt, decisions, critic.findings, directives, trace)
+        decisions = await runCriticRepair(
+          model,
+          primary.requestedMaxOutputTokens,
+          attempt,
+          decisions,
+          critic.findings,
+          directives,
+          trace,
+        )
       }
       const criticQuarantine = quarantineCriticFindings(decisions, critic.findings)
       decisions = criticQuarantine.decisions
@@ -334,9 +386,16 @@ export async function refinePendingPurchasePacketWithLlm(
         compactionLevel: attempt.level,
         contextItemCount: attempt.input.contextItems.length,
         degradedProviders,
-        estimatedInputTokens: estimateTokens(attempt.serialized.length + REFINEMENT_SYSTEM_PROMPT.length),
+        estimatedInputTokens: estimateTokens(attempt.serialized.length + REFINEMENT_SYSTEM_PROMPT.length, modelCapabilities.estimatedCharsPerToken),
+        modelCapabilities: {
+          contextWindowTokens: modelCapabilities.contextWindowTokens,
+          maxOutputTokens: modelCapabilities.maxOutputTokens,
+          source: modelCapabilities.source,
+        },
         omittedContextItemCount: combinedInput.contextItems.length - attempt.input.contextItems.length,
+        outputRetryCount: primary.outputRetryCount,
         overflowRetryCount,
+        requestedMaxOutputTokens: primary.requestedMaxOutputTokens,
         directives,
         critic: {
           model: criticModel,
@@ -348,19 +407,73 @@ export async function refinePendingPurchasePacketWithLlm(
         },
         quarantineReasons,
         modelTrace: boundTrace(trace),
+        windowCount: primary.windowCount,
       }
     } catch (error) {
+      if (error instanceof PendingPurchaseRefinementOutputTruncatedError) {
+        throw new PendingPurchaseRefinementError(
+          'The analyst could not produce a complete response even after a larger-output retry and atomic row windows.',
+          attemptProvenance({
+            attempt,
+            capabilities: modelCapabilities,
+            degradedProviders,
+            directiveCount: directives.length,
+            failureKind: 'output_truncated',
+            model,
+            originalContextItemCount: combinedInput.contextItems.length,
+            outputRetryCount: error.outputRetryCount,
+            overflowRetryCount,
+            requestedMaxOutputTokens: modelCapabilities.maxOutputTokens,
+            windowCount: error.windowCount,
+          }),
+        )
+      }
       if (!(error instanceof PendingPurchaseRefinementContextOverflowError) || overflowRetryCount >= 1) {
         if (error instanceof PendingPurchaseRefinementContextOverflowError) {
           throw new PendingPurchaseRefinementError(
             'The analyst still needs less context. Choose one row or one family and retry; your feedback is preserved.',
-            attemptProvenance(attempt, combinedInput.contextItems.length, degradedProviders, overflowRetryCount),
+            attemptProvenance({
+              attempt,
+              capabilities: modelCapabilities,
+              degradedProviders,
+              directiveCount: directives.length,
+              failureKind: 'context_overflow',
+              model,
+              originalContextItemCount: combinedInput.contextItems.length,
+              outputRetryCount: 0,
+              overflowRetryCount,
+              requestedMaxOutputTokens: maxTokens,
+              windowCount: 0,
+            }),
+          )
+        }
+        if (error instanceof PendingPurchaseRefinementError) {
+          throw new PendingPurchaseRefinementError(
+            error.message,
+            error.attemptProvenance ?? attemptProvenance({
+              attempt,
+              capabilities: modelCapabilities,
+              degradedProviders,
+              directiveCount: directives.length,
+              failureKind: error instanceof PendingPurchaseRefinementRetryableError ? 'provider' : 'validation',
+              model,
+              originalContextItemCount: combinedInput.contextItems.length,
+              outputRetryCount: 0,
+              overflowRetryCount,
+              requestedMaxOutputTokens: maxTokens,
+              windowCount: 0,
+            }),
           )
         }
         throw error
       }
       overflowRetryCount += 1
-      attempt = buildPromptAttempt(combinedInput, nextCompactionLevel(attempt.level))
+      attempt = buildPromptAttempt(
+        combinedInput,
+        nextCompactionLevel(attempt.level),
+        inputTokenBudget,
+        modelCapabilities.estimatedCharsPerToken,
+      )
       console.warn(`[pendingPurchaseRefinement] model=${model} context overflow; retrying once at ${attempt.level} compaction`)
     }
   }
@@ -370,6 +483,141 @@ interface RefinementPromptAttempt {
   readonly input: RefinePendingPurchasePacketInput
   readonly level: PendingPurchaseRefinementCompactionLevel
   readonly serialized: string
+}
+
+interface PrimaryCapacityResult {
+  readonly decisions: PendingPurchaseRefinementRowDecision[]
+  readonly outputRetryCount: number
+  readonly requestedMaxOutputTokens: number
+  readonly windowCount: number
+}
+
+async function runPrimaryWithCapacity(input: {
+  attempt: RefinementPromptAttempt
+  directives: readonly RefinementDirective[]
+  estimatedCharsPerToken: number
+  inputTokenBudget: number
+  maxTokens: number
+  model: string
+  modelMaxOutputTokens: number
+  trace: ModelTraceEntry[]
+}): Promise<PrimaryCapacityResult> {
+  try {
+    return {
+      decisions: await runRefinementAttempt(input.model, input.maxTokens, input.attempt, input.directives, input.trace),
+      outputRetryCount: 0,
+      requestedMaxOutputTokens: input.maxTokens,
+      windowCount: 1,
+    }
+  } catch (error) {
+    if (!(error instanceof PendingPurchaseRefinementOutputTruncatedError)) throw error
+    input.trace.push(truncatedTraceEntry(input.model, 'primary', input.maxTokens))
+  }
+
+  if (input.maxTokens < input.modelMaxOutputTokens) {
+    try {
+      return {
+        decisions: await runRefinementAttempt(
+          input.model,
+          input.modelMaxOutputTokens,
+          input.attempt,
+          input.directives,
+          input.trace,
+        ),
+        outputRetryCount: 1,
+        requestedMaxOutputTokens: input.modelMaxOutputTokens,
+        windowCount: 1,
+      }
+    } catch (error) {
+      if (!(error instanceof PendingPurchaseRefinementOutputTruncatedError)) throw error
+      input.trace.push(truncatedTraceEntry(input.model, 'primary-output-retry', input.modelMaxOutputTokens))
+    }
+  }
+
+  if (input.attempt.input.rows.length === 1) {
+    throw new PendingPurchaseRefinementOutputTruncatedError(
+      'Model output remained truncated for one row.',
+      input.maxTokens < input.modelMaxOutputTokens ? 1 : 0,
+      1,
+    )
+  }
+
+  const splitAt = Math.ceil(input.attempt.input.rows.length / 2)
+  const left = await runPrimaryWindows({
+    ...input,
+    rows: input.attempt.input.rows.slice(0, splitAt),
+  })
+  const right = await runPrimaryWindows({
+    ...input,
+    rows: input.attempt.input.rows.slice(splitAt),
+  })
+  return {
+    decisions: [...left.decisions, ...right.decisions],
+    outputRetryCount: input.maxTokens < input.modelMaxOutputTokens ? 1 : 0,
+    requestedMaxOutputTokens: input.modelMaxOutputTokens,
+    windowCount: left.windowCount + right.windowCount,
+  }
+}
+
+async function runPrimaryWindows(input: {
+  attempt: RefinementPromptAttempt
+  directives: readonly RefinementDirective[]
+  estimatedCharsPerToken: number
+  inputTokenBudget: number
+  model: string
+  modelMaxOutputTokens: number
+  rows: readonly PendingPurchaseRefinementRowInput[]
+  trace: ModelTraceEntry[]
+}): Promise<{ decisions: PendingPurchaseRefinementRowDecision[]; windowCount: number }> {
+  const lineages = new Set(input.rows.map((row) => row.rowLineageId))
+  const windowInput: RefinePendingPurchasePacketInput = {
+    ...input.attempt.input,
+    rows: input.rows,
+    contextItems: input.attempt.input.contextItems.filter((item) =>
+      item.targetRowLineageId === undefined || lineages.has(item.targetRowLineageId),
+    ),
+  }
+  const windowAttempt = buildPromptAttempt(
+    windowInput,
+    input.attempt.level,
+    input.inputTokenBudget,
+    input.estimatedCharsPerToken,
+  )
+  try {
+    return {
+      decisions: await runRefinementAttempt(
+        input.model,
+        input.modelMaxOutputTokens,
+        windowAttempt,
+        input.directives,
+        input.trace,
+      ),
+      windowCount: 1,
+    }
+  } catch (error) {
+    if (!(error instanceof PendingPurchaseRefinementOutputTruncatedError)) throw error
+    input.trace.push(truncatedTraceEntry(input.model, `primary-window-${input.rows.length}`, input.modelMaxOutputTokens))
+  }
+
+  if (input.rows.length === 1) {
+    throw new PendingPurchaseRefinementOutputTruncatedError('Model output remained truncated for one row.', 1, 1)
+  }
+  const splitAt = Math.ceil(input.rows.length / 2)
+  const left = await runPrimaryWindows({ ...input, rows: input.rows.slice(0, splitAt) })
+  const right = await runPrimaryWindows({ ...input, rows: input.rows.slice(splitAt) })
+  return {
+    decisions: [...left.decisions, ...right.decisions],
+    windowCount: left.windowCount + right.windowCount,
+  }
+}
+
+function truncatedTraceEntry(model: string, scope: string, maxTokens: number): ModelTraceEntry {
+  return {
+    model,
+    scope,
+    request: { maxTokens },
+    response: '[provider stopped at the requested output-token limit]',
+  }
 }
 
 async function runRefinementAttempt(
@@ -803,13 +1051,15 @@ const REFINEMENT_SYSTEM_PROMPT = [
 function buildPromptAttempt(
   input: RefinePendingPurchasePacketInput,
   requestedLevel: PendingPurchaseRefinementCompactionLevel,
+  inputTokenBudget: number,
+  estimatedCharsPerToken: number,
 ): RefinementPromptAttempt {
   let level = requestedLevel
   for (;;) {
     const compactedContext = compactContextItems(input.contextItems, level)
     const attemptInput = { ...input, contextItems: compactedContext }
     const serialized = JSON.stringify(buildUserPayload(attemptInput, level))
-    if (serialized.length <= REFINEMENT_MAX_INPUT_CHARS) {
+    if (estimateTokens(serialized.length + REFINEMENT_SYSTEM_PROMPT.length, estimatedCharsPerToken) <= inputTokenBudget) {
       return { input: attemptInput, level, serialized }
     }
     const tighter = nextCompactionLevel(level)
@@ -824,9 +1074,19 @@ function buildPromptAttempt(
           compactionLevel: level,
           contextItemCount: compactedContext.length,
           degradedProviders,
-          estimatedInputTokens: estimateTokens(serialized.length + REFINEMENT_SYSTEM_PROMPT.length),
+          directiveCount: compileDirectives(input.feedbackText).length,
+          estimatedInputTokens: estimateTokens(serialized.length + REFINEMENT_SYSTEM_PROMPT.length, estimatedCharsPerToken),
+          failureKind: 'context_overflow',
+          model: 'unresolved',
+          modelCapabilitySource: 'conservative-fallback',
+          modelContextWindowTokens: inputTokenBudget,
+          modelMaxOutputTokens: 0,
           omittedContextItemCount: input.contextItems.length - compactedContext.length,
+          outputRetryCount: 0,
           overflowRetryCount: 0,
+          requestedMaxOutputTokens: 0,
+          rowCount: input.rows.length,
+          windowCount: 0,
         },
       )
     }
@@ -848,7 +1108,6 @@ function buildUserPayload(
     sketchVersion: 2,
     compaction: {
       level,
-      estimatedTokenBudget: REFINEMENT_BALANCED_TOKEN_BUDGET,
       omittedEvidenceMayExist: input.contextItems.length >= COMPACTION_LIMITS[level].contextItems,
     },
     event: {
@@ -940,8 +1199,8 @@ function nextCompactionLevel(
   return COMPACTION_LEVELS[Math.min(index + 1, COMPACTION_LEVELS.length - 1)]!
 }
 
-function estimateTokens(chars: number): number {
-  return Math.ceil(chars / REFINEMENT_ESTIMATED_CHARS_PER_TOKEN)
+function estimateTokens(chars: number, estimatedCharsPerToken: number): number {
+  return Math.ceil(chars / estimatedCharsPerToken)
 }
 
 function buildRefinementRepairPrompt(validationError: string): string {
@@ -1034,9 +1293,7 @@ async function callRefinementModelOnce(input: {
 
   const finishReason = extractFinishReason(payload)
   if (finishReason === 'length' || finishReason === 'max_tokens') {
-    throw new PendingPurchaseRefinementError(
-      'The analyst response was too large to validate safely. Choose one row or one family and retry; your feedback is preserved.',
-    )
+    throw new PendingPurchaseRefinementOutputTruncatedError('The analyst response reached its output-token limit.')
   }
 
   return { content: extractChatCompletionContent(payload) }
@@ -1381,19 +1638,39 @@ function rowContainsIdentity(
   return haystack === needle || haystack.includes(` ${needle} `) || haystack.startsWith(`${needle} `) || haystack.endsWith(` ${needle}`)
 }
 
-function attemptProvenance(
-  attempt: RefinementPromptAttempt,
-  totalContextItemCount: number,
-  degradedProviders: readonly string[],
-  overflowRetryCount: number,
-): PendingPurchaseRefinementAttemptProvenance {
+function attemptProvenance(input: {
+  attempt: RefinementPromptAttempt
+  capabilities: ReturnType<typeof getBedrockModelCapabilities>
+  degradedProviders: readonly string[]
+  directiveCount: number
+  failureKind: PendingPurchaseRefinementAttemptProvenance['failureKind']
+  model: string
+  originalContextItemCount: number
+  outputRetryCount: number
+  overflowRetryCount: number
+  requestedMaxOutputTokens: number
+  windowCount: number
+}): PendingPurchaseRefinementAttemptProvenance {
   return {
-    compactionLevel: attempt.level,
-    contextItemCount: attempt.input.contextItems.length,
-    degradedProviders,
-    estimatedInputTokens: estimateTokens(attempt.serialized.length + REFINEMENT_SYSTEM_PROMPT.length),
-    omittedContextItemCount: totalContextItemCount - attempt.input.contextItems.length,
-    overflowRetryCount,
+    compactionLevel: input.attempt.level,
+    contextItemCount: input.attempt.input.contextItems.length,
+    degradedProviders: input.degradedProviders,
+    directiveCount: input.directiveCount,
+    estimatedInputTokens: estimateTokens(
+      input.attempt.serialized.length + REFINEMENT_SYSTEM_PROMPT.length,
+      input.capabilities.estimatedCharsPerToken,
+    ),
+    failureKind: input.failureKind,
+    model: input.model,
+    modelCapabilitySource: input.capabilities.source,
+    modelContextWindowTokens: input.capabilities.contextWindowTokens,
+    modelMaxOutputTokens: input.capabilities.maxOutputTokens,
+    omittedContextItemCount: input.originalContextItemCount - input.attempt.input.contextItems.length,
+    outputRetryCount: input.outputRetryCount,
+    overflowRetryCount: input.overflowRetryCount,
+    requestedMaxOutputTokens: input.requestedMaxOutputTokens,
+    rowCount: input.attempt.input.rows.length,
+    windowCount: input.windowCount,
   }
 }
 

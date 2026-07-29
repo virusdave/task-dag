@@ -179,8 +179,15 @@ export interface PendingPurchaseCandidateRefinement {
   }[]
   readonly estimatedInputTokens: number
   readonly model: string
+  readonly modelCapabilities: {
+    readonly contextWindowTokens: number
+    readonly maxOutputTokens: number
+    readonly source: 'known-model' | 'conservative-fallback'
+  }
   readonly omittedContextItemCount: number
+  readonly outputRetryCount: number
   readonly overflowRetryCount: number
+  readonly requestedMaxOutputTokens: number
   readonly patches: readonly PendingPurchaseCandidatePatch[]
   readonly promptVersion: string
   readonly schemaVersion: number
@@ -193,6 +200,7 @@ export interface PendingPurchaseCandidateRefinement {
   }
   readonly quarantineReasons: Readonly<Record<string, readonly string[]>>
   readonly modelTrace: unknown
+  readonly windowCount: number
 }
 
 export interface PendingPurchaseRefinementSnapshot {
@@ -773,8 +781,11 @@ export async function createPendingPurchaseCandidateRevision(
         ),
         degradedProviders: refinement.degradedProviders,
         estimatedInputTokens: refinement.estimatedInputTokens,
+        modelCapabilities: refinement.modelCapabilities,
         omittedContextItemCount: refinement.omittedContextItemCount,
+        outputRetryCount: refinement.outputRetryCount,
         overflowRetryCount: refinement.overflowRetryCount,
+        requestedMaxOutputTokens: refinement.requestedMaxOutputTokens,
         patchCount: refinement.patches.length,
         rowDecisions: refinement.decisions.map((decision) => ({
           citedContextIds: decision.citedContextIds,
@@ -788,6 +799,7 @@ export async function createPendingPurchaseCandidateRevision(
         quarantineReasons: refinement.quarantineReasons,
         modelTrace: refinement.modelTrace,
         schemaVersion: refinement.schemaVersion,
+        windowCount: refinement.windowCount,
       }),
     ],
   )
