@@ -4,7 +4,13 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { extractEnvAssignmentValue, extractPostgresUrl, readOptionalSecretEnv } from './runtimeEnv.js'
+import {
+  extractEnvAssignmentValue,
+  extractPostgresUrl,
+  readOptionalSecretEnv,
+  readRequiredReadOnlyDatabaseUrl,
+  validateReadOnlyDatabaseUrl,
+} from './runtimeEnv.js'
 
 describe('extractPostgresUrl', () => {
   it('extracts the first postgres url from TigerData-style credential text', () => {
@@ -150,6 +156,69 @@ describe('readOptionalSecretEnv', () => {
         process.env.GOOGLE_OAUTH_CLIENT_ID = previousValue
       }
       rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+})
+
+describe('readRequiredReadOnlyDatabaseUrl', () => {
+  it('reads the dedicated URL without falling back to DATABASE_URL', () => {
+    const previousReadOnly = process.env.HELIOS_READONLY_DATABASE_URL
+    const previousDatabase = process.env.DATABASE_URL
+    process.env.HELIOS_READONLY_DATABASE_URL =
+      'postgres://helios_agent_readonly:secret@db.example.com/tsdb'
+    process.env.DATABASE_URL = 'postgres://writer:secret@db.example.com/helios'
+
+    try {
+      expect(readRequiredReadOnlyDatabaseUrl()).toBe(
+        'postgres://helios_agent_readonly:secret@db.example.com/tsdb',
+      )
+    } finally {
+      if (previousReadOnly === undefined) delete process.env.HELIOS_READONLY_DATABASE_URL
+      else process.env.HELIOS_READONLY_DATABASE_URL = previousReadOnly
+      if (previousDatabase === undefined) delete process.env.DATABASE_URL
+      else process.env.DATABASE_URL = previousDatabase
+    }
+  })
+
+  it('rejects a write-capable identity stored under the read-only name', () => {
+    expect(() =>
+      validateReadOnlyDatabaseUrl('postgres://tsdbadmin:secret@db.example.com/tsdb'),
+    ).toThrow('must authenticate as helios_agent_readonly against /tsdb')
+  })
+
+  it('rejects the read-only identity pointed at another database', () => {
+    expect(() =>
+      validateReadOnlyDatabaseUrl(
+        'postgres://helios_agent_readonly:secret@db.example.com/postgres',
+      ),
+    ).toThrow('must authenticate as helios_agent_readonly against /tsdb')
+  })
+
+  it('fails closed when only the write-capable URL is configured', () => {
+    const tempHome = mkdtempSync(join(tmpdir(), 'helios-readonly-env-'))
+    const previousReadOnly = process.env.HELIOS_READONLY_DATABASE_URL
+    const previousReadOnlyFile = process.env.HELIOS_READONLY_DATABASE_URL_FILE
+    const previousDatabase = process.env.DATABASE_URL
+    const previousHome = process.env.HOME
+    delete process.env.HELIOS_READONLY_DATABASE_URL
+    delete process.env.HELIOS_READONLY_DATABASE_URL_FILE
+    process.env.DATABASE_URL = 'postgres://writer:secret@db.example.com/helios'
+    process.env.HOME = tempHome
+
+    try {
+      expect(() => readRequiredReadOnlyDatabaseUrl()).toThrow(
+        'The read-only loader never falls back to DATABASE_URL.',
+      )
+    } finally {
+      if (previousReadOnly === undefined) delete process.env.HELIOS_READONLY_DATABASE_URL
+      else process.env.HELIOS_READONLY_DATABASE_URL = previousReadOnly
+      if (previousReadOnlyFile === undefined) delete process.env.HELIOS_READONLY_DATABASE_URL_FILE
+      else process.env.HELIOS_READONLY_DATABASE_URL_FILE = previousReadOnlyFile
+      if (previousDatabase === undefined) delete process.env.DATABASE_URL
+      else process.env.DATABASE_URL = previousDatabase
+      if (previousHome === undefined) delete process.env.HOME
+      else process.env.HOME = previousHome
+      rmSync(tempHome, { force: true, recursive: true })
     }
   })
 })

@@ -2,9 +2,9 @@
 // branding `literal-slug → opaque-ref` manifest (Helios single producer;
 // parent EPIC_PLAN top-level#19 P1-prereq, automation#48).
 //
-// Run with tsx (DATABASE_URL must point at the Helios DB; for a PRODUCTION
-// manifest FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET must be the REAL secret — the
-// non-production fallback would 308 live Google-Ads URLs to 404):
+// Run with tsx (the dedicated Helios read-only DB URL must be provisioned; for
+// a PRODUCTION manifest FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET must be the REAL
+// secret — the non-production fallback would 308 live Google-Ads URLs to 404):
 //
 //   tsx src/server/branding/cli.ts build [--env prod] [--out map.json]
 //   tsx src/server/branding/cli.ts publish --root /cloud/lp --env prod \
@@ -25,6 +25,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 import { pageDave } from '../../worker/runtime/pageDave.js'
+import { readRequiredReadOnlyDatabaseUrl } from '../../shared/config/runtimeEnv.js'
 import { closePool, getPool } from '../db/pool.js'
 import { publicKeyPemFromPrivate } from '../lp/signing.js'
 import type { LpEnvironment } from '../lp/publish.js'
@@ -169,6 +170,7 @@ async function reportCollisions(result: BrandingManifestBuildResult, command: st
 }
 
 async function buildFromDb(environment: LpEnvironment): Promise<BrandingManifestBuildResult> {
+  process.env.DATABASE_URL = readRequiredReadOnlyDatabaseUrl()
   const secret = resolveSecretForEnv(environment)
   const rows = await fetchBrandingPresenceRows(getPool())
   return buildBrandingOpaqueManifest(rows, { secret: secret.secret, secretSource: secret.source })

@@ -52,7 +52,14 @@ export async function registerBudtenderAnalyticsRoutes(
         })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        console.warn(`[budtender-analytics] could not queue staff-directory refresh: ${message}`)
+        const code =
+          typeof error === 'object' && error !== null && 'code' in error
+            ? String(error.code)
+            : null
+        const signal = code === '42501' ? 'read-only database denied optional enqueue; ' : ''
+        console.warn(
+          `[budtender-analytics] ${signal}could not queue staff-directory refresh: ${message}`,
+        )
       }
     }
     return reply.send(BudtenderAnalyticsResponseSchema.parse(result.analytics))

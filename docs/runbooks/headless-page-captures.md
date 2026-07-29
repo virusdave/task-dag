@@ -10,11 +10,13 @@ cookie, and asks headless Chromium for a full-page screenshot.
 
 - Build and serve only from an ephemeral checkout. Bind the capture server to
   `127.0.0.1` on a non-production port; never restart a production service.
-- Set `NODE_ENV=test`, a one-use `SESSION_COOKIE_SECRET`, and
-  `PGOPTIONS='-c default_transaction_read_only=on'`. The last setting makes the
-  database reject writes even if rendered JavaScript unexpectedly attempts a
-  mutation. Do not click controls or invoke page JavaScript from the capture
-  controller.
+- Use only the dedicated URL at
+  `~/.secret/tigerdata/helios-readonly-url`. Never fall back to the general
+  TigerData credential bundle if it is missing or permission denied; stop and
+  request operator help. Also set `NODE_ENV=test`, a one-use
+  `SESSION_COOKIE_SECRET`, and `PGOPTIONS='-c default_transaction_read_only=on'`
+  as defense in depth. Do not click controls or invoke page JavaScript from the
+  capture controller.
 - Treat the production database URL and signed cookie as secrets. Never print
   either. Remove the Chromium profile and temporary controller afterward.
 - Chromium is a large action. Wrap the entire server/browser/capture lifecycle
@@ -48,14 +50,17 @@ cookie, and asks headless Chromium for a full-page screenshot.
    every Chromium child carrying its unique `--user-data-dir` argument, wait,
    and remove its temporary profile. Killing only the wrapper PID can leave
    Chromium children writing into the profile. Start Helios from the compiled
-   checkout with the sanctioned production `DATABASE_URL`, these additional
-   variables, and an unused loopback port:
+   checkout with the sanctioned read-only URL, these additional variables, and
+   an unused loopback port. The Helios server still expects its connection in
+   `DATABASE_URL`, so map the dedicated secret explicitly; do not use the
+   general TigerData bundle:
 
    ```sh
    export NODE_ENV=test
    export APP_BASE_URL=http://127.0.0.1:4355
    export PORT=4355
    export SESSION_COOKIE_SECRET="$(openssl rand -hex 32)"
+   export DATABASE_URL="$(cat "$HOME/.secret/tigerdata/helios-readonly-url")"
    export PGOPTIONS='-c default_transaction_read_only=on'
    node --input-type=module -e \
      "import('./dist/server/server/app/buildServer.js').then(async ({buildServer}) => { const server=await buildServer(); await server.listen({host:'127.0.0.1',port:4355}); })" &
@@ -108,6 +113,13 @@ cookie, and asks headless Chromium for a full-page screenshot.
    explicitly not to launch OCR-heavy subprocesses. If OCR is actually needed,
    run it directly under the same named lock and a bounded systemd unit rather
    than delegating it to an unconstrained review process.
+
+   A page-data GET can best-effort enqueue stale staff-directory work. Under
+   the read-only role that enqueue is expected to log a PostgreSQL permission
+   denial while the cached analytics response still succeeds. Preserve that
+   warning in the worker evidence; never retry the capture with full database
+   credentials. Any other permission denial should stop the capture unless the
+   affected page has an explicitly documented read-only fallback.
 
 6. For operator review, do not link directly to `upload-to-mss` image objects:
    that service can return them as binary downloads. Upload an HTML index that

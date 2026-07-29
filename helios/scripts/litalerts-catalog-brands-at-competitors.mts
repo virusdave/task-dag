@@ -31,7 +31,7 @@
  *
  * Usage:
  *
- *   DATABASE_URL="postgres://…" \
+ *   HELIOS_READONLY_DATABASE_URL="postgres://…" \
  *   npx tsx scripts/litalerts-catalog-brands-at-competitors.mts [maxMiles] [outFile]
  *
  * Defaults: maxMiles=3 (near+mid bands), outFile=/tmp/catalog-brands-at-competitors.html
@@ -45,6 +45,7 @@
 import { writeFileSync } from 'node:fs'
 
 import { Pool } from 'pg'
+import { readRequiredReadOnlyDatabaseUrl } from '../src/shared/config/runtimeEnv.js'
 
 import {
   PRICING_MID_DISTANCE_MAX_MILES,
@@ -577,11 +578,7 @@ function buildHtml(input: {
 async function main(): Promise<void> {
   const maxMiles = Number.parseFloat(process.argv[2] ?? String(DEFAULT_MAX_MILES))
   const outFile = process.argv[3] ?? DEFAULT_OUT_FILE
-  const databaseUrl = process.env.DATABASE_URL?.trim()
-  if (!databaseUrl) {
-    console.error('DATABASE_URL is required')
-    process.exit(1)
-  }
+  const databaseUrl = readRequiredReadOnlyDatabaseUrl()
   if (!Number.isFinite(maxMiles) || maxMiles <= 0) {
     console.error(`Invalid maxMiles: ${process.argv[2]}`)
     process.exit(1)

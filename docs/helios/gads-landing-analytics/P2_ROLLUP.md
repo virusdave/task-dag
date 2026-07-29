@@ -98,8 +98,9 @@ psql "$DATABASE_URL" -f helios/src/server/db/migrations/087_gads_lp_rollup.sql
 
 Inspect the last refresh:
 
-```sql
-select * from gads_lp_rollup_refresh_state;
+```sh
+psql "$(cat "$HOME/.secret/tigerdata/helios-readonly-url")" \
+  -c 'select * from gads_lp_rollup_refresh_state;'
 ```
 
 Force a one-off rebuild: enqueue `config.workers.gads_lp_rollup_refresh`

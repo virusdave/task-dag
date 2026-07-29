@@ -1,6 +1,7 @@
 import { Pool } from 'pg'
+import { readRequiredReadOnlyDatabaseUrl } from '../src/shared/config/runtimeEnv.js'
 ;(async () => {
-  const p = new Pool({ connectionString: process.env.DATABASE_URL })
+  const p = new Pool({ connectionString: readRequiredReadOnlyDatabaseUrl() })
   const r = await p.query(`
     select
       count(*) filter (where address_id is not null) as linked,

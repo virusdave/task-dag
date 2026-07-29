@@ -90,4 +90,24 @@ describe('budtender analytics staff refresh', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({ cashiers: [], totals: { activeCashiers: 0 } })
   })
+
+  it('preserves a clear signal when the read-only role denies the optional enqueue', async () => {
+    getAnalyticsMock.mockResolvedValue({
+      analytics,
+      staffRefreshTrigger: 'budtender_cache_stale',
+    })
+    const permissionDenied = Object.assign(new Error('permission denied for table job_queue'), {
+      code: '42501',
+    })
+    enqueueJobMock.mockRejectedValueOnce(permissionDenied)
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const response = await server.inject({ method: 'GET', url: '/api/budtender-analytics' })
+
+    expect(response.statusCode).toBe(200)
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('read-only database denied optional enqueue'),
+    )
+    warning.mockRestore()
+  })
 })

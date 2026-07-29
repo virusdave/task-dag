@@ -1751,6 +1751,163 @@ const SENTINELS: MigrationSentinel[] = [
       return hasColumn && hasValidCoveringIndex && oldIndex.rows[0]?.exists === false
     },
   },
+  {
+    migrationId: '107_helios_agent_readonly_role',
+    label:
+      'Dedicated helios_agent_readonly login role with SELECT-only access to ' +
+      'current and future Helios relations. The role is created without a ' +
+      'password; credential provisioning remains a separate secret operation.',
+    blessing: {
+      ref: 'https://ampcode.com/threads/T-019fad4e-84c9-7698-baca-847faacd9564',
+      reviewedSha: '053ea8c4326a8927787f5683baee574a12ea5f01',
+      artifactSha256: '57d3d0033894d91ac60cd032456ee62d525ee484ee9636eb6ac8265a0bce35e1',
+      transactionMode: 'transactional',
+      operatorExplanation:
+        'This migration creates a dedicated NOLOGIN role for agent and ' +
+        'headless production reads, grants SELECT on current and future ' +
+        'Helios relations, and grants no persistent write, sequence, schema-' +
+        'creation, or table-maintenance capability. Enabling LOGIN and setting ' +
+        'its generated credential remain a separate secret provisioning step.',
+      note:
+        'Oracle-approved exact single-file closure. Self-wrapped in begin/' +
+        'commit with a 5s lock timeout; no data scan, rewrite, backfill, or ' +
+        'index work. The reviewed down-file sha256 is ' +
+        '8fc8110278b48fb2c2e71112e95f61237b55320cfd47f049adc333bbc2063a4e. ' +
+        'Session-local TEMP/settings are outside the persistent-production-' +
+        'data invariant and do not grant persistent mutation.',
+    },
+    check: async (db) => {
+      const result = await db.query<{ applied: boolean }>(
+        `with role_state as (
+           select oid, rolconfig, rolcanlogin, rolsuper, rolcreatedb,
+                  rolcreaterole, rolinherit, rolreplication, rolbypassrls,
+                  rolconnlimit
+             from pg_roles
+            where rolname = 'helios_agent_readonly'
+         )
+         select
+           exists (
+             select 1
+               from role_state
+              where rolcanlogin
+                and not rolsuper
+                and not rolcreatedb
+                and not rolcreaterole
+                and not rolinherit
+                and not rolreplication
+                and not rolbypassrls
+                and rolconnlimit = 20
+                and rolconfig @> array[
+                  'default_transaction_read_only=on',
+                  'statement_timeout=2min',
+                  'idle_in_transaction_session_timeout=1min'
+                ]
+           )
+           and not exists (
+             select 1
+               from pg_auth_members m
+               join role_state r on m.member = r.oid
+           )
+           and not exists (
+             select 1 from pg_class c join role_state r on c.relowner = r.oid
+             union all
+             select 1 from pg_namespace n join role_state r on n.nspowner = r.oid
+             union all
+             select 1 from pg_proc p join role_state r on p.proowner = r.oid
+           )
+           and exists (
+             select 1 from role_state r
+              where has_database_privilege(r.oid, 'tsdb', 'connect')
+                and has_schema_privilege(r.oid, 'public', 'usage')
+                and not has_database_privilege(r.oid, 'tsdb', 'create')
+           )
+           and not exists (
+             select 1
+               from pg_namespace n
+               cross join role_state r
+              where n.nspname <> 'information_schema'
+                and n.nspname not like 'pg_%'
+                and has_schema_privilege(r.oid, n.oid, 'create')
+           )
+           and not exists (
+             select 1
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+               cross join role_state r
+              where n.nspname = 'public'
+                and c.relkind in ('r', 'p', 'v', 'm', 'f')
+                and c.relowner = (select oid from pg_roles where rolname = 'tsdbadmin')
+                and not has_table_privilege(r.oid, c.oid, 'select')
+           )
+           and not exists (
+             select 1
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+               cross join role_state r
+              where n.nspname <> 'information_schema'
+                and n.nspname not like 'pg_%'
+                and c.relkind in ('r', 'p', 'v', 'm', 'f')
+                and (
+                  has_table_privilege(r.oid, c.oid, 'insert')
+                  or has_table_privilege(r.oid, c.oid, 'update')
+                  or has_table_privilege(r.oid, c.oid, 'delete')
+                  or has_table_privilege(r.oid, c.oid, 'truncate')
+                  or has_table_privilege(r.oid, c.oid, 'references')
+                  or has_table_privilege(r.oid, c.oid, 'trigger')
+                  or has_table_privilege(r.oid, c.oid, 'maintain')
+                )
+           )
+           and not exists (
+             select 1
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+               cross join role_state r
+              where n.nspname <> 'information_schema'
+                and n.nspname not like 'pg_%'
+                and c.relkind = 'S'
+                and (
+                  has_sequence_privilege(r.oid, c.oid, 'select')
+                  or has_sequence_privilege(r.oid, c.oid, 'usage')
+                  or has_sequence_privilege(r.oid, c.oid, 'update')
+                )
+           )
+           and not exists (
+             select 1
+               from pg_proc p
+               join pg_namespace n on n.oid = p.pronamespace
+               cross join role_state r
+              where n.nspname = 'public'
+                and p.prosecdef
+                and has_function_privilege(r.oid, p.oid, 'execute')
+                and not (
+                  p.oid::regprocedure::text = 'hypertable_detailed_size(regclass)'
+                  and pg_get_userbyid(p.proowner) = 'postgres'
+                  and exists (
+                    select 1
+                      from pg_depend dep
+                      join pg_extension ext on ext.oid = dep.refobjid
+                     where dep.classid = 'pg_proc'::regclass
+                       and dep.objid = p.oid
+                       and dep.deptype = 'e'
+                       and ext.extname = 'timescaledb'
+                  )
+                )
+           )
+           and exists (
+             select 1
+               from pg_default_acl d
+               cross join lateral aclexplode(d.defaclacl) a
+               cross join role_state r
+              where d.defaclrole = (select oid from pg_roles where rolname = 'tsdbadmin')
+                and d.defaclnamespace = (select oid from pg_namespace where nspname = 'public')
+                and d.defaclobjtype = 'r'
+                and a.grantee = r.oid
+                and a.privilege_type = 'SELECT'
+           ) as applied`,
+      )
+      return result.rows[0]?.applied === true
+    },
+  },
   // NOTE (automation#62 leaf 9): migrations 100_migration_flow_smoketest and
   // 101_migration_flow_smoketest_drop were a throwaway create+drop PAIR used to
   // exercise the admin "Apply Now" psql apply flow end-to-end for the first

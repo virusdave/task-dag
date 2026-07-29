@@ -22,6 +22,7 @@
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
+import { readRequiredReadOnlyDatabaseUrl } from '../../shared/config/runtimeEnv.js'
 import { generateEd25519Pem, publicKeyPemFromPrivate } from '../lp/signing.js'
 import { compileSeoBundle, SeoCompileError, type CompileInput } from './compile.js'
 import { loadApprovedFaqSetsForBundle } from './faqBundleSource.js'
@@ -109,12 +110,13 @@ function compileFromConfig(cfg: BundleConfig) {
  * with the operator-APPROVED FAQ sets from the control-plane DB (verified
  * against the approval ledger by faqBundleSource.ts). Everything else
  * (sites/widgets/policy/assets/sitemaps) still comes from the JSON config.
- * Requires DATABASE_URL to be set. Returns the (possibly unchanged) config.
+ * Requires the dedicated Helios read-only URL. Returns the (possibly unchanged) config.
  */
 async function applyFaqFromDb(cfg: BundleConfig, args: Args): Promise<BundleConfig> {
   if (!args.bools.has('faq-from-db')) {
     return cfg
   }
+  process.env.DATABASE_URL = readRequiredReadOnlyDatabaseUrl()
   const faqSets = await loadApprovedFaqSetsForBundle(getPool())
   process.stdout.write(`[faq-from-db] loaded ${faqSets.length} approved FAQ set(s) from DB\n`)
   return {
@@ -128,12 +130,13 @@ async function applyFaqFromDb(cfg: BundleConfig, args: Args): Promise<BundleConf
  * with the operator-APPROVED blog posts from the control-plane DB (verified
  * against the approval ledger by postBundleSource.ts). Everything else
  * (sites/widgets/policy/assets/sitemaps) still comes from the JSON config.
- * Requires DATABASE_URL to be set. Returns the (possibly unchanged) config.
+ * Requires the dedicated Helios read-only URL. Returns the (possibly unchanged) config.
  */
 async function applyPostsFromDb(cfg: BundleConfig, args: Args): Promise<BundleConfig> {
   if (!args.bools.has('posts-from-db')) {
     return cfg
   }
+  process.env.DATABASE_URL = readRequiredReadOnlyDatabaseUrl()
   const posts = await loadApprovedPostsForBundle(getPool())
   process.stdout.write(`[posts-from-db] loaded ${posts.length} approved post(s) from DB\n`)
   return {
@@ -149,13 +152,14 @@ async function applyPostsFromDb(cfg: BundleConfig, args: Args): Promise<BundleCo
  * imageAssetBundleSource.ts). Everything else (sites/widgets/content/
  * policy/sitemaps) still comes from the JSON config. The compiler's
  * consistency layer additionally enforces that any post that references a
- * hero/og image resolves to one of these approved assets. Requires
- * DATABASE_URL to be set. Returns the (possibly unchanged) config.
+ * hero/og image resolves to one of these approved assets. Requires the
+ * dedicated Helios read-only URL. Returns the (possibly unchanged) config.
  */
 async function applyAssetsFromDb(cfg: BundleConfig, args: Args): Promise<BundleConfig> {
   if (!args.bools.has('assets-from-db')) {
     return cfg
   }
+  process.env.DATABASE_URL = readRequiredReadOnlyDatabaseUrl()
   const assets = await loadApprovedImageAssetsForBundle(getPool())
   process.stdout.write(`[assets-from-db] loaded ${assets.length} approved image asset(s) from DB\n`)
   return {

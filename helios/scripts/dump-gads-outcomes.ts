@@ -17,15 +17,15 @@
 //          "outcomes": { "success": ..., "no_change": ... } }, ...]
 //   }
 //
-// Reads connection string from DATABASE_URL (same env the helios
-// services use). Exits 0 with the JSON on success; exits non-zero
+// Reads the dedicated read-only connection string. It never falls back to the
+// write-capable Helios DATABASE_URL. Exits 0 with the JSON on success; exits non-zero
 // with a structured `{ "error": "..." }` on stdout if the DB is
 // unreachable / table is missing. L3 treats both empty data and
 // non-zero exits as "no outcome signal — fall back to deterministic
 // observations only", so this script is intentionally tolerant.
 
 import { Pool } from 'pg'
-import { readRequiredDatabaseUrl } from '../src/shared/config/runtimeEnv.js'
+import { readRequiredReadOnlyDatabaseUrl } from '../src/shared/config/runtimeEnv.js'
 
 interface ActionTypeRow {
   action_type: string
@@ -51,7 +51,7 @@ interface TotalsRow {
 async function main(): Promise<void> {
   let dbUrl: string
   try {
-    dbUrl = readRequiredDatabaseUrl()
+    dbUrl = readRequiredReadOnlyDatabaseUrl()
   } catch (err) {
     process.stdout.write(
       JSON.stringify({

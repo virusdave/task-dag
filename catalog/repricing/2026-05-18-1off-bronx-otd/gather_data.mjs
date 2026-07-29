@@ -26,8 +26,8 @@
  *  - Lit Alerts partner API: token at
  *    `~/.secret/litalerts/partner-api-token` (the same token Helios's
  *    `partnerClient.ts` loads).
- *  - TigerData (helios DB): credentials at
- *    `~/.secret/tigerdata/tiger-cloud-db-94793-credentials.txt`.
+ *  - TigerData (helios DB): read-only URL at
+ *    `~/.secret/tigerdata/helios-readonly-url`.
  *
  * Run:
  *    cd catalog/repricing/2026-05-18-1off-bronx-otd
@@ -72,12 +72,25 @@ const BRAND_IDS = [
 const NY_POST_TAX_MULTIPLIER = 1.13
 
 function readDatabaseUrl() {
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL
-  const credsFile = `${process.env.HOME}/.secret/tigerdata/tiger-cloud-db-94793-credentials.txt`
-  const text = readFileSync(credsFile, 'utf8')
-  const match = text.match(/postgres(?:ql)?:\/\/[^\s"'`]+/)
-  if (!match) throw new Error(`No postgres URL in ${credsFile}`)
-  return match[0]
+  const databaseUrl = process.env.HELIOS_READONLY_DATABASE_URL
+    ? process.env.HELIOS_READONLY_DATABASE_URL
+    : readFileSync(
+        process.env.HELIOS_READONLY_DATABASE_URL_FILE ??
+          `${process.env.HOME}/.secret/tigerdata/helios-readonly-url`,
+        'utf8',
+      ).trim()
+  const parsed = new URL(databaseUrl)
+  if (
+    (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') ||
+    decodeURIComponent(parsed.username) !== 'helios_agent_readonly' ||
+    decodeURIComponent(parsed.pathname) !== '/tsdb' ||
+    !parsed.hostname ||
+    !parsed.password ||
+    /\s/.test(databaseUrl)
+  ) {
+    throw new Error('The read-only URL must authenticate as helios_agent_readonly against /tsdb')
+  }
+  return databaseUrl
 }
 
 /**

@@ -95,7 +95,8 @@ curl -i -sS \
 ## DB assertion
 
 ```bash
-psql "$DATABASE_URL" -c "
+READONLY_DATABASE_URL="$(cat "$HOME/.secret/tigerdata/helios-readonly-url")"
+psql "$READONLY_DATABASE_URL" -c "
   select id, site_slug, ingest_source, first_name, last_name, state, postal_code
     from visitor_scans
     where hash_id = '${HASH_ID}'

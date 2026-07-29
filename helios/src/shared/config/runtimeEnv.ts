@@ -84,6 +84,54 @@ export function readRequiredDatabaseUrl(): string {
   return databaseUrl
 }
 
+/**
+ * Resolve the dedicated production read-only database credential.
+ *
+ * This deliberately never falls back to DATABASE_URL or the general
+ * TigerData credential bundle. Agent/headless read paths must fail closed
+ * instead of silently escalating to the write-capable Helios credential.
+ */
+export function readRequiredReadOnlyDatabaseUrl(): string {
+  const databaseUrl = readOptionalSecretEnv('HELIOS_READONLY_DATABASE_URL', {
+    defaultFilePaths: buildDefaultSecretFilePaths('tigerdata/helios-readonly-url'),
+  })
+  if (!databaseUrl) {
+    throw new Error(
+      'HELIOS_READONLY_DATABASE_URL is required. Set it directly, set HELIOS_READONLY_DATABASE_URL_FILE, or provision ~/.secret/tigerdata/helios-readonly-url. The read-only loader never falls back to DATABASE_URL.',
+    )
+  }
+  return validateReadOnlyDatabaseUrl(databaseUrl)
+}
+
+export function validateReadOnlyDatabaseUrl(databaseUrl: string): string {
+  if (databaseUrl.trim() !== databaseUrl || /\s/.test(databaseUrl)) {
+    throw new Error('HELIOS_READONLY_DATABASE_URL must not contain whitespace.')
+  }
+
+  let parsed: URL
+  try {
+    parsed = new URL(databaseUrl)
+  } catch {
+    throw new Error('HELIOS_READONLY_DATABASE_URL must be a valid PostgreSQL URL.')
+  }
+
+  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+    throw new Error('HELIOS_READONLY_DATABASE_URL must use postgres:// or postgresql://.')
+  }
+  if (
+    decodeURIComponent(parsed.username) !== 'helios_agent_readonly' ||
+    decodeURIComponent(parsed.pathname) !== '/tsdb'
+  ) {
+    throw new Error(
+      'HELIOS_READONLY_DATABASE_URL must authenticate as helios_agent_readonly against /tsdb.',
+    )
+  }
+  if (!parsed.hostname || !parsed.password) {
+    throw new Error('HELIOS_READONLY_DATABASE_URL must include a hostname and credential.')
+  }
+  return databaseUrl
+}
+
 export function extractPostgresUrl(contents: string): string | null {
   const match = contents.match(POSTGRES_URL_PATTERN)
   return match?.[0] ?? null

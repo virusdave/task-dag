@@ -17,6 +17,7 @@
 import { writeFileSync } from 'node:fs'
 
 import { Pool } from 'pg'
+import { readRequiredReadOnlyDatabaseUrl } from '../src/shared/config/runtimeEnv.js'
 
 interface CatalogBrand {
   brandName: string
@@ -61,11 +62,7 @@ function jaccard(a: Set<string>, b: Set<string>): number {
 }
 
 async function main(): Promise<void> {
-  const databaseUrl = process.env.DATABASE_URL?.trim()
-  if (!databaseUrl) {
-    console.error('DATABASE_URL is required')
-    process.exit(1)
-  }
+  const databaseUrl = readRequiredReadOnlyDatabaseUrl()
   const outPath = process.argv[2] ?? '/tmp/litalerts-brand-mapping-sanity.html'
   const pool = new Pool({ connectionString: databaseUrl })
 
