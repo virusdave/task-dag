@@ -21,6 +21,8 @@ describe('pending-purchase created SKU repricing contract', () => {
     expect(mayIssueCreatedSkuAdd('group', { phase: 'group_create_pending' })).toBe(false)
     expect(mayIssueCreatedSkuAdd('product', { phase: 'group_created' })).toBe(true)
     expect(mayIssueCreatedSkuAdd('product', { phase: 'product_create_pending' })).toBe(false)
+    expect(mayIssueCreatedSkuAdd('product', { phase: 'product_create_pending', requestId: 46 }, 46)).toBe(false)
+    expect(mayIssueCreatedSkuAdd('product', { phase: 'product_create_pending', requestId: 46 }, 47)).toBe(true)
     expect(mayIssueCreatedSkuAdd('product', { phase: 'product_created' })).toBe(false)
   })
 

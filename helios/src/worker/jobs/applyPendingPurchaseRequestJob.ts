@@ -254,10 +254,15 @@ type CreatedSkuCheckpoint = z.infer<typeof CreatedSkuCheckpointSchema>
 
 export function mayIssueCreatedSkuAdd(
   kind: 'group' | 'product',
-  checkpoint: Pick<CreatedSkuCheckpoint, 'phase'> | null,
+  checkpoint: { phase: CreatedSkuCheckpoint['phase']; requestId?: number } | null,
+  currentRequestId?: number,
 ): boolean {
   if (kind === 'group') return checkpoint === null
-  return checkpoint === null || checkpoint.phase === 'group_created'
+  if (checkpoint === null || checkpoint.phase === 'group_created') return true
+  return checkpoint.phase === 'product_create_pending'
+    && checkpoint.requestId !== undefined
+    && currentRequestId !== undefined
+    && checkpoint.requestId !== currentRequestId
 }
 
 // Cap the stored/displayed image-skip message so a pathological error object
@@ -889,7 +894,7 @@ async function applyPendingPurchaseRow(
     }
     const brand = await ensureBrand(stateDealerId, dictionaries, requireNonEmptyString(row.targetBrand, 'target brand'))
     const productPrice = PENDING_PURCHASE_TEMPORARY_UNSELLABLE_PRICE
-    if (row.effectivePrimaryImageUrl) {
+    if (row.effectivePrimaryImageUrl && createdGroupId === null) {
       // Image attachment is NON-FATAL by operator directive: it is better to
       // create the product without an image (so the inventory can go on sale
       // now) and backfill the image later than to block the whole apply. Any
@@ -976,7 +981,7 @@ async function applyPendingPurchaseRow(
     if (reconciledProduct) {
       createdProductId = reconciledProduct.id
     } else {
-      if (!mayIssueCreatedSkuAdd('product', row.createdSkuCheckpoint)) {
+      if (!mayIssueCreatedSkuAdd('product', row.createdSkuCheckpoint, applyRequestId)) {
         throw new DependencyUnavailableWorkerError(
           `The outcome of Sweed product creation for pending-purchase row ${row.rowId} is still unknown; refusing to create a duplicate product.`,
           { delayMs: 5 * 60 * 1000 },
