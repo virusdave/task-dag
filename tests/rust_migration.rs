@@ -53,7 +53,6 @@ struct Fixture {
     refs: BTreeMap<String, String>,
     activation: String,
     graph: String,
-    journal: String,
 }
 
 impl Drop for Fixture {
@@ -103,15 +102,6 @@ impl Fixture {
             None,
         );
         Self::run_raw(&work, &["init", "--trusted-floor", &floor], None, None);
-        let journal = ok(
-            &work,
-            &["ls-remote", "origin", "refs/heads/tasks/system/transitions"],
-        )
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_owned();
-
         let root = commit(&work, "Root\n\nLegacy project context", &[]);
         let active = commit(&work, "Active child", &[&root]);
         let a = commit(&work, "Frontier A", &[&root, &active]);
@@ -166,7 +156,16 @@ impl Fixture {
         );
         if blocked_in_closure {
             refs.remove("refs/heads/tasks/frontier/c");
-            refs.insert("refs/heads/tasks/blocked/c".into(), c.clone());
+            refs.insert(format!("refs/heads/tasks/frontier/blocked-{c}"), c.clone());
+            refs.insert(format!("refs/heads/tasks/blocked/{c}"), c.clone());
+            refs.insert(
+                format!("refs/heads/tasks/blocked-meta/{c}"),
+                commit(
+                    &work,
+                    &format!("Blocked-Meta: Frontier C\n\nTask-Commit: {c}\nBlocker-Kind: manual\nReason: Waiting for reviewed input\nBlocked-At: 2026-07-28T00:00:00Z"),
+                    &[&c],
+                ),
+            );
         }
         refs.insert("refs/heads/tasks/v1/activation".into(), activation.clone());
         refs.insert("refs/heads/tasks/v1/graph".into(), graph.clone());
@@ -193,18 +192,21 @@ impl Fixture {
             refs,
             activation,
             graph,
-            journal,
         }
     }
 
     fn graph_commit(work: &Path, task: &str, parent: Option<&str>) -> String {
         let edge = json!({"from":format!("task:owner/repo@{task}"),"mode":"all","origin":{"repo-id":1,"witness":"fixture"},"relation":"requires","schema":1,"to":"issue:owner/repo#42"});
+        Self::graph_commit_edge(work, &edge, parent)
+    }
+
+    fn graph_commit_edge(work: &Path, edge: &Value, parent: Option<&str>) -> String {
         let mut edge_id = Sha256::new();
         for (index, value) in [
             edge["from"].as_str().unwrap(),
             edge["to"].as_str().unwrap(),
-            "requires",
-            "all",
+            edge["relation"].as_str().unwrap(),
+            edge["mode"].as_str().unwrap(),
         ]
         .into_iter()
         .enumerate()
@@ -342,35 +344,6 @@ impl Fixture {
         let line = ok(&self.work, &["ls-remote", "origin", reference]);
         line.split_whitespace().next().map(str::to_owned)
     }
-    fn assert_failure_untouched(&self, out: &Output) {
-        assert!(!out.status.success(), "migration unexpectedly succeeded");
-        assert_eq!(
-            self.remote("refs/heads/tasks/system/transitions").unwrap(),
-            self.journal
-        );
-        assert_eq!(
-            self.remote("refs/heads/tasks/v1/activation").as_deref(),
-            Some(self.activation.as_str())
-        );
-        for (reference, oid) in &self.refs {
-            if reference.contains("tasks/v1/") {
-                continue;
-            }
-            assert_eq!(
-                self.remote(reference).as_deref(),
-                Some(oid.as_str()),
-                "changed {reference}"
-            );
-        }
-        assert!(
-            ok(
-                &self.work,
-                &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
-            )
-            .is_empty()
-        );
-    }
-
     fn assert_graph_guard(&self, prior: &str) {
         let current = self.remote("refs/heads/tasks/v1/graph").unwrap();
         assert_ne!(current, prior);
@@ -590,7 +563,7 @@ fn ambiguous_success_replays_identical_result() {
 }
 
 #[test]
-fn malformed_closure_and_touching_graph_fail_without_mutation() {
+fn touching_graph_fails_then_blocked_overlay_migrates() {
     let f = Fixture::new(true, false);
     let touching = Fixture::graph_commit(&f.work, &f.root, Some(&f.graph));
     ok(
@@ -617,8 +590,257 @@ fn malformed_closure_and_touching_graph_fail_without_mutation() {
         ],
     );
     let out = f.migrate("blocked-closure", None);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("blocked legacy state"));
-    f.assert_failure_untouched(&out);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = result["mapping"][&f.tasks["c"]].as_str().unwrap();
+    let lease = result["blockLeases"][id].as_str().unwrap();
+    assert_eq!(
+        f.remote(&format!("refs/heads/tasks/blocked/{id}"))
+            .as_deref(),
+        Some(lease)
+    );
+    let blocked = body(&f.work, lease);
+    assert_eq!(blocked["reason"], "Waiting for reviewed input");
+    assert_eq!(blocked["blockedAt"], 1_785_196_800_u64);
+    let blocked_parents = ok(&f.work, &["show", "-s", "--format=%P", lease]);
+    assert_eq!(blocked_parents.split_whitespace().count(), 2);
+    let mapping = f
+        .remote(&format!(
+            "refs/heads/tasks/v2/imports/v1/by-sha/{}",
+            f.tasks["c"]
+        ))
+        .unwrap();
+    let mapping_value = body(&f.work, &mapping);
+    assert_eq!(
+        mapping_value["provenance"]["legacyLifecycleRefs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let metadata_oid = f.refs[&format!("refs/heads/tasks/blocked-meta/{}", f.tasks["c"])].clone();
+    assert!(
+        ok(&f.work, &["show", "-s", "--format=%P", &mapping])
+            .split_whitespace()
+            .any(|parent| parent == metadata_oid)
+    );
+    assert!(
+        f.remote(&format!(
+            "refs/heads/tasks/frontier/blocked-{}",
+            f.tasks["c"]
+        ))
+        .is_none()
+    );
+    assert!(
+        f.remote(&format!("refs/heads/tasks/blocked/{}", f.tasks["c"]))
+            .is_none()
+    );
+    assert!(
+        f.remote(&format!("refs/heads/tasks/blocked-meta/{}", f.tasks["c"]))
+            .is_none()
+    );
+    let unblock = Fixture::run_raw(
+        &f.work,
+        &[
+            "unblock",
+            id,
+            "--block-lease",
+            lease,
+            "--authorization",
+            "reviewed migrated block",
+            "--operation-id",
+            "unblock-migrated-block",
+        ],
+        None,
+        None,
+    );
+    assert!(!unblock.status.success());
+    assert_eq!(
+        f.remote(&format!("refs/heads/tasks/blocked/{id}"))
+            .as_deref(),
+        Some(lease)
+    );
+}
+
+#[test]
+fn local_graph_requirement_is_immutable_and_structural_root_cycle_is_rejected() {
+    let f = Fixture::new(false, false);
+    let edge = json!({
+        "from":format!("task:owner/repo@{}", f.tasks["b"]),
+        "mode":"all",
+        "origin":{"repo-id":1,"witness":"local-requirement"},
+        "relation":"requires",
+        "schema":1,
+        "to":format!("task:owner/repo@{}", f.tasks["sibling"])
+    });
+    let graph = Fixture::graph_commit_edge(&f.work, &edge, Some(&f.graph));
+    ok(
+        &f.work,
+        &[
+            "push",
+            &format!("--force-with-lease=refs/heads/tasks/v1/graph:{}", f.graph),
+            "origin",
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = f.migrate("local-graph-requirement", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let b_mapping = f
+        .remote(&format!(
+            "refs/heads/tasks/v2/imports/v1/by-sha/{}",
+            f.tasks["b"]
+        ))
+        .unwrap();
+    let b_task = body(&f.work, &b_mapping)["taskOid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let requirement_ids: Vec<_> = body(&f.work, &b_task)["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|requirement| requirement["taskId"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        requirement_ids.contains(
+            &result["mapping"][&f.tasks["a"]]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        )
+    );
+    assert!(
+        requirement_ids.contains(
+            &result["mapping"][&f.tasks["sibling"]]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        )
+    );
+
+    let rejected = Fixture::new(false, false);
+    let edge = json!({
+        "from":format!("task:owner/repo@{}", rejected.tasks["c"]),
+        "mode":"all",
+        "origin":{"repo-id":1,"witness":"cycle"},
+        "relation":"requires",
+        "schema":1,
+        "to":format!("task:owner/repo@{}", rejected.root)
+    });
+    let graph = Fixture::graph_commit_edge(&rejected.work, &edge, Some(&rejected.graph));
+    ok(
+        &rejected.work,
+        &[
+            "push",
+            &format!(
+                "--force-with-lease=refs/heads/tasks/v1/graph:{}",
+                rejected.graph
+            ),
+            "origin",
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = rejected.migrate("structural-root-cycle", None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("structural root"));
+    assert!(
+        ok(
+            &rejected.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        rejected.remote("refs/heads/tasks/frontier/c").as_deref(),
+        rejected.refs["refs/heads/tasks/frontier/c"].as_str().into()
+    );
+}
+
+#[test]
+fn unsupported_structural_census_and_metadata_fail_before_writes() {
+    let nested = Fixture::new(false, true);
+    let pending_child = commit(&nested.work, "Nested pending", &[&nested.root]);
+    ok(
+        &nested.work,
+        &[
+            "push",
+            "origin",
+            &format!("{pending_child}:refs/heads/tasks/pending/nested"),
+        ],
+    );
+    let out = nested.migrate("nested-pending", None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nested legacy structural"));
+    assert!(
+        ok(
+            &nested.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+
+    let cross = Fixture::new(false, false);
+    let crossing = commit(
+        &cross.work,
+        "Cross-boundary child",
+        &[&cross.root, &cross.tasks["other_frontier"]],
+    );
+    ok(
+        &cross.work,
+        &[
+            "push",
+            "origin",
+            &format!("{crossing}:refs/heads/tasks/frontier/crossing"),
+        ],
+    );
+    let out = cross.migrate("cross-boundary-parent", None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("crosses migration closure"));
+    assert!(
+        ok(
+            &cross.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+
+    let malformed = Fixture::new(true, false);
+    let task = &malformed.tasks["c"];
+    let metadata_ref = format!("refs/heads/tasks/blocked-meta/{task}");
+    let prior = malformed.remote(&metadata_ref).unwrap();
+    let replacement = commit(
+        &malformed.work,
+        "Blocked-Meta: Frontier C\n\nTask-Commit: wrong\nBlocker-Kind: manual\nBlocked-At: 2026-07-28T00:00:00Z",
+        &[task],
+    );
+    ok(
+        &malformed.work,
+        &[
+            "push",
+            &format!("--force-with-lease={metadata_ref}:{prior}"),
+            "origin",
+            &format!("{replacement}:{metadata_ref}"),
+        ],
+    );
+    let out = malformed.migrate("malformed-blocked-metadata", None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("wrong Task"));
+    assert!(
+        ok(
+            &malformed.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
 }
 
 #[test]

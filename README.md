@@ -167,7 +167,9 @@ and provider operations) fail without network access or mutation and point to
 supported task-dag commands rather than suggesting raw Git edits.
 
 `migrate-v1` is an exceptional, single-repository importer and requires an
-operator-enforced writer freeze for its entire run. It performs one bounded
+operator-enforced writer freeze for its entire run. The operator must drain
+all legacy writers first, including raw delegated-ref publishers that predate
+the v1 activation fence. It performs one bounded
 legacy discovery (at most 100 closure tasks, 500 refs, and 10 MiB of metadata),
 rejects unsupported or conflicting legacy state before mutation, and atomically
 creates deterministic v2 tasks, lifecycle records, provenance mappings, an
@@ -175,6 +177,10 @@ operation receipt, and a transition-journal entry while deleting the exact
 legacy closure refs. Exact operation replay is checked before discovery. Keep
 the freeze active if post-write readback reports that master or either v1
 authority changed.
+Direct-child blocked overlays (with optional valid blocked metadata) and local
+`requires/all` graph edges wholly inside the imported closure are preserved.
+Nested structural closures, cross-boundary/delegated edges, `satisfies` edges,
+and root-active or delegated lifecycle state fail closed without mutation.
 
 `breakdown` accepts
 `{"operationId":"...","children":[{"key":"...","title":"...","description":"...","requires":[],"claim":false}]}`.

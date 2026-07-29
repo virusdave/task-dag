@@ -12,6 +12,9 @@ pub(super) struct LegacyTask {
     pub(super) description: String,
     pub(super) requires: Vec<String>,
     pub(super) lifecycle: Vec<(String, String)>,
+    pub(super) blocked_reason: Option<String>,
+    pub(super) blocked_at: Option<u64>,
+    pub(super) graph_edges: Vec<String>,
 }
 pub(super) struct Frozen {
     pub(super) refs: BTreeMap<String, String>,
@@ -38,6 +41,8 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
         "refs/heads/tasks/active/*".into(),
         "refs/heads/tasks/blocked/*".into(),
         "refs/heads/tasks/blocked-meta/*".into(),
+        "refs/heads/tasks/root-active/*".into(),
+        "refs/heads/tasks/delegated/*".into(),
         "refs/heads/tasks/v2/activation".into(),
         "refs/heads/tasks/system/transitions".into(),
     ];
@@ -69,6 +74,10 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
         graph.clone(),
         root.into(),
     ];
+    let mut blocked_meta = BTreeMap::new();
+    let mut root_active = Vec::new();
+    let mut delegated = Vec::new();
+    let mut pending_tasks = Vec::new();
     for (r, o) in &snap.refs {
         let state = if r.starts_with("refs/heads/tasks/frontier/") {
             Some("frontier")
@@ -91,6 +100,23 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
                 .entry(task)
                 .or_default()
                 .push((state.into(), r.clone(), o.clone()));
+        } else if let Some(suffix) = r.strip_prefix("refs/heads/tasks/blocked-meta/") {
+            if blocked_meta
+                .insert(suffix.to_owned(), (r.clone(), o.clone()))
+                .is_some()
+            {
+                return Err("duplicate legacy blocked metadata".into());
+            }
+            objects.push(o.clone());
+        } else if r.starts_with("refs/heads/tasks/root-active/") {
+            root_active.push((r.clone(), o.clone()));
+            objects.push(o.clone());
+        } else if r.starts_with("refs/heads/tasks/delegated/") {
+            delegated.push((r.clone(), o.clone()));
+            objects.push(o.clone());
+        } else if r.starts_with("refs/heads/tasks/pending/") {
+            pending_tasks.push(o.clone());
+            objects.push(o.clone());
         }
     }
     objects.extend(task_states.keys().cloned());
@@ -109,9 +135,85 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
         .keys()
         .map(|task| Ok((task.clone(), git::parents(task)?)))
         .collect::<Result<_>>()?;
+    if !git::parents(root)?.is_empty() {
+        return Err("legacy migration root must be a parentless Task".into());
+    }
     let closure = descendant_closure(root, &task_parents, 100)?;
+    for (reference, oid) in &snap.refs {
+        if let Some(task) = reference.strip_prefix("refs/heads/tasks/blocked/") {
+            if closure.contains(task) && oid != task {
+                return Err("legacy blocked overlay does not point to its Task".into());
+            }
+            if closure.contains(oid) && task != oid {
+                return Err(
+                    "legacy blocked ref must use the full Task OID as its exact path".into(),
+                );
+            }
+        }
+    }
+    for (task, (_, oid)) in &blocked_meta {
+        let parents = git::parents(oid)?;
+        if (closure.contains(task) || parents.iter().any(|parent| closure.contains(parent)))
+            && parents != [task.clone()]
+        {
+            return Err("legacy blocked metadata path does not name its Task parent".into());
+        }
+    }
+    for task in task_states.keys().chain(pending_tasks.iter()) {
+        if task == root {
+            continue;
+        }
+        let pending_task = pending_tasks.contains(task);
+        let mut current = task.clone();
+        for depth in 0..=100 {
+            let parents = git::parents(&current)?;
+            let Some(parent) = parents.first() else {
+                break;
+            };
+            if parent == root {
+                if depth != 0 || pending_task {
+                    return Err("nested legacy structural closure is unsupported".into());
+                }
+                break;
+            }
+            if git::output(["show", "-s", "--format=%T", parent])?.trim()
+                != "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            {
+                break;
+            }
+            current = parent.clone();
+            if depth == 100 {
+                return Err("legacy structural ancestry exceeds 100 tasks".into());
+            }
+        }
+    }
+    for task in closure.iter().filter(|task| task.as_str() != root) {
+        if task_parents[task].first().map(String::as_str) != Some(root) {
+            return Err("nested legacy structural closure is unsupported".into());
+        }
+    }
+    let pending_suffix = pending[0]
+        .0
+        .strip_prefix("refs/heads/tasks/pending/")
+        .unwrap();
+    for (reference, oid) in root_active.iter().chain(delegated.iter()) {
+        if git::parents(oid)?.iter().any(|parent| parent == root)
+            || reference == &format!("refs/heads/tasks/root-active/{pending_suffix}")
+            || reference.starts_with(&format!("refs/heads/tasks/delegated/{pending_suffix}/"))
+        {
+            return Err(
+                "legacy root-active or delegated state is unsupported by bounded migration".into(),
+            );
+        }
+    }
     let repository = current_repository()?;
-    let observed_terminal_edges = inspect_graph(&graph, &closure, &repository, &mut metadata)?;
+    let graph_inspection = inspect_graph(&graph, &closure, &repository, &mut metadata)?;
+    if graph_inspection.requires.contains_key(root) {
+        return Err(
+            "legacy root requirements cannot be represented without a dependency cycle".into(),
+        );
+    }
+    let observed_terminal_edges = graph_inspection.terminal;
     validate_terminal_edges(&observed_terminal_edges, terminal_edges)?;
     let guard = parse_guard(&activation)?;
     let mut tasks = Vec::new();
@@ -123,6 +225,13 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
         description: description(root)?,
         requires: vec![],
         lifecycle: vec![(pending[0].0.clone(), pending[0].1.clone())],
+        blocked_reason: None,
+        blocked_at: None,
+        graph_edges: graph_inspection
+            .provenance
+            .get(root)
+            .cloned()
+            .unwrap_or_default(),
     });
     let mut remaining: BTreeSet<_> = closure
         .iter()
@@ -135,38 +244,107 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
             .find(|t| {
                 task_parents[*t]
                     .iter()
-                    .filter(|p| closure.contains(*p) && p.as_str() != root)
+                    .skip(1)
+                    .chain(graph_inspection.requires.get(*t).into_iter().flatten())
+                    .filter(|p| closure.contains(*p))
                     .all(|p| !remaining.contains(p))
             })
             .cloned()
             .ok_or("legacy dependency cycle")?;
         remaining.remove(&next);
         let states = &task_states[&next];
-        if states.len() != 1 {
+        let schedule: Vec<_> = states.iter().filter(|state| state.0 != "blocked").collect();
+        let blocked: Vec<_> = states.iter().filter(|state| state.0 == "blocked").collect();
+        if schedule.len() != 1 || blocked.len() > 1 {
             return Err("legacy task has conflicting or missing lifecycle state".into());
         }
-        if states[0].0 == "blocked" {
-            return Err("blocked legacy state in migration closure is unsupported".into());
+        let mut lifecycle = vec![(schedule[0].1.clone(), schedule[0].2.clone())];
+        let mut blocked_reason = None;
+        let mut blocked_at = None;
+        if let Some(blocked) = blocked.first() {
+            lifecycle.push((blocked.1.clone(), blocked.2.clone()));
+            if blocked.2 != next {
+                return Err("legacy blocked overlay does not point to its Task".into());
+            }
+            if let Some((reference, oid)) = blocked_meta.remove(&next) {
+                let parents = git::parents(&oid)?;
+                if parents != [next.clone()]
+                    || git::output(["show", "-s", "--format=%T", &oid])?.trim()
+                        != git::output(["show", "-s", "--format=%T", &next])?.trim()
+                {
+                    return Err(
+                        "legacy blocked metadata must have one Task parent and its tree".into(),
+                    );
+                }
+                let raw = git::output(["cat-file", "commit", &oid])?;
+                let body = raw
+                    .split_once("\n\n")
+                    .map(|(_, message)| message)
+                    .ok_or("legacy blocked metadata commit lacks a message")?;
+                let parsed = parse_blocked_metadata(&body, &next)?;
+                blocked_reason = parsed.0;
+                blocked_at = Some(parsed.1);
+                lifecycle.push((reference, oid));
+            }
         }
-        let requires = task_parents[&next]
+        if task_parents[&next]
             .iter()
+            .skip(1)
+            .any(|parent| !closure.contains(parent))
+        {
+            return Err("legacy parent-encoded requirement crosses migration closure".into());
+        }
+        let mut requires: BTreeSet<_> = task_parents[&next]
+            .iter()
+            .skip(1)
             .cloned()
             .filter(|p| closure.contains(p) && p != root)
             .collect();
-        let owner = if states[0].0 == "active" {
-            owner(&states[0].2)?
+        requires.extend(
+            graph_inspection
+                .requires
+                .get(&next)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        if requires.contains(root) {
+            return Err("legacy child cannot require its structural root".into());
+        }
+        if requires.contains(&next) {
+            return Err("legacy local requirement self-cycle".into());
+        }
+        let owner = if schedule[0].0 == "active" {
+            owner(&schedule[0].2)?
         } else {
             String::new()
         };
         tasks.push(LegacyTask {
             task: next.clone(),
-            state: states[0].0.clone(),
+            state: if blocked.is_empty() {
+                schedule[0].0.clone()
+            } else {
+                "blocked".into()
+            },
             owner,
             title: subject(&next)?,
             description: description(&next)?,
-            requires,
-            lifecycle: vec![(states[0].1.clone(), states[0].2.clone())],
+            requires: requires.into_iter().collect(),
+            lifecycle,
+            blocked_reason,
+            blocked_at,
+            graph_edges: graph_inspection
+                .provenance
+                .get(&next)
+                .cloned()
+                .unwrap_or_default(),
         });
+    }
+    if task_states.contains_key(root) {
+        return Err("blocked or scheduled legacy root state is unsupported".into());
+    }
+    if blocked_meta.keys().any(|task| closure.contains(task)) {
+        return Err("legacy blocked metadata has no matching blocked closure overlay".into());
     }
     let digest = model::framed_digest(
         "migrate-v1-snapshot",
@@ -203,7 +381,7 @@ fn descendant_closure(
     let mut queue = VecDeque::from([root.to_owned()]);
     while let Some(parent) = queue.pop_front() {
         for (task, parents) in task_parents {
-            if !closure.contains(task) && parents.contains(&parent) {
+            if !closure.contains(task) && parents.first() == Some(&parent) {
                 closure.insert(task.clone());
                 queue.push_back(task.clone());
                 if closure.len() > limit {
@@ -243,6 +421,97 @@ fn owner(oid: &str) -> Result<String> {
     let value = values[0];
     model::bounded("legacy owner", value, 256)?;
     Ok(value.into())
+}
+
+fn parse_blocked_metadata(body: &str, task: &str) -> Result<(Option<String>, u64)> {
+    let body = body
+        .strip_suffix('\n')
+        .ok_or("legacy blocked metadata message lacks its canonical terminator")?;
+    if body.ends_with(char::is_whitespace) {
+        return Err("legacy blocked metadata has trailing whitespace".into());
+    }
+    let lines: Vec<_> = body.lines().collect();
+    if lines.len() < 5
+        || lines[0] != format!("Blocked-Meta: {}", subject(task)?)
+        || !lines[1].is_empty()
+    {
+        return Err("legacy blocked metadata header is malformed".into());
+    }
+    let order = [
+        "Task-Commit",
+        "Blocker-Kind",
+        "Reason",
+        "Request-URL",
+        "Repo",
+        "Issue",
+        "Source-URL",
+        "Blocked-By",
+        "Blocked-Host",
+        "Blocked-At",
+    ];
+    let mut seen = BTreeSet::new();
+    let mut prior = None;
+    let mut reason = None;
+    let mut blocked_at = None;
+    for line in &lines[2..] {
+        let (key, value) = line
+            .split_once(": ")
+            .ok_or("legacy blocked metadata field is malformed")?;
+        let position = order
+            .iter()
+            .position(|candidate| *candidate == key)
+            .ok_or("legacy blocked metadata has an unknown field")?;
+        if value.is_empty()
+            || prior.is_some_and(|previous| position <= previous)
+            || !seen.insert(key)
+        {
+            return Err("legacy blocked metadata fields are not canonical".into());
+        }
+        model::bounded("legacy blocked metadata field", value, 16_384)?;
+        match key {
+            "Task-Commit" if value != task => {
+                return Err("legacy blocked metadata names the wrong Task".into());
+            }
+            "Reason" => reason = Some(value.to_owned()),
+            "Blocked-At" => blocked_at = Some(parse_rfc3339(value)?),
+            _ => {}
+        }
+        prior = Some(position);
+    }
+    if lines[2] != format!("Task-Commit: {task}")
+        || !lines[3].starts_with("Blocker-Kind: ")
+        || !lines.last().unwrap().starts_with("Blocked-At: ")
+    {
+        return Err("legacy blocked metadata lacks canonical required fields".into());
+    }
+    Ok((
+        reason,
+        blocked_at.ok_or("legacy blocked metadata lacks Blocked-At")?,
+    ))
+}
+
+fn parse_rfc3339(value: &str) -> Result<u64> {
+    if value.len() != 20 || !value.ends_with('Z') {
+        return Err("legacy Blocked-At is not canonical RFC3339 UTC".into());
+    }
+    let out = std::process::Command::new("date")
+        .args(["-u", "-d", value, "+%s|%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .map_err(|e| format!("parse legacy Blocked-At: {e}"))?;
+    if !out.status.success() {
+        return Err("legacy Blocked-At is malformed".into());
+    }
+    let text = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
+    let (epoch, roundtrip) = text
+        .trim()
+        .split_once('|')
+        .ok_or("legacy Blocked-At parser returned malformed output")?;
+    if roundtrip != value {
+        return Err("legacy Blocked-At is not canonical RFC3339 UTC".into());
+    }
+    epoch
+        .parse()
+        .map_err(|_| "legacy Blocked-At epoch is malformed".into())
 }
 
 #[cfg(test)]
@@ -330,7 +599,7 @@ mod tests {
             prop_assert!(closure.contains("root"));
             prop_assert!(closure.len() <= node_count + 1);
             for (task, task_parents) in &parents {
-                let has_reachable_parent = task_parents.iter().any(|parent| closure.contains(parent));
+                let has_reachable_parent = task_parents.first().is_some_and(|parent| closure.contains(parent));
                 prop_assert_eq!(closure.contains(task), has_reachable_parent);
             }
         }
@@ -439,12 +708,18 @@ fn parse_guard(oid: &str) -> Result<Guard> {
     })
 }
 
+struct GraphInspection {
+    terminal: Vec<String>,
+    requires: BTreeMap<String, BTreeSet<String>>,
+    provenance: BTreeMap<String, Vec<String>>,
+}
+
 fn inspect_graph(
     graph: &str,
     closure: &BTreeSet<String>,
     repository: &str,
     total: &mut u64,
-) -> Result<Vec<String>> {
+) -> Result<GraphInspection> {
     let tree = git::output(["show", "-s", "--format=%T", graph])?
         .trim()
         .to_owned();
@@ -486,13 +761,29 @@ fn inspect_graph(
         }
     }
     let mut terminal_edges = Vec::new();
+    let mut requires: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut provenance: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (edge_id, (blob_oid, value)) in edges {
-        if !tombstones.contains(&edge_id) && inspect_edges(&value, closure, repository)? {
-            terminal_edges.push(blob_oid);
+        if !tombstones.contains(&edge_id) {
+            match inspect_edge(&value, closure, repository)? {
+                EdgeUse::Unrelated => {}
+                EdgeUse::Terminal(task) => {
+                    provenance.entry(task).or_default().push(blob_oid.clone());
+                    terminal_edges.push(blob_oid);
+                }
+                EdgeUse::Local(from, to) => {
+                    requires.entry(from.clone()).or_default().insert(to);
+                    provenance.entry(from).or_default().push(blob_oid);
+                }
+            }
         }
     }
     terminal_edges.sort();
-    Ok(terminal_edges)
+    Ok(GraphInspection {
+        terminal: terminal_edges,
+        requires,
+        provenance,
+    })
 }
 
 fn graph_path(path: &str) -> Result<(&str, &str)> {
@@ -528,7 +819,21 @@ fn add_object_size(oid: &str, total: &mut u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn inspect_edges(value: &Value, closure: &BTreeSet<String>, repository: &str) -> Result<bool> {
+    Ok(!matches!(
+        inspect_edge(value, closure, repository)?,
+        EdgeUse::Unrelated
+    ))
+}
+
+enum EdgeUse {
+    Unrelated,
+    Terminal(String),
+    Local(String, String),
+}
+
+fn inspect_edge(value: &Value, closure: &BTreeSet<String>, repository: &str) -> Result<EdgeUse> {
     let map = value
         .as_object()
         .ok_or("graph edge JSON has malformed shape")?;
@@ -538,20 +843,24 @@ fn inspect_edges(value: &Value, closure: &BTreeSet<String>, repository: &str) ->
     let from_in_closure = endpoint_in_closure(from, closure, repository)?;
     let to_in_closure = endpoint_in_closure(to, closure, repository)?;
     if !from_in_closure && !to_in_closure {
-        return Ok(false);
+        return Ok(EdgeUse::Unrelated);
     }
-    if !from_in_closure
-        || to_in_closure
-        || !to.starts_with("issue:")
-        || map["relation"] != "requires"
-        || map["mode"] != "all"
-    {
+    if map["relation"] != "requires" || map["mode"] != "all" || !from_in_closure {
         return Err(
             "v1 graph edge touching migration closure is not a terminal external requirement"
                 .into(),
         );
     }
-    Ok(true)
+    let task_oid = |endpoint: &str| endpoint.rsplit_once('@').map(|(_, oid)| oid.to_owned());
+    let from_task = task_oid(from).ok_or("graph requirement source is not a Task")?;
+    if to_in_closure {
+        let to_task = task_oid(to).ok_or("graph requirement target is not a Task")?;
+        Ok(EdgeUse::Local(from_task, to_task))
+    } else if to.starts_with("issue:") {
+        Ok(EdgeUse::Terminal(from_task))
+    } else {
+        Err("v1 graph requirement crosses the migration closure boundary".into())
+    }
 }
 
 fn edge_id_for_value(value: &Value, tombstone: bool) -> Result<String> {

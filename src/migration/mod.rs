@@ -102,10 +102,11 @@ pub(crate) fn run(
     let mut outputs = Vec::new();
     let mut children = Vec::new();
     let mut tokens = BTreeMap::new();
+    let mut block_leases = BTreeMap::new();
     for legacy in frozen.tasks.iter().filter(|t| t.task != root) {
         let id = &ids[&legacy.task];
         let task = &task_oids[&legacy.task];
-        let (state, record) = if legacy.state == "active" {
+        let (state, record, waiting_state) = if legacy.state == "active" {
             let token = crate::commands::claim_token()?;
             if tokens.values().any(|prior| prior == &token) {
                 return Err("generated duplicate migration claim token".into());
@@ -114,14 +115,31 @@ pub(crate) fn run(
             (
                 "active",
                 json!({"attemptId":model::framed_digest("migration-active", &[&legacy.task]),"claimToken":token,"claimedAt":now,"expiresAt":now+43_200,"formatVersion":2,"host":"migration","logicalId":semantic,"operationId":operation,"owner":format!("migration:{}",legacy.owner),"reclaimRequired":true,"sessionId":"migration","taskId":id,"taskOid":task}),
+                None,
             )
+        } else if legacy.state == "blocked" {
+            let token = crate::commands::claim_token()?;
+            if tokens.values().any(|prior| prior == &token) {
+                return Err("generated duplicate migration claim token".into());
+            }
+            let active_record = json!({"attemptId":model::framed_digest("migration-blocked-active", &[&legacy.task]),"claimToken":token,"claimedAt":now.saturating_sub(1),"expiresAt":now,"formatVersion":2,"host":"migration","logicalId":semantic,"operationId":operation,"owner":"migration:v1-blocked","reclaimRequired":true,"sessionId":"migration","taskId":id,"taskOid":task});
+            let active = git::commit(&active_record, std::slice::from_ref(task))?;
+            crate::validators::lifecycle("active", &active, id)?;
+            let blocked_record = json!({"authorization":"factual v1 blocked-overlay migration","blockedAt":legacy.blocked_at.unwrap_or(now),"claimTokenDigest":model::digest(&token),"formatVersion":2,"operationId":operation,"reason":legacy.blocked_reason.as_deref().unwrap_or("Migrated from legacy v1 blocked overlay"),"taskId":id,"taskOid":task});
+            ("blocked", blocked_record, Some((active, token)))
         } else {
             (
                 "frontier",
                 json!({"formatVersion":2,"operationId":operation,"semanticId":semantic,"taskId":id,"taskOid":task}),
+                None,
             )
         };
-        let state_oid = git::commit(&record, std::slice::from_ref(task))?;
+        let parents = waiting_state
+            .as_ref()
+            .map(|(active, _)| vec![active.clone(), task.clone()])
+            .unwrap_or_else(|| vec![task.clone()]);
+        let state_oid = git::commit(&record, &parents)?;
+        crate::validators::lifecycle(state, &state_oid, id)?;
         let state_ref = model::state_ref(state, id);
         updates.push(Update {
             semantic_ref: state_ref.clone(),
@@ -129,7 +147,30 @@ pub(crate) fn run(
             new: Some(state_oid.clone()),
         });
         outputs.push((state_ref.clone(), state_oid.clone()));
-        children.push(json!({"claimToken":tokens.get(id),"owner":if state=="active"{json!(format!("migration:{}",legacy.owner))}else{Value::Null},"ref":state_ref,"stateOid":state_oid,"taskId":id,"taskOid":task}));
+        if state == "blocked" {
+            block_leases.insert(id.clone(), state_oid.clone());
+        }
+        let (child_ref, child_oid, child_token, child_owner) =
+            if let Some((active, token)) = waiting_state {
+                (
+                    model::state_ref("active", id),
+                    active,
+                    json!(token),
+                    json!("migration:v1-blocked"),
+                )
+            } else {
+                (
+                    state_ref.clone(),
+                    state_oid.clone(),
+                    tokens.get(id).map_or(Value::Null, |v| json!(v)),
+                    if state == "active" {
+                        json!(format!("migration:{}", legacy.owner))
+                    } else {
+                        Value::Null
+                    },
+                )
+            };
+        children.push(json!({"claimToken":child_token,"owner":child_owner,"ref":child_ref,"stateOid":child_oid,"taskId":id,"taskOid":task}));
     }
     let root_task = &task_oids[root];
     if children.is_empty() {
@@ -176,7 +217,7 @@ pub(crate) fn run(
             Value::Null
         };
         let mapping = git::commit(
-            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"graph":frozen.graph,"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
+            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
             &if legacy.task == root {
                 vec![
                     task_oids[&legacy.task].clone(),
@@ -184,7 +225,13 @@ pub(crate) fn run(
                     frozen.graph.clone(),
                 ]
             } else {
-                vec![task_oids[&legacy.task].clone(), legacy.task.clone()]
+                let mut parents = vec![task_oids[&legacy.task].clone(), legacy.task.clone()];
+                for (_, oid) in &legacy.lifecycle {
+                    if !parents.contains(oid) {
+                        parents.push(oid.clone());
+                    }
+                }
+                parents
             },
         )?;
         updates.push(Update {
@@ -201,7 +248,7 @@ pub(crate) fn run(
             });
         }
     }
-    let result = json!({"claimTokens":tokens,"mapping":ids,"reclaimRequired":true,"rootTaskId":root_id,"terminalExternalEdges":frozen.terminal_edges});
+    let result = json!({"blockLeases":block_leases,"claimTokens":tokens,"mapping":ids,"reclaimRequired":true,"rootTaskId":root_id,"terminalExternalEdges":frozen.terminal_edges});
     let receipt = git::commit(
         &json!({"domain":DOMAIN,"formatVersion":2,"operationId":operation,"outputs":result,"semanticDigest":semantic}),
         &outputs.iter().map(|(_, o)| o.clone()).collect::<Vec<_>>(),
