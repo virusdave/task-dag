@@ -972,6 +972,18 @@ export function PendingPurchasesPage() {
               <legend>Outstanding purchase</legend>
               {outstandingPurchasesLoading ? <p className="subtle-copy">Loading outstanding purchases…</p> : null}
               {outstandingPurchasesError ? <p className="error-copy">{outstandingPurchasesError}</p> : null}
+              {!outstandingPurchasesLoading && !outstandingPurchasesError ? (
+                <div className="pp-purchase-choice-headings" aria-hidden="true">
+                  <span />
+                  <span title="Sweed purchase name or purchase number">Purchase</span>
+                  <span title="Freshly Baked receiving location">Site</span>
+                  <span title="Vendor on the Sweed purchase">Vendor</span>
+                  <span title="Distributor fulfilling the purchase">Distributor</span>
+                  <span title="Expected receive date">Receive</span>
+                  <span title="Number of line items on the purchase">Items</span>
+                  <span title="Sweed purchase identifier">Sweed ID</span>
+                </div>
+              ) : null}
               {!outstandingPurchasesLoading && !outstandingPurchasesError ? outstandingPurchases
                 .filter((purchase) => generateSiteFilter === 'all' || purchase.siteKey === generateSiteFilter)
                 .map((purchase) => {
@@ -984,13 +996,15 @@ export function PendingPurchasesPage() {
                         onChange={() => setSelectedPurchaseKey(key)}
                         type="radio"
                       />
-                      <strong>{purchase.purchaseName ?? `Purchase #${purchase.purchaseId}`}</strong>
-                      <span>{purchase.siteLabel}</span>
-                      <span>{purchase.vendorName ?? 'Vendor unknown'}</span>
-                      <span>{purchase.distributorName ?? 'Distributor unknown'}</span>
-                      <span>{purchase.deliveryDate ? `Receive ${purchase.deliveryDate}` : 'Receive date unknown'}</span>
-                      <span>{purchase.itemCount} {purchase.itemCount === 1 ? 'item' : 'items'}</span>
-                      <span className="subtle-copy">Sweed #{purchase.purchaseId}</span>
+                      <strong className="pp-purchase-choice-value" data-label="Purchase">
+                        {purchase.purchaseName ?? `Purchase #${purchase.purchaseId}`}
+                      </strong>
+                      <span className="pp-purchase-choice-value" data-label="Site">{purchase.siteLabel}</span>
+                      <span className="pp-purchase-choice-value" data-label="Vendor">{purchase.vendorName ?? 'Unknown'}</span>
+                      <span className="pp-purchase-choice-value" data-label="Distributor">{purchase.distributorName ?? 'Unknown'}</span>
+                      <span className="pp-purchase-choice-value pp-purchase-choice-receive" data-label="Receive">{purchase.deliveryDate ?? 'Unknown'}</span>
+                      <span className="pp-purchase-choice-value" data-label="Items">{purchase.itemCount}</span>
+                      <span className="pp-purchase-choice-value subtle-copy" data-label="Sweed ID">#{purchase.purchaseId}</span>
                     </label>
                   )
                 }) : null}
