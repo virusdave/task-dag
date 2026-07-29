@@ -104,6 +104,11 @@ pub(crate) fn checked_snapshot(mut patterns: Vec<String>) -> Result<Snapshot> {
     patterns.sort();
     patterns.dedup();
     let snap = advertise(&patterns)?;
+    validate_snapshot(&snap)?;
+    Ok(snap)
+}
+
+pub(crate) fn validate_snapshot(snap: &Snapshot) -> Result<()> {
     let activation = snap
         .refs
         .get(ACTIVATION)
@@ -122,7 +127,7 @@ pub(crate) fn checked_snapshot(mut patterns: Vec<String>) -> Result<Snapshot> {
     if !allowed.iter().any(|v| v.as_str() == Some(&runtime)) {
         return Err(format!("runtime {runtime} is not authorized by activation"));
     }
-    Ok(snap)
+    Ok(())
 }
 pub(crate) fn materialize(oids: &[String]) -> Result<()> {
     materialize_remote("origin", oids)

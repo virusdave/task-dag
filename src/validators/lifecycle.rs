@@ -244,6 +244,9 @@ fn validate_done_active_parent(parents: &[String], task_oid: &str, id: &str) -> 
 }
 
 pub(crate) fn waiting(oid: &str, id: &str) -> Result<Value> {
+    if git::object_json(oid)?.get("intentOid").is_some() {
+        return delegated_waiting(oid, id);
+    }
     let value = object(
         oid,
         "waiting",
@@ -318,6 +321,63 @@ pub(crate) fn waiting(oid: &str, id: &str) -> Result<Value> {
         if git::object_json(state_oid)?["taskOid"] != task_oid {
             return Err("waiting child state names wrong Task object".into());
         }
+    }
+    Ok(value)
+}
+
+fn delegated_waiting(oid: &str, id: &str) -> Result<Value> {
+    let value = object(
+        oid,
+        "delegated waiting",
+        &[
+            "formatVersion",
+            "intentOid",
+            "intentRef",
+            "operationId",
+            "parentTaskId",
+            "parentTaskOid",
+            "semanticId",
+            "targetTaskId",
+        ],
+        &[&[]],
+    )?;
+    let parent_task = id_oid(&value, "parentTaskId", "parentTaskOid", id)?;
+    digest("delegated waiting semanticId", &value["semanticId"])?;
+    model::valid_id(
+        value["targetTaskId"]
+            .as_str()
+            .ok_or("delegated waiting target Task-ID malformed")?,
+    )?;
+    let intent_oid = value["intentOid"]
+        .as_str()
+        .ok_or("delegated waiting intent OID malformed")?;
+    model::oid(intent_oid)?;
+    let intent_ref = value["intentRef"]
+        .as_str()
+        .ok_or("delegated waiting intent ref malformed")?;
+    model::bounded("delegated waiting intent ref", intent_ref, 512)?;
+    let operation = value["operationId"]
+        .as_str()
+        .ok_or("delegated waiting operationId malformed")?;
+    if intent_ref != model::delegation_intent_ref(operation) {
+        return Err("delegated waiting intent ref is not deterministic".into());
+    }
+    let parents = git::parents(oid)?;
+    if parents.len() != 3 || parents[1] != parent_task || parents[2] != intent_oid {
+        return Err("delegated waiting immediate parent ordering is malformed".into());
+    }
+    let active = lifecycle("active", &parents[0], id)?;
+    if active["taskOid"] != parent_task {
+        return Err("delegated waiting active parent names wrong Task".into());
+    }
+    let intent = super::intent(intent_oid)?;
+    if intent["sourceTaskId"] != id
+        || intent["sourceTaskOid"] != parent_task
+        || intent["targetTaskId"] != value["targetTaskId"]
+        || intent["operationId"] != value["operationId"]
+        || intent["semanticId"] != value["semanticId"]
+    {
+        return Err("delegated waiting does not match its intent".into());
     }
     Ok(value)
 }

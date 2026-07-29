@@ -1,9 +1,11 @@
+mod delegation;
 mod lifecycle;
 mod system;
 mod task;
 
+pub(crate) use delegation::intent;
 pub(crate) use lifecycle::{lifecycle, waiting};
-pub(crate) use system::{activation, journal};
+pub(crate) use system::{activation, activation_identity, journal};
 pub(crate) use task::task;
 
 use crate::{Result, git, model};

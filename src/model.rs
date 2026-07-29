@@ -69,6 +69,12 @@ pub(crate) fn repository_id(value: &str) -> Result<()> {
 pub(crate) fn state_ref(state: &str, id: &str) -> String {
     format!("refs/heads/tasks/{state}/{id}")
 }
+pub(crate) fn delegation_intent_ref(operation: &str) -> String {
+    format!(
+        "refs/heads/tasks/delegations/intents/{}",
+        framed_digest("delegation-operation-key", &[operation])
+    )
+}
 pub(crate) fn parse_state_ref<'a>(r: &'a str, state: &str) -> Option<&'a str> {
     r.strip_prefix(&format!("refs/heads/tasks/{state}/"))
 }

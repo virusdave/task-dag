@@ -354,6 +354,48 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         inherited["record"]["fleetDigest"],
         identity["record"]["fleetDigest"]
     );
+    let delegated_source = success(
+        &a,
+        &[
+            "create",
+            "--operation-id",
+            "delegated-source",
+            "--title",
+            "Delegated source",
+            "--description",
+            "source task",
+            "--claim",
+        ],
+        "delegated-source-token",
+        100,
+    );
+    let delegate_args = [
+        "delegate",
+        "create",
+        delegated_source["taskId"].as_str().unwrap(),
+        "--target-repository-id",
+        "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "--operation-id",
+        "delegation-fixture",
+        "--title",
+        "Delegated target",
+        "--description",
+        "target task",
+        "--claim-token",
+        delegated_source["claimToken"].as_str().unwrap(),
+    ];
+    uncertain(&a, &delegate_args, "unused-token-000", 100);
+    let delegated = success(&a, &delegate_args, "unused-token-000", 100);
+    assert!(delegated["intentOid"].as_str().is_some());
+    assert_eq!(
+        success(
+            &a,
+            &["show", delegated_source["taskId"].as_str().unwrap()],
+            "unused-token-000",
+            100,
+        )["state"],
+        "waiting"
+    );
     assert_eq!(
         success(
             &a,

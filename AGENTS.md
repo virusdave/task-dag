@@ -42,6 +42,20 @@ Every Oracle prompt that reviews a task-dag design or architecture, including
 a post-implementation change review, MUST state this boundary explicitly; a
 link to this section alone is insufficient.
 
+## Rust CLI safety requirements
+
+- Every Rust CLI command and subcommand, as well as a bare CLI invocation,
+  MUST support a no-op `--help` invocation. If `--help` is present, the process
+  MUST make no state change to task-dag or any other development or production
+  system.
+- Rust must use canonical safe coding practices and preserve the guarantees of
+  the type system. Do not bypass validated types with unchecked `unwrap`,
+  `expect`, unchecked indexing, raw pointers, or equivalent assumptions when
+  processing external, persisted, remote, or otherwise fallible data.
+- Treat likely panic paths and unsafe hygiene in Rust CLI code as errors. Keep
+  a lightweight static lint gate enabled to reject such patterns where a
+  practical lint exists; any narrow exception requires explicit justification.
+
 ## Test resource policy on Helios
 
 - On the production Helios host, do **not** run

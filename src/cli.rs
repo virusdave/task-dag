@@ -113,7 +113,10 @@ enum Commands {
     },
     Frontier,
     Comment(Unsupported),
-    Delegate(Unsupported),
+    Delegate {
+        #[command(subcommand)]
+        command: DelegateCommands,
+    },
     Dep {
         #[command(subcommand)]
         command: DepCommands,
@@ -146,6 +149,26 @@ enum RuntimeCommands {
 enum DepCommands {
     Add(Unsupported),
     Drop(Unsupported),
+}
+
+#[derive(Subcommand)]
+enum DelegateCommands {
+    Create(DelegateCreate),
+}
+
+#[derive(Args)]
+pub(crate) struct DelegateCreate {
+    pub(crate) task_id: String,
+    #[arg(long)]
+    pub(crate) target_repository_id: String,
+    #[arg(long)]
+    pub(crate) operation_id: String,
+    #[arg(long)]
+    pub(crate) title: String,
+    #[arg(long)]
+    pub(crate) description: String,
+    #[arg(long)]
+    pub(crate) claim_token: String,
 }
 
 #[derive(Args)]
@@ -281,7 +304,9 @@ pub(crate) fn run() -> Result<()> {
         Commands::Context { task_id } => commands::readers::context(&task_id),
         Commands::Frontier => commands::readers::frontier(),
         Commands::Comment(_) => commands::unsupported::fail("comment"),
-        Commands::Delegate(_) => commands::unsupported::fail("delegate"),
+        Commands::Delegate {
+            command: DelegateCommands::Create(args),
+        } => commands::delegation::create(args),
         Commands::Dep {
             command: DepCommands::Add(_),
         } => commands::unsupported::fail(

@@ -171,6 +171,31 @@ pub(crate) fn activation(oid: &str) -> Result<Value> {
     Ok(value)
 }
 
+pub(crate) fn activation_identity(value: &Value) -> Result<(String, String, Vec<String>)> {
+    if value["formatVersion"] != 3 {
+        return Err("cross-repository operations require activation identity v3".into());
+    }
+    let repository_id = value["repositoryId"]
+        .as_str()
+        .ok_or("activation repositoryId malformed")?
+        .to_owned();
+    let fleet_digest = value["fleetDigest"]
+        .as_str()
+        .ok_or("activation fleetDigest malformed")?
+        .to_owned();
+    let fleet = value["fleetRepositoryIds"]
+        .as_array()
+        .ok_or("activation fleetRepositoryIds malformed")?
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "activation fleet repository ID malformed".to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((repository_id, fleet_digest, fleet))
+}
+
 struct JournalRecord {
     value: Value,
     updates: Vec<model::Update>,
