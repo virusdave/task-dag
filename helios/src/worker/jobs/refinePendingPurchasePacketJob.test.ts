@@ -95,6 +95,7 @@ beforeEach(() => {
   mocks.refine.mockResolvedValue(refinement)
   mocks.createCandidate.mockResolvedValue({ candidatePacketId: 101, revisionNumber: 2 })
   mocks.pool.query.mockImplementation(async (text: string) => {
+    if (/update job_queue/i.test(text)) return { rows: [] }
     if (/select distinct category_name/i.test(text)) return { rows: [{ value: 'Flower' }] }
     if (/select distinct subcategory_name/i.test(text)) return { rows: [{ value: 'Packaged Eighth' }] }
     if (/from catalog_group_products/i.test(text)) return { rows: [{ product_id: 7001 }, { product_id: 7002 }] }
@@ -167,7 +168,7 @@ describe('runCatalogPendingPurchasesRefineJob', () => {
 
     await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001, scopeRowLineageIds: ['pprline_501'] })
 
-    expect(mocks.pool.query).not.toHaveBeenCalled()
+    expect(mocks.pool.query).toHaveBeenCalledOnce()
     expect(mocks.refine).not.toHaveBeenCalled()
     expect(mocks.createCandidate).not.toHaveBeenCalled()
   })

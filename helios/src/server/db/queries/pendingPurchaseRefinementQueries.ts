@@ -169,6 +169,10 @@ export interface PendingPurchaseCandidateRefinement {
   readonly degradedProviders: readonly string[]
   readonly decisions: readonly {
     readonly citedContextIds: readonly string[]
+    readonly directiveCoverage: readonly {
+      readonly directiveId: string
+      readonly assessment: 'applied' | 'already_satisfied' | 'not_applicable' | 'uncertain'
+    }[]
     readonly disposition: 'changed' | 'unchanged' | 'not_applicable' | 'needs_review'
     readonly rationale: string
     readonly rowLineageId: string
@@ -180,6 +184,15 @@ export interface PendingPurchaseCandidateRefinement {
   readonly patches: readonly PendingPurchaseCandidatePatch[]
   readonly promptVersion: string
   readonly schemaVersion: number
+  readonly directives: readonly { readonly directiveId: string; readonly text: string }[]
+  readonly critic: {
+    readonly model: string
+    readonly findings: readonly { readonly rowLineageId: string; readonly reason: string }[]
+    readonly repairAttempted: boolean
+    readonly quarantinedRowLineageIds: readonly string[]
+  }
+  readonly quarantineReasons: Readonly<Record<string, readonly string[]>>
+  readonly modelTrace: unknown
 }
 
 export interface PendingPurchaseRefinementSnapshot {
@@ -766,9 +779,14 @@ export async function createPendingPurchaseCandidateRevision(
         rowDecisions: refinement.decisions.map((decision) => ({
           citedContextIds: decision.citedContextIds,
           disposition: decision.disposition,
+          directiveCoverage: decision.directiveCoverage,
           rationale: decision.rationale,
           rowLineageId: decision.rowLineageId,
         })),
+        directives: refinement.directives,
+        critic: refinement.critic,
+        quarantineReasons: refinement.quarantineReasons,
+        modelTrace: refinement.modelTrace,
         schemaVersion: refinement.schemaVersion,
       }),
     ],

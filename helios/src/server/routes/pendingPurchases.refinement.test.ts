@@ -532,6 +532,7 @@ beforeEach(async () => {
   }
   vi.clearAllMocks()
   mockState.pool.query.mockImplementation(async (text: string) => {
+    if (/update job_queue/i.test(text)) return { rows: [] }
     if (/from job_queue jq/i.test(text)) return { rows: [] }
     if (/select distinct category_name/i.test(text)) return { rows: [{ value: 'Flower' }] }
     if (/select distinct subcategory_name/i.test(text)) return { rows: [{ value: 'Packaged Eighth' }] }
@@ -544,16 +545,26 @@ beforeEach(async () => {
     decisions: [{
       basePacketSnapshotSha256: 'b'.repeat(64),
       citedContextIds: ['catalog:pprline_501:7001'],
+      directiveCoverage: [{ directiveId: 'directive-01-test', assessment: 'applied' }],
       disposition: 'changed',
       fields: { targetBrand: 'Runtz' },
       rationale: 'The feedback and offered catalog product identify Pink Runtz.',
       rowLineageId: 'pprline_501',
     }],
+    directives: [{ directiveId: 'directive-01-test', text: 'Use Pink Runtz.' }],
+    critic: {
+      findings: [],
+      model: 'critic-model',
+      quarantinedRowLineageIds: [],
+      repairAttempted: false,
+    },
     degradedProviders: [],
     estimatedInputTokens: 100,
     model: 'test-model',
     omittedContextItemCount: 0,
     overflowRetryCount: 0,
+    quarantineReasons: {},
+    modelTrace: [],
     patches: [{
       basePacketSnapshotSha256: 'b'.repeat(64),
       citedContextIds: ['catalog:pprline_501:7001'],
@@ -562,7 +573,7 @@ beforeEach(async () => {
       rowLineageId: 'pprline_501',
     }],
     promptVersion: 'test-prompt-v1',
-    schemaVersion: 2,
+    schemaVersion: 3,
   })
   server = Fastify()
   server.setErrorHandler((error, _request, reply) => {

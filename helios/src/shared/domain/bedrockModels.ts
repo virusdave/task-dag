@@ -43,6 +43,7 @@ export const DEFAULT_AGENT_WASTE_CLUSTERER_MODEL = 'deepseek.v3.2'
 export const BEDROCK_MODEL_CONTEXT_KEYS = [
   'pending_purchase_classifier',
   'pending_purchase_refinement',
+  'pending_purchase_refinement_critic',
   'agent_waste_clusterer',
   'agent_waste_ticket_drafter',
 ] as const
@@ -71,6 +72,13 @@ export const BEDROCK_MODEL_CONTEXTS: readonly BedrockModelContextDefinition[] = 
     description:
       'Turns operator feedback on a pending-purchase packet into complete row-lineage decisions. Output is schema-validated before any candidate revision can use it.',
     defaultModel: DEFAULT_PENDING_PURCHASE_REFINEMENT_MODEL,
+  },
+  {
+    key: 'pending_purchase_refinement_critic',
+    label: 'Pending-purchase refinement critic',
+    description:
+      'Independently checks a proposed pending-purchase refinement for unsupported identity changes before a candidate is created.',
+    defaultModel: DEFAULT_STANDARD_REASONING_MODEL,
   },
   {
     key: 'agent_waste_clusterer',

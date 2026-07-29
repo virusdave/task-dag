@@ -64,16 +64,18 @@ const RefinementSnapshotSchema = z.object({
 })
 
 export async function runCatalogPendingPurchasesRefineJob(
-  _context: JobHandlerContext,
+  context: JobHandlerContext,
   payload: CatalogPendingPurchasesRefineJobPayload,
 ): Promise<void> {
   try {
+    await updateRefinementJobProgress(context.id, 1, 'Preparing the packet snapshot and refinement scope.')
     const prepared = await withTransaction((db) => preparePendingPurchaseRefinement(db, payload.refinementTurnId))
     if (prepared === null) {
       return
     }
 
     const db = getPool()
+    await updateRefinementJobProgress(context.id, 2, 'Loading taxonomy, aliases, and bounded row evidence.')
     const taxonomy = await loadRefinementTaxonomy(db)
     let { contextItems, rows } = buildRefinementModelRows(prepared)
     const scopeLineages = new Set(payload.scopeRowLineageIds)
@@ -90,6 +92,7 @@ export async function runCatalogPendingPurchasesRefineJob(
       row.productIdCandidates.map((productId) => `catalog:${row.rowLineageId}:${productId}`),
     ))
     contextItems = contextItems.filter((item) => currentContextIds.has(item.contextId))
+    await updateRefinementJobProgress(context.id, 3, 'Running the primary analyst, semantic safeguards, and independent critic.')
     const refinement = await refinePendingPurchasePacketWithLlm({
       allowedTaxonomy: taxonomy,
       contextItems,
@@ -100,6 +103,7 @@ export async function runCatalogPendingPurchasesRefineJob(
       rowSnapshotSha256: prepared.rowSnapshotSha256,
     })
 
+    await updateRefinementJobProgress(context.id, 4, 'Persisting the reviewed candidate and turn provenance.')
     await withTransaction(async (transaction) => {
       await createPendingPurchaseCandidateRevision(transaction, payload.refinementTurnId, refinement)
     })
@@ -117,6 +121,25 @@ export async function runCatalogPendingPurchasesRefineJob(
     })
     throw new Error(failure.message)
   }
+}
+
+async function updateRefinementJobProgress(jobId: number, phaseIndex: number, message: string): Promise<void> {
+  const progress = { kind: 'phases', message, phaseCount: 4, phaseIndex }
+  const entry = { createdAt: new Date().toISOString(), message }
+  await getPool().query(
+    `update job_queue
+        set payload_json = jsonb_set(
+          jsonb_set(coalesce(payload_json, '{}'::jsonb), '{progress}', $2::jsonb, true),
+          '{progressLog}',
+          (select coalesce(jsonb_agg(value order by ordinality), '[]'::jsonb)
+             from jsonb_array_elements(coalesce(payload_json->'progressLog', '[]'::jsonb) || jsonb_build_array($3::jsonb))
+                  with ordinality as entries(value, ordinality)
+            where ordinality > greatest(jsonb_array_length(coalesce(payload_json->'progressLog', '[]'::jsonb)) - 19, 0)),
+          true),
+            updated_at = now()
+      where id = $1`,
+    [jobId, JSON.stringify(progress), JSON.stringify(entry)],
+  )
 }
 
 function operatorRefinementFailure(error: unknown): {

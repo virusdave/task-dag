@@ -147,7 +147,7 @@ describe('createPendingPurchaseCandidateRevision', () => {
       101,
       'test-model',
       'test-prompt-v1',
-      '{"compactionLevel":"balanced","contextItemCount":4,"decisionCounts":{"changed":1,"unchanged":0,"not_applicable":0,"needs_review":0},"degradedProviders":[],"estimatedInputTokens":1200,"omittedContextItemCount":0,"overflowRetryCount":0,"patchCount":1,"rowDecisions":[{"citedContextIds":["catalog:pprline_501:7001"],"disposition":"changed","rationale":"Matches the offered catalog candidate.","rowLineageId":"pprline_501"}],"schemaVersion":2}',
+      '{"compactionLevel":"balanced","contextItemCount":4,"decisionCounts":{"changed":1,"unchanged":0,"not_applicable":0,"needs_review":0},"degradedProviders":[],"estimatedInputTokens":1200,"omittedContextItemCount":0,"overflowRetryCount":0,"patchCount":1,"rowDecisions":[{"citedContextIds":["catalog:pprline_501:7001"],"disposition":"changed","directiveCoverage":[{"directiveId":"directive-01-test","assessment":"applied"}],"rationale":"Matches the offered catalog candidate.","rowLineageId":"pprline_501"}],"directives":[{"directiveId":"directive-01-test","text":"Use the matching catalog candidate."}],"critic":{"model":"critic-model","findings":[],"repairAttempted":false,"quarantinedRowLineageIds":[]},"quarantineReasons":{},"modelTrace":[],"schemaVersion":3}',
     ])
   })
 
@@ -208,10 +208,20 @@ function refinement(basePacketSnapshotSha256: string) {
     degradedProviders: [],
     decisions: [{
       citedContextIds: ['catalog:pprline_501:7001'],
+      directiveCoverage: [{ directiveId: 'directive-01-test', assessment: 'applied' as const }],
       disposition: 'changed' as const,
       rationale: 'Matches the offered catalog candidate.',
       rowLineageId: 'pprline_501',
     }],
+    directives: [{ directiveId: 'directive-01-test', text: 'Use the matching catalog candidate.' }],
+    critic: {
+      model: 'critic-model',
+      findings: [],
+      repairAttempted: false,
+      quarantinedRowLineageIds: [],
+    },
+    quarantineReasons: {},
+    modelTrace: [],
     estimatedInputTokens: 1200,
     model: 'test-model',
     omittedContextItemCount: 0,
@@ -224,7 +234,7 @@ function refinement(basePacketSnapshotSha256: string) {
       rowLineageId: 'pprline_501',
     }],
     promptVersion: 'test-prompt-v1',
-    schemaVersion: 2,
+    schemaVersion: 3,
   }
 }
 

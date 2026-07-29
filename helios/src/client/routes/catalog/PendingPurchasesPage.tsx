@@ -2087,6 +2087,7 @@ function PendingPurchaseRefinementPanel({
                       {formatRefinementProvenance(turn.promptContext)}
                     </p>
                     {turn.errorMessage ? <p className="error-text">{turn.errorMessage}</p> : null}
+                    <RefinementSafetyDetails promptContext={turn.promptContext} />
                   </li>
                 ))}
               </ul>
@@ -2315,6 +2316,32 @@ function formatRefinementProvenance(promptContext: unknown): string {
       : null,
   ].filter((value): value is string => value !== null)
   return parts.length > 0 ? ` · ${parts.join(' · ')}` : ''
+}
+
+function formatRefinementSafetySummary(promptContext: unknown): string | null {
+  if (promptContext === null || typeof promptContext !== 'object' || Array.isArray(promptContext)) return null
+  const context = promptContext as Record<string, unknown>
+  const directives = Array.isArray(context.directives) ? context.directives.length : 0
+  const critic = context.critic !== null && typeof context.critic === 'object' && !Array.isArray(context.critic)
+    ? context.critic as Record<string, unknown>
+    : null
+  const findings = Array.isArray(critic?.findings) ? critic.findings.length : 0
+  const quarantines = context.quarantineReasons !== null && typeof context.quarantineReasons === 'object'
+    && !Array.isArray(context.quarantineReasons) ? Object.keys(context.quarantineReasons).length : 0
+  if (directives === 0 && critic === null && quarantines === 0) return null
+  return `${directives} directive${directives === 1 ? '' : 's'} · ${findings} critic finding${findings === 1 ? '' : 's'} · ${quarantines} quarantined row${quarantines === 1 ? '' : 's'}`
+}
+
+function RefinementSafetyDetails({ promptContext }: { promptContext: unknown }) {
+  const [open, setOpen] = useState(false)
+  const summary = formatRefinementSafetySummary(promptContext)
+  if (summary === null) return null
+  return (
+    <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>{summary}</summary>
+      {open ? <pre className="code-block">{JSON.stringify(promptContext, null, 2)}</pre> : null}
+    </details>
+  )
 }
 
 function formatCompactDiffValue(value: unknown): string {
