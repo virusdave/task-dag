@@ -17,6 +17,7 @@ import {
   type JsonValue,
   MutationAcceptedResponseSchema,
   CreatePendingPurchaseHintBundleBodySchema,
+  OutstandingPendingPurchaseListResponseSchema,
   PendingPurchaseEtlDetailsResponseSchema,
   PendingPurchaseEtlDetailsRouteParamsSchema,
   PendingPurchaseHintBundleDetailResponseSchema,
@@ -121,6 +122,24 @@ interface PendingPurchaseRowLockRow extends QueryResultRow {
   version: number
 }
 
+const OutstandingPurchaseListResponseSchema = z.object({
+  data: z.array(z.object({
+    id: z.coerce.number().int().positive(),
+    name: z.string().nullable().optional(),
+  }).passthrough()).default([]),
+  totalCount: z.coerce.number().int().nonnegative().default(0),
+}).passthrough()
+
+const OutstandingPurchaseDetailSchema = z.object({
+  deliveryDate: z.string().nullable().optional(),
+  distributor: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+  distributorIntegration: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+  id: z.coerce.number().int().positive(),
+  name: z.string().nullable().optional(),
+  positions: z.array(z.unknown()).default([]),
+  vendor: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+}).passthrough()
+
 interface PendingPurchaseApplySelectionRow extends QueryResultRow {
   approval_status: 'approved' | 'pending' | 'rejected'
   distributor_product_name: string
@@ -142,6 +161,55 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const user = await requireSessionUser(request, reply, 'admin')
     if (!user) return
     return reply.send(PendingPurchaseRepriceDebtResponseSchema.parse(await getPendingPurchaseRepriceDebt(getPool())))
+  })
+
+  server.get('/api/catalog/pending-purchases/outstanding-purchases', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+
+    const result = await withSweedSession(async () => {
+      const purchases = []
+      for (const site of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
+        const orderSummaries: Array<{ id: number; name: string | null }> = []
+        let page = 1
+        const pageSize = 50
+        while (true) {
+          const pageResult = OutstandingPurchaseListResponseSchema.parse(await callSweedRpc(
+            site.dealerId,
+            'store.purchase.order.list',
+            { fromDate: '2020-01-01', orderStatusId: 2, page, pageSize, toDate: '2099-12-31' },
+          ))
+          orderSummaries.push(...pageResult.data.map((order) => ({ id: order.id, name: order.name ?? null })))
+          if (orderSummaries.length >= pageResult.totalCount || pageResult.data.length < pageSize) break
+          page += 1
+        }
+
+        for (const orderSummary of orderSummaries) {
+          const order = OutstandingPurchaseDetailSchema.parse(
+            await callSweedRpc(site.dealerId, 'store.purchase.order.get', { id: orderSummary.id }),
+          )
+          purchases.push({
+            dealerId: site.dealerId,
+            deliveryDate: order.deliveryDate?.slice(0, 10) ?? null,
+            distributorName: order.distributor?.name ?? order.distributorIntegration?.name ?? null,
+            itemCount: order.positions.length,
+            purchaseId: order.id,
+            purchaseName: orderSummary.name ?? order.name ?? null,
+            siteKey: site.siteKey,
+            siteLabel: site.siteLabel,
+            vendorName: order.vendor?.name ?? null,
+          })
+        }
+      }
+      return purchases
+    })
+
+    result.sort((left, right) => (
+      (left.deliveryDate ?? '9999-12-31').localeCompare(right.deliveryDate ?? '9999-12-31')
+      || left.siteLabel.localeCompare(right.siteLabel)
+      || left.purchaseId - right.purchaseId
+    ))
+    return reply.send(OutstandingPendingPurchaseListResponseSchema.parse({ purchases: result }))
   })
 
   server.get('/api/catalog/pending-purchases', async (request, reply) => {

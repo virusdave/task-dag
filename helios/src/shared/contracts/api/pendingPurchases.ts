@@ -252,6 +252,24 @@ export const QueuePendingPurchasePacketGenerationRequestSchema = z
   .refine((value) => value.fromDate <= value.toDate, 'fromDate must be on or before toDate.')
 export type QueuePendingPurchasePacketGenerationRequest = z.infer<typeof QueuePendingPurchasePacketGenerationRequestSchema>
 
+export const OutstandingPendingPurchaseSchema = z.object({
+  dealerId: z.number().int().positive(),
+  deliveryDate: z.string().nullable(),
+  distributorName: z.string().nullable(),
+  itemCount: z.number().int().nonnegative(),
+  purchaseId: z.number().int().positive(),
+  purchaseName: z.string().nullable(),
+  siteKey: z.string(),
+  siteLabel: z.string(),
+  vendorName: z.string().nullable(),
+})
+export type OutstandingPendingPurchase = z.infer<typeof OutstandingPendingPurchaseSchema>
+
+export const OutstandingPendingPurchaseListResponseSchema = z.object({
+  purchases: z.array(OutstandingPendingPurchaseSchema),
+})
+export type OutstandingPendingPurchaseListResponse = z.infer<typeof OutstandingPendingPurchaseListResponseSchema>
+
 export const QueuePendingPurchaseApplyRequestSchema = z.object({
   packetId: z.number().int().positive(),
   reason: z.string().trim().max(500).nullable().optional(),

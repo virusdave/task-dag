@@ -10,6 +10,7 @@ import {
   CreatePendingPurchaseHintBundleBodySchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   MutationAcceptedResponseSchema,
+  OutstandingPendingPurchaseListResponseSchema,
   PendingPurchaseHintBundleDetailResponseSchema,
   PendingPurchaseHintDocumentAddResponseSchema,
   PendingPurchaseListResponseSchema,
@@ -28,6 +29,7 @@ import {
   buildHeliosModulePath,
   type EditedStructuredFields,
   type JobStatusResponse,
+  type OutstandingPendingPurchase,
   type PendingPurchaseListResponse,
   type PendingPurchaseRepriceDebtResponse,
   type PendingPurchaseHintDocumentRecord,
@@ -249,15 +251,14 @@ export function PendingPurchasesPage() {
   const navigate = useNavigate()
   const [applySuccessMessage, setApplySuccessMessage] = useState<{ text: string; jobId: number | null } | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [generateFromDate, setGenerateFromDate] = useState(defaultGenerateFromDate)
-  const [generateSiteDealerIds, setGenerateSiteDealerIds] = useState<number[]>(
-    HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => dealer.dealerId),
-  )
+  const [generateSiteFilter, setGenerateSiteFilter] = useState('all')
   const [generationJobStatus, setGenerationJobStatus] = useState<JobStatusResponse | null>(data.activeGenerationJob)
   const [generateNotes, setGenerateNotes] = useState('')
-  const [generatePurchaseOrderNumber, setGeneratePurchaseOrderNumber] = useState('')
+  const [outstandingPurchases, setOutstandingPurchases] = useState<OutstandingPendingPurchase[]>([])
+  const [outstandingPurchasesError, setOutstandingPurchasesError] = useState<string | null>(null)
+  const [outstandingPurchasesLoading, setOutstandingPurchasesLoading] = useState(false)
+  const [selectedPurchaseKey, setSelectedPurchaseKey] = useState<string | null>(null)
   const [generateSuccessMessage, setGenerateSuccessMessage] = useState<string | null>(null)
-  const [generateToDate, setGenerateToDate] = useState(defaultGenerateToDate)
   const [importFilePath, setImportFilePath] = useState('')
   const [importSuccessMessage, setImportSuccessMessage] = useState<string | null>(null)
   const [isApplying, setIsApplying] = useState(false)
@@ -278,6 +279,8 @@ export function PendingPurchasesPage() {
   const isAdmin = session.user?.role === 'admin'
   const mode = data.mode
   const filters = data.filters
+  const isGenerationInProgress = generationJobStatus !== null
+    && !isJobTerminal(generationJobStatus.job.status)
 
   useEffect(() => {
     if (!isAdmin) return
@@ -301,6 +304,26 @@ export function PendingPurchasesPage() {
       if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [isAdmin])
+
+  useEffect(() => {
+    if (!isAdmin || mode !== 'packets' || isGenerationInProgress) return
+    let active = true
+    setOutstandingPurchasesLoading(true)
+    void loadJson(
+      '/api/catalog/pending-purchases/outstanding-purchases',
+      OutstandingPendingPurchaseListResponseSchema,
+    ).then((result) => {
+      if (!active) return
+      setOutstandingPurchases(result.purchases)
+      setOutstandingPurchasesError(null)
+    }).catch((error: unknown) => {
+      if (!active) return
+      setOutstandingPurchasesError(error instanceof Error ? error.message : 'Could not load outstanding purchases.')
+    }).finally(() => {
+      if (active) setOutstandingPurchasesLoading(false)
+    })
+    return () => { active = false }
+  }, [isAdmin, isGenerationInProgress, mode])
 
   // Keep the sidebar-subtree registration but as a leaf only; the deep
   // packet/site/category/brand hierarchy that used to live in the catalog
@@ -606,7 +629,12 @@ export function PendingPurchasesPage() {
     clearFeedback()
 
     try {
-      const trimmedPurchaseOrderNumber = generatePurchaseOrderNumber.trim()
+      const selectedPurchase = outstandingPurchases.find(
+        (purchase) => buildOutstandingPurchaseKey(purchase) === selectedPurchaseKey,
+      )
+      if (!selectedPurchase) {
+        throw new Error('Select one outstanding purchase before generating a packet.')
+      }
       // Freeform operator context (decision 2): if notes were typed/uploaded,
       // stash them as an operator_note document in a fresh hint bundle via the
       // C2/C3 admin API and thread the resulting hintBundleId into the generate
@@ -614,12 +642,12 @@ export function PendingPurchasesPage() {
       const trimmedNotes = generateNotes.trim()
       const hintBundleId = trimmedNotes.length > 0 ? await createHintBundleFromNotes(trimmedNotes) : null
       const body = QueuePendingPurchasePacketGenerationRequestSchema.parse({
-        fromDate: generateFromDate,
+        fromDate: '2020-01-01',
         hintBundleId,
-        purchaseOrderNumber: trimmedPurchaseOrderNumber.length > 0 ? trimmedPurchaseOrderNumber : null,
+        purchaseOrderNumber: selectedPurchase.purchaseName ?? String(selectedPurchase.purchaseId),
         reason: 'Admin live pending-purchase packet generation',
-        siteDealerIds: generateSiteDealerIds,
-        toDate: generateToDate,
+        siteDealerIds: [selectedPurchase.dealerId],
+        toDate: '2099-12-31',
       })
       const response = await mutateJson('/api/catalog/pending-purchases/generate', MutationAcceptedResponseSchema, {
         body: JSON.stringify(body),
@@ -822,14 +850,6 @@ export function PendingPurchasesPage() {
     await revalidator.revalidate()
   }
 
-  function toggleGenerateSiteDealer(dealerId: number) {
-    setGenerateSiteDealerIds((current) => (
-      current.includes(dealerId)
-        ? current.filter((value) => value !== dealerId)
-        : [...current, dealerId].sort((left, right) => left - right)
-    ))
-  }
-
   function toggleSelectedRow(rowId: number) {
     setSelectedRowIds((current) => (
       current.includes(rowId)
@@ -850,8 +870,6 @@ export function PendingPurchasesPage() {
   const totalLabel = mode === 'packets'
     ? `${data.totalCount} packet${data.totalCount === 1 ? '' : 's'}`
     : `${data.totalCount} row${data.totalCount === 1 ? '' : 's'}`
-  const isGenerationInProgress = generationJobStatus !== null
-    && !isJobTerminal(generationJobStatus.job.status)
 
   return (
     <section
@@ -919,41 +937,53 @@ export function PendingPurchasesPage() {
             <Pill tone="warning">admin</Pill>
           </summary>
           <p className="subtle-copy">
-            Read the current Sweed outstanding PO queue directly and persist a generated Helios review packet. This supersedes the prior ready packet without writing to Sweed synchronously. Leave the purchase order # blank to scan the whole queue, or enter a specific Sweed purchase order number (and select its site) to run only that one purchase through the flow.
+            Choose one outstanding purchase to create a focused review packet. This supersedes the prior ready packet without writing to Sweed synchronously.
           </p>
           <div className="filter-row" style={{ alignItems: 'center' }}>
-            <label className="stack-field" style={{ minWidth: '11rem' }}>
-              <span>From</span>
-              <input onChange={(event) => setGenerateFromDate(event.currentTarget.value)} type="date" value={generateFromDate} />
-            </label>
-            <label className="stack-field" style={{ minWidth: '11rem' }}>
-              <span>To</span>
-              <input onChange={(event) => setGenerateToDate(event.currentTarget.value)} type="date" value={generateToDate} />
-            </label>
-            <label className="stack-field" style={{ minWidth: '12rem' }}>
-              <span>Purchase order # (optional)</span>
-              <input
-                onChange={(event) => setGeneratePurchaseOrderNumber(event.currentTarget.value)}
-                placeholder="Single PO only — blank = all"
-                type="text"
-                value={generatePurchaseOrderNumber}
-              />
-            </label>
-            <div className="stack-field">
-              <span>Sites</span>
-              <div className="inline-row wrap-row">
-                {HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => (
-                  <label className="inline-row" key={dealer.dealerId} style={{ gap: '0.35rem' }}>
-                    <input
-                      checked={generateSiteDealerIds.includes(dealer.dealerId)}
-                      onChange={() => toggleGenerateSiteDealer(dealer.dealerId)}
-                      type="checkbox"
-                    />
-                    <span>{dealer.siteLabel}</span>
-                  </label>
+            <label className="stack-field">
+              <span>Site</span>
+              <select onChange={(event) => {
+                setGenerateSiteFilter(event.currentTarget.value)
+                setSelectedPurchaseKey(null)
+              }} value={generateSiteFilter}>
+                <option value="all">All sites</option>
+                {HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => (
+                  <option key={site.siteKey} value={site.siteKey}>{site.siteLabel}</option>
                 ))}
-              </div>
-            </div>
+              </select>
+            </label>
+            <fieldset style={{ flexBasis: '100%', minWidth: '100%' }}>
+              <legend>Outstanding purchase</legend>
+              {outstandingPurchasesLoading ? <p className="subtle-copy">Loading outstanding purchases…</p> : null}
+              {outstandingPurchasesError ? <p className="error-copy">{outstandingPurchasesError}</p> : null}
+              {!outstandingPurchasesLoading && !outstandingPurchasesError ? outstandingPurchases
+                .filter((purchase) => generateSiteFilter === 'all' || purchase.siteKey === generateSiteFilter)
+                .map((purchase) => {
+                  const key = buildOutstandingPurchaseKey(purchase)
+                  return (
+                    <label className="pp-purchase-choice" key={key}>
+                      <input
+                        checked={selectedPurchaseKey === key}
+                        name="pending-purchase"
+                        onChange={() => setSelectedPurchaseKey(key)}
+                        type="radio"
+                      />
+                      <strong>{purchase.purchaseName ?? `Purchase #${purchase.purchaseId}`}</strong>
+                      <span>{purchase.siteLabel}</span>
+                      <span>{purchase.vendorName ?? 'Vendor unknown'}</span>
+                      <span>{purchase.distributorName ?? 'Distributor unknown'}</span>
+                      <span>{purchase.deliveryDate ? `Receive ${purchase.deliveryDate}` : 'Receive date unknown'}</span>
+                      <span>{purchase.itemCount} {purchase.itemCount === 1 ? 'item' : 'items'}</span>
+                      <span className="subtle-copy">Sweed #{purchase.purchaseId}</span>
+                    </label>
+                  )
+                }) : null}
+              {!outstandingPurchasesLoading && !outstandingPurchasesError && !outstandingPurchases.some(
+                (purchase) => generateSiteFilter === 'all' || purchase.siteKey === generateSiteFilter,
+              )
+                ? <p className="subtle-copy">No outstanding purchases found for this site.</p>
+                : null}
+            </fieldset>
             <label className="stack-field" style={{ flexBasis: '100%', minWidth: '100%' }}>
               <span>Notes / hints for the classifier (optional)</span>
               <textarea
@@ -977,7 +1007,7 @@ export function PendingPurchasesPage() {
             </span>
             <button
               className="primary-button"
-              disabled={isGenerating || generateSiteDealerIds.length === 0}
+              disabled={isGenerating || selectedPurchaseKey === null}
               onClick={() => void handleGenerate()}
               type="button"
             >
@@ -4505,11 +4535,6 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
-function defaultGenerateFromDate(): string {
-  const now = new Date()
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10)
-}
-
-function defaultGenerateToDate(): string {
-  return new Date().toISOString().slice(0, 10)
+function buildOutstandingPurchaseKey(purchase: OutstandingPendingPurchase): string {
+  return `${purchase.dealerId}:${purchase.purchaseId}`
 }

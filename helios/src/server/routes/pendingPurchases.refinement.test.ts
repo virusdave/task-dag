@@ -355,6 +355,7 @@ import { registerPendingPurchaseRoutes } from './pendingPurchases.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
 import { listPendingPurchaseRows } from '../db/queries/pendingPurchaseQueries.js'
+import { callSweedRpc } from '../../worker/sweed/rpc.js'
 import {
   assertBaseRowsMatchSnapshot,
   assertPendingPurchasePacketApplyable,
@@ -535,6 +536,11 @@ beforeEach(async () => {
     turns: [],
   }
   vi.clearAllMocks()
+  vi.mocked(callSweedRpc).mockImplementation(async () => [{
+    enabled: true,
+    name: 'Flower',
+    subcategories: [{ enabled: true, name: 'Packaged Eighth' }],
+  }])
   mockState.pool.query.mockImplementation(async (text: string) => {
     if (/update job_queue/i.test(text)) return { rows: [] }
     if (/from job_queue jq/i.test(text)) return { rows: [] }
@@ -593,6 +599,42 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await server.close()
+})
+
+describe('outstanding pending-purchase picker route', () => {
+  it('returns compact live purchase choices for both sites', async () => {
+    mockState.role = 'admin'
+    vi.mocked(callSweedRpc).mockImplementation(async (dealerId, method, params) => {
+      if (method === 'store.purchase.order.list') {
+        return {
+          data: [{ id: dealerId === 210249 ? 101 : 202 }],
+          totalCount: 1,
+        }
+      }
+      if (method === 'store.purchase.order.get') {
+        const purchaseId = (params as { id: number }).id
+        return {
+          deliveryDate: purchaseId === 101 ? '2026-07-20T00:00:00Z' : '2026-07-21T00:00:00Z',
+          distributor: { name: purchaseId === 101 ? 'Bronx Supply' : 'Midtown Supply' },
+          id: purchaseId,
+          name: `PO-${purchaseId}`,
+          positions: purchaseId === 101 ? [{}, {}] : [{}],
+        }
+      }
+      throw new Error(`Unexpected Sweed method: ${method}`)
+    })
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/catalog/pending-purchases/outstanding-purchases',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().purchases).toEqual([
+      expect.objectContaining({ itemCount: 2, purchaseId: 101, siteLabel: 'Bronx' }),
+      expect.objectContaining({ itemCount: 1, purchaseId: 202, siteLabel: 'Midtown' }),
+    ])
+  })
 })
 
 describe('pending-purchase rows route live brand options', () => {

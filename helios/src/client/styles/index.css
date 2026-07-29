@@ -1162,6 +1162,31 @@ pre {
   padding-bottom: 0.25rem;
 }
 
+.pp-purchase-choice {
+  align-items: center;
+  border-bottom: 1px solid var(--panel-border);
+  cursor: pointer;
+  display: grid;
+  gap: 0.35rem 0.75rem;
+  grid-template-columns: auto minmax(8rem, 1.5fr) repeat(6, minmax(6rem, 1fr));
+  padding: 0.65rem 0.35rem;
+}
+
+.pp-purchase-choice:hover {
+  background: var(--surface-muted, rgba(0, 0, 0, 0.02));
+}
+
+@media (max-width: 780px) {
+  .pp-purchase-choice {
+    align-items: start;
+    grid-template-columns: auto 1fr;
+  }
+
+  .pp-purchase-choice > :not(input) {
+    grid-column: 2;
+  }
+}
+
 .pp-mode-tab {
   display: inline-flex;
   align-items: center;
