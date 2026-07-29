@@ -170,8 +170,11 @@ afterEach(() => {
 describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
   it('returns validated row-lineage patches with provenance', async () => {
     stubFetch(modelResponse({ patches: [patch()] }))
+    const progress: string[] = []
 
-    const result = await refinePendingPurchasePacketWithLlm(buildInput())
+    const result = await refinePendingPurchasePacketWithLlm(buildInput({
+      onProgress: async (message) => { progress.push(message) },
+    }))
 
     expect(result.schemaVersion).toBe(3)
     expect(result.model).toBe('deepseek.v3.2')
@@ -183,6 +186,18 @@ describe('refinePendingPurchasePacketWithLlm — strict happy path', () => {
       directiveCoverage: [{ directiveId: DIRECTIVE_ID, assessment: 'applied' }],
       disposition: 'changed',
     }])
+    expect(progress).toEqual([
+      'Starting optional prior-packet, catalog, and market evidence loading.',
+      expect.stringMatching(/^Evidence loading finished in .+ with 3 bounded item\(s\)\.$/),
+      expect.stringMatching(/^Starting primary analyst with 1 row\(s\), 1 directive\(s\), and 1500 requested output token\(s\)\.$/),
+      expect.stringMatching(/^Primary analyst finished in .+ with 1 decision\(s\), 0 output retry\/retries, and 1 atomic window\(s\)\.$/),
+      'Starting deterministic semantic safeguards and brand-alias checks.',
+      expect.stringMatching(/^Semantic safeguards finished in .+ with 0 alias match\(es\) and 0 quarantined row\(s\)\.$/),
+      'Starting independent critic review of 1 decision(s).',
+      expect.stringMatching(/^Independent critic finished in .+ with 0 finding\(s\)\.$/),
+      'Starting final critic quarantine and candidate safety summary.',
+      expect.stringMatching(/^Final safety summary finished in .+: 1 changed and 0 needs-review row\(s\)\.$/),
+    ])
   })
 
   it('uses an authoritative leading alias and removes it from the variant on token boundaries', async () => {

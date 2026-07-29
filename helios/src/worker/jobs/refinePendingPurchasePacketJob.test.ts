@@ -105,6 +105,11 @@ beforeEach(() => {
 
 describe('runCatalogPendingPurchasesRefineJob', () => {
   it('calls the strict model with offered candidates, then materializes its validated patches', async () => {
+    mocks.refine.mockImplementation(async (input: { onProgress?: (message: string) => Promise<void> }) => {
+      await input.onProgress?.('Starting primary analyst test step.')
+      await input.onProgress?.('Primary analyst test step finished in 12ms with 1 decision.')
+      return refinement
+    })
     await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001, scopeRowLineageIds: ['pprline_501'] })
 
     expect(mocks.refine).toHaveBeenCalledWith(expect.objectContaining({
@@ -141,6 +146,21 @@ describe('runCatalogPendingPurchasesRefineJob', () => {
     expect(taxonomyQuery).toContain("lower(live_state_json ->> 'enabled') = 'true'")
     expect(taxonomyQuery).toContain("coalesce(group_name, '')")
     expect(taxonomyQuery).toContain("coalesce(brand_name, '')")
+    const progressMessages = mocks.pool.query.mock.calls
+      .filter(([text]) => /update job_queue/i.test(text))
+      .map(([, parameters]) => JSON.parse((parameters as string[])[2]!).message)
+    expect(progressMessages).toEqual([
+      'Preparing the packet snapshot and refinement scope.',
+      expect.stringMatching(/^Preparation finished in .+ with 1 snapshotted row\(s\)\.$/),
+      'Loading taxonomy, aliases, and bounded row evidence.',
+      expect.stringMatching(/^Scope loading finished in .+ with 1 row\(s\), 2 current catalog item\(s\), 1 categories, and 1 subcategories\.$/),
+      'Starting primary analyst test step.',
+      'Primary analyst test step finished in 12ms with 1 decision.',
+      'Persisting the reviewed candidate and turn provenance.',
+      expect.stringMatching(/^Candidate persistence finished in .+; refinement job completed in .+ with 1 changed row\(s\)\.$/),
+    ])
+    const progressSql = mocks.pool.query.mock.calls.find(([text]) => /update job_queue/i.test(text))?.[0]
+    expect(progressSql).toContain('- 99')
   })
 
   it('preserves the turn as failed when model refinement errors', async () => {
@@ -168,7 +188,7 @@ describe('runCatalogPendingPurchasesRefineJob', () => {
 
     await runCatalogPendingPurchasesRefineJob(context, { refinementTurnId: 9001, scopeRowLineageIds: ['pprline_501'] })
 
-    expect(mocks.pool.query).toHaveBeenCalledOnce()
+    expect(mocks.pool.query).toHaveBeenCalledTimes(2)
     expect(mocks.refine).not.toHaveBeenCalled()
     expect(mocks.createCandidate).not.toHaveBeenCalled()
   })

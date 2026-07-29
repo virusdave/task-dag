@@ -206,6 +206,7 @@ export interface RefinePendingPurchasePacketInput {
   readonly rows: readonly PendingPurchaseRefinementRowInput[]
   readonly contextItems: readonly PendingPurchaseRefinementContextItem[]
   readonly allowedTaxonomy: PendingPurchaseRefinementAllowedTaxonomy
+  readonly onProgress?: (message: string) => Promise<void>
 }
 
 export interface PendingPurchaseRefinementResult {
@@ -327,7 +328,13 @@ export async function refinePendingPurchasePacketWithLlm(
       - modelCapabilities.safetyReserveTokens,
   )
   const trace: ModelTraceEntry[] = []
+  const evidenceStartedAt = Date.now()
+  await emitRefinementProgress(input.onProgress, 'Starting optional prior-packet, catalog, and market evidence loading.')
   const optionalContextItems = await loadOptionalRefinementEvidence(input.db, input.rows)
+  await emitRefinementProgress(
+    input.onProgress,
+    `Evidence loading finished in ${formatElapsed(evidenceStartedAt)} with ${optionalContextItems.length} bounded item(s).`,
+  )
   const combinedInput: RefinePendingPurchasePacketInput = {
     ...input,
     contextItems: [...input.contextItems, ...optionalContextItems],
@@ -348,35 +355,84 @@ export async function refinePendingPurchasePacketWithLlm(
 
   for (;;) {
     try {
-      const primary = await runPrimaryWithCapacity({
-        attempt,
-        directives,
-        estimatedCharsPerToken: modelCapabilities.estimatedCharsPerToken,
-        inputTokenBudget,
-        maxTokens,
-        model,
-        modelMaxOutputTokens: modelCapabilities.maxOutputTokens,
-        trace,
-      })
+      const primaryStartedAt = Date.now()
+      await emitRefinementProgress(
+        input.onProgress,
+        `Starting primary analyst with ${attempt.input.rows.length} row(s), ${directives.length} directive(s), and ${maxTokens} requested output token(s).`,
+      )
+      const primary = await withProgressHeartbeat(
+        input.onProgress,
+        'Primary analyst',
+        primaryStartedAt,
+        () => runPrimaryWithCapacity({
+          attempt,
+          directives,
+          estimatedCharsPerToken: modelCapabilities.estimatedCharsPerToken,
+          inputTokenBudget,
+          maxTokens,
+          model,
+          modelMaxOutputTokens: modelCapabilities.maxOutputTokens,
+          onProgress: input.onProgress,
+          trace,
+        }),
+      )
+      await emitRefinementProgress(
+        input.onProgress,
+        `Primary analyst finished in ${formatElapsed(primaryStartedAt)} with ${primary.decisions.length} decision(s), ${primary.outputRetryCount} output retry/retries, and ${primary.windowCount} atomic window(s).`,
+      )
       let decisions = primary.decisions
+      const safeguardsStartedAt = Date.now()
+      await emitRefinementProgress(input.onProgress, 'Starting deterministic semantic safeguards and brand-alias checks.')
       const aliases = await loadLeadingBrandAliases(input.db, combinedInput.rows)
       const safeguard = applySemanticSafeguards(decisions, attempt.input, aliases)
       decisions = safeguard.decisions
-      const critic = await runCritic(criticModel, primary.requestedMaxOutputTokens, attempt, decisions, trace)
+      await emitRefinementProgress(
+        input.onProgress,
+        `Semantic safeguards finished in ${formatElapsed(safeguardsStartedAt)} with ${aliases.length} alias match(es) and ${Object.keys(safeguard.reasons).length} quarantined row(s).`,
+      )
+      const criticStartedAt = Date.now()
+      await emitRefinementProgress(input.onProgress, `Starting independent critic review of ${decisions.length} decision(s).`)
+      const critic = await withProgressHeartbeat(
+        input.onProgress,
+        'Independent critic',
+        criticStartedAt,
+        () => runCritic(criticModel, primary.requestedMaxOutputTokens, attempt, decisions, trace),
+      )
+      await emitRefinementProgress(
+        input.onProgress,
+        `Independent critic finished in ${formatElapsed(criticStartedAt)} with ${critic.findings.length} finding(s).`,
+      )
       if (critic.findings.length > 0) {
-        decisions = await runCriticRepair(
-          model,
-          primary.requestedMaxOutputTokens,
-          attempt,
-          decisions,
-          critic.findings,
-          directives,
-          trace,
+        const repairStartedAt = Date.now()
+        await emitRefinementProgress(input.onProgress, `Starting bounded repair for ${critic.findings.length} critic finding(s).`)
+        decisions = await withProgressHeartbeat(
+          input.onProgress,
+          'Critic repair',
+          repairStartedAt,
+          () => runCriticRepair(
+            model,
+            primary.requestedMaxOutputTokens,
+            attempt,
+            decisions,
+            critic.findings,
+            directives,
+            trace,
+          ),
+        )
+        await emitRefinementProgress(
+          input.onProgress,
+          `Critic repair finished in ${formatElapsed(repairStartedAt)} with ${decisions.length} complete decision(s).`,
         )
       }
+      const quarantineStartedAt = Date.now()
+      await emitRefinementProgress(input.onProgress, 'Starting final critic quarantine and candidate safety summary.')
       const criticQuarantine = quarantineCriticFindings(decisions, critic.findings)
       decisions = criticQuarantine.decisions
       const quarantineReasons = mergeQuarantineReasons(safeguard.reasons, criticQuarantine.reasons)
+      await emitRefinementProgress(
+        input.onProgress,
+        `Final safety summary finished in ${formatElapsed(quarantineStartedAt)}: ${patchesFromDecisions(decisions).length} changed and ${decisions.filter((decision) => decision.disposition === 'needs_review').length} needs-review row(s).`,
+      )
       return {
         schemaVersion: PENDING_PURCHASE_REFINEMENT_SCHEMA_VERSION,
         model,
@@ -500,6 +556,7 @@ async function runPrimaryWithCapacity(input: {
   maxTokens: number
   model: string
   modelMaxOutputTokens: number
+  onProgress: RefinePendingPurchasePacketInput['onProgress']
   trace: ModelTraceEntry[]
 }): Promise<PrimaryCapacityResult> {
   try {
@@ -512,6 +569,12 @@ async function runPrimaryWithCapacity(input: {
   } catch (error) {
     if (!(error instanceof PendingPurchaseRefinementOutputTruncatedError)) throw error
     input.trace.push(truncatedTraceEntry(input.model, 'primary', input.maxTokens))
+    await emitRefinementProgress(
+      input.onProgress,
+      input.maxTokens < input.modelMaxOutputTokens
+        ? `Primary analyst reached the ${input.maxTokens}-token output limit; retrying the complete scope at ${input.modelMaxOutputTokens} tokens.`
+        : `Primary analyst reached the model's ${input.modelMaxOutputTokens}-token output limit; starting deterministic atomic row windows.`,
+    )
   }
 
   if (input.maxTokens < input.modelMaxOutputTokens) {
@@ -531,6 +594,10 @@ async function runPrimaryWithCapacity(input: {
     } catch (error) {
       if (!(error instanceof PendingPurchaseRefinementOutputTruncatedError)) throw error
       input.trace.push(truncatedTraceEntry(input.model, 'primary-output-retry', input.modelMaxOutputTokens))
+      await emitRefinementProgress(
+        input.onProgress,
+        `Complete-scope retry reached the ${input.modelMaxOutputTokens}-token output limit; starting deterministic atomic row windows.`,
+      )
     }
   }
 
@@ -566,6 +633,7 @@ async function runPrimaryWindows(input: {
   inputTokenBudget: number
   model: string
   modelMaxOutputTokens: number
+  onProgress: RefinePendingPurchasePacketInput['onProgress']
   rows: readonly PendingPurchaseRefinementRowInput[]
   trace: ModelTraceEntry[]
 }): Promise<{ decisions: PendingPurchaseRefinementRowDecision[]; windowCount: number }> {
@@ -583,20 +651,31 @@ async function runPrimaryWindows(input: {
     input.inputTokenBudget,
     input.estimatedCharsPerToken,
   )
+  const windowStartedAt = Date.now()
+  await emitRefinementProgress(input.onProgress, `Starting primary analyst window for ${input.rows.length} row(s).`)
   try {
+    const decisions = await runRefinementAttempt(
+      input.model,
+      input.modelMaxOutputTokens,
+      windowAttempt,
+      input.directives,
+      input.trace,
+    )
+    await emitRefinementProgress(
+      input.onProgress,
+      `Primary analyst window finished in ${formatElapsed(windowStartedAt)} with ${decisions.length} decision(s).`,
+    )
     return {
-      decisions: await runRefinementAttempt(
-        input.model,
-        input.modelMaxOutputTokens,
-        windowAttempt,
-        input.directives,
-        input.trace,
-      ),
+      decisions,
       windowCount: 1,
     }
   } catch (error) {
     if (!(error instanceof PendingPurchaseRefinementOutputTruncatedError)) throw error
     input.trace.push(truncatedTraceEntry(input.model, `primary-window-${input.rows.length}`, input.modelMaxOutputTokens))
+    await emitRefinementProgress(
+      input.onProgress,
+      `Primary analyst window for ${input.rows.length} row(s) reached the output limit after ${formatElapsed(windowStartedAt)}; splitting it in half.`,
+    )
   }
 
   if (input.rows.length === 1) {
@@ -618,6 +697,42 @@ function truncatedTraceEntry(model: string, scope: string, maxTokens: number): M
     request: { maxTokens },
     response: '[provider stopped at the requested output-token limit]',
   }
+}
+
+async function emitRefinementProgress(
+  onProgress: RefinePendingPurchasePacketInput['onProgress'],
+  message: string,
+): Promise<void> {
+  await onProgress?.(message)
+}
+
+async function withProgressHeartbeat<T>(
+  onProgress: RefinePendingPurchasePacketInput['onProgress'],
+  label: string,
+  startedAt: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!onProgress) return operation()
+  let heartbeatWrites = Promise.resolve()
+  const heartbeat = setInterval(() => {
+    heartbeatWrites = heartbeatWrites
+      .then(() => onProgress(`${label} still running after ${formatElapsed(startedAt)}.`))
+      .catch((error: unknown) => {
+        console.warn(`[pendingPurchaseRefinement] ${label} heartbeat write failed`, error)
+      })
+  }, 15_000)
+  heartbeat.unref()
+  try {
+    return await operation()
+  } finally {
+    clearInterval(heartbeat)
+    await heartbeatWrites
+  }
+}
+
+function formatElapsed(startedAt: number): string {
+  const elapsedMs = Math.max(0, Date.now() - startedAt)
+  return elapsedMs < 1_000 ? `${elapsedMs}ms` : `${(elapsedMs / 1_000).toFixed(1)}s`
 }
 
 async function runRefinementAttempt(

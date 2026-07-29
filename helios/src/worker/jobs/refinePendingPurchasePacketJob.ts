@@ -67,14 +67,23 @@ export async function runCatalogPendingPurchasesRefineJob(
   context: JobHandlerContext,
   payload: CatalogPendingPurchasesRefineJobPayload,
 ): Promise<void> {
+  const jobStartedAt = Date.now()
   try {
+    const preparationStartedAt = Date.now()
     await updateRefinementJobProgress(context.id, 1, 'Preparing the packet snapshot and refinement scope.')
     const prepared = await withTransaction((db) => preparePendingPurchaseRefinement(db, payload.refinementTurnId))
     if (prepared === null) {
+      await updateRefinementJobProgress(context.id, 1, `Preparation finished in ${formatElapsed(preparationStartedAt)}; the turn was already terminal.`)
       return
     }
+    await updateRefinementJobProgress(
+      context.id,
+      1,
+      `Preparation finished in ${formatElapsed(preparationStartedAt)} with ${prepared.rowRefs.length} snapshotted row(s).`,
+    )
 
     const db = getPool()
+    const contextStartedAt = Date.now()
     await updateRefinementJobProgress(context.id, 2, 'Loading taxonomy, aliases, and bounded row evidence.')
     const taxonomy = await loadRefinementTaxonomy(db)
     let { contextItems, rows } = buildRefinementModelRows(prepared)
@@ -92,7 +101,11 @@ export async function runCatalogPendingPurchasesRefineJob(
       row.productIdCandidates.map((productId) => `catalog:${row.rowLineageId}:${productId}`),
     ))
     contextItems = contextItems.filter((item) => currentContextIds.has(item.contextId))
-    await updateRefinementJobProgress(context.id, 3, 'Running the primary analyst, semantic safeguards, and independent critic.')
+    await updateRefinementJobProgress(
+      context.id,
+      2,
+      `Scope loading finished in ${formatElapsed(contextStartedAt)} with ${rows.length} row(s), ${contextItems.length} current catalog item(s), ${taxonomy.categories.length} categories, and ${taxonomy.subcategories.length} subcategories.`,
+    )
     const refinement = await refinePendingPurchasePacketWithLlm({
       allowedTaxonomy: taxonomy,
       contextItems,
@@ -101,15 +114,29 @@ export async function runCatalogPendingPurchasesRefineJob(
       packetDescription: prepared.packetTitle,
       rows,
       rowSnapshotSha256: prepared.rowSnapshotSha256,
+      onProgress: (message) => updateRefinementJobProgress(context.id, 3, message),
     })
 
+    const persistenceStartedAt = Date.now()
     await updateRefinementJobProgress(context.id, 4, 'Persisting the reviewed candidate and turn provenance.')
     await withTransaction(async (transaction) => {
       await createPendingPurchaseCandidateRevision(transaction, payload.refinementTurnId, refinement)
     })
+    await updateRefinementJobProgress(
+      context.id,
+      4,
+      `Candidate persistence finished in ${formatElapsed(persistenceStartedAt)}; refinement job completed in ${formatElapsed(jobStartedAt)} with ${refinement.patches.length} changed row(s).`,
+    )
   } catch (error) {
     const failure = operatorRefinementFailure(error)
     console.error('[pendingPurchaseRefinement] refinement failed', error)
+    await updateRefinementJobProgress(
+      context.id,
+      4,
+      `Refinement failed after ${formatElapsed(jobStartedAt)}: ${failure.message}`,
+    ).catch((progressError: unknown) => {
+      console.warn('[pendingPurchaseRefinement] final failure progress write failed', progressError)
+    })
     await withTransaction(async (db) => {
       await markPendingPurchaseRefinementTurnFailed(
         db,
@@ -134,12 +161,17 @@ async function updateRefinementJobProgress(jobId: number, phaseIndex: number, me
           (select coalesce(jsonb_agg(value order by ordinality), '[]'::jsonb)
              from jsonb_array_elements(coalesce(payload_json->'progressLog', '[]'::jsonb) || jsonb_build_array($3::jsonb))
                   with ordinality as entries(value, ordinality)
-            where ordinality > greatest(jsonb_array_length(coalesce(payload_json->'progressLog', '[]'::jsonb)) - 19, 0)),
+            where ordinality > greatest(jsonb_array_length(coalesce(payload_json->'progressLog', '[]'::jsonb)) - 99, 0)),
           true),
             updated_at = now()
       where id = $1`,
     [jobId, JSON.stringify(progress), JSON.stringify(entry)],
   )
+}
+
+function formatElapsed(startedAt: number): string {
+  const elapsedMs = Math.max(0, Date.now() - startedAt)
+  return elapsedMs < 1_000 ? `${elapsedMs}ms` : `${(elapsedMs / 1_000).toFixed(1)}s`
 }
 
 function operatorRefinementFailure(error: unknown): {
