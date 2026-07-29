@@ -44,6 +44,7 @@ RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
 export TASKDAG_CURRENT_REPO="owner/repo"
 json_escape() { jq -Rs .; }
 taskdag_json_file_is_single_strict() { jq -e . "$1" >/dev/null 2>&1; }
+eval "$(source "$TD" --help >/dev/null; declare -f taskdag_timing_start taskdag_timing_finish)"
 # shellcheck source=/dev/null
 source "$LIB_DIR/git-objects.sh"
 # shellcheck source=/dev/null

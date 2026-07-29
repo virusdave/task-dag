@@ -7,6 +7,7 @@ pass=0 fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 taskdag_json_file_is_single_strict(){ jq -e . "$1" >/dev/null 2>&1; }
+eval "$(source "$TD" --help >/dev/null; declare -f taskdag_timing_start taskdag_timing_finish)"
 source "$LIB/git-objects.sh"; source "$LIB/task-model.sh"; source "$LIB/claim-model.sh"; source "$LIB/repository-identity.sh"
 _taskdag_materialise_no_duplicate_keys(){ jq -e . "$1" >/dev/null 2>&1; }
 source "$LIB/activation.sh"; source "$LIB/epic-registry.sh"
