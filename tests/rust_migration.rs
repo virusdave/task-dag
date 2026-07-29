@@ -248,6 +248,7 @@ impl Fixture {
         cmd.current_dir(work)
             .args(args)
             .env("TASKDAG_TEST_TIME", "1785196800")
+            .env("TASKDAG_TEST_LEGACY_ACTIVATION", "1")
             .env("TASKDAG_SESSION_ID", "migration-integration")
             .env(
                 "TASKDAG_TEST_RUNTIME_REMOTE",
