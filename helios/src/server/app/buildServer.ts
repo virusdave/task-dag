@@ -93,6 +93,7 @@ import {
 } from '../routes/visitorScans.js'
 import { registerCustomersMapRoutes } from '../routes/customersMap.js'
 import { registerWhiteglovePricingRoutes } from '../routes/whiteglovePricing.js'
+import { registerTradeSampleZeroRoutes } from '../routes/tradeSampleZero.js'
 import { joinBasePath } from '../../shared/config/appBasePath.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -334,6 +335,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerVisitorScansAdminRoutes(server)
   await registerCustomersMapRoutes(server)
   await registerWhiteglovePricingRoutes(server)
+  await registerTradeSampleZeroRoutes(server)
 
   const clientDistPath = resolve(__dirname, '../../../client')
   if (!existsSync(clientDistPath)) {
