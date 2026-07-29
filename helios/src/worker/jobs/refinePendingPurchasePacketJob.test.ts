@@ -4,6 +4,7 @@ import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { runCatalogPendingPurchasesRefineJob } from './refinePendingPurchasePacketJob.js'
 
 const mocks = vi.hoisted(() => ({
+  callSweedRpc: vi.fn(),
   createCandidate: vi.fn(),
   markFailed: vi.fn(),
   pool: { query: vi.fn() },
@@ -21,9 +22,11 @@ vi.mock('../../server/db/queries/pendingPurchaseRefinementQueries.js', () => ({
 vi.mock('../../server/db/tx.js', () => ({
   withTransaction: (run: (db: object) => Promise<unknown>) => run(mocks.transaction),
 }))
+vi.mock('../config/env.js', () => ({ getWorkerEnv: () => ({ sweedStateDealerId: 17 }) }))
 vi.mock('../pendingPurchases/refinePendingPurchasePacket.js', () => ({
   refinePendingPurchasePacketWithLlm: mocks.refine,
 }))
+vi.mock('../sweed/rpc.js', () => ({ callSweedRpc: mocks.callSweedRpc }))
 
 const context = {
   id: 44,
@@ -91,13 +94,23 @@ const refinement = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.callSweedRpc.mockResolvedValue([{
+    enabled: true,
+    name: 'Flower',
+    subcategories: [
+      { enabled: true, name: 'Packaged Eighth' },
+      { enabled: false, name: 'Retired Eighth' },
+    ],
+  }, {
+    enabled: false,
+    name: 'Retired Category',
+    subcategories: [{ enabled: true, name: 'Retired Product' }],
+  }])
   mocks.prepare.mockResolvedValue(prepared)
   mocks.refine.mockResolvedValue(refinement)
   mocks.createCandidate.mockResolvedValue({ candidatePacketId: 101, revisionNumber: 2 })
   mocks.pool.query.mockImplementation(async (text: string) => {
     if (/update job_queue/i.test(text)) return { rows: [] }
-    if (/select distinct category_name/i.test(text)) return { rows: [{ value: 'Flower' }] }
-    if (/select distinct subcategory_name/i.test(text)) return { rows: [{ value: 'Packaged Eighth' }] }
     if (/from catalog_group_products/i.test(text)) return { rows: [{ product_id: 7001 }, { product_id: 7002 }] }
     throw new Error(`Unexpected test query: ${text}`)
   })
@@ -142,10 +155,7 @@ describe('runCatalogPendingPurchasesRefineJob', () => {
     expect(catalogQuery).toContain("lower(live_product ->> 'enabled') = 'true'")
     expect(catalogQuery).toContain("lower(catalog_group.live_state_json ->> 'enabled') = 'true'")
     expect(catalogQuery).toContain("coalesce(catalog_group.brand_name, '')")
-    const taxonomyQuery = mocks.pool.query.mock.calls.find(([text]) => /select distinct category_name/i.test(text))?.[0]
-    expect(taxonomyQuery).toContain("lower(live_state_json ->> 'enabled') = 'true'")
-    expect(taxonomyQuery).toContain("coalesce(group_name, '')")
-    expect(taxonomyQuery).toContain("coalesce(brand_name, '')")
+    expect(mocks.callSweedRpc).toHaveBeenCalledWith(17, 'store.product.category.list', {})
     const progressMessages = mocks.pool.query.mock.calls
       .filter(([text]) => /update job_queue/i.test(text))
       .map(([, parameters]) => JSON.parse((parameters as string[])[2]!).message)
