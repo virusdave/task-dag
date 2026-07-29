@@ -34,6 +34,8 @@ export interface JobPoolMetadata {
  */
 export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   // --- sweed pool: anything that touches the shared Sweed UI session ---
+  'catalog.inventory.stage_trade_samples': { pool: 'sweed', requiresSweedSession: true },
+  'catalog.inventory.zero_trade_samples': { pool: 'sweed', requiresSweedSession: true },
   'catalog.maintenance.upload_group_image': { pool: 'sweed', requiresSweedSession: true },
   'catalog.sync.full_summary': { pool: 'sweed', requiresSweedSession: true },
   'catalog.sync.group_detail': { pool: 'sweed', requiresSweedSession: true },

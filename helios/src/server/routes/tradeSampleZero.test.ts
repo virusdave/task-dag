@@ -1,63 +1,120 @@
 import Fastify from 'fastify'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { applyMock, previewMock, withSweedSessionMock } = vi.hoisted(() => ({
-  applyMock: vi.fn(),
-  previewMock: vi.fn(),
-  withSweedSessionMock: vi.fn(async (fn: () => Promise<unknown>) => fn()),
+const mocks = vi.hoisted(() => ({
+  appendAudit: vi.fn(),
+  enqueue: vi.fn(),
+  poolQuery: vi.fn(),
+  preview: vi.fn(),
+  readInventory: vi.fn(),
+  resolveDestination: vi.fn(),
+  verify: vi.fn(() => true),
+  withSession: vi.fn(async (run: () => Promise<unknown>) => run()),
 }))
-
-vi.mock('../auth/requireSession.js', () => ({
-  requireSessionUser: vi.fn().mockResolvedValue({ id: 17, role: 'editor' }),
-}))
-vi.mock('../../worker/sweed/session.js', () => ({ withSweedSession: withSweedSessionMock }))
-vi.mock('../catalog/tradeSampleZeroService.js', async (original) => ({
-  ...await original<typeof import('../catalog/tradeSampleZeroService.js')>(),
-  previewTradeSampleZero: previewMock,
-  applyTradeSampleZero: applyMock,
+vi.mock('../auth/requireSession.js', () => ({ requireSessionUser: vi.fn().mockResolvedValue({ id: 17, role: 'editor' }) }))
+vi.mock('../../worker/sweed/session.js', () => ({ withSweedSession: mocks.withSession }))
+vi.mock('../db/pool.js', () => ({ getPool: () => ({ query: mocks.poolQuery }) }))
+vi.mock('../db/tx.js', () => ({ withTransaction: vi.fn(async (run: (db: object) => Promise<unknown>) => run({})) }))
+vi.mock('../jobs/enqueueJob.js', () => ({ enqueueJobExactOnce: mocks.enqueue, JOB_PRIORITY_LIVE_REQUESTED: 500 }))
+vi.mock('../audit/appendAuditEvent.js', () => ({ appendAuditEvent: mocks.appendAudit }))
+vi.mock('../catalog/tradeSampleZeroService.js', () => ({
+  assertTargetContents: vi.fn(),
+  previewTradeSampleZero: mocks.preview,
+  readLiveInventory: mocks.readInventory,
+  resolveTradeSampleDestination: mocks.resolveDestination,
+  verifyTradeSampleZeroPreview: mocks.verify,
 }))
 
 import { registerTradeSampleZeroRoutes } from './tradeSampleZero.js'
-import { TradeSampleZeroBusyError } from '../catalog/tradeSampleZeroService.js'
 
-const applyPayload = { siteDealerId: 210249, digest: 'a'.repeat(64), items: [], confirmation: 'ZERO TRADE SAMPLES' }
+const destination = { id: 88, name: 'NOT FOR SALE - Samples', stockTypeId: 7 }
+const item = { currentQty: 2, availableQty: 2, externalTrackCode: 'TAG', inventoryItemId: '44', packageLabel: null,
+  productId: 9, productName: 'Sample', productSku: null, sourceLocationId: 12, sourceLocationName: 'Back', sourceStockTypeId: 3 }
+const preview = { siteDealerId: 210249, digest: 'a'.repeat(64), previewId: '123e4567-e89b-42d3-a456-426614174000',
+  previewToken: 'signed.preview', destination, items: [item] }
+const stageRequestId = `catalog.inventory.stage_trade_samples:210249:${preview.previewId}`
+const stagePayload = { ...preview, previewToken: undefined, confirmation: 'STAGE TRADE SAMPLES', actorUserId: 17, requestId: stageRequestId }
+delete stagePayload.previewToken
+const stage = { operationId: stageRequestId, siteDealerId: 210249, destination, items: [item], complete: true,
+  counts: { completed: 1, failedUnknown: 0, notAppliedStale: 0, notAppliedAuditFailure: 0 },
+  outcomes: [{ inventoryItemId: '44', status: 'completed' }], message: 'Staged.' }
 
-describe('trade sample zero routes', () => {
-  beforeEach(() => vi.clearAllMocks())
+describe('trade sample routes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.verify.mockReturnValue(true)
+    mocks.resolveDestination.mockResolvedValue(destination)
+    mocks.readInventory.mockResolvedValue([])
+    mocks.appendAudit.mockResolvedValue(1)
+  })
 
-  it('runs an editor preview inside a Sweed session', async () => {
-    previewMock.mockResolvedValue({ siteDealerId: 210249, digest: 'a'.repeat(64), items: [] })
+  it('previews in a Sweed session and queues staging only with the signed reviewed payload', async () => {
+    mocks.preview.mockResolvedValue(preview)
+    mocks.enqueue.mockResolvedValue({ inserted: true, jobId: 42 })
     const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
-    const response = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/preview-zero', payload: { siteDealerId: 210249 } })
-    expect(response.statusCode).toBe(200)
-    expect(withSweedSessionMock).toHaveBeenCalledOnce()
-    expect(previewMock).toHaveBeenCalledWith(210249)
+    expect((await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/preview-zero', payload: { siteDealerId: 210249 } })).statusCode).toBe(200)
+    const response = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/apply-zero', payload: { ...preview, confirmation: 'STAGE TRADE SAMPLES' } })
+    expect(response.json()).toEqual({ jobId: 42 })
+    expect(mocks.enqueue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      jobType: 'catalog.inventory.stage_trade_samples',
+      dedupeKey: `catalog.inventory.stage_trade_samples:210249:${preview.previewId}`,
+      payload: expect.objectContaining({ confirmation: 'STAGE TRADE SAMPLES', digest: preview.digest }),
+    }))
+    expect(mocks.enqueue.mock.calls[0]?.[1].payload).not.toHaveProperty('previewToken')
     await server.close()
   })
 
-  it('returns an apply response and maps lock conflict to 409', async () => {
-    applyMock.mockResolvedValueOnce({ counts: { completed: 0, failedUnknown: 0, notAppliedStale: 0, notAppliedAuditFailure: 0 }, outcomes: [] })
-      .mockRejectedValueOnce(new TradeSampleZeroBusyError('busy'))
+  it('requires exact approval and a trusted successful stage result before fresh verification and zero enqueue', async () => {
+    mocks.poolQuery.mockResolvedValueOnce({ rows: [{ status: 'succeeded', job_payload_json: stagePayload, result_payload_json: stage }] })
+      .mockResolvedValueOnce({ rows: [] })
+    mocks.enqueue.mockResolvedValue({ inserted: true, jobId: 43 })
     const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
-    expect((await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/apply-zero', payload: applyPayload })).statusCode).toBe(200)
-    const conflict = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/apply-zero', payload: applyPayload })
-    expect(conflict.statusCode).toBe(409)
-    expect(conflict.json()).toEqual({ error: 'busy' })
+    expect((await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmation: 'close enough' } })).statusCode).toBe(400)
+    const response = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' } })
+    expect(response.json()).toEqual({ jobId: 43 })
+    expect(mocks.resolveDestination).toHaveBeenCalledWith(210249)
+    expect(mocks.enqueue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      jobType: 'catalog.inventory.zero_trade_samples',
+      dedupeKey: 'catalog.inventory.zero_trade_samples:stage:8',
+      payload: expect.not.objectContaining({ digest: expect.anything(), previewId: expect.anything() }),
+    }))
+    expect(mocks.appendAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      eventType: 'trade_sample.zero.approved',
+      payload: expect.objectContaining({ stageJobId: 8, zeroJobId: 43, siteDealerId: 210249 }),
+    }))
     await server.close()
   })
 
-  it('does not expose unexpected preview or apply errors', async () => {
-    previewMock.mockRejectedValueOnce(new Error('secret Sweed body'))
-    applyMock.mockRejectedValueOnce(new Error('secret RPC body'))
-    const server = Fastify({ logger: false })
+  it('aborts approval before enqueue when the stage is untrusted or fresh exact-set verification fails', async () => {
+    mocks.poolQuery.mockResolvedValueOnce({ rows: [{ status: 'failed', job_payload_json: stagePayload, result_payload_json: stage }] })
+      .mockResolvedValueOnce({ rows: [{ status: 'succeeded', job_payload_json: stagePayload, result_payload_json: stage }] })
+      .mockResolvedValueOnce({ rows: [] })
+    const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
-    const preview = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/preview-zero', payload: { siteDealerId: 210249 } })
-    const apply = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/apply-zero', payload: applyPayload })
-    expect(preview.statusCode).toBe(503)
-    expect(apply.statusCode).toBe(502)
-    expect(`${preview.body}${apply.body}`).not.toContain('secret')
+    const request = { method: 'POST' as const, url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' } }
+    expect((await server.inject(request)).statusCode).toBe(409)
+    mocks.resolveDestination.mockRejectedValueOnce(new Error('extra package'))
+    expect((await server.inject(request)).statusCode).toBe(409)
+    expect(mocks.enqueue).not.toHaveBeenCalled()
+    await server.close()
+  })
+
+  it('reconciles an exact prior approval before re-reading inventory', async () => {
+    mocks.poolQuery.mockResolvedValueOnce({ rows: [{ status: 'succeeded', job_payload_json: stagePayload, result_payload_json: stage }] })
+      .mockResolvedValueOnce({ rows: [{ id: 43, exact_payload: true }] })
+    const server = Fastify()
+    await registerTradeSampleZeroRoutes(server)
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero',
+      payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' },
+    })
+    expect(response.json()).toEqual({ jobId: 43 })
+    expect(mocks.resolveDestination).not.toHaveBeenCalled()
+    expect(mocks.enqueue).not.toHaveBeenCalled()
+    expect(mocks.appendAudit).not.toHaveBeenCalled()
     await server.close()
   })
 })

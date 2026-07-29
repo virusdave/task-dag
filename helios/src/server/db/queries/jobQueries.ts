@@ -7,6 +7,8 @@ import type {
   JobStatusResponse,
 } from '../../../shared/contracts/api/jobs.js'
 import {
+  CatalogInventoryStageTradeSamplesJobPayloadSchema,
+  CatalogInventoryZeroTradeSamplesJobPayloadSchema,
   classifyJobPriorityBand,
   type JobExecutionPool,
   type JobPriorityBand,
@@ -18,6 +20,7 @@ import {
 import type { Queryable } from '../pool.js'
 import { toIsoString } from './helpers.js'
 import { listSweedAuthEventsForJob } from './sweedAuthEventsQueries.js'
+import { TradeSampleStageResultSchema, TradeSampleZeroResultSchema, type TradeSampleStageResult, type TradeSampleZeroResult } from '../../../shared/contracts/api/tradeSampleZero.js'
 
 const JOB_POOL_TUPLES: Array<[string, JobExecutionPool]> = Object.entries(
   JOB_EXECUTION_POOL_BY_TYPE,
@@ -70,6 +73,7 @@ interface JobRow extends QueryResultRow {
   last_error: string | null
   module_code: JobStatusResponse['job']['module']
   payload_json: {
+    requestId?: string
     llmRunId?: number
     pendingPurchaseApplyRequestId?: number
     pendingPurchasePacketId?: number
@@ -221,7 +225,62 @@ export async function getJobStatus(db: Queryable, jobId: number): Promise<JobSta
     return null
   }
 
-  const sweedAuthEvents = await listSweedAuthEventsForJob(db, row.id)
+  const isTradeSampleZero = row.job_type === 'catalog.inventory.zero_trade_samples'
+  const isDestructiveTradeSample = isTradeSampleZero
+    || row.job_type === 'catalog.inventory.stage_trade_samples'
+  const sweedAuthEvents = isDestructiveTradeSample ? [] : await listSweedAuthEventsForJob(db, row.id)
+  let tradeSampleZeroResult: TradeSampleZeroResult | null = null
+  let tradeSampleStageResult: TradeSampleStageResult | null = null
+  if (isTradeSampleZero && typeof row.payload_json?.requestId === 'string') {
+    const audit = await db.query<{ payload_json: unknown }>(
+      `select payload_json from audit_events
+        where entity_type = 'trade_sample_zero_batch'
+          and entity_id = $1
+          and event_type = 'trade_sample.zero.batch_result'
+        order by id desc limit 1`,
+      [String(row.id)],
+    )
+    const parsed = TradeSampleZeroResultSchema.safeParse(audit.rows[0]?.payload_json)
+    tradeSampleZeroResult = parsed.success ? parsed.data : null
+  }
+  if (row.job_type === 'catalog.inventory.stage_trade_samples') {
+    const audit = await db.query<{ payload_json: unknown }>(`select payload_json from audit_events where entity_type='trade_sample_stage_batch' and entity_id=$1 and event_type='trade_sample.stage.batch_result' order by id desc limit 1`, [String(row.id)])
+    const parsed = TradeSampleStageResultSchema.safeParse(audit.rows[0]?.payload_json)
+    tradeSampleStageResult = parsed.success ? parsed.data : null
+  }
+  const terminalFailure = row.status === 'failed' || row.status === 'dead_letter'
+  if (terminalFailure && row.job_type === 'catalog.inventory.stage_trade_samples' && tradeSampleStageResult === null) {
+    const payload = CatalogInventoryStageTradeSamplesJobPayloadSchema.safeParse(row.payload_json)
+    if (payload.success) {
+      const outcomes = await deriveTradeSampleOutcomes(db, payload.data.siteDealerId, payload.data.requestId, payload.data.items, 'stage')
+      tradeSampleStageResult = TradeSampleStageResultSchema.parse({
+        operationId: payload.data.requestId,
+        siteDealerId: payload.data.siteDealerId,
+        destination: payload.data.destination,
+        items: payload.data.items,
+        complete: false,
+        counts: countTradeSampleOutcomes(outcomes),
+        outcomes,
+        message: 'The worker stopped before recording a final staging result. Inspect every listed package in Sweed.',
+      })
+    }
+  }
+  if (terminalFailure && row.job_type === 'catalog.inventory.zero_trade_samples' && tradeSampleZeroResult === null) {
+    const payload = CatalogInventoryZeroTradeSamplesJobPayloadSchema.safeParse(row.payload_json)
+    if (payload.success) {
+      const outcomes = await deriveTradeSampleOutcomes(db, payload.data.siteDealerId, payload.data.requestId, payload.data.items, 'zero')
+      tradeSampleZeroResult = TradeSampleZeroResultSchema.parse({
+        operationId: payload.data.requestId,
+        siteDealerId: payload.data.siteDealerId,
+        destination: payload.data.destination,
+        items: payload.data.items,
+        stageJobId: payload.data.stageJobId,
+        counts: countTradeSampleOutcomes(outcomes),
+        outcomes,
+        message: 'The worker stopped before recording a final zeroing result. Inspect every listed package in Sweed.',
+      })
+    }
+  }
 
   return {
     job: {
@@ -251,6 +310,57 @@ export async function getJobStatus(db: Queryable, jobId: number): Promise<JobSta
     progressLog: readProgressLog(row.payload_json),
     progress: readProgress(row.payload_json),
     sweedAuthEvents,
+    tradeSampleZeroResult,
+    tradeSampleStageResult,
+  }
+}
+
+type TradeSampleOutcome = TradeSampleZeroResult['outcomes'][number]
+
+async function deriveTradeSampleOutcomes(
+  db: Queryable,
+  siteDealerId: number,
+  requestId: string,
+  items: Array<{ inventoryItemId: string }>,
+  phase: 'stage' | 'zero',
+): Promise<TradeSampleOutcome[]> {
+  const entityIds = items.map((item) => `${siteDealerId}:${item.inventoryItemId}`)
+  const eventTypes = phase === 'stage'
+    ? ['trade_sample.stage.attempted', 'trade_sample.stage.completed']
+    : ['trade_sample.zero.attempted', 'trade_sample.zero.completed']
+  const result = await db.query<{ entity_id: string; event_type: string }>(
+    `select entity_id, event_type
+       from audit_events
+      where entity_type = 'trade_sample_inventory_item'
+        and entity_id = any($1::text[])
+        and request_id = $2
+        and event_type = any($3::text[])
+      order by id`,
+    [entityIds, requestId, eventTypes],
+  )
+  const eventsByEntity = new Map<string, Set<string>>()
+  for (const event of result.rows) {
+    const events = eventsByEntity.get(event.entity_id) ?? new Set<string>()
+    events.add(event.event_type)
+    eventsByEntity.set(event.entity_id, events)
+  }
+  return items.map((item) => {
+    const events = eventsByEntity.get(`${siteDealerId}:${item.inventoryItemId}`)
+    const completed = events?.has(`trade_sample.${phase}.completed`) === true
+    const attempted = events?.has(`trade_sample.${phase}.attempted`) === true
+    return {
+      inventoryItemId: item.inventoryItemId,
+      status: completed ? 'completed' : attempted ? 'failed_unknown' : 'not_applied_stale',
+    }
+  })
+}
+
+function countTradeSampleOutcomes(outcomes: TradeSampleOutcome[]): TradeSampleZeroResult['counts'] {
+  return {
+    completed: outcomes.filter((outcome) => outcome.status === 'completed').length,
+    failedUnknown: outcomes.filter((outcome) => outcome.status === 'failed_unknown').length,
+    notAppliedStale: outcomes.filter((outcome) => outcome.status === 'not_applied_stale').length,
+    notAppliedAuditFailure: outcomes.filter((outcome) => outcome.status === 'not_applied_audit_failure').length,
   }
 }
 

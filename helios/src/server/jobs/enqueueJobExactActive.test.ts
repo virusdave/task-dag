@@ -5,7 +5,7 @@ import type { Queryable } from '../db/pool.js'
 vi.mock('../db/notify.js', () => ({ notifyJobQueueEnqueued: vi.fn(async () => undefined) }))
 
 import { notifyJobQueueEnqueued } from '../db/notify.js'
-import { enqueueJobExactActive } from './enqueueJob.js'
+import { enqueueJobExactActive, enqueueJobExactOnce } from './enqueueJob.js'
 
 const input = {
   jobType: 'db.migration.apply' as const,
@@ -86,5 +86,20 @@ describe('enqueueJobExactActive', () => {
     await expect(enqueueJobExactActive(db, input)).resolves.toEqual({ inserted: true, jobId: 13 })
     expect(notifyJobQueueEnqueued).toHaveBeenCalledWith(db)
     expect(db.query).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('enqueueJobExactOnce', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('returns an exact terminal row instead of inserting attempt two', async () => {
+    const db = fake(input.payload)
+    await expect(enqueueJobExactOnce(db, input)).resolves.toEqual({ inserted: false, jobId: 11, exactPayload: true })
+    expect(String((db.query as ReturnType<typeof vi.fn>).mock.calls[1]?.[0])).toContain("'dead_letter'")
+    expect(notifyJobQueueEnqueued).not.toHaveBeenCalled()
+  })
+
+  it('reports a terminal-row payload conflict', async () => {
+    await expect(enqueueJobExactOnce(fake(forcePayload), input)).resolves.toEqual({ inserted: false, jobId: 11, exactPayload: false })
   })
 })

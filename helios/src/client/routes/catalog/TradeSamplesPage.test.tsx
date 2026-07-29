@@ -1,0 +1,184 @@
+// @vitest-environment happy-dom
+
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const mocks = vi.hoisted(() => ({ mutateJson: vi.fn() }))
+
+vi.mock('../../app/fetchJson.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../app/fetchJson.js')>(),
+  mutateJson: mocks.mutateJson,
+}))
+vi.mock('./catalogSidebarSubtree.js', () => ({
+  useRegisterCatalogSidebarSubtree: () => undefined,
+}))
+
+import { TradeSamplesPage } from './TradeSamplesPage.js'
+import { TradeSampleStageResults, TradeSampleZeroResults } from '../jobs/JobDetailPage.js'
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+function change(element: HTMLInputElement, value: string): void {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(element, value)
+  element.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+describe('TradeSamplesPage', () => {
+  let host: HTMLDivElement
+  let root: Root
+
+  beforeEach(async () => {
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => root.render(<MemoryRouter><TradeSamplesPage /></MemoryRouter>))
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+    vi.clearAllMocks()
+  })
+
+  it('binds the destructive confirmation to the exact preview and queues it once', async () => {
+    const preview = {
+      siteDealerId: 210249,
+      digest: 'a'.repeat(64),
+      previewId: '123e4567-e89b-42d3-a456-426614174000',
+      previewToken: 'signed.preview',
+      items: [{
+        currentQty: 3.5,
+        externalTrackCode: '1A4120300000C1E000064024',
+        inventoryItemId: '1656450',
+        packageLabel: null,
+        productId: 99,
+        productName: 'Trade Sample Flower',
+        productSku: 'SAMPLE-1',
+        availableQty: 3.5,
+        sourceLocationId: 12,
+        sourceLocationName: 'Back Stock',
+        sourceStockTypeId: 3,
+      }],
+      destination: { id: 88, name: 'NOT FOR SALE - Samples', stockTypeId: 7 },
+    }
+    mocks.mutateJson.mockResolvedValueOnce(preview).mockResolvedValueOnce({ jobId: 77 })
+
+    const previewButton = [...host.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Preview trade samples',
+    )!
+    await act(async () => previewButton.click())
+
+    expect(host.textContent).toContain('does not zero inventory')
+    expect(host.textContent).toContain('Trade Sample Flower')
+    expect(host.textContent).toContain('3.5 total quantity')
+    const applyButton = [...host.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === 'Queue staging transfer',
+    )!
+    expect(applyButton.disabled).toBe(true)
+
+    await act(async () => change(
+      host.querySelector<HTMLInputElement>('#trade-sample-confirmation')!,
+      'STAGE TRADE SAMPLES',
+    ))
+    expect(applyButton.disabled).toBe(false)
+    await act(async () => applyButton.click())
+
+    expect(mocks.mutateJson).toHaveBeenLastCalledWith(
+      '/api/catalog/inventory/trade-samples/apply-zero',
+      expect.anything(),
+      expect.objectContaining({ body: JSON.stringify({
+        siteDealerId: preview.siteDealerId,
+        digest: preview.digest,
+        previewId: preview.previewId,
+        previewToken: preview.previewToken,
+        items: preview.items,
+        destination: preview.destination,
+        confirmation: 'STAGE TRADE SAMPLES',
+      }) }),
+    )
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/77"]')?.textContent).toBe('Queued job #77')
+    expect(host.textContent).not.toContain('Reviewed preview')
+  })
+
+  it('disarms an ambiguous queue request before it settles and directs the operator to jobs', async () => {
+    const preview = {
+      siteDealerId: 210249,
+      digest: 'a'.repeat(64),
+      previewId: '123e4567-e89b-42d3-a456-426614174000',
+      previewToken: 'signed.preview',
+      items: [{ currentQty: 1, externalTrackCode: 'tag', inventoryItemId: 'item', packageLabel: null,
+        productId: 1, productName: 'Sample', productSku: null, availableQty: 1,
+        sourceLocationId: 12, sourceLocationName: 'Back Stock', sourceStockTypeId: 3 }],
+      destination: { id: 88, name: 'NOT FOR SALE - Samples', stockTypeId: 7 },
+    }
+    let rejectQueue!: (error: unknown) => void
+    const pendingQueue = new Promise((_, reject) => { rejectQueue = reject })
+    mocks.mutateJson.mockResolvedValueOnce(preview).mockReturnValueOnce(pendingQueue)
+    await act(async () => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Preview trade samples')!.click())
+    await act(async () => change(host.querySelector<HTMLInputElement>('#trade-sample-confirmation')!, 'STAGE TRADE SAMPLES'))
+    act(() => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Queue staging transfer')!.click())
+    expect(host.textContent).not.toContain('Reviewed preview')
+    expect(host.textContent).toContain('preview is disarmed')
+    expect(mocks.mutateJson).toHaveBeenCalledTimes(2)
+    await act(async () => rejectQueue(new Error('network detail')))
+    expect(host.textContent).not.toContain('network detail')
+    expect(host.textContent).toContain('queue request outcome is unknown')
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs"]')?.textContent).toBe('Check recent jobs')
+  })
+
+  it('shows the exact staged scope and reconciles an ambiguous approval without a new action', async () => {
+    const staged = {
+      operationId: 'stage-8',
+      siteDealerId: 210249,
+      destination: { id: 88, name: 'NOT FOR SALE - Samples' as const, stockTypeId: 7 },
+      items: [{ currentQty: 2, externalTrackCode: 'METRC-TAG', inventoryItemId: 'package-44', packageLabel: null,
+        productId: 1, productName: 'Sample', productSku: null, availableQty: 2,
+        sourceLocationId: 12, sourceLocationName: 'Back Stock', sourceStockTypeId: 3 }],
+      complete: true,
+      counts: { completed: 1, failedUnknown: 0, notAppliedStale: 0, notAppliedAuditFailure: 0 },
+      outcomes: [{ inventoryItemId: 'package-44', status: 'completed' as const }],
+      message: 'Staged and verified.',
+    }
+    let rejectApproval!: (error: unknown) => void
+    mocks.mutateJson.mockReturnValueOnce(new Promise((_, reject) => { rejectApproval = reject }))
+      .mockResolvedValueOnce({ jobId: 91 })
+    await act(async () => root.render(<MemoryRouter><TradeSampleStageResults jobId={8} result={staged} /></MemoryRouter>))
+    expect(host.textContent).toContain('Bronx (dealer #210249)')
+    expect(host.textContent).toContain('location #88, stock type #7')
+    expect(host.textContent).toContain('Package package-44 · METRC tag METRC-TAG · Qty 2')
+    await act(async () => change(host.querySelector<HTMLInputElement>('#stage-approval')!, 'I VERIFIED ONLY TRADE SAMPLES'))
+    act(() => [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('Approve permanent'))!.click())
+    expect(host.textContent).toContain('action is disarmed')
+    expect(host.querySelector('#stage-approval')).toBeNull()
+    await act(async () => rejectApproval(new Error('network detail')))
+    expect(host.textContent).toContain('approval outcome is unknown')
+    const reconcile = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Check approval outcome')!
+    await act(async () => reconcile.click())
+    expect(mocks.mutateJson).toHaveBeenCalledTimes(2)
+    expect(mocks.mutateJson.mock.calls[0]?.[2]).toEqual(mocks.mutateJson.mock.calls[1]?.[2])
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/91"]')?.textContent).toBe('Open zero job #91')
+  })
+
+  it('renders wrapped terminal package outcomes and manual-inspection guidance', async () => {
+    await act(async () => root.render(<MemoryRouter><TradeSampleZeroResults result={{
+      operationId: 'operation',
+      siteDealerId: 210249,
+      destination: { id: 88, name: 'NOT FOR SALE - Samples', stockTypeId: 7 },
+      items: [{ currentQty: 1, externalTrackCode: 'tag', inventoryItemId: 'very-long-inventory-item-identifier', packageLabel: null,
+        productId: 1, productName: 'Sample', productSku: null, availableQty: 1,
+        sourceLocationId: 12, sourceLocationName: 'Back Stock', sourceStockTypeId: 3 }],
+      stageJobId: 76,
+      counts: { completed: 1, failedUnknown: 1, notAppliedStale: 0, notAppliedAuditFailure: 0 },
+      outcomes: [{ inventoryItemId: 'very-long-inventory-item-identifier', status: 'failed_unknown' }],
+      message: 'Inspect Sweed and create a fresh preview before another adjustment.',
+    }} /></MemoryRouter>))
+    expect(host.textContent).toContain('Completed: 1')
+    expect(host.textContent).toContain('Unknown: 1')
+    expect(host.textContent).toContain('Inspect Sweed')
+    expect(host.textContent).toContain('Bronx (dealer #210249)')
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/76"]')).not.toBeNull()
+    expect(host.querySelector('li')?.style.overflowWrap).toBe('anywhere')
+  })
+})

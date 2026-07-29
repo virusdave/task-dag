@@ -22,6 +22,7 @@ import {
   SchedulingExtractConstraintsJobPayloadSchema,
   SchedulingGenerateCandidatesJobPayloadSchema,
 } from './scheduling.js'
+import { TradeSampleZeroItemSchema } from '../api/tradeSampleZero.js'
 
 export const JobTypeSchema = z.enum([
   'catalog.sync.full_summary',
@@ -77,6 +78,8 @@ export const JobTypeSchema = z.enum([
   'config.workers.gads_lp_rollup_refresh',
   'config.workers.faq_hybrid_sync',
   'catalog.maintenance.upload_group_image',
+  'catalog.inventory.stage_trade_samples',
+  'catalog.inventory.zero_trade_samples',
   'inventory.lifecycle.advance',
   'db.migration.apply',
 ])
@@ -84,6 +87,24 @@ export type JobType = z.infer<typeof JobTypeSchema>
 
 export const JobStatusSchema = z.enum(['queued', 'running', 'succeeded', 'failed', 'dead_letter'])
 export type JobStatus = z.infer<typeof JobStatusSchema>
+
+export const CatalogInventoryZeroTradeSamplesJobPayloadSchema = z.object({
+  siteDealerId: z.number().int().positive(),
+  items: z.array(TradeSampleZeroItemSchema).max(500),
+  destination: z.object({ id: z.number().int().positive(), name: z.literal('NOT FOR SALE - Samples'), stockTypeId: z.number().int().positive() }).strict(),
+  confirmation: z.literal('I VERIFIED ONLY TRADE SAMPLES'),
+  stageJobId: z.number().int().positive(),
+  actorUserId: z.number().int().positive(),
+  requestId: z.string().min(1),
+}).strict()
+export type CatalogInventoryZeroTradeSamplesJobPayload = z.infer<typeof CatalogInventoryZeroTradeSamplesJobPayloadSchema>
+
+export const CatalogInventoryStageTradeSamplesJobPayloadSchema = z.object({
+  siteDealerId: z.number().int().positive(), digest: z.string().regex(/^[a-f0-9]{64}$/), items: z.array(TradeSampleZeroItemSchema).max(500),
+  destination: z.object({ id: z.number().int().positive(), name: z.literal('NOT FOR SALE - Samples'), stockTypeId: z.number().int().positive() }).strict(),
+  previewId: z.uuid(), confirmation: z.literal('STAGE TRADE SAMPLES'), actorUserId: z.number().int().positive(), requestId: z.string().min(1),
+}).strict()
+export type CatalogInventoryStageTradeSamplesJobPayload = z.infer<typeof CatalogInventoryStageTradeSamplesJobPayloadSchema>
 
 /**
  * Worker execution pool a job is bound to. Mirrors the values in

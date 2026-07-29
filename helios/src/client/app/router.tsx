@@ -30,6 +30,7 @@ import {
 import { ReviewDetailsPage } from '../routes/catalog/ReviewDetailsPage.js'
 import { StockRefreshPage } from '../routes/catalog/StockRefreshPage.js'
 import { LowInventoryPage } from '../routes/catalog/LowInventoryPage.js'
+import { TradeSamplesPage } from '../routes/catalog/TradeSamplesPage.js'
 import { ClusterProposalsPage } from '../routes/communications/ClusterProposalsPage.js'
 import { CommunicationsLandingPage } from '../routes/communications/CommunicationsLandingPage.js'
 import { PolicyReplacementReviewPage, policyReplacementReviewLoader } from '../routes/communications/PolicyReplacementReviewPage.js'
@@ -346,6 +347,10 @@ export const router = createBrowserRouter([
         // #14). Reuses the existing workers.scheduling.stock run-now job.
         element: <StockRefreshPage />,
         path: 'catalog/inventory/stock-refresh',
+      },
+      {
+        element: <TradeSamplesPage />,
+        path: 'catalog/inventory/trade-samples',
       },
       {
         element: <LowInventoryPage />,

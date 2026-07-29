@@ -12,6 +12,7 @@ import {
 } from '../domain/jobs.js'
 import { HeliosModuleCodeSchema } from '../domain/modules.js'
 import { SweedAuthEventSchema } from './sweedAuthEvents.js'
+import { TradeSampleStageResultSchema, TradeSampleZeroResultSchema } from './tradeSampleZero.js'
 
 export const JobRouteParamsSchema = z.object({
   jobId: z.coerce.number().int().positive(),
@@ -95,6 +96,8 @@ export const JobStatusResponseSchema = z.object({
   // 011_sweed_auth_events hasn't been applied. Ordered oldest-first
   // so the UI can render a chronological timeline.
   sweedAuthEvents: z.array(SweedAuthEventSchema),
+  tradeSampleZeroResult: TradeSampleZeroResultSchema.nullable(),
+  tradeSampleStageResult: TradeSampleStageResultSchema.nullable(),
 })
 export type JobStatusResponse = z.infer<typeof JobStatusResponseSchema>
 

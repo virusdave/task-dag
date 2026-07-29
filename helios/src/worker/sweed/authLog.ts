@@ -110,6 +110,11 @@ function truncateError(message: string | null): string | null {
  */
 export function recordAuthEvent(input: SweedAuthEventInput): void {
   const ctx = getCurrentJobAuthContext()
+  const destructiveTradeSample = ctx?.jobType === 'catalog.inventory.stage_trade_samples'
+    || ctx?.jobType === 'catalog.inventory.zero_trade_samples'
+  const persistedInput = destructiveTradeSample
+    ? { ...input, authToken: null, context: {}, errorMessage: input.errorMessage === null ? null : 'Sweed request failed; inspect the package directly.' }
+    : input
   // Snapshot now so the row's created_at lines up tightly with when
   // the RPC actually completed (rather than when the async write
   // happens). The DB column still defaults to now() for inserts that
@@ -117,7 +122,7 @@ export function recordAuthEvent(input: SweedAuthEventInput): void {
   insertEventRow(getPool(), {
     jobId: ctx?.jobId ?? null,
     jobType: ctx?.jobType ?? null,
-    ...input,
+    ...persistedInput,
   }).catch((error) => {
     console.warn(
       '[sweed-auth-log] failed to persist auth event for',

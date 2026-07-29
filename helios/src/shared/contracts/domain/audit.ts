@@ -34,6 +34,8 @@ export const AuditEntityTypeSchema = z.enum([
   'low_inventory_package_count',
   'low_inventory_package_transfer',
   'trade_sample_inventory_item',
+  'trade_sample_zero_batch',
+  'trade_sample_stage_batch',
 ])
 export const AuditEventTypeSchema = z.enum([
   'auth.user.signed_in',
@@ -176,6 +178,12 @@ export const AuditEventTypeSchema = z.enum([
   'trade_sample.zero.attempted',
   'trade_sample.zero.completed',
   'trade_sample.zero.failed',
+  'trade_sample.zero.batch_result',
+  'trade_sample.stage.attempted',
+  'trade_sample.stage.completed',
+  'trade_sample.stage.failed',
+  'trade_sample.stage.batch_result',
+  'trade_sample.zero.approved',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>

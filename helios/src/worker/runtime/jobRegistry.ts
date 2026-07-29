@@ -1,5 +1,7 @@
 import {
   CatalogMaintenanceUploadGroupImageJobPayloadSchema,
+  CatalogInventoryZeroTradeSamplesJobPayloadSchema,
+  CatalogInventoryStageTradeSamplesJobPayloadSchema,
   CatalogPendingPurchasesApplyJobPayloadSchema,
   CatalogPendingPurchasesQueueRepriceJobPayloadSchema,
   CatalogPendingPurchasesGenerateJobPayloadSchema,
@@ -60,6 +62,8 @@ import type { HeliosModuleCode, HeliosModuleScope } from '../../shared/contracts
 import { runGenerateDescriptionBatchJob } from '../jobs/generateDescriptionBatchJob.js'
 import { runGeneratePricingBatchJob } from '../jobs/generatePricingBatchJob.js'
 import { runCatalogMaintenanceUploadGroupImageJob } from '../jobs/catalogMaintenanceUploadGroupImageJob.js'
+import { runCatalogInventoryZeroTradeSamplesJob } from '../jobs/catalogInventoryZeroTradeSamplesJob.js'
+import { runCatalogInventoryStageTradeSamplesJob } from '../jobs/catalogInventoryStageTradeSamplesJob.js'
 import { runCatalogPendingPurchasesApplyJob } from '../jobs/applyPendingPurchaseRequestJob.js'
 import { runCatalogPendingPurchasesQueueRepriceJob } from '../jobs/queuePendingPurchaseRepriceJob.js'
 import { runCatalogPendingPurchasesGenerateJob } from '../jobs/generatePendingPurchasePacketJob.js'
@@ -123,6 +127,7 @@ import { withSweedSession } from '../sweed/session.js'
 
 export interface JobHandlerContext {
   id: number
+  leaseToken?: string
   jobType: JobType
   module: HeliosModuleCode
   payload: unknown
@@ -132,6 +137,12 @@ export interface JobHandlerContext {
 type JobHandler = (context: JobHandlerContext) => Promise<void>
 
 const handlers: Record<JobType, JobHandler> = {
+  'catalog.inventory.stage_trade_samples': async (context) => {
+    await runCatalogInventoryStageTradeSamplesJob(context, CatalogInventoryStageTradeSamplesJobPayloadSchema.parse(context.payload))
+  },
+  'catalog.inventory.zero_trade_samples': async (context) => {
+    await runCatalogInventoryZeroTradeSamplesJob(context, CatalogInventoryZeroTradeSamplesJobPayloadSchema.parse(context.payload))
+  },
   'catalog.maintenance.upload_group_image': async (context) => {
     await runCatalogMaintenanceUploadGroupImageJob(
       context,
@@ -423,6 +434,8 @@ const handlers: Record<JobType, JobHandler> = {
  * to the legacy shared-token mutex on their occasional Sweed calls.
  */
 const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
+  'catalog.inventory.stage_trade_samples',
+  'catalog.inventory.zero_trade_samples',
   'catalog.maintenance.upload_group_image',
   'catalog.pending_purchases.apply',
   'catalog.pending_purchases.generate',

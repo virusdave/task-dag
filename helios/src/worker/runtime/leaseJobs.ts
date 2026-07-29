@@ -81,6 +81,23 @@ export interface LeaseJobsOptions {
   minPriority?: number
 }
 
+export const EXPIRED_LEASE_SWEEP_SQL = `
+  update job_queue
+  set status = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then 'failed' else 'queued' end,
+      lease_token = null,
+      leased_until = null,
+      started_at = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then started_at else null end,
+      finished_at = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then coalesce(finished_at, now()) else null end,
+      run_at = now(),
+      last_error = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples')
+        then 'Destructive trade-sample job lease expired; inspect Sweed. It will not retry automatically.'
+        else 'Worker lease expired before job completion; retrying.' end,
+      updated_at = now()
+  where status = 'running'
+    and leased_until is not null
+    and leased_until < now()
+`
+
 export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): Promise<LeasedJob[]> {
   const leaseToken = randomUUID()
   const pool = getPool()
@@ -101,22 +118,7 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
     const nowMs = Date.now()
     if (nowMs - lastExpiredLeaseSweepMs >= EXPIRED_LEASE_SWEEP_INTERVAL_MS) {
       lastExpiredLeaseSweepMs = nowMs
-      await client.query(
-        `
-          update job_queue
-          set status = 'queued',
-              lease_token = null,
-              leased_until = null,
-              started_at = null,
-              finished_at = null,
-              run_at = now(),
-              last_error = 'Worker lease expired before job completion; retrying.',
-              updated_at = now()
-          where status = 'running'
-            and leased_until is not null
-            and leased_until < now()
-        `,
-      )
+      await client.query(EXPIRED_LEASE_SWEEP_SQL)
     }
 
     const leaseResult = await client.query<LeasedJobRow>(

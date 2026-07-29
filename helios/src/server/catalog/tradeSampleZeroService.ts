@@ -1,215 +1,142 @@
-import { createHash } from 'node:crypto'
-
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { z } from 'zod'
-
-import type { TradeSampleZeroApplyResponse, TradeSampleZeroItem, TradeSampleZeroPreviewResponse } from '../../shared/contracts/index.js'
-import { getHeliosPendingPurchaseSiteDealer } from '../../shared/contracts/index.js'
+import type { TradeSampleLocationSchema, TradeSampleZeroItem, TradeSampleZeroPreviewResponse } from '../../shared/contracts/index.js'
+import { TRADE_SAMPLE_LOCATION_NAME, getHeliosPendingPurchaseSiteDealer } from '../../shared/contracts/index.js'
 import { callSweedRpc } from '../../worker/sweed/rpc.js'
-import { appendAuditEvent } from '../audit/appendAuditEvent.js'
-import { getPool, withClient, type Queryable } from '../db/pool.js'
+import { getServerEnv } from '../config/env.js'
 
 const PAGE_SIZE = 100
-const MAX_CANDIDATES = 500
-const LOCK_NAMESPACE = 'trade_sample_zero_apply'
-const StrictFiniteNumberSchema = z.preprocess(
+const PREVIEW_TTL_MS = 15 * 60 * 1000
+const NumberSchema = z.preprocess(
   (value) => typeof value === 'string' && value.trim() !== '' ? Number(value) : value,
   z.number().finite(),
 )
-
-const GroupedItemSchema = z.object({
-  id: z.union([z.coerce.string(), z.number()]).optional(),
-  inventoryItemId: z.union([z.coerce.string(), z.number()]).optional(),
-  currentQty: StrictFiniteNumberSchema.nullable().optional(),
+const IntegerSchema = z.preprocess(
+  (value) => typeof value === 'string' && value.trim() !== '' ? Number(value) : value,
+  z.number().int(),
+)
+const ItemSchema = z.object({
+  id: z.union([z.string(), z.number()]).optional(),
+  inventoryItemId: z.union([z.string(), z.number()]).optional(),
+  currentQty: NumberSchema.optional(),
+  availableQty: NumberSchema.optional(),
   externalTrackCode: z.string().nullable().optional(),
   isTradeSample: z.boolean().nullable().optional(),
+  stockLocation: z.object({ id: IntegerSchema.optional(), name: z.string().nullable().optional() }).nullable().optional(),
+  stockType: z.object({ id: IntegerSchema.optional() }).nullable().optional(),
 }).passthrough()
-const GroupedRowSchema = z.object({
-  product: z.object({
-    id: z.coerce.number().int().optional(),
-    name: z.string().nullable().optional(),
-    sku: z.string().nullable().optional(),
-  }).passthrough().optional(),
-  items: z.array(GroupedItemSchema),
-}).passthrough()
-const GroupedResponseSchema = z.object({
-  data: z.array(GroupedRowSchema),
-  totalCount: z.coerce.number().int().nonnegative(),
-}).passthrough()
-const ItemDetailSchema = z.object({
-  id: z.union([z.coerce.string(), z.number()]),
-  currentQty: StrictFiniteNumberSchema,
-  externalTrackCode: z.string(),
-  isTradeSample: z.boolean(),
-}).passthrough()
-
-export type TradeSampleZeroLockRunner = <T>(dealerId: number, run: () => Promise<T>) => Promise<T>
-export interface TradeSampleZeroDeps {
-  audit: typeof appendAuditEvent
-  db: Queryable
-  rpc: typeof callSweedRpc
-  withLock: TradeSampleZeroLockRunner
-}
-
-async function postgresLock<T>(dealerId: number, run: () => Promise<T>): Promise<T> {
-  return withClient(async (client) => {
-    const result = await client.query<{ locked: boolean }>(
-      'select pg_try_advisory_lock(hashtext($1), hashtext($2)) as locked',
-      [LOCK_NAMESPACE, String(dealerId)],
-    )
-    if (!result.rows[0]?.locked) throw new TradeSampleZeroBusyError('Another trade-sample adjustment is already running for this site.')
-    try {
-      return await run()
-    } finally {
-      try {
-        await client.query('select pg_advisory_unlock(hashtext($1), hashtext($2))', [LOCK_NAMESPACE, String(dealerId)])
-      } catch (error) {
-        console.error('[trade-sample-zero] advisory unlock failed', error)
-      }
-    }
-  })
-}
-
-const defaultDeps = (): TradeSampleZeroDeps => ({ audit: appendAuditEvent, db: getPool(), rpc: callSweedRpc, withLock: postgresLock })
-
-function requireSite(dealerId: number): void {
-  if (getHeliosPendingPurchaseSiteDealer(dealerId) === null) throw new Error(`Unknown siteDealerId ${dealerId}.`)
-}
-
-export function tradeSampleZeroDigest(dealerId: number, items: readonly TradeSampleZeroItem[]): string {
-  const identities = items.map((item) => [item.productId, item.inventoryItemId, item.externalTrackCode, item.currentQty] as const)
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
-  return createHash('sha256').update(JSON.stringify([dealerId, identities])).digest('hex')
-}
-
-async function liveItems(dealerId: number, deps: TradeSampleZeroDeps): Promise<TradeSampleZeroItem[]> {
-  const byId = new Map<string, TradeSampleZeroItem>()
-  const seen = new Map<string, string>()
-  let expectedTotal: number | null = null
-  let rowsRead = 0
-  for (let page = 1; page <= 10_000; page += 1) {
-    const parsed = GroupedResponseSchema.parse(await deps.rpc(dealerId, 'store.inventory.item.list.grouped', { page, pageSize: PAGE_SIZE, isOnStock: false }))
-    if (expectedTotal === null) expectedTotal = parsed.totalCount
-    if (parsed.totalCount !== expectedTotal) throw new Error('Grouped inventory total changed during pagination.')
-    if (parsed.data.length === 0 && rowsRead < expectedTotal) throw new Error('Grouped inventory pagination ended before totalCount.')
-    rowsRead += parsed.data.length
-    if (rowsRead > expectedTotal) throw new Error('Grouped inventory pagination exceeded totalCount.')
-    for (const row of parsed.data) {
-      for (const raw of row.items) {
-        if (raw.isTradeSample !== true) continue
-        if (raw.currentQty === null || raw.currentQty === undefined) {
-          throw new Error('Grouped inventory returned a trade sample without a valid quantity.')
-        }
-        if (raw.currentQty <= 0) continue
-        const productId = row.product?.id
-        const inventoryItemId = String(raw.inventoryItemId ?? raw.id ?? '').trim()
-        const tag = raw.externalTrackCode?.trim() ?? ''
-        if (
-          productId === undefined ||
-          productId < 1 ||
-          !Number.isFinite(raw.currentQty) ||
-          inventoryItemId === '' ||
-          tag === ''
-        ) {
-          throw new Error('Grouped inventory returned a malformed positive trade sample.')
-        }
-        const candidate: TradeSampleZeroItem = { currentQty: raw.currentQty, externalTrackCode: tag, inventoryItemId,
-          packageLabel: null, productId, productName: row.product?.name ?? null, productSku: row.product?.sku ?? null }
-        const identity = JSON.stringify([candidate, raw.isTradeSample])
-        const prior = seen.get(inventoryItemId)
-        if (prior !== undefined && prior !== identity) throw new Error(`Conflicting duplicate inventory item ${inventoryItemId}.`)
-        seen.set(inventoryItemId, identity)
-        byId.set(inventoryItemId, candidate)
-      }
-    }
-    if (rowsRead === expectedTotal) break
-    if (parsed.data.length !== PAGE_SIZE) throw new Error('Grouped inventory returned incomplete pagination.')
-  }
-  if (expectedTotal === null || rowsRead !== expectedTotal) throw new Error('Grouped inventory pagination did not complete.')
-  if (byId.size > MAX_CANDIDATES) throw new TradeSampleZeroCandidateLimitError(`More than ${MAX_CANDIDATES} trade samples require adjustment; narrow the operation before retrying.`)
-  return [...byId.values()].sort((a, b) => a.productId - b.productId || a.inventoryItemId.localeCompare(b.inventoryItemId))
-}
-
-async function getExactItem(dealerId: number, item: TradeSampleZeroItem, deps: TradeSampleZeroDeps): Promise<z.infer<typeof ItemDetailSchema>> {
-  const detail = ItemDetailSchema.parse(await deps.rpc(dealerId, 'store.inventory.item.get', { inventoryItemId: item.inventoryItemId }))
-  if (String(detail.id) !== item.inventoryItemId || detail.externalTrackCode !== item.externalTrackCode) throw new Error('Inventory item identity or tag changed.')
-  return detail
-}
-
-export async function previewTradeSampleZero(dealerId: number, injected?: TradeSampleZeroDeps): Promise<TradeSampleZeroPreviewResponse> {
-  requireSite(dealerId)
-  const items = await liveItems(dealerId, injected ?? defaultDeps())
-  return { digest: tradeSampleZeroDigest(dealerId, items), items, siteDealerId: dealerId }
-}
-
+const RowSchema = z.object({ product: z.object({ id: z.coerce.number().int().optional(), name: z.string().nullable().optional(), sku: z.string().nullable().optional() }).optional(), items: z.array(ItemSchema) }).passthrough()
+const GroupedSchema = z.object({ data: z.array(RowSchema), totalCount: IntegerSchema.pipe(z.number().nonnegative()) }).passthrough()
+const LocationSchema = z.object({ id: IntegerSchema, name: z.string(), enabled: z.boolean().optional(), stockType: z.object({ id: IntegerSchema }).nullable().optional() }).passthrough()
+const DetailSchema = ItemSchema.extend({ id: z.union([z.string(), z.number()]), currentQty: NumberSchema, availableQty: NumberSchema, externalTrackCode: z.string(), isTradeSample: z.boolean() })
+type Location = z.infer<typeof TradeSampleLocationSchema>
+export interface TradeSampleZeroDeps { rpc: typeof callSweedRpc; previewSecret?: string }
+const deps = (): TradeSampleZeroDeps => ({ rpc: callSweedRpc })
 export class TradeSampleZeroStaleError extends Error {}
-export class TradeSampleZeroBusyError extends Error {}
 export class TradeSampleZeroCandidateLimitError extends Error {}
+export class TradeSampleTargetError extends Error {}
 
-export async function applyTradeSampleZero(input: { actorUserId: number; confirmation: string; digest: string; items: TradeSampleZeroItem[]; requestId: string | null; siteDealerId: number }, injected?: TradeSampleZeroDeps): Promise<TradeSampleZeroApplyResponse> {
-  requireSite(input.siteDealerId)
-  if (input.confirmation !== 'ZERO TRADE SAMPLES') throw new Error('Confirmation must exactly match ZERO TRADE SAMPLES.')
-  if (tradeSampleZeroDigest(input.siteDealerId, input.items) !== input.digest) throw new TradeSampleZeroStaleError('Preview digest does not match submitted items.')
-  const deps = injected ?? defaultDeps()
-  return deps.withLock(input.siteDealerId, async () => {
-    const current = await liveItems(input.siteDealerId, deps)
-    if (tradeSampleZeroDigest(input.siteDealerId, current) !== input.digest) throw new TradeSampleZeroStaleError('Trade sample inventory changed; refresh the preview. No adjustments were made.')
-
-    const outcomes: TradeSampleZeroApplyResponse['outcomes'] = []
-    for (let index = 0; index < input.items.length; index += 1) {
-      const item = input.items[index]!
-      let late: z.infer<typeof ItemDetailSchema>
-      try {
-        late = await getExactItem(input.siteDealerId, item, deps)
-      } catch {
-        late = { id: '', currentQty: Number.NaN, externalTrackCode: '', isTradeSample: false }
-      }
-      if (late.isTradeSample !== true || late.currentQty !== item.currentQty) {
-        for (const remaining of input.items.slice(index)) outcomes.push({ inventoryItemId: remaining.inventoryItemId, status: 'not_applied_stale', error: 'Inventory changed before adjustment; no further items were applied.' })
-        break
-      }
-      const metadata = { before: item.currentQty, delta: -item.currentQty, externalTrackCode: item.externalTrackCode,
-        integrationReasonId: 197, inventoryItemId: item.inventoryItemId, note: 'sample use', productId: item.productId, reasonId: 20 }
-      const auditBase = { actorType: 'user' as const, actorUserId: input.actorUserId, entityId: `${input.siteDealerId}:${item.inventoryItemId}`,
-        entityType: 'trade_sample_inventory_item' as const, module: 'catalog' as const, requestId: input.requestId, scope: null, undoPayload: null }
-      try {
-        await deps.audit(deps.db, { ...auditBase, eventType: 'trade_sample.zero.attempted', payload: metadata })
-      } catch (error) {
-        console.error(`[trade-sample-zero] attempted audit failed request=${input.requestId ?? 'unknown'} item=${item.inventoryItemId}`, error)
-        for (const remaining of input.items.slice(index)) {
-          outcomes.push({
-            inventoryItemId: remaining.inventoryItemId,
-            status: 'not_applied_audit_failure',
-            error: 'Audit recording failed; this and all remaining packages were not applied.',
-          })
-        }
-        break
-      }
-
-      let status: 'completed' | 'failed_unknown' = 'completed'
-      let rpcError: unknown
-      try {
-        await deps.rpc(input.siteDealerId, 'store.inventory.item.adjust', { reasonId: 20, integrationReasonId: 197, note: 'sample use',
-          items: [{ qty: -item.currentQty, id: item.inventoryItemId, externalTrackCode: item.externalTrackCode }], isInternal: false })
-        const after = await getExactItem(input.siteDealerId, item, deps)
-        if (after.currentQty !== 0) throw new Error('Post-adjustment quantity was not exactly zero.')
-      } catch (error) {
-        status = 'failed_unknown'
-        rpcError = error
-      }
-
-      const eventType = status === 'completed' ? 'trade_sample.zero.completed' as const : 'trade_sample.zero.failed' as const
-      const payload = status === 'completed' ? { ...metadata, after: 0 } : { ...metadata, error: rpcError instanceof Error ? rpcError.message : 'Unknown failure', outcome: 'failed_unknown' }
-      try {
-        await deps.audit(deps.db, { ...auditBase, eventType, payload })
-      } catch (error) {
-        console.error(`[trade-sample-zero] terminal audit failed request=${input.requestId ?? 'unknown'} item=${item.inventoryItemId}`, error)
-        status = 'failed_unknown'
-      }
-      outcomes.push(status === 'completed' ? { inventoryItemId: item.inventoryItemId, status } : { inventoryItemId: item.inventoryItemId, status, error: 'Adjustment outcome is unknown; inspect this package in Sweed.' })
-    }
-    return { counts: { completed: outcomes.filter((x) => x.status === 'completed').length,
-      failedUnknown: outcomes.filter((x) => x.status === 'failed_unknown').length,
-      notAppliedStale: outcomes.filter((x) => x.status === 'not_applied_stale').length,
-      notAppliedAuditFailure: outcomes.filter((x) => x.status === 'not_applied_audit_failure').length }, outcomes }
-  })
+function requireSite(id: number): void { if (getHeliosPendingPurchaseSiteDealer(id) === null) throw new Error(`Unknown siteDealerId ${id}.`) }
+function unwrap(raw: unknown): unknown { return raw && typeof raw === 'object' && 'result' in raw ? (raw as { result: unknown }).result : raw }
+export async function resolveTradeSampleDestination(dealerId: number, d: TradeSampleZeroDeps = deps()): Promise<Location> {
+  const raw = unwrap(await d.rpc(dealerId, 'store.stock.location.list', {}))
+  const list = z.union([z.array(LocationSchema), z.object({ data: z.array(LocationSchema) }).transform(v => v.data)]).parse(raw)
+  const matches = list.filter((location) =>
+    location.enabled === true
+    && !/^\s*(dead|deleted|retired)\b/i.test(location.name)
+    && location.name === TRADE_SAMPLE_LOCATION_NAME
+    && location.stockType?.id,
+  )
+  if (matches.length !== 1) throw new TradeSampleTargetError(`Expected exactly one enabled location named "${TRADE_SAMPLE_LOCATION_NAME}"; found ${matches.length}.`)
+  return { id: matches[0]!.id, name: TRADE_SAMPLE_LOCATION_NAME, stockTypeId: matches[0]!.stockType!.id }
 }
+
+export async function readLiveInventory(dealerId: number, d: TradeSampleZeroDeps = deps()): Promise<Array<TradeSampleZeroItem & { isTradeSample: boolean }>> {
+  const byId = new Map<string, TradeSampleZeroItem & { isTradeSample: boolean }>()
+  let total: number | null = null
+  let read = 0
+  for (let page = 1; page <= 10_000; page++) {
+    const p = GroupedSchema.parse(unwrap(await d.rpc(dealerId, 'store.inventory.item.list.grouped', { page, pageSize: PAGE_SIZE, isOnStock: true })))
+    total ??= p.totalCount; if (p.totalCount !== total) throw new TradeSampleZeroStaleError('Inventory changed during pagination.'); read += p.data.length
+    for (const row of p.data) for (const x of row.items) {
+      if ((x.currentQty ?? 0) <= 0) continue
+      const id = String(x.inventoryItemId ?? x.id ?? '').trim(), tag = x.externalTrackCode?.trim() ?? '', productId = row.product?.id
+      if (!id || !tag || !productId || x.currentQty == null || x.availableQty == null || !x.stockLocation?.id || !x.stockLocation.name || !x.stockType?.id) throw new TradeSampleZeroStaleError('Live inventory has invalid package/source metadata.')
+      const item = { inventoryItemId: id, externalTrackCode: tag, currentQty: x.currentQty, availableQty: x.availableQty, isTradeSample: x.isTradeSample === true,
+        sourceLocationId: x.stockLocation.id, sourceLocationName: x.stockLocation.name, sourceStockTypeId: x.stockType.id,
+        packageLabel: null, productId, productName: row.product?.name ?? null, productSku: row.product?.sku ?? null }
+      const previous = byId.get(id)
+      if (previous && JSON.stringify(previous) !== JSON.stringify(item)) {
+        throw new TradeSampleZeroStaleError(`Conflicting duplicate inventory ID ${id}.`)
+      }
+      byId.set(id, item)
+    }
+    if (read === total) return [...byId.values()]
+    if (!p.data.length || read > total || p.data.length !== PAGE_SIZE) throw new TradeSampleZeroStaleError('Inventory pagination was incomplete.')
+  }
+  throw new TradeSampleZeroStaleError('Inventory pagination limit exceeded.')
+}
+
+export function assertTargetContents(all: Array<TradeSampleZeroItem & { isTradeSample: boolean }>, destination: Location, expected: TradeSampleZeroItem[] = []): void {
+  const actual = all.filter(x => x.sourceLocationId === destination.id)
+  if (actual.length !== expected.length) throw new TradeSampleTargetError(`"${TRADE_SAMPLE_LOCATION_NAME}" is occupied or contains an unexpected package.`)
+  const byId = new Map(actual.map(x => [x.inventoryItemId, x]))
+  for (const expectedItem of expected) {
+    const actualItem = byId.get(expectedItem.inventoryItemId)
+    if (
+      !actualItem
+      || !actualItem.isTradeSample
+      || actualItem.externalTrackCode !== expectedItem.externalTrackCode
+      || actualItem.currentQty !== expectedItem.currentQty
+      || actualItem.availableQty !== expectedItem.currentQty
+      || actualItem.sourceLocationName !== TRADE_SAMPLE_LOCATION_NAME
+      || actualItem.sourceStockTypeId !== destination.stockTypeId
+    ) {
+      throw new TradeSampleTargetError('Dedicated location contents do not exactly match the staged trade samples.')
+    }
+  }
+}
+
+export function tradeSampleZeroDigest(
+  dealerId: number,
+  items: readonly TradeSampleZeroItem[],
+  destination?: Location,
+): string {
+  const canonicalItems = [...items]
+    .sort((left, right) => left.inventoryItemId.localeCompare(right.inventoryItemId))
+    .map((item) => [
+      item.inventoryItemId,
+      item.externalTrackCode,
+      item.currentQty,
+      item.availableQty,
+      item.productId,
+      item.productName,
+      item.productSku,
+      item.packageLabel,
+      item.sourceLocationId,
+      item.sourceLocationName,
+      item.sourceStockTypeId,
+    ])
+  const canonicalDestination = destination
+    ? [destination.id, destination.name, destination.stockTypeId]
+    : null
+  return createHash('sha256')
+    .update(JSON.stringify([dealerId, canonicalDestination, canonicalItems]))
+    .digest('hex')
+}
+export async function previewTradeSampleZero(dealerId: number, d: TradeSampleZeroDeps = deps()): Promise<TradeSampleZeroPreviewResponse> {
+  requireSite(dealerId); const destination = await resolveTradeSampleDestination(dealerId, d); const all = await readLiveInventory(dealerId, d); assertTargetContents(all, destination)
+  const items = all.filter(x => x.isTradeSample).map(({ isTradeSample: _, ...x }) => x)
+  if (items.some(x => x.availableQty !== x.currentQty)) throw new TradeSampleZeroStaleError('A trade sample has reservations; available quantity must equal current quantity.')
+  if (items.length > 500) throw new TradeSampleZeroCandidateLimitError('More than 500 trade samples require staging.')
+  const digest = tradeSampleZeroDigest(dealerId, items, destination), previewId = randomUUID(), capability = { digest, destination, expiresAt: Date.now() + PREVIEW_TTL_MS, previewId, siteDealerId: dealerId }
+  const encoded = Buffer.from(JSON.stringify(capability)).toString('base64url'), secret = d.previewSecret ?? getServerEnv().sessionCookieSecret
+  return { digest, destination, items, previewId, siteDealerId: dealerId, previewToken: `${encoded}.${createHmac('sha256', secret).update(encoded).digest('base64url')}` }
+}
+export function verifyTradeSampleZeroPreview(input: TradeSampleZeroPreviewResponse, secret = getServerEnv().sessionCookieSecret, now = Date.now()): boolean {
+  const [encoded, sig, extra] = input.previewToken.split('.'); if (!encoded || !sig || extra) return false
+  try { const expected = createHmac('sha256', secret).update(encoded).digest(), supplied = Buffer.from(sig, 'base64url'); const p = JSON.parse(Buffer.from(encoded, 'base64url').toString()) as { digest:string; destination:Location; expiresAt:number; previewId:string; siteDealerId:number }
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected) && p.expiresAt >= now && p.expiresAt <= now + PREVIEW_TTL_MS && p.previewId === input.previewId && p.siteDealerId === input.siteDealerId && p.digest === input.digest && JSON.stringify(p.destination) === JSON.stringify(input.destination) && tradeSampleZeroDigest(input.siteDealerId, input.items, input.destination) === input.digest
+  } catch { return false }
+}
+export async function readExactItem(dealerId: number, expected: TradeSampleZeroItem, d: TradeSampleZeroDeps = deps()): Promise<z.infer<typeof DetailSchema>> { const x = DetailSchema.parse(unwrap(await d.rpc(dealerId, 'store.inventory.item.get', { inventoryItemId: expected.inventoryItemId }))); if (String(x.id) !== expected.inventoryItemId || x.externalTrackCode !== expected.externalTrackCode) throw new TradeSampleZeroStaleError('Package identity changed.'); return x }

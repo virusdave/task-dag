@@ -24,6 +24,26 @@ interface LeaseLoopOptions {
   maxAttempts: number
 }
 
+export function classifyWorkerFailure(jobType: JobType, error: unknown): {
+  dependencyUnavailable: boolean
+  delayMs: number | undefined
+  destructiveTradeSample: boolean
+  message: string
+} {
+  // Classify the original error before applying the destructive-job terminal policy.
+  const dependencyUnavailable = isDependencyUnavailableWorkerError(error)
+  const destructiveTradeSample = jobType === 'catalog.inventory.stage_trade_samples'
+    || jobType === 'catalog.inventory.zero_trade_samples'
+  return {
+    dependencyUnavailable,
+    delayMs: dependencyUnavailable ? error.delayMs ?? undefined : undefined,
+    destructiveTradeSample,
+    message: destructiveTradeSample
+      ? 'Destructive trade-sample operation stopped safely; inspect Sweed. It will not retry automatically.'
+      : error instanceof Error ? error.message : 'Unknown worker error.',
+  }
+}
+
 /**
  * Runs both the main lease loop and a dedicated high-priority
  * fast-lane loop in parallel inside the same worker process.
@@ -174,12 +194,16 @@ async function runLeaseLoop(opts: LeaseLoopOptions): Promise<never> {
           await withJobAuthContext({ jobId: job.id, jobType: job.jobType }, async () => {
             try {
               await ensureDependenciesReadyForJob(job.jobType, job.payload)
-              await runJob({ id: job.id, jobType: job.jobType, module: job.module, payload: job.payload, scope: job.scope })
+              await runJob({ id: job.id, jobType: job.jobType, leaseToken: job.leaseToken, module: job.module, payload: job.payload, scope: job.scope })
               await markJobSucceeded(job.id, job.leaseToken)
             } catch (error) {
-              const message = error instanceof Error ? error.message : 'Unknown worker error.'
-              if (isDependencyUnavailableWorkerError(error)) {
-                const delayMs = error.delayMs ?? getRetryDelayMs(0, opts.retryBaseDelayMs)
+              const failure = classifyWorkerFailure(job.jobType, error)
+              if (failure.destructiveTradeSample) {
+                await markJobFailed(job.id, job.leaseToken, failure.message)
+                return
+              }
+              if (failure.dependencyUnavailable) {
+                const delayMs = failure.delayMs ?? getRetryDelayMs(0, opts.retryBaseDelayMs)
                 // Synthesize a sweed_auth_events row so the job detail
                 // page can show *why* a job is stuck "queued" forever.
                 // The probe itself already logs its own row when it
@@ -194,26 +218,26 @@ async function runLeaseLoop(opts: LeaseLoopOptions): Promise<never> {
                   dealerId: null,
                   outcome: 'retryable',
                   httpStatus: null,
-                  errorMessage: message,
+                  errorMessage: failure.message,
                   durationMs: 0,
                   context: { deferredMs: delayMs, jobType: job.jobType },
                 })
-                await markJobDeferred(job.id, job.leaseToken, message, new Date(Date.now() + delayMs))
+                await markJobDeferred(job.id, job.leaseToken, failure.message, new Date(Date.now() + delayMs))
                 return
               }
 
               if (isRetryableWorkerError(error)) {
                 if (job.attemptCount >= opts.maxAttempts) {
-                  await markJobDeadLetter(job.id, job.leaseToken, message)
+                  await markJobDeadLetter(job.id, job.leaseToken, failure.message)
                   return
                 }
 
                 const delayMs = error.delayMs ?? getRetryDelayMs(job.attemptCount, opts.retryBaseDelayMs)
-                await markJobForRetry(job.id, job.leaseToken, message, new Date(Date.now() + delayMs))
+                await markJobForRetry(job.id, job.leaseToken, failure.message, new Date(Date.now() + delayMs))
                 return
               }
 
-              await markJobFailed(job.id, job.leaseToken, message)
+              await markJobFailed(job.id, job.leaseToken, failure.message)
             }
           })
         } finally {

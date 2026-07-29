@@ -239,6 +239,38 @@ export async function enqueueJobExactActive(
   return { inserted: true, jobId: inserted.rows[0].id }
 }
 
+/** Transaction-only, immutable one-use enqueue. Terminal rows also dedupe. */
+export async function enqueueJobExactOnce(
+  db: Queryable,
+  input: EnqueueJobInput & { dedupeKey: string },
+): Promise<ExactActiveEnqueueResult> {
+  await db.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [input.dedupeKey])
+  const existing = await db.query<JobRow & { exact_payload: boolean }>(
+    `select id, payload_json = $2::jsonb as exact_payload
+       from job_queue
+      where dedupe_key = $1
+        and status in ('queued', 'running', 'succeeded', 'failed', 'dead_letter')
+      limit 1`,
+    [input.dedupeKey, JSON.stringify(input.payload)],
+  )
+  if (existing.rows[0]) return { inserted: false, jobId: existing.rows[0].id, exactPayload: existing.rows[0].exact_payload }
+  const catalogGroupId = parseCatalogGroupIdFromModuleScope(input.module, input.scope)
+  const inserted = await db.query<JobRow>(
+    `insert into job_queue (
+       job_type, dedupe_key, concurrency_key, module_code, scope_entity_type,
+       scope_entity_id, catalog_group_id, payload_json, status, run_at,
+       requested_by_user_id, priority
+     ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 'queued', $9, $10, $11)
+     returning id`,
+    [input.jobType, input.dedupeKey, input.concurrencyKey ?? null, input.module,
+      input.scope?.entityType ?? null, input.scope?.entityId ?? null, catalogGroupId,
+      JSON.stringify(input.payload), input.runAt ?? new Date(), input.requestedByUserId ?? null,
+      input.priority ?? defaultPriorityFor(input)],
+  )
+  await notifyJobQueueEnqueued(db)
+  return { inserted: true, jobId: inserted.rows[0].id }
+}
+
 /**
  * Bulk plural variant of `enqueueJob`. Shipped as part of the
  * Helios DB-cost-reduction epic (virusdave/top-level#11, phase

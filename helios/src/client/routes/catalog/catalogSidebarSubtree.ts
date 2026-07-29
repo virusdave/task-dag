@@ -199,6 +199,12 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
     },
     {
       kind: 'leaf',
+      navKey: 'catalog.trade-samples',
+      label: 'Trade samples',
+      to: '/catalog/inventory/trade-samples',
+    },
+    {
+      kind: 'leaf',
       // Edible THC clamp lives in the same catalog-maintenance vein as
       // Images & Barcodes — both are floor-operator-driven catalog fixups
       // that shouldn't live under config/workers/scheduling alongside the
