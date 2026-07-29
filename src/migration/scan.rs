@@ -8,6 +8,7 @@ pub(super) struct LegacyTask {
     pub(super) state: String,
     pub(super) owner: String,
     pub(super) title: String,
+    pub(super) description: String,
     pub(super) requires: Vec<String>,
     pub(super) lifecycle: Vec<(String, String)>,
 }
@@ -102,19 +103,11 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
     if metadata > 10 * 1024 * 1024 {
         return Err("migration metadata exceeds 10MiB".into());
     }
-    let mut closure = BTreeSet::from([root.to_owned()]);
-    let mut queue = VecDeque::from([root.to_owned()]);
-    while let Some(parent) = queue.pop_front() {
-        for task in task_states.keys() {
-            if !closure.contains(task) && git::parents(task)?.contains(&parent) {
-                closure.insert(task.clone());
-                queue.push_back(task.clone());
-                if closure.len() > 100 {
-                    return Err("migration closure exceeds 100 tasks".into());
-                }
-            }
-        }
-    }
+    let task_parents: BTreeMap<_, _> = task_states
+        .keys()
+        .map(|task| Ok((task.clone(), git::parents(task)?)))
+        .collect::<Result<_>>()?;
+    let closure = descendant_closure(root, &task_parents, 100)?;
     inspect_graph(&graph, &closure, &mut metadata)?;
     let guard = parse_guard(&activation)?;
     let mut tasks = Vec::new();
@@ -123,6 +116,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         state: "pending".into(),
         owner: String::new(),
         title: subject(root)?,
+        description: description(root)?,
         requires: vec![],
         lifecycle: vec![(pending[0].0.clone(), pending[0].1.clone())],
     });
@@ -135,8 +129,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         let next = remaining
             .iter()
             .find(|t| {
-                git::parents(t)
-                    .unwrap_or_default()
+                task_parents[*t]
                     .iter()
                     .filter(|p| closure.contains(*p) && p.as_str() != root)
                     .all(|p| !remaining.contains(p))
@@ -151,8 +144,9 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         if states[0].0 == "blocked" {
             return Err("blocked legacy state in migration closure is unsupported".into());
         }
-        let requires = git::parents(&next)?
-            .into_iter()
+        let requires = task_parents[&next]
+            .iter()
+            .cloned()
             .filter(|p| closure.contains(p) && p != root)
             .collect();
         let owner = if states[0].0 == "active" {
@@ -165,6 +159,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
             state: states[0].0.clone(),
             owner,
             title: subject(&next)?,
+            description: description(&next)?,
             requires,
             lifecycle: vec![(states[0].1.clone(), states[0].2.clone())],
         });
@@ -193,12 +188,43 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         digest,
     })
 }
+
+fn descendant_closure(
+    root: &str,
+    task_parents: &BTreeMap<String, Vec<String>>,
+    limit: usize,
+) -> Result<BTreeSet<String>> {
+    let mut closure = BTreeSet::from([root.to_owned()]);
+    let mut queue = VecDeque::from([root.to_owned()]);
+    while let Some(parent) = queue.pop_front() {
+        for (task, parents) in task_parents {
+            if !closure.contains(task) && parents.contains(&parent) {
+                closure.insert(task.clone());
+                queue.push_back(task.clone());
+                if closure.len() > limit {
+                    return Err(format!("migration closure exceeds {limit} tasks"));
+                }
+            }
+        }
+    }
+    Ok(closure)
+}
+
 fn subject(oid: &str) -> Result<String> {
     let s = git::output(["show", "-s", "--format=%s", oid])?
         .trim()
         .to_owned();
     model::bounded("legacy title", &s, 512)?;
     Ok(s)
+}
+fn description(oid: &str) -> Result<String> {
+    let body = git::output(["show", "-s", "--format=%s%n%n%b", oid])?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    model::bounded("legacy description", &body, 16_384)
+        .map_err(|error| format!("{error} for {oid}"))?;
+    Ok(body)
 }
 fn owner(oid: &str) -> Result<String> {
     let body = git::output(["show", "-s", "--format=%B", oid])?;
@@ -212,6 +238,42 @@ fn owner(oid: &str) -> Result<String> {
     let value = values[0];
     model::bounded("legacy owner", value, 256)?;
     Ok(value.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::descendant_closure;
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
+
+    proptest! {
+        #[test]
+        fn discovered_closure_is_a_bounded_reachability_fixed_point(
+            node_count in 1_usize..32,
+            edges in prop::collection::vec(any::<bool>(), 1..1024),
+        ) {
+            let mut parents = BTreeMap::new();
+            for node in 0..node_count {
+                let mut node_parents = Vec::new();
+                if edges[node % edges.len()] {
+                    node_parents.push("root".to_owned());
+                }
+                for parent in 0..node_count {
+                    if edges[(node * node_count + parent + 1) % edges.len()] {
+                        node_parents.push(format!("node-{parent}"));
+                    }
+                }
+                parents.insert(format!("node-{node}"), node_parents);
+            }
+            let closure = descendant_closure("root", &parents, node_count + 1).unwrap();
+            prop_assert!(closure.contains("root"));
+            prop_assert!(closure.len() <= node_count + 1);
+            for (task, task_parents) in &parents {
+                let has_reachable_parent = task_parents.iter().any(|parent| closure.contains(parent));
+                prop_assert_eq!(closure.contains(task), has_reachable_parent);
+            }
+        }
+    }
 }
 
 struct Guard {

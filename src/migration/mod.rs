@@ -46,7 +46,7 @@ pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
         } else {
             json!({"taskId":root_id,"taskOid":task_oids[root]})
         };
-        let value = json!({"description":format!("Imported from legacy v1 task {}",legacy.task),"formatVersion":2,"operationId":operation,"requirements":requirements,"structuralParent":structural,"taskId":ids[&legacy.task],"title":legacy.title});
+        let value = json!({"description":legacy.description,"formatVersion":2,"operationId":operation,"requirements":requirements,"structuralParent":structural,"taskId":ids[&legacy.task],"title":legacy.title});
         let mut parents = Vec::new();
         if legacy.task != root {
             parents.push(task_oids[root].clone());
@@ -89,26 +89,42 @@ pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
         children.push(json!({"claimToken":tokens.get(id),"owner":if state=="active"{json!(format!("migration:{}",legacy.owner))}else{Value::Null},"ref":state_ref,"stateOid":state_oid,"taskId":id,"taskOid":task}));
     }
     let root_task = &task_oids[root];
-    let manifest = git::commit(
-        &json!({"children":children,"formatVersion":2,"operationId":operation,"semanticId":semantic,"parentTaskId":root_id,"parentTaskOid":root_task}),
-        &[
-            vec![root.to_owned(), root_task.clone()],
-            frozen
-                .tasks
-                .iter()
-                .filter(|t| t.task != root)
-                .map(|t| task_oids[&t.task].clone())
-                .collect(),
-        ]
-        .concat(),
-    )?;
-    let waiting_ref = model::state_ref("waiting", &root_id);
-    updates.push(Update {
-        semantic_ref: waiting_ref.clone(),
-        old: None,
-        new: Some(manifest.clone()),
-    });
-    outputs.push((waiting_ref, manifest));
+    if children.is_empty() {
+        let frontier = git::commit(
+            &json!({"formatVersion":2,"operationId":operation,"semanticId":semantic,"taskId":root_id,"taskOid":root_task}),
+            std::slice::from_ref(root_task),
+        )?;
+        crate::validators::lifecycle("frontier", &frontier, &root_id)?;
+        let frontier_ref = model::state_ref("frontier", &root_id);
+        updates.push(Update {
+            semantic_ref: frontier_ref.clone(),
+            old: None,
+            new: Some(frontier.clone()),
+        });
+        outputs.push((frontier_ref, frontier));
+    } else {
+        let manifest = git::commit(
+            &json!({"children":children,"formatVersion":2,"operationId":operation,"semanticId":semantic,"parentTaskId":root_id,"parentTaskOid":root_task}),
+            &[
+                vec![root.to_owned(), root_task.clone()],
+                frozen
+                    .tasks
+                    .iter()
+                    .filter(|t| t.task != root)
+                    .map(|t| task_oids[&t.task].clone())
+                    .collect(),
+            ]
+            .concat(),
+        )?;
+        crate::validators::waiting(&manifest, &root_id)?;
+        let waiting_ref = model::state_ref("waiting", &root_id);
+        updates.push(Update {
+            semantic_ref: waiting_ref.clone(),
+            old: None,
+            new: Some(manifest.clone()),
+        });
+        outputs.push((waiting_ref, manifest));
+    }
     for legacy in &frozen.tasks {
         let mapping_ref = format!("refs/heads/tasks/v2/imports/v1/by-sha/{}", legacy.task);
         let mapping = git::commit(

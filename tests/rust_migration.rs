@@ -62,7 +62,7 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-    fn new(blocked_in_closure: bool) -> Self {
+    fn new(blocked_in_closure: bool, singleton: bool) -> Self {
         let root_dir = std::env::temp_dir().join(format!(
             "taskdag-migration-{}-{}",
             std::process::id(),
@@ -111,7 +111,7 @@ impl Fixture {
         .unwrap()
         .to_owned();
 
-        let root = commit(&work, "Root", &[]);
+        let root = commit(&work, "Root\n\nLegacy project context", &[]);
         let active = commit(&work, "Active child", &[&root]);
         let a = commit(&work, "Frontier A", &[&root, &active]);
         let b = commit(&work, "Frontier B", &[&root, &a]);
@@ -139,11 +139,13 @@ impl Fixture {
 
         let mut refs = BTreeMap::new();
         refs.insert("refs/heads/tasks/pending/root".into(), root.clone());
-        refs.insert("refs/heads/tasks/active/active".into(), claim_a);
-        refs.insert("refs/heads/tasks/frontier/a".into(), a.clone());
-        refs.insert("refs/heads/tasks/frontier/b".into(), b.clone());
-        refs.insert("refs/heads/tasks/frontier/c".into(), c.clone());
-        refs.insert("refs/heads/tasks/active/sibling".into(), claim_sibling);
+        if !singleton {
+            refs.insert("refs/heads/tasks/active/active".into(), claim_a);
+            refs.insert("refs/heads/tasks/frontier/a".into(), a.clone());
+            refs.insert("refs/heads/tasks/frontier/b".into(), b.clone());
+            refs.insert("refs/heads/tasks/frontier/c".into(), c.clone());
+            refs.insert("refs/heads/tasks/active/sibling".into(), claim_sibling);
+        }
         refs.insert(
             "refs/heads/tasks/pending/other-root".into(),
             other_root.clone(),
@@ -311,8 +313,58 @@ impl Fixture {
 }
 
 #[test]
+fn singleton_pending_root_becomes_open_frontier_with_preserved_context() {
+    let f = Fixture::new(false, true);
+    let out = f.migrate("migration-singleton", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["mapping"].as_object().unwrap().len(), 1);
+    assert!(result["claimTokens"].as_object().unwrap().is_empty());
+    let root_id = result["rootTaskId"].as_str().unwrap();
+    assert!(
+        f.remote(&format!("refs/heads/tasks/frontier/{root_id}"))
+            .is_some()
+    );
+    assert!(
+        f.remote(&format!("refs/heads/tasks/waiting/{root_id}"))
+            .is_none()
+    );
+    assert!(f.remote("refs/heads/tasks/pending/root").is_none());
+    let context = Fixture::run_raw(&f.work, &["context", root_id], None, None);
+    assert!(context.status.success());
+    let context: Value = serde_json::from_slice(&context.stdout).unwrap();
+    assert_eq!(context["state"], "frontier");
+    assert_eq!(
+        context["task"]["description"],
+        "Root Legacy project context"
+    );
+    let claim = Fixture::run_raw(
+        &f.work,
+        &[
+            "claim",
+            root_id,
+            "--owner",
+            "migrated-project-worker",
+            "--operation-id",
+            "claim-migrated-project",
+        ],
+        None,
+        Some("migrated-project-token"),
+    );
+    assert!(
+        claim.status.success(),
+        "{}",
+        String::from_utf8_lossy(&claim.stderr)
+    );
+}
+
+#[test]
 fn migrates_exact_closure_deterministically_and_preserves_unrelated_state() {
-    let f = Fixture::new(false);
+    let f = Fixture::new(false, false);
     let journal_before = f.remote("refs/heads/tasks/system/transitions").unwrap();
     let out = f.migrate("migration-main", None);
     assert!(
@@ -442,7 +494,7 @@ fn migrates_exact_closure_deterministically_and_preserves_unrelated_state() {
 
 #[test]
 fn ambiguous_success_replays_identical_result() {
-    let f = Fixture::new(false);
+    let f = Fixture::new(false, false);
     let failed = f.migrate(
         "migration-ambiguous",
         Some(("TASKDAG_TEST_FAIL_AFTER_PUSH", "1")),
@@ -469,7 +521,7 @@ fn ambiguous_success_replays_identical_result() {
 
 #[test]
 fn malformed_closure_and_touching_graph_fail_without_mutation() {
-    let f = Fixture::new(true);
+    let f = Fixture::new(true, false);
     let touching = Fixture::graph_commit(&f.work, &f.root);
     ok(
         &f.work,
@@ -499,7 +551,7 @@ fn malformed_closure_and_touching_graph_fail_without_mutation() {
 
 #[test]
 fn activation_race_rejects_all_migration_updates() {
-    let f = Fixture::new(false);
+    let f = Fixture::new(false, false);
     let raced = commit(&f.work, "concurrent activation", &[&f.activation]);
     let out = f.migrate(
         "activation-race",
