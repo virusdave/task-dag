@@ -75,6 +75,15 @@ pub(crate) fn delegation_intent_ref(operation: &str) -> String {
         framed_digest("delegation-operation-key", &[operation])
     )
 }
+pub(crate) fn delegation_admission_ref(source_repository_id: &str, operation: &str) -> String {
+    format!(
+        "refs/heads/tasks/delegations/admissions/{}",
+        framed_digest(
+            "delegation-admission-key",
+            &[source_repository_id, operation]
+        )
+    )
+}
 pub(crate) fn parse_state_ref<'a>(r: &'a str, state: &str) -> Option<&'a str> {
     r.strip_prefix(&format!("refs/heads/tasks/{state}/"))
 }

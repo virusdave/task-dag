@@ -91,3 +91,61 @@ pub(crate) fn intent(oid: &str) -> Result<Value> {
     }
     Ok(value)
 }
+
+pub(crate) fn admission(oid: &str) -> Result<Value> {
+    let value = object(
+        oid,
+        "delegation admission",
+        &[
+            "fleetDigest",
+            "formatVersion",
+            "initialLifecycleOid",
+            "intentOid",
+            "operationId",
+            "sourceRepositoryId",
+            "targetRepositoryId",
+            "targetTaskId",
+            "targetTaskOid",
+        ],
+        &[&[]],
+    )?;
+    let intent_oid = value["intentOid"]
+        .as_str()
+        .ok_or("admission intent OID malformed")?;
+    let task_id = value["targetTaskId"]
+        .as_str()
+        .ok_or("admission target Task-ID malformed")?;
+    let task_oid = value["targetTaskOid"]
+        .as_str()
+        .ok_or("admission target Task OID malformed")?;
+    let lifecycle_oid = value["initialLifecycleOid"]
+        .as_str()
+        .ok_or("admission initial lifecycle OID malformed")?;
+    model::oid(intent_oid)?;
+    model::valid_id(task_id)?;
+    model::oid(task_oid)?;
+    model::oid(lifecycle_oid)?;
+    let parents = git::parents(oid)?;
+    if parents != [intent_oid, task_oid, lifecycle_oid] {
+        return Err("delegation admission parent ordering is malformed".into());
+    }
+    let intent = intent(intent_oid)?;
+    let task = super::task(task_oid, task_id)?;
+    let lifecycle = super::lifecycle("frontier", lifecycle_oid, task_id)?;
+    if value["operationId"] != intent["operationId"]
+        || value["sourceRepositoryId"] != intent["sourceRepositoryId"]
+        || value["targetRepositoryId"] != intent["targetRepositoryId"]
+        || value["fleetDigest"] != intent["fleetDigest"]
+        || value["targetTaskId"] != intent["targetTaskId"]
+        || task["operationId"] != intent["operationId"]
+        || task["title"] != intent["title"]
+        || task["description"] != intent["description"]
+        || task["requirements"] != serde_json::json!([])
+        || !task["structuralParent"].is_null()
+        || lifecycle["taskOid"] != task_oid
+        || lifecycle["operationId"] != intent["operationId"]
+    {
+        return Err("delegation admission does not match intent and Task".into());
+    }
+    Ok(value)
+}

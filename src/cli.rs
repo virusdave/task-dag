@@ -154,6 +154,7 @@ enum DepCommands {
 #[derive(Subcommand)]
 enum DelegateCommands {
     Create(DelegateCreate),
+    Admit(DelegateAdmit),
 }
 
 #[derive(Args)]
@@ -169,6 +170,14 @@ pub(crate) struct DelegateCreate {
     pub(crate) description: String,
     #[arg(long)]
     pub(crate) claim_token: String,
+}
+
+#[derive(Args)]
+pub(crate) struct DelegateAdmit {
+    #[arg(long)]
+    pub(crate) source_remote: String,
+    #[arg(long)]
+    pub(crate) operation_id: String,
 }
 
 #[derive(Args)]
@@ -307,6 +316,9 @@ pub(crate) fn run() -> Result<()> {
         Commands::Delegate {
             command: DelegateCommands::Create(args),
         } => commands::delegation::create(args),
+        Commands::Delegate {
+            command: DelegateCommands::Admit(args),
+        } => commands::delegation_admit::admit(args),
         Commands::Dep {
             command: DepCommands::Add(_),
         } => commands::unsupported::fail(

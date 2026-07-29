@@ -396,6 +396,73 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         )["state"],
         "waiting"
     );
+    let target_origin = root.join("target-origin.git");
+    ok(&root, &["init", "--bare", target_origin.to_str().unwrap()]);
+    let target_floor = ok(
+        source,
+        &[
+            "commit-tree",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "-m",
+            "delegation target floor",
+        ],
+    );
+    ok(
+        source,
+        &[
+            "push",
+            target_origin.to_str().unwrap(),
+            &format!("{target_floor}:refs/heads/master"),
+        ],
+    );
+    let target = root.join("target");
+    ok(
+        &root,
+        &[
+            "clone",
+            target_origin.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    );
+    ok(&target, &["config", "user.name", "test"]);
+    ok(&target, &["config", "user.email", "test@localhost"]);
+    ok(&target, &["fetch", source.to_str().unwrap(), runtime]);
+    success(
+        &target,
+        &[
+            "init",
+            "--trusted-floor",
+            &target_floor,
+            "--repository-id",
+            "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--fleet-repository-id",
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--fleet-repository-id",
+            "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+        "unused-token-000",
+        100,
+    );
+    let admit_args = [
+        "delegate",
+        "admit",
+        "--source-remote",
+        origin.to_str().unwrap(),
+        "--operation-id",
+        "delegation-fixture",
+    ];
+    uncertain(&target, &admit_args, "unused-token-000", 100);
+    let admitted = success(&target, &admit_args, "unused-token-000", 100);
+    assert_eq!(admitted["taskId"], delegated["targetTaskId"]);
+    assert_eq!(
+        success(
+            &target,
+            &["show", admitted["taskId"].as_str().unwrap()],
+            "unused-token-000",
+            100,
+        )["state"],
+        "frontier"
+    );
     assert_eq!(
         success(
             &a,

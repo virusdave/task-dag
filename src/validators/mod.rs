@@ -3,7 +3,7 @@ mod lifecycle;
 mod system;
 mod task;
 
-pub(crate) use delegation::intent;
+pub(crate) use delegation::{admission, intent};
 pub(crate) use lifecycle::{lifecycle, waiting};
 pub(crate) use system::{activation, activation_identity, journal};
 pub(crate) use task::task;
