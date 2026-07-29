@@ -11,6 +11,7 @@ fn main() {
     for path in ["Cargo.toml", "Cargo.lock", "build.rs", "src"] {
         println!("cargo:rerun-if-changed={path}");
     }
+    println!("cargo:rerun-if-env-changed=TASKDAG_TEST_COMPILED_COMMIT");
     let test_seam = env::var_os("CARGO_FEATURE_TEST_SEAM").is_some();
     let commit = if test_seam {
         env::var("TASKDAG_TEST_COMPILED_COMMIT")

@@ -29,7 +29,13 @@ fn ok(cwd: &Path, args: &[&str]) -> String {
 }
 fn commit(cwd: &Path, message: &str, parents: &[&str]) -> String {
     let mut command = Command::new("git");
-    command.current_dir(cwd).args(["commit-tree", EMPTY_TREE]);
+    command
+        .current_dir(cwd)
+        .args(["commit-tree", EMPTY_TREE])
+        .env("GIT_AUTHOR_NAME", "task-dag test")
+        .env("GIT_AUTHOR_EMAIL", "task-dag-test@localhost")
+        .env("GIT_COMMITTER_NAME", "task-dag test")
+        .env("GIT_COMMITTER_EMAIL", "task-dag-test@localhost");
     for parent in parents {
         command.args(["-p", parent]);
     }

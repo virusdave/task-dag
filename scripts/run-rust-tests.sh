@@ -20,7 +20,6 @@ esac
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
-if [[ -n ${TASKDAG_TEST_COMPILED_COMMIT:-} ]]; then
-    exec nix develop --command cargo test --locked --features test-seam "$@"
-fi
-exec nix develop --command cargo test --locked "$@"
+nix develop --command cargo build --locked
+export TASKDAG_TEST_COMPILED_COMMIT=${TASKDAG_TEST_COMPILED_COMMIT:-$(git rev-parse HEAD)}
+exec nix develop --command cargo test --locked --features test-seam "$@"

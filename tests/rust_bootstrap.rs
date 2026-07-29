@@ -8,6 +8,10 @@ fn git(cwd: &Path, args: &[&str]) -> Output {
     Command::new("git")
         .current_dir(cwd)
         .args(args)
+        .env("GIT_AUTHOR_NAME", "task-dag test")
+        .env("GIT_AUTHOR_EMAIL", "task-dag-test@localhost")
+        .env("GIT_COMMITTER_NAME", "task-dag test")
+        .env("GIT_COMMITTER_EMAIL", "task-dag-test@localhost")
         .output()
         .unwrap()
 }
