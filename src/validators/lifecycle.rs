@@ -3,6 +3,10 @@ use crate::{Result, git, model};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+fn delegated_task_matches(waiting: &Value, task_oid: &str) -> bool {
+    waiting["parentTaskOid"].as_str() == Some(task_oid)
+}
+
 pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
     let value = match state {
         "frontier" => object(
@@ -63,6 +67,7 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 &["attemptId", "oldMaster", "publicationCommit"],
                 &["attemptId", "authorization", "description", "evidence"],
                 &["children", "manifestOid", "operationId"],
+                &["acceptedOid", "intentOid", "operationId"],
             ],
         )?,
         _ => return Err(format!("unsupported lifecycle validator {state}")),
@@ -174,6 +179,29 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 }
             }
         }
+        "done" if value.get("acceptedOid").is_some() => {
+            let accepted_oid = value["acceptedOid"]
+                .as_str()
+                .ok_or("delegated done accepted OID malformed")?;
+            let intent_oid = value["intentOid"]
+                .as_str()
+                .ok_or("delegated done intent OID malformed")?;
+            model::oid(accepted_oid)?;
+            model::oid(intent_oid)?;
+            if parents.len() != 3 || parents[2] != accepted_oid {
+                return Err("delegated done immediate parent ordering is malformed".into());
+            }
+            let waiting = waiting(&parents[0], id)?;
+            let accepted = super::accepted(accepted_oid)?;
+            if !delegated_task_matches(&waiting, &task_oid)
+                || waiting["intentOid"] != intent_oid
+                || waiting["operationId"] != value["operationId"]
+                || accepted["intentOid"] != intent_oid
+                || accepted["operationId"] != value["operationId"]
+            {
+                return Err("delegated done does not match waiting and accepted evidence".into());
+            }
+        }
         "done" => {
             let manifest = value["manifestOid"]
                 .as_str()
@@ -230,6 +258,23 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
         _ => unreachable!(),
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delegated_task_matches;
+
+    #[test]
+    fn delegated_done_rejects_a_different_task_object_with_the_same_id() {
+        let waiting = serde_json::json!({
+            "parentTaskId": format!("v2-{}", "a".repeat(64)),
+            "parentTaskOid": "1111111111111111111111111111111111111111",
+        });
+        assert!(!delegated_task_matches(
+            &waiting,
+            "2222222222222222222222222222222222222222",
+        ));
+    }
 }
 
 fn validate_done_active_parent(parents: &[String], task_oid: &str, id: &str) -> Result<()> {

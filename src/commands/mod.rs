@@ -5,7 +5,10 @@ pub(crate) mod claim;
 pub(crate) mod claim_lifecycle;
 pub(crate) mod completion;
 pub(crate) mod delegation;
+pub(crate) mod delegation_accept;
 pub(crate) mod delegation_admit;
+pub(crate) mod delegation_export;
+pub(crate) mod delegation_status;
 pub(crate) mod readers;
 pub(crate) mod unsupported;
 

@@ -84,6 +84,24 @@ pub(crate) fn delegation_admission_ref(source_repository_id: &str, operation: &s
         )
     )
 }
+pub(crate) fn delegation_export_ref(source_repository_id: &str, operation: &str) -> String {
+    format!(
+        "refs/heads/tasks/delegations/exports/{}",
+        framed_digest(
+            "delegation-admission-key",
+            &[source_repository_id, operation]
+        )
+    )
+}
+pub(crate) fn delegation_accepted_ref(source_repository_id: &str, operation: &str) -> String {
+    format!(
+        "refs/heads/tasks/delegations/accepted/{}",
+        framed_digest(
+            "delegation-admission-key",
+            &[source_repository_id, operation]
+        )
+    )
+}
 pub(crate) fn parse_state_ref<'a>(r: &'a str, state: &str) -> Option<&'a str> {
     r.strip_prefix(&format!("refs/heads/tasks/{state}/"))
 }

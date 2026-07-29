@@ -463,6 +463,152 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         )["state"],
         "frontier"
     );
+    let target_claim = success(
+        &target,
+        &[
+            "claim",
+            admitted["taskId"].as_str().unwrap(),
+            "--owner",
+            "delegation-target-worker",
+            "--operation-id",
+            "delegation-target-claim",
+        ],
+        "delegation-target-token",
+        101,
+    );
+    success(
+        &target,
+        &[
+            "complete-ops",
+            admitted["taskId"].as_str().unwrap(),
+            "--description",
+            "delegated target complete",
+            "--authorization",
+            "fixture",
+            "--claim-token",
+            target_claim["claimToken"].as_str().unwrap(),
+        ],
+        "unused-token-000",
+        102,
+    );
+    let export_args = [
+        "delegate",
+        "export",
+        "--source-repository-id",
+        "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--operation-id",
+        "delegation-fixture",
+    ];
+    uncertain(&target, &export_args, "unused-token-000", 103);
+    let exported = success(&target, &export_args, "unused-token-000", 103);
+    assert!(exported["exportOid"].as_str().is_some());
+    let accept_args = [
+        "delegate",
+        "accept",
+        "--target-remote",
+        target_origin.to_str().unwrap(),
+        "--operation-id",
+        "delegation-fixture",
+    ];
+    uncertain(&a, &accept_args, "unused-token-000", 104);
+    let accepted = success(&a, &accept_args, "unused-token-000", 104);
+    assert_eq!(accepted["taskId"], delegated_source["taskId"]);
+    assert_eq!(
+        success(
+            &a,
+            &["show", delegated_source["taskId"].as_str().unwrap()],
+            "unused-token-000",
+            104,
+        )["state"],
+        "done"
+    );
+    let source_task_id = delegated_source["taskId"].as_str().unwrap();
+    let done_ref = format!("refs/heads/tasks/done/{source_task_id}");
+    let original_done = ok(&a, &["ls-remote", "origin", &done_ref])
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    ok(&a, &["fetch", "origin", &original_done]);
+    let original_done_value: serde_json::Value =
+        serde_json::from_str(&ok(&a, &["show", "-s", "--format=%B", &original_done])).unwrap();
+    let original_task_oid = original_done_value["taskOid"].as_str().unwrap();
+    let task_body = root.join("same-id-task.json");
+    fs::write(
+        &task_body,
+        ok(&a, &["show", "-s", "--format=%B", original_task_oid]),
+    )
+    .unwrap();
+    let other_task_oid = ok(
+        &a,
+        &[
+            "commit-tree",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "-F",
+            task_body.to_str().unwrap(),
+        ],
+    );
+    assert_ne!(other_task_oid, original_task_oid);
+    let mut malformed_done_value = original_done_value;
+    malformed_done_value["taskOid"] = serde_json::Value::String(other_task_oid.clone());
+    let malformed_body = root.join("same-id-malformed-done.json");
+    fs::write(
+        &malformed_body,
+        serde_json::to_vec(&malformed_done_value).unwrap(),
+    )
+    .unwrap();
+    let parents = ok(&a, &["show", "-s", "--format=%P", &original_done]);
+    let mut commit_tree_args = vec![
+        "commit-tree".to_owned(),
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned(),
+    ];
+    for (index, parent) in parents.split_whitespace().enumerate() {
+        commit_tree_args.extend([
+            "-p".to_owned(),
+            if index == 1 {
+                other_task_oid.clone()
+            } else {
+                parent.to_owned()
+            },
+        ]);
+    }
+    commit_tree_args.extend([
+        "-F".to_owned(),
+        malformed_body.to_string_lossy().into_owned(),
+    ]);
+    let commit_tree_refs: Vec<&str> = commit_tree_args.iter().map(String::as_str).collect();
+    let malformed_done = ok(&a, &commit_tree_refs);
+    ok(
+        &a,
+        &[
+            "push",
+            "--force",
+            "origin",
+            &format!("{malformed_done}:{done_ref}"),
+        ],
+    );
+    let malformed_show = cli(&a, &["show", source_task_id], "unused-token-000", 104);
+    assert!(
+        !malformed_show.status.success(),
+        "delegated done must reject a different Task object sharing its Task-ID"
+    );
+    ok(
+        &a,
+        &[
+            "push",
+            "--force",
+            "origin",
+            &format!("{original_done}:{done_ref}"),
+        ],
+    );
+    let delegation_status = success(
+        &a,
+        &["delegate", "status", "--operation-id", "delegation-fixture"],
+        "unused-token-000",
+        104,
+    );
+    assert!(delegation_status["intent"].as_str().is_some());
+    assert!(delegation_status["accepted"].as_str().is_some());
     assert_eq!(
         success(
             &a,

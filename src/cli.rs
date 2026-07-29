@@ -155,6 +155,9 @@ enum DepCommands {
 enum DelegateCommands {
     Create(DelegateCreate),
     Admit(DelegateAdmit),
+    Export(DelegateExport),
+    Accept(DelegateAccept),
+    Status(DelegateStatus),
 }
 
 #[derive(Args)]
@@ -178,6 +181,30 @@ pub(crate) struct DelegateAdmit {
     pub(crate) source_remote: String,
     #[arg(long)]
     pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct DelegateExport {
+    #[arg(long)]
+    pub(crate) source_repository_id: String,
+    #[arg(long)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct DelegateAccept {
+    #[arg(long)]
+    pub(crate) target_remote: String,
+    #[arg(long)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct DelegateStatus {
+    #[arg(long)]
+    pub(crate) operation_id: String,
+    #[arg(long)]
+    pub(crate) source_repository_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -319,6 +346,15 @@ pub(crate) fn run() -> Result<()> {
         Commands::Delegate {
             command: DelegateCommands::Admit(args),
         } => commands::delegation_admit::admit(args),
+        Commands::Delegate {
+            command: DelegateCommands::Export(args),
+        } => commands::delegation_export::export(args),
+        Commands::Delegate {
+            command: DelegateCommands::Accept(args),
+        } => commands::delegation_accept::accept(args),
+        Commands::Delegate {
+            command: DelegateCommands::Status(args),
+        } => commands::delegation_status::status(args),
         Commands::Dep {
             command: DepCommands::Add(_),
         } => commands::unsupported::fail(
