@@ -197,7 +197,7 @@ impl Fixture {
     }
 
     fn graph_commit(work: &Path, task: &str) -> String {
-        let edge = json!({"from":format!("task:owner/repo@{task}"),"to":"issue:owner/repo#42"});
+        let edge = json!({"from":format!("task:owner/repo@{task}"),"mode":"all","origin":{"repo-id":1,"witness":"fixture"},"relation":"requires","schema":1,"to":"issue:owner/repo#42"});
         let blob: String = {
             let mut child = Command::new("git")
                 .current_dir(work)
@@ -275,6 +275,26 @@ impl Fixture {
                 operation,
             ],
             extra,
+            Some("migration-token-0001"),
+        )
+    }
+    fn migrate_with_terminal_edge(&self, operation: &str, edge: &str) -> Output {
+        Self::run_raw(
+            &self.work,
+            &[
+                "migrate-v1",
+                "--root",
+                &self.root,
+                "--operation-id",
+                operation,
+                "--terminal-external-edge",
+                edge,
+                "--resolution-authorization",
+                "operator-approved terminal legacy prerequisite",
+                "--resolution-evidence",
+                "https://example.invalid/closed-prerequisite",
+            ],
+            None,
             Some("migration-token-0001"),
         )
     }
@@ -534,7 +554,9 @@ fn malformed_closure_and_touching_graph_fail_without_mutation() {
     );
     let out = f.migrate("touching-graph", None);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("edge touching migration closure"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("resolutions must exactly match graph edges")
+    );
     ok(
         &f.work,
         &[
@@ -547,6 +569,49 @@ fn malformed_closure_and_touching_graph_fail_without_mutation() {
     let out = f.migrate("blocked-closure", None);
     assert!(String::from_utf8_lossy(&out.stderr).contains("blocked legacy state"));
     f.assert_failure_untouched(&out);
+}
+
+#[test]
+fn exact_terminal_external_edge_is_preserved_as_immutable_provenance() {
+    let f = Fixture::new(false, true);
+    let touching = Fixture::graph_commit(&f.work, &f.root);
+    ok(
+        &f.work,
+        &[
+            "push",
+            &format!("--force-with-lease=refs/heads/tasks/v1/graph:{}", f.graph),
+            "origin",
+            &format!("{touching}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let edge = ok(
+        &f.work,
+        &["ls-tree", "-r", "--format=%(objectname)", &touching],
+    );
+    let out = f.migrate_with_terminal_edge("terminal-edge", &edge);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["terminalExternalEdges"], json!([edge]));
+    let mapping = f
+        .remote(&format!("refs/heads/tasks/v2/imports/v1/by-sha/{}", f.root))
+        .unwrap();
+    assert_eq!(
+        body(&f.work, &mapping)["provenance"]["terminalExternalEdges"],
+        json!({
+            "authorization":"operator-approved terminal legacy prerequisite",
+            "disposition":"terminal",
+            "edgeBlobOids":[edge],
+            "evidence":["https://example.invalid/closed-prerequisite"]
+        })
+    );
+    assert_eq!(
+        f.remote("refs/heads/tasks/v1/graph").as_deref(),
+        Some(touching.as_str())
+    );
 }
 
 #[test]
@@ -583,5 +648,38 @@ fn activation_race_rejects_all_migration_updates() {
             Some(oid.as_str()),
             "changed {reference}"
         );
+    }
+}
+
+#[test]
+fn graph_race_rejects_all_migration_updates() {
+    let f = Fixture::new(false, false);
+    let raced = commit(&f.work, "concurrent graph", &[]);
+    let out = f.migrate("graph-race", Some(("TASKDAG_TEST_RACE_V1_GRAPH", &raced)));
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("conflicting or indeterminate"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        f.remote("refs/heads/tasks/v1/graph").as_deref(),
+        Some(raced.as_str())
+    );
+    assert_eq!(
+        f.remote("refs/heads/tasks/v1/activation").as_deref(),
+        Some(f.activation.as_str())
+    );
+    assert!(
+        ok(
+            &f.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+    for (reference, oid) in &f.refs {
+        if !reference.contains("tasks/v1/") {
+            assert_eq!(f.remote(reference).as_deref(), Some(oid.as_str()));
+        }
     }
 }

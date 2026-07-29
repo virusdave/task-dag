@@ -10,10 +10,53 @@ use std::collections::BTreeMap;
 
 const DOMAIN: &str = "migrate-v1";
 
-pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
+pub(crate) fn run(
+    root: &str,
+    operation: &str,
+    terminal_edges: &[String],
+    resolution_authorization: Option<&str>,
+    resolution_evidence: &[String],
+) -> Result<()> {
     model::oid(root)?;
     model::bounded("operation-id", operation, 256)?;
-    let semantic = model::framed_digest("migrate-v1-semantics", &[root]);
+    let mut terminal_edges = terminal_edges.to_vec();
+    terminal_edges.sort();
+    if terminal_edges.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("terminal external edge OIDs must be unique".into());
+    }
+    for oid in &terminal_edges {
+        model::oid(oid)?;
+    }
+    let authorization = resolution_authorization.unwrap_or("");
+    if terminal_edges.is_empty() {
+        if !authorization.is_empty() || !resolution_evidence.is_empty() {
+            return Err("terminal resolution metadata requires an external edge".into());
+        }
+    } else {
+        model::bounded(
+            "terminal edge resolution authorization",
+            authorization,
+            4096,
+        )?;
+        if resolution_evidence.is_empty() {
+            return Err("terminal edge resolution requires evidence".into());
+        }
+        for evidence in resolution_evidence {
+            model::bounded("terminal edge resolution evidence", evidence, 4096)?;
+        }
+    }
+    let semantic = if terminal_edges.is_empty() {
+        model::framed_digest("migrate-v1-semantics", &[root])
+    } else {
+        let semantic_inputs = [
+            root.to_owned(),
+            terminal_edges.join(","),
+            authorization.to_owned(),
+            resolution_evidence.join("\n"),
+        ];
+        let semantic_parts: Vec<_> = semantic_inputs.iter().map(String::as_str).collect();
+        model::framed_digest("migrate-v1-semantics-terminal-edges", &semantic_parts)
+    };
     let receipt_ref = format!(
         "refs/heads/tasks/v2/imports/v1/operations/{}",
         model::framed_digest("migrate-v1-operation", &[operation])
@@ -21,7 +64,7 @@ pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
     if let Some(value) = replay(&receipt_ref, operation, &semantic)? {
         return crate::commands::print_json(&value);
     }
-    let frozen = scan::discover(root)?;
+    let frozen = scan::discover(root, &terminal_edges)?;
     let snap = repository::checked_snapshot(frozen.patterns.clone())?;
     if snap.refs != frozen.refs {
         return Err("v1 discovery changed between frozen scan and activation capture".into());
@@ -127,8 +170,13 @@ pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
     }
     for legacy in &frozen.tasks {
         let mapping_ref = format!("refs/heads/tasks/v2/imports/v1/by-sha/{}", legacy.task);
+        let terminal_resolution = if legacy.task == root && !frozen.terminal_edges.is_empty() {
+            json!({"authorization":authorization,"edgeBlobOids":frozen.terminal_edges,"evidence":resolution_evidence,"disposition":"terminal"})
+        } else {
+            Value::Null
+        };
         let mapping = git::commit(
-            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"graph":frozen.graph,"master":frozen.master},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
+            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"graph":frozen.graph,"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
             &[task_oids[&legacy.task].clone(), legacy.task.clone()],
         )?;
         updates.push(Update {
@@ -145,8 +193,7 @@ pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
             });
         }
     }
-    let result =
-        json!({"claimTokens":tokens,"mapping":ids,"reclaimRequired":true,"rootTaskId":root_id});
+    let result = json!({"claimTokens":tokens,"mapping":ids,"reclaimRequired":true,"rootTaskId":root_id,"terminalExternalEdges":frozen.terminal_edges});
     let receipt = git::commit(
         &json!({"domain":DOMAIN,"formatVersion":2,"operationId":operation,"outputs":result,"semanticDigest":semantic}),
         &outputs.iter().map(|(_, o)| o.clone()).collect::<Vec<_>>(),
@@ -199,10 +246,16 @@ pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
         old: Some(frozen.activation.clone()),
         new: Some(replacement_guard.clone()),
     });
+    updates.push(Update {
+        semantic_ref: "refs/heads/tasks/v1/graph".into(),
+        old: Some(frozen.graph.clone()),
+        new: Some(frozen.graph.clone()),
+    });
     outputs.push((
         "refs/heads/tasks/v1/activation".into(),
         replacement_guard.clone(),
     ));
+    outputs.push(("refs/heads/tasks/v1/graph".into(), frozen.graph.clone()));
     updates = model::canonical_updates(updates);
     let j = journal::commit(
         snap.refs.get(JOURNAL).cloned(),
@@ -228,6 +281,25 @@ pub(crate) fn run(root: &str, operation: &str) -> Result<()> {
             .map_err(|e| format!("run migration race seam: {e}"))?;
         if !status.success() {
             return Err("migration race seam could not advance activation".into());
+        }
+    }
+    #[cfg(feature = "test-seam")]
+    if let Ok(raced) = std::env::var("TASKDAG_TEST_RACE_V1_GRAPH") {
+        model::oid(&raced)?;
+        let status = std::process::Command::new("git")
+            .args([
+                "push",
+                &format!(
+                    "--force-with-lease=refs/heads/tasks/v1/graph:{}",
+                    frozen.graph
+                ),
+                "origin",
+                &format!("{raced}:refs/heads/tasks/v1/graph"),
+            ])
+            .status()
+            .map_err(|e| format!("run migration graph race seam: {e}"))?;
+        if !status.success() {
+            return Err("migration graph race seam could not advance graph".into());
         }
     }
     repository::mutate(&snap, updates, &j)?;
