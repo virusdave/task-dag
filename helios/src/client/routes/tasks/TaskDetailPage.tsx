@@ -9,17 +9,16 @@ import {
   StatusBadge,
   CopyButton,
   TaskCard,
-  githubCommitUrl,
   githubIssueUrl,
   type TaskDetail,
   type TaskNode,
 } from './taskShared.js'
 
 export function TaskDetailPage() {
-  const { sha = '', repository = '' } = useParams<{ sha: string; repository: string }>()
+  const { taskId = '', repository = '' } = useParams<{ taskId: string; repository: string }>()
   const { data, error, loading, refreshing, refresh } = usePolledData<TaskDetail>(
-    () => fetchTaskJson<TaskDetail>(`/api/tasks/repositories/${repository}/tasks/${sha}`),
-    [sha, repository],
+    () => fetchTaskJson<TaskDetail>(`/api/tasks/repositories/${repository}/tasks/${taskId}`),
+    [taskId, repository],
     30_000,
   )
 
@@ -66,14 +65,10 @@ export function TaskDetailPage() {
 
       <div className="inline-row wrap-row module-card-links task-nav-row">
         <Link to="/tasks/frontier">Task queue</Link>
-        {task.epicIssueNumber != null && (
-          <>
-            <Link to={`/tasks/frontier?repository=${task.repository}&issue=${task.epicIssueNumber}`}>
-              Tasks for this issue
-            </Link>
-            <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>Task plan</Link>
-          </>
-        )}
+        <Link to={`/tasks/frontier?repository=${task.repository}&rootTaskId=${task.rootTaskId}`}>
+          Tasks in this plan
+        </Link>
+        <Link to={`/tasks/${task.repository}/epic/${task.rootTaskId}`}>Task plan</Link>
         {task.issueNumber != null && (
           <a
             href={task.githubUrl ?? githubIssueUrl(task.issueNumber, task.githubRepository)}
@@ -91,8 +86,8 @@ export function TaskDetailPage() {
             <div className="mini-card-row">
               <span>Task ID</span>
               <span className="inline-row" style={{ gap: '0.5rem' }}>
-                <code>{task.shortSha}</code>
-                <CopyButton value={task.sha} label="Copy task ID" />
+                <code>{task.taskId}</code>
+                <CopyButton value={task.taskId} label="Copy task ID" />
               </span>
             </div>
             {task.issueNumber != null && (
@@ -113,43 +108,27 @@ export function TaskDetailPage() {
                 <span>{task.author}</span>
               </div>
             )}
+            <div className="mini-card-row">
+              <span>Immutable task object</span>
+              <span className="inline-row" style={{ gap: '0.5rem' }}>
+                <code>{task.taskOid}</code>
+                <CopyButton value={task.taskOid} label="Copy task object ID" />
+              </span>
+            </div>
+            <div className="mini-card-row">
+              <span>Current state object</span>
+              <span className="inline-row" style={{ gap: '0.5rem' }}>
+                <code>{task.stateOid}</code>
+                <CopyButton value={task.stateOid} label="Copy state object ID" />
+              </span>
+            </div>
           </div>
-          <strong>References</strong>
-          {task.refs.length === 0 ? (
-            <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
-              No refs currently point at this task.
-            </p>
-          ) : (
-            <ul className="task-ref-list">
-              {task.refs.map((ref) => (
-                <li key={ref}>
-                  <code>{ref}</code>
-                </li>
-              ))}
-            </ul>
-          )}
-          {task.completedBy.length > 0 && (
-            <>
-              <p className="subtle-copy" style={{ marginTop: '0.75rem' }}>
-                Completed by
-              </p>
-              <ul className="task-ref-list">
-                {task.completedBy.map((c) => (
-                  <li key={c}>
-                    <a href={githubCommitUrl(c, task.githubRepository)} target="_blank" rel="noopener noreferrer">
-                      <code>{c.slice(0, 10)}</code>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
       </details>
 
       <RelatedSection title="Part of" tasks={data.parent ? [data.parent] : []} />
       <RelatedSection
         title="Must finish first"
-        tasks={data.dependencies}
+        tasks={data.requirements}
         showStatusEmoji
       />
       <RelatedSection
@@ -180,7 +159,7 @@ function RelatedSection({
       <h3 className="task-section-title">{title}</h3>
         <div className="task-group-body">
           {tasks.map((t) => (
-            <div key={`${t.repository}:${t.sha}`} className="task-related-row">
+            <div key={`${t.repository}:${t.taskId}`} className="task-related-row">
               {showStatusEmoji && (
                 <span className="task-dep-marker" aria-hidden>
                   {t.status === 'done' ? '✓' : '○'}

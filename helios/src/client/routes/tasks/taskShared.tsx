@@ -5,6 +5,8 @@ import { Pill } from '../../components/Pill.js'
 // --- shared types (mirror server/taskDagRepo.ts) ---------------------------
 
 export type TaskStatus = 'pending' | 'in-progress' | 'blocked' | 'done'
+export type TaskState = 'frontier' | 'active' | 'blocked' | 'waiting' | 'done'
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 export interface TaskDagSourceStatus {
   available: boolean
@@ -24,25 +26,27 @@ export interface TaskDagSourceStatus {
 export interface TaskNode {
   repository: string
   githubRepository?: string
-  sha: string
-  shortSha: string
+  taskId: string
+  taskOid: string
+  stateOid: string
+  state: TaskState
   title: string
+  description: string
+  structuralParent?: string
+  requirements: string[]
+  directChildren: string[]
+  lifecycleRecord: JsonValue
   issueNumber?: number
   status: TaskStatus
   type: 'epic' | 'task' | 'leaf'
   author?: string
-  parentTask?: string
-  dependencies: string[]
   dependents: string[]
-  breakdownChildren: string[]
-  refs: string[]
   isFrontier: boolean
   isActive: boolean
   isBlocked: boolean
   isReady: boolean
   dependenciesMet: boolean
-  completedBy: string[]
-  epicSha?: string
+  rootTaskId: string
   epicIssueNumber?: number
   epicTitle?: string
   githubUrl?: string
@@ -51,8 +55,9 @@ export interface TaskNode {
 export interface EpicMeta {
   repository: string
   githubRepository?: string
-  sha: string
-  shortSha: string
+  taskId: string
+  taskOid: string
+  stateOid: string
   issueNumber?: number
   title: string
   githubUrl?: string
@@ -60,7 +65,7 @@ export interface EpicMeta {
 
 export interface FrontierGroup {
   epic: EpicMeta | null
-  counts: { total: number; ready: number; active: number; blocked: number; done: number }
+  counts: { total: number; ready: number; active: number; blocked: number; waiting: number; done: number }
   tasks: TaskNode[]
 }
 
@@ -71,6 +76,7 @@ export interface FrontierView {
     ready: number
     active: number
     blocked: number
+    waiting: number
     done: number
     epicCount: number
   }
@@ -80,10 +86,10 @@ export interface FrontierView {
 export interface EpicSummary {
   repository: string
   githubRepository?: string
+  taskId: string
+  taskOid: string
+  stateOid: string
   issueNumber?: number
-  epicRef: string
-  sha: string
-  shortSha: string
   title: string
   githubUrl?: string
   statusCounts: Record<string, number>
@@ -91,6 +97,7 @@ export interface EpicSummary {
   readyCount: number
   activeCount: number
   blockedCount: number
+  waitingCount: number
   completionPct: number
   totalTasks: number
 }
@@ -118,7 +125,7 @@ export interface TaskDetail {
   source: TaskDagSourceStatus
   task: TaskNode
   parent: TaskNode | null
-  dependencies: TaskNode[]
+  requirements: TaskNode[]
   dependents: TaskNode[]
   children: TaskNode[]
 }
@@ -216,12 +223,19 @@ export function statusTone(status: TaskStatus): 'success' | 'warning' | 'danger'
   return 'muted'
 }
 
-export function statusLabel(t: Pick<TaskNode, 'status' | 'isReady'>): string {
-  if (t.status === 'pending' && t.isReady) return 'Ready'
-  if (t.status === 'in-progress') return 'In progress'
-  if (t.status === 'blocked') return 'Blocked'
-  if (t.status === 'done') return 'Done'
+export function statusLabel(t: Pick<TaskNode, 'state' | 'isReady'>): string {
+  if (t.state === 'frontier') return t.isReady ? 'Ready' : 'Waiting'
+  if (t.state === 'active') return 'In progress'
+  if (t.state === 'blocked') return 'Blocked'
+  if (t.state === 'done') return 'Done'
   return 'Waiting'
+}
+
+function statusLabelTone(label: string): 'success' | 'warning' | 'danger' | 'muted' {
+  if (label === 'Ready' || label === 'Done') return 'success'
+  if (label === 'In progress') return 'warning'
+  if (label === 'Blocked') return 'danger'
+  return 'muted'
 }
 
 export function formatAge(ms: number | null): string {
@@ -450,19 +464,19 @@ export function CopyButton({
   )
 }
 
-export function StatusBadge({ task }: { task: Pick<TaskNode, 'status' | 'isReady'> }) {
+export function StatusBadge({ task }: { task: Pick<TaskNode, 'status' | 'state' | 'isReady'> }) {
   const label = statusLabel(task)
-  const tone = label === 'Ready' ? 'success' : statusTone(task.status)
+  const tone = statusLabelTone(label)
   return <Pill tone={tone}>{label}</Pill>
 }
 
-type TaskCardTray = 'status' | 'dependencies' | 'children'
+type TaskCardTray = 'status' | 'requirements' | 'children'
 
 /**
  * Compact, reusable task row for queue, plan, and relationship views.
  */
 export function TaskCard({ task, showEpic = false }: { task: TaskNode; showEpic?: boolean }) {
-  return <TaskCardBody key={`${task.repository}:${task.sha}`} task={task} showEpic={showEpic} />
+  return <TaskCardBody key={`${task.repository}:${task.taskId}`} task={task} showEpic={showEpic} />
 }
 
 function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean }) {
@@ -473,7 +487,7 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
   const requestIdRef = useRef(0)
   const buttonRefs = useRef<Record<TaskCardTray, HTMLButtonElement | null>>({
     status: null,
-    dependencies: null,
+    requirements: null,
     children: null,
   })
   const taskVersionRef = useRef({ task, version: 0 })
@@ -482,7 +496,7 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
   }
   const trayId = `task-card-tray-${useId().replaceAll(':', '')}`
   const trayHeadingId = `${trayId}-heading`
-  const snapshot = `${task.repository}:${task.sha}:${taskVersionRef.current.version}`
+  const snapshot = `${task.repository}:${task.taskId}:${taskVersionRef.current.version}`
   const detail = detailState?.snapshot === snapshot ? detailState.detail : null
   const detailError = detailErrorState?.snapshot === snapshot ? detailErrorState.message : null
   const detailLoading = detailLoadingSnapshot === snapshot
@@ -495,7 +509,7 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
     setDetailErrorState(null)
     try {
       const result = await fetchTaskJson<TaskDetail>(
-        `/api/tasks/repositories/${encodeURIComponent(task.repository)}/tasks/${encodeURIComponent(task.sha)}`,
+        `/api/tasks/repositories/${encodeURIComponent(task.repository)}/tasks/${encodeURIComponent(task.taskId)}`,
       )
       if (requestIdRef.current === requestId) {
         setDetailState({ snapshot: requestedSnapshot, detail: result })
@@ -533,7 +547,7 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
   }
 
   const status = statusLabel(task)
-  const tone = status === 'Ready' ? 'success' : statusTone(task.status)
+  const tone = statusLabelTone(status)
   return (
     <article
       className="task-card"
@@ -546,7 +560,7 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
       }}
     >
       <div className="task-card-main">
-        <Link to={`/tasks/${task.repository}/task/${task.sha}`} className="task-card-title">
+        <Link to={`/tasks/${task.repository}/task/${task.taskId}`} className="task-card-title">
           {task.title}
         </Link>
         <div className="task-card-badges">
@@ -560,19 +574,19 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
           >
             {status}
           </button>
-          {task.dependencies.length > 0 && (
+          {task.requirements.length > 0 && (
             <button
-              ref={(node) => { buttonRefs.current.dependencies = node }}
+              ref={(node) => { buttonRefs.current.requirements = node }}
               type="button"
               className={`task-disclosure-button pill pill-${task.dependenciesMet ? 'success' : 'muted'}`}
-              aria-expanded={tray === 'dependencies'}
+              aria-expanded={tray === 'requirements'}
               aria-controls={trayId}
-              onClick={() => toggleTray('dependencies')}
+              onClick={() => toggleTray('requirements')}
             >
-              {`${task.dependencies.length} prerequisite${task.dependencies.length === 1 ? '' : 's'}`}
+              {`${task.requirements.length} prerequisite${task.requirements.length === 1 ? '' : 's'}`}
             </button>
           )}
-          {task.breakdownChildren.length > 0 && (
+          {task.directChildren.length > 0 && (
             <button
               ref={(node) => { buttonRefs.current.children = node }}
               type="button"
@@ -581,7 +595,7 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
               aria-controls={trayId}
               onClick={() => toggleTray('children')}
             >
-              {`${task.breakdownChildren.length} subtask${task.breakdownChildren.length === 1 ? '' : 's'}`}
+              {`${task.directChildren.length} subtask${task.directChildren.length === 1 ? '' : 's'}`}
             </button>
           )}
         </div>
@@ -601,16 +615,14 @@ function TaskCardBody({ task, showEpic }: { task: TaskNode; showEpic: boolean })
       )}
       <div className="task-card-meta">
         <span>{task.repository}</span>
-        {showEpic && task.epicIssueNumber != null && (
-          <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`} className="task-card-epic">
-            {`#${task.epicIssueNumber} ${task.epicTitle ?? ''}`.trim()}
+        {showEpic && (
+          <Link to={`/tasks/${task.repository}/epic/${task.rootTaskId}`} className="task-card-epic">
+            {task.epicIssueNumber != null ? `#${task.epicIssueNumber} ${task.epicTitle ?? ''}`.trim() : (task.epicTitle ?? 'Task plan')}
           </Link>
         )}
       </div>
       <div className="task-card-actions">
-        {task.epicIssueNumber != null && (
-          <Link to={`/tasks/${task.repository}/epic/${task.epicIssueNumber}`}>Task plan</Link>
-        )}
+        <Link to={`/tasks/${task.repository}/epic/${task.rootTaskId}`}>Task plan</Link>
         {task.githubUrl ? (
           <a href={task.githubUrl} target="_blank" rel="noopener noreferrer">
             GitHub
@@ -646,7 +658,7 @@ function TaskCardDisclosure({
   onRetry: () => void
   onClose: () => void
 }) {
-  const title = tray === 'status' ? 'Current status' : tray === 'dependencies' ? 'Prerequisites' : 'Subtasks'
+  const title = tray === 'status' ? 'Current status' : tray === 'requirements' ? 'Prerequisites' : 'Subtasks'
   return (
     <section
       id={id}
@@ -670,15 +682,22 @@ function TaskCardDisclosure({
           </div>
         ) : detail ? (
           <TaskRelationshipList
-            related={tray === 'dependencies' ? detail.dependencies : detail.children}
-            expectedIds={tray === 'dependencies' ? detail.task.dependencies : detail.task.breakdownChildren}
-            emptyLabel={tray === 'dependencies' ? 'No prerequisites.' : 'No subtasks.'}
+            related={tray === 'requirements' ? detail.requirements : detail.children}
+            expectedIds={tray === 'requirements' ? detail.task.requirements : detail.task.directChildren}
+            emptyLabel={tray === 'requirements' ? 'No prerequisites.' : 'No subtasks.'}
             onRetry={onRetry}
           />
         ) : null}
       </div>
     </section>
   )
+}
+
+function lifecycleString(task: TaskNode, key: string): string | undefined {
+  const record = task.lifecycleRecord
+  if (record === null || Array.isArray(record) || typeof record !== 'object') return undefined
+  const value = record[key]
+  return typeof value === 'string' ? value : undefined
 }
 
 function TaskStatusEvidence({ task }: { task: TaskNode }) {
@@ -691,21 +710,18 @@ function TaskStatusEvidence({ task }: { task: TaskNode }) {
   if (label === 'Blocked') explanation = task.isBlocked
     ? 'A current block prevents this task from being picked up.'
     : 'Current task metadata reports blocked, but block evidence is unavailable in this snapshot.'
-  if (label === 'Done') explanation = task.completedBy.length > 0
-    ? 'Durable completion evidence exists for this task.'
-    : 'Current task metadata reports done, but completion evidence is unavailable in this snapshot.'
+  if (label === 'Done') explanation = 'Durable completion evidence exists for this task.'
+  const publicationCommit = lifecycleString(task, 'publicationCommit')
   return (
     <div>
       <p>{explanation}</p>
-      {task.status === 'done' && task.completedBy.length > 0 && (
+      {task.state === 'done' && publicationCommit && (
         <ul className="task-card-disclosure__list">
-          {task.completedBy.map((sha) => (
-            <li key={sha}>
-              <a href={githubCommitUrl(sha, task.githubRepository)} target="_blank" rel="noopener noreferrer">
-                Completion <code>{sha.slice(0, 10)}</code>
-              </a>
-            </li>
-          ))}
+          <li>
+            <a href={githubCommitUrl(publicationCommit, task.githubRepository)} target="_blank" rel="noopener noreferrer">
+              Publication <code>{publicationCommit.slice(0, 10)}</code>
+            </a>
+          </li>
         </ul>
       )}
       <p className="subtle-copy">Coverage: current-evidence. This is not complete history.</p>
@@ -724,15 +740,15 @@ function TaskRelationshipList({
   emptyLabel: string
   onRetry: () => void
 }) {
-  const resolved = new Map(related.map((item) => [item.sha, item]))
+  const resolved = new Map(related.map((item) => [item.taskId, item]))
   const ordered = [...related].sort(compareTaskAttention)
   const unavailable = expectedIds.filter((sha) => !resolved.has(sha)).sort()
   if (ordered.length === 0 && unavailable.length === 0) return <p className="subtle-copy">{emptyLabel}</p>
   return (
     <ul className="task-card-disclosure__list">
       {ordered.map((item) => (
-        <li key={`${item.repository}:${item.sha}`}>
-          <Link to={`/tasks/${item.repository}/task/${item.sha}`}>{item.title}</Link>
+        <li key={`${item.repository}:${item.taskId}`}>
+          <Link to={`/tasks/${item.repository}/task/${item.taskId}`}>{item.title}</Link>
           <span className="subtle-copy">{statusLabel(item)}</span>
         </li>
       ))}
@@ -761,5 +777,5 @@ function compareTaskAttention(left: TaskNode, right: TaskNode): number {
   ])
   return (order.get(statusLabel(left)) ?? 5) - (order.get(statusLabel(right)) ?? 5)
     || left.title.localeCompare(right.title)
-    || `${left.repository}:${left.sha}`.localeCompare(`${right.repository}:${right.sha}`)
+    || `${left.repository}:${left.taskId}`.localeCompare(`${right.repository}:${right.taskId}`)
 }

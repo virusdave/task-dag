@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import Fastify from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -18,6 +19,7 @@ import {
   parseTaskDagReposConfig,
   publicTaskDagError,
 } from './taskDagMirror.js'
+import { registerTaskDagRoutes } from './routes/taskDag.js'
 
 const ids = {
   root: `v2-${'1'.repeat(64)}`,
@@ -208,6 +210,31 @@ describe('bounded task-dag v2 adapter', () => {
       errorSpy.mockRestore()
       fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\n')
       fs.writeFileSync(pathsFile, `automation ${repoDir}\n`)
+    }
+  })
+})
+
+describe('task-dag v2 API identity', () => {
+  it('round-trips a full Task-ID and rejects ambiguous legacy identifiers', async () => {
+    const server = Fastify()
+    await registerTaskDagRoutes(server)
+    try {
+      const full = await server.inject({
+        method: 'GET',
+        url: `/api/tasks/repositories/automation/tasks/${ids.frontier}`,
+      })
+      expect(full.statusCode).toBe(200)
+      expect(full.json().task).toMatchObject({ taskId: ids.frontier, taskOid: expect.any(String), stateOid: headOid })
+      expect(full.json().task).not.toHaveProperty('sha')
+
+      const legacy = await server.inject({
+        method: 'GET',
+        url: '/api/tasks/repositories/automation/tasks/deadbee',
+      })
+      expect(legacy.statusCode).toBe(400)
+      expect(legacy.json()).toEqual({ error: 'A full task-dag v2 Task-ID is required' })
+    } finally {
+      await server.close()
     }
   })
 })

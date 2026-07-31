@@ -17,7 +17,7 @@ import {
 
 const COLLAPSE_KEY = 'helios.tasks.frontier.collapsed.v1'
 
-const STATUS_FILTERS = ['all', 'ready', 'active', 'blocked', 'pending', 'done'] as const
+const STATUS_FILTERS = ['all', 'ready', 'active', 'blocked', 'waiting', 'done'] as const
 type StatusFilter = (typeof STATUS_FILTERS)[number]
 
 function parseStatus(raw: string | null): StatusFilter {
@@ -49,13 +49,13 @@ function matchesStatus(task: TaskNode, filter: StatusFilter): boolean {
     case 'ready':
       return task.isReady
     case 'active':
-      return task.isActive
+      return task.state === 'active'
     case 'blocked':
-      return task.isBlocked
+      return task.state === 'blocked'
     case 'done':
-      return task.status === 'done'
-    case 'pending':
-      return task.status === 'pending' && !task.isReady
+      return task.state === 'done'
+    case 'waiting':
+      return task.state === 'waiting' || (task.state === 'frontier' && !task.isReady)
   }
 }
 
@@ -63,29 +63,30 @@ export function taskMatchesSearch(task: TaskNode, needle: string): boolean {
   return (
     task.title.toLowerCase().includes(needle) ||
     task.repository.toLowerCase().includes(needle) ||
-    task.sha.startsWith(needle) ||
+    task.taskId.startsWith(needle) ||
     (task.issueNumber != null && String(task.issueNumber).includes(needle))
   )
 }
 
 function groupKeyOf(g: FrontierGroup): string {
   const repository = g.epic?.repository ?? g.tasks[0]?.repository ?? 'unknown'
-  return g.epic?.issueNumber != null ? `${repository}:issue:${g.epic.issueNumber}` : `${repository}:${g.epic?.sha ?? 'none'}`
+  return `${repository}:${g.epic?.taskId ?? 'none'}`
 }
 
 function visibleCounts(tasks: TaskNode[]): FrontierGroup['counts'] {
   return {
     total: tasks.length,
     ready: tasks.filter((t) => t.isReady).length,
-    active: tasks.filter((t) => t.isActive).length,
-    blocked: tasks.filter((t) => t.isBlocked).length,
-    done: tasks.filter((t) => t.status === 'done').length,
+    active: tasks.filter((t) => t.state === 'active').length,
+    blocked: tasks.filter((t) => t.state === 'blocked').length,
+    waiting: tasks.filter((t) => t.state === 'waiting' || (t.state === 'frontier' && !t.isReady)).length,
+    done: tasks.filter((t) => t.state === 'done').length,
   }
 }
 
 export function TaskFrontierPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const issueFilter = searchParams.get('issue') ?? ''
+  const rootTaskIdFilter = searchParams.get('rootTaskId') ?? ''
   const repositoryFilter = searchParams.get('repository') ?? ''
   const statusFilter = parseStatus(searchParams.get('status'))
   const [search, setSearch] = useState('')
@@ -95,11 +96,11 @@ export function TaskFrontierPage() {
   const { data, error, loading, refreshing, refresh } = usePolledData<FrontierView>(
     () => {
       const params = new URLSearchParams()
-      if (issueFilter) params.set('issue', issueFilter)
+      if (rootTaskIdFilter) params.set('rootTaskId', rootTaskIdFilter)
       if (repositoryFilter) params.set('repository', repositoryFilter)
       return fetchTaskJson<FrontierView>(`/api/tasks/frontier?${params.toString()}`)
     },
-    [issueFilter, repositoryFilter],
+    [rootTaskIdFilter, repositoryFilter],
     30_000,
   )
 
@@ -123,7 +124,6 @@ export function TaskFrontierPage() {
           tasks,
           counts: visibleCounts(tasks),
           totalTasks: g.tasks.length,
-          waitingCount: tasks.filter((task) => task.status === 'pending' && !task.isReady).length,
         }
       })
       .filter((g) => g.tasks.length > 0)
@@ -134,10 +134,10 @@ export function TaskFrontierPage() {
     return {
       all: all.length,
       ready: all.filter((t) => t.isReady).length,
-      active: all.filter((t) => t.isActive).length,
-      blocked: all.filter((t) => t.isBlocked).length,
-      pending: all.filter((t) => t.status === 'pending' && !t.isReady).length,
-      done: all.filter((t) => t.status === 'done').length,
+      active: all.filter((t) => t.state === 'active').length,
+      blocked: all.filter((t) => t.state === 'blocked').length,
+      waiting: all.filter((t) => t.state === 'waiting' || (t.state === 'frontier' && !t.isReady)).length,
+      done: all.filter((t) => t.state === 'done').length,
     }
   }, [data])
 
@@ -148,8 +148,8 @@ export function TaskFrontierPage() {
     setSearchParams(next, { replace: true })
   }
 
-  const hasActiveFilters = statusFilter !== 'all' || search.trim() !== '' || issueFilter !== '' || repositoryFilter !== ''
-  const filterKey = `${statusFilter}\u0000${search.trim()}\u0000${repositoryFilter}\u0000${issueFilter}`
+  const hasActiveFilters = statusFilter !== 'all' || search.trim() !== '' || rootTaskIdFilter !== '' || repositoryFilter !== ''
+  const filterKey = `${statusFilter}\u0000${search.trim()}\u0000${repositoryFilter}\u0000${rootTaskIdFilter}`
 
   useEffect(() => {
     if (!hasActiveFilters) {
@@ -196,7 +196,7 @@ export function TaskFrontierPage() {
     { key: 'ready', label: 'Ready', count: chipCounts.ready },
     { key: 'active', label: 'In progress', count: chipCounts.active },
     { key: 'blocked', label: 'Blocked', count: chipCounts.blocked },
-    { key: 'pending', label: 'Waiting', count: chipCounts.pending },
+    { key: 'waiting', label: 'Waiting', count: chipCounts.waiting },
     { key: 'done', label: 'Done', count: chipCounts.done },
   ]
 
@@ -209,9 +209,9 @@ export function TaskFrontierPage() {
 
       <SourceBanner source={sourceFromError(error) ?? data?.source} onRefresh={refresh} refreshing={refreshing} />
 
-      {(issueFilter || repositoryFilter) && (
+      {(rootTaskIdFilter || repositoryFilter) && (
         <p className="task-scope">
-          Showing {repositoryFilter || 'all repositories'}{issueFilter ? ` · Issue #${issueFilter}` : ''}.{' '}
+          Showing {repositoryFilter || 'all repositories'}{rootTaskIdFilter ? ' · one task plan' : ''}.{' '}
           <Link to="/tasks/frontier">Clear scope</Link>
         </p>
       )}
@@ -309,8 +309,8 @@ export function TaskFrontierPage() {
                     {group.counts.blocked > 0 && (
                       <Pill tone="danger">{`${group.counts.blocked} blocked`}</Pill>
                     )}
-                    {group.waitingCount > 0 && (
-                      <Pill tone="muted">{`${group.waitingCount} waiting`}</Pill>
+                    {group.counts.waiting > 0 && (
+                      <Pill tone="muted">{`${group.counts.waiting} waiting`}</Pill>
                     )}
                     <Pill tone="muted">
                       {hasActiveFilters && group.tasks.length !== group.totalTasks
@@ -321,9 +321,7 @@ export function TaskFrontierPage() {
                 </summary>
                 <div className="task-group-body">
                   <div className="task-group-links">
-                    {group.epic?.issueNumber != null && (
-                      <Link to={`/tasks/${group.epic.repository}/epic/${group.epic.issueNumber}`}>Task plan</Link>
-                    )}
+                    {group.epic && <Link to={`/tasks/${group.epic.repository}/epic/${group.epic.taskId}`}>Task plan</Link>}
                     {group.epic?.githubUrl ? (
                       <a href={group.epic.githubUrl} target="_blank" rel="noopener noreferrer">
                         GitHub issue
@@ -331,7 +329,7 @@ export function TaskFrontierPage() {
                     ) : null}
                   </div>
                   {group.tasks.map((task) => (
-                    <TaskCard key={`${task.repository}:${task.sha}`} task={task} />
+                    <TaskCard key={`${task.repository}:${task.taskId}`} task={task} />
                   ))}
                 </div>
               </details>

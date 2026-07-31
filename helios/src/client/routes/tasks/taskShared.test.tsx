@@ -16,11 +16,13 @@ import {
 
 const missingA = 'a'.repeat(40)
 const missingB = 'b'.repeat(40)
+const fullTaskId = `v2-${'c'.repeat(64)}`
 const task: TaskNode = {
-  repository: 'automation', sha: 'abc123', shortSha: 'abc123', title: 'Improve task UX',
-  status: 'in-progress', type: 'leaf', dependencies: ['first', missingB, missingA], dependents: [],
-  breakdownChildren: ['child'], refs: [], isFrontier: true, isActive: true, isBlocked: false,
-  isReady: false, dependenciesMet: false, completedBy: [], epicIssueNumber: 89,
+  repository: 'automation', taskId: fullTaskId, taskOid: '1'.repeat(40), stateOid: '2'.repeat(40),
+  state: 'active', title: 'Improve task UX', description: 'Improve task UX', lifecycleRecord: {},
+  status: 'in-progress', type: 'leaf', requirements: ['first', missingB, missingA], dependents: [],
+  directChildren: ['child'], isFrontier: false, isActive: true, isBlocked: false,
+  isReady: false, dependenciesMet: false, rootTaskId: 'root', epicIssueNumber: 89,
 }
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
@@ -41,8 +43,9 @@ const degradedSource: TaskDagSourceStatus = {
 
 describe('task presentation', () => {
   it('uses shared operator-facing status terminology', () => {
-    expect(statusLabel({ status: 'pending', isReady: true })).toBe('Ready')
-    expect(statusLabel({ status: 'pending', isReady: false })).toBe('Waiting')
+    expect(statusLabel({ state: 'frontier', isReady: true })).toBe('Ready')
+    expect(statusLabel({ state: 'frontier', isReady: false })).toBe('Waiting')
+    expect(statusLabel({ state: 'waiting', isReady: false })).toBe('Waiting')
     expect(statusLabel(task)).toBe('In progress')
   })
 
@@ -101,21 +104,21 @@ describe('TaskCard disclosures', () => {
   it('uses one tray for status and relationships and restores focus on Escape', async () => {
     const dependency: TaskNode = {
       ...task,
-      sha: 'first',
-      shortSha: 'first',
+      taskId: 'first',
       title: 'First prerequisite',
+      state: 'blocked',
       status: 'blocked',
       isActive: false,
       isBlocked: true,
     }
     const child: TaskNode = {
       ...task,
-      sha: 'child',
-      shortSha: 'child',
+      taskId: 'child',
       title: 'Child task',
+      state: 'frontier',
       status: 'pending',
-      dependencies: [],
-      breakdownChildren: [],
+      requirements: [],
+      directChildren: [],
       isActive: false,
       isReady: true,
     }
@@ -123,7 +126,7 @@ describe('TaskCard disclosures', () => {
       source: degradedSource,
       task,
       parent: null,
-      dependencies: [dependency],
+      requirements: [dependency],
       dependents: [],
       children: [child],
     }), { status: 200, headers: { 'content-type': 'application/json' } })))
@@ -150,7 +153,7 @@ describe('TaskCard disclosures', () => {
     expect(host.textContent).toContain(missingB)
     expect(host.textContent!.indexOf(missingA)).toBeLessThan(host.textContent!.indexOf(missingB))
     expect(host.querySelector('.task-card-disclosure')?.getAttribute('aria-labelledby')).toBeTruthy()
-    expect(fetch).toHaveBeenCalledWith('/api/tasks/repositories/automation/tasks/abc123')
+    expect(fetch).toHaveBeenCalledWith(`/api/tasks/repositories/automation/tasks/${fullTaskId}`)
 
     await act(async () => subtasksButton.click())
     expect(host.textContent).toContain('Child task')
@@ -169,14 +172,14 @@ describe('TaskCard disclosures', () => {
   })
 
   it('suppresses stale relationship responses across same-identity polling refreshes', async () => {
-    const firstDependency = { ...task, sha: 'first', shortSha: 'first', title: 'Old title' }
+    const firstDependency = { ...task, taskId: 'first', title: 'Old title' }
     const freshTask = { ...task }
     const freshDependency = { ...firstDependency, title: 'Fresh title', status: 'done' as const }
     const response = (responseTask: TaskNode, dependency: TaskNode) => new Response(JSON.stringify({
       source: degradedSource,
       task: responseTask,
       parent: null,
-      dependencies: [dependency],
+      requirements: [dependency],
       dependents: [],
       children: [],
     }), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -207,14 +210,14 @@ describe('TaskCard disclosures', () => {
   })
 
   it('retries a failed relationship request inline', async () => {
-    const dependency = { ...task, sha: 'first', shortSha: 'first', title: 'Recovered prerequisite' }
+    const dependency = { ...task, taskId: 'first', title: 'Recovered prerequisite' }
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(new Response('failure', { status: 500 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         source: degradedSource,
         task,
         parent: null,
-        dependencies: [dependency],
+        requirements: [dependency],
         dependents: [],
         children: [],
       }), { status: 200, headers: { 'content-type': 'application/json' } })))

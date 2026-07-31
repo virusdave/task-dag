@@ -85,7 +85,7 @@ export function TasksPage() {
       ) : (
         <div className="review-grid">
           {epicsQ.data!.epics.map((epic) => (
-            <article className="mini-card" key={`${epic.repository}:${epic.issueNumber ?? epic.sha}`}>
+            <article className="mini-card" key={`${epic.repository}:${epic.issueNumber ?? epic.taskId}`}>
               <header>
                 <div>
                   <strong>{epic.title}</strong>
@@ -116,14 +116,12 @@ export function TasksPage() {
                 className="inline-row wrap-row module-card-links"
                 style={{ marginTop: '1rem' }}
               >
-                {epic.issueNumber != null && <Link to={`/tasks/${epic.repository}/epic/${epic.issueNumber}`}>View task plan</Link>}
-                {epic.issueNumber != null && (
-                  <Link to={`/tasks/frontier?repository=${epic.repository}&issue=${epic.issueNumber}${epic.readyCount > 0 ? '&status=ready' : ''}`}>
+                <Link to={`/tasks/${epic.repository}/epic/${epic.taskId}`}>View task plan</Link>
+                <Link to={`/tasks/frontier?repository=${epic.repository}&rootTaskId=${epic.taskId}${epic.readyCount > 0 ? '&status=ready' : ''}`}>
                     {epic.readyCount > 0
                       ? `View ${epic.readyCount} ready task${epic.readyCount === 1 ? '' : 's'}`
                       : `View ${epic.frontierCount} queued task${epic.frontierCount === 1 ? '' : 's'}`}
-                  </Link>
-                )}
+                </Link>
                 {epic.issueNumber != null && <a href={epic.githubUrl ?? githubIssueUrl(epic.issueNumber, epic.githubRepository)} target="_blank" rel="noopener noreferrer">GitHub issue</a>}
               </div>
             </article>

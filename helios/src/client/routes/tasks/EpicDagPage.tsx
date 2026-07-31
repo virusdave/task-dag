@@ -42,7 +42,7 @@ export type TaskPlanStatus = 'all' | 'ready' | 'in-progress' | 'blocked' | 'wait
 const TASK_PLAN_STATUSES = new Set<TaskPlanStatus>(['all', 'ready', 'in-progress', 'blocked', 'waiting', 'done'])
 
 export function EpicDagPage() {
-  const { id = '', repository = '' } = useParams<{ id: string; repository: string }>()
+  const { taskId = '', repository = '' } = useParams<{ taskId: string; repository: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
   const [view, setView] = useState<'list' | 'graph'>('list')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
@@ -56,8 +56,8 @@ export function EpicDagPage() {
   }, [rawStatus, searchParams, setSearchParams])
 
   const { data, error, loading, refreshing, refresh } = usePolledData<DagResult>(
-    () => fetchTaskJson<DagResult>(`/api/tasks/repositories/${repository}/epics/${id}/dag`),
-    [id, repository],
+    () => fetchTaskJson<DagResult>(`/api/tasks/repositories/${repository}/epics/${taskId}/dag`),
+    [taskId, repository],
     30_000,
   )
 
@@ -163,18 +163,12 @@ export function EpicDagPage() {
         >
           Dependency graph
         </button>
-        {data.epic.issueNumber != null ? (
-          <Link
-            to={`/tasks/frontier?repository=${data.epic.repository}&issue=${data.epic.issueNumber}&status=ready`}
-            className="task-link-button"
-          >
-            View ready tasks
-          </Link>
-        ) : (
-          <Link to="/tasks/frontier" className="task-link-button">
-            Task queue
-          </Link>
-        )}
+        <Link
+          to={`/tasks/frontier?repository=${data.epic.repository}&rootTaskId=${data.epic.taskId}&status=ready`}
+          className="task-link-button"
+        >
+          View ready tasks
+        </Link>
         {data.epic.issueNumber != null && (
           <a
             href={data.epic.githubUrl ?? githubIssueUrl(data.epic.issueNumber, data.epic.githubRepository)}
@@ -209,16 +203,16 @@ export function EpicDagPage() {
 
 function DagListView({ data, status }: { data: DagResult; status: TaskPlanStatus }) {
   // Order by breakdown depth so parents precede children.
-  const bySha = useMemo(() => new Map(data.nodes.map((n) => [n.sha, n])), [data.nodes])
+  const bySha = useMemo(() => new Map(data.nodes.map((n) => [n.taskId, n])), [data.nodes])
   const ordered = useMemo(() => {
-    const roots = data.nodes.filter((n) => !n.parentTask || !bySha.has(n.parentTask))
+    const roots = data.nodes.filter((n) => !n.structuralParent || !bySha.has(n.structuralParent))
     const out: { node: TaskNode; depth: number }[] = []
     const seen = new Set<string>()
     const visit = (n: TaskNode, depth: number) => {
-      if (seen.has(n.sha)) return
-      seen.add(n.sha)
+      if (seen.has(n.taskId)) return
+      seen.add(n.taskId)
       out.push({ node: n, depth })
-      for (const childSha of n.breakdownChildren) {
+      for (const childSha of n.directChildren) {
         const child = bySha.get(childSha)
         if (child) visit(child, depth + 1)
       }
@@ -226,7 +220,7 @@ function DagListView({ data, status }: { data: DagResult; status: TaskPlanStatus
     roots.forEach((r) => visit(r, 0))
     // Any nodes not reached (cycles / detached) appended at depth 0.
     data.nodes.forEach((n) => {
-      if (!seen.has(n.sha)) visit(n, 0)
+      if (!seen.has(n.taskId)) visit(n, 0)
     })
     return out
   }, [data.nodes, bySha])
@@ -235,7 +229,7 @@ function DagListView({ data, status }: { data: DagResult; status: TaskPlanStatus
     <div className="task-group-body">
       {ordered.filter(({ node }) => taskMatchesPlanStatus(node, status)).map(({ node, depth }) => (
         <div
-          key={`${node.repository}:${node.sha}`}
+          key={`${node.repository}:${node.taskId}`}
           style={{ marginLeft: `${Math.min(depth, 4) * 1.25}rem` }}
         >
           <TaskCard task={node} />
@@ -317,8 +311,8 @@ function DagGraphView({
             </marker>
           </defs>
           {data.edges.map((edge, i) => {
-            const s = layout.nodes.find((n) => n.node.sha === edge.source)
-            const t = layout.nodes.find((n) => n.node.sha === edge.target)
+            const s = layout.nodes.find((n) => n.node.taskId === edge.source)
+            const t = layout.nodes.find((n) => n.node.taskId === edge.target)
             if (!s || !t) return null
             return (
               <line
@@ -335,12 +329,12 @@ function DagGraphView({
             )
           })}
           {layout.nodes.map((ln) => {
-            const isSel = selected?.sha === ln.node.sha
+            const isSel = selected?.taskId === ln.node.taskId
             const visualStatus = graphStatusKey(ln.node)
             const highlighted = taskMatchesPlanStatus(ln.node, status)
             return (
               <g
-                key={ln.node.sha}
+                key={ln.node.taskId}
                 transform={`translate(${ln.x - ln.width / 2}, ${ln.y - ln.height / 2})`}
                 onClick={() => onSelect(ln.node)}
                 onKeyDown={(e) => {
@@ -379,7 +373,7 @@ function DagGraphView({
           <div className="inline-row" style={{ justifyContent: 'space-between' }}>
             <strong>Selected task</strong>
             <span className="inline-row wrap-row task-selected-actions" style={{ gap: '0.75rem' }}>
-              <Link className="task-link-button" to={`/tasks/${selected.repository}/task/${selected.sha}`}>
+              <Link className="task-link-button" to={`/tasks/${selected.repository}/task/${selected.taskId}`}>
                 View full task details
               </Link>
               <button type="button" className="task-link-button" onClick={() => onSelect(null)}>
@@ -402,9 +396,10 @@ function DagGraphView({
   )
 }
 
-export function graphStatusKey(task: Pick<TaskNode, 'status' | 'isReady'>): string {
-  if (task.status === 'pending') return task.isReady ? 'ready' : 'waiting'
-  return task.status
+export function graphStatusKey(task: Pick<TaskNode, 'state' | 'isReady'>): string {
+  if (task.state === 'frontier') return task.isReady ? 'ready' : 'waiting'
+  if (task.state === 'active') return 'in-progress'
+  return task.state
 }
 
 export function parseTaskPlanStatus(value: string | null): TaskPlanStatus {
@@ -420,23 +415,20 @@ export function canonicalTaskPlanSearch(searchParams: URLSearchParams): URLSearc
   return normalized
 }
 
-export function taskMatchesPlanStatus(task: Pick<TaskNode, 'status' | 'isReady'>, status: TaskPlanStatus): boolean {
+export function taskMatchesPlanStatus(task: Pick<TaskNode, 'state' | 'isReady'>, status: TaskPlanStatus): boolean {
   return status === 'all' || graphStatusKey(task) === status
 }
 
-function taskNodeKey(task: Pick<TaskNode, 'repository' | 'sha'>): string {
-  return `${task.repository}:${task.sha}`
+function taskNodeKey(task: Pick<TaskNode, 'repository' | 'taskId'>): string {
+  return `${task.repository}:${task.taskId}`
 }
 
 export function withoutEpicNodes(data: DagResult): DagResult {
   const nodes = data.nodes.filter((node) => node.type !== 'epic')
-  const ids = new Set(nodes.map((node) => node.sha))
+  const ids = new Set(nodes.map((node) => node.taskId))
   const statusCounts = Object.fromEntries(
-    [
-      ['ready', nodes.filter((node) => node.isReady).length],
-      ['waiting', nodes.filter((node) => node.status === 'pending' && !node.isReady).length],
-      ...['done', 'in-progress', 'blocked'].map((status) => [status, nodes.filter((node) => node.status === status).length] as const),
-    ],
+    ['ready', 'waiting', 'done', 'in-progress', 'blocked'].map((status) =>
+      [status, nodes.filter((node) => graphStatusKey(node) === status).length] as const),
   )
   return { ...data, nodes, edges: data.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)), summary: { totalTasks: nodes.length, statusCounts } }
 }
@@ -445,14 +437,14 @@ function layoutDag(data: DagResult): { nodes: LayoutNode[] } {
   const g = new dagre.graphlib.Graph()
   g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80 })
   g.setDefaultEdgeLabel(() => ({}))
-  data.nodes.forEach((n) => g.setNode(n.sha, { width: 190, height: 64 }))
+  data.nodes.forEach((n) => g.setNode(n.taskId, { width: 190, height: 64 }))
   data.edges.forEach((e) => {
     if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target)
   })
   dagre.layout(g)
   return {
     nodes: data.nodes.map((node) => {
-      const n = g.node(node.sha)
+      const n = g.node(node.taskId)
       return { x: n.x, y: n.y, width: n.width, height: n.height, node }
     }),
   }

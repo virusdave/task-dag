@@ -12,6 +12,8 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import * as taskDagRepo from '../taskDagRepo.js'
 import { TaskDagRepositoryNotFoundError, TaskDagUnavailableError } from '../taskDagRepo.js'
 
+const TASK_ID_PATTERN = /^v2-[0-9a-f]{64}$/
+
 function handleError(
   server: FastifyInstance,
   reply: FastifyReply,
@@ -42,11 +44,14 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
     }
   })
 
-  server.get<{ Params: { repository: string; id: string } }>(
-    '/api/tasks/repositories/:repository/epics/:id/dag',
+  server.get<{ Params: { repository: string; taskId: string } }>(
+    '/api/tasks/repositories/:repository/epics/:taskId/dag',
     async (request, reply) => {
       try {
-        return reply.send(await taskDagRepo.getEpicDag(request.params.id, request.params.repository))
+        if (!TASK_ID_PATTERN.test(request.params.taskId)) {
+          return reply.status(400).send({ error: 'A full task-dag v2 Task-ID is required' })
+        }
+        return reply.send(await taskDagRepo.getEpicDag(request.params.taskId, request.params.repository))
       } catch (error) {
         if (error instanceof Error && /not found/i.test(error.message)) return reply.status(404).send({ error: error.message })
         return handleError(server, reply, error, 'Failed to fetch epic DAG')
@@ -55,14 +60,16 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
   )
 
   // GET /api/tasks/frontier - grouped frontier view
-  server.get<{ Querystring: { issue?: string; status?: string; repository?: string } }>(
+  server.get<{ Querystring: { rootTaskId?: string; status?: string; repository?: string } }>(
     '/api/tasks/frontier',
     async (request, reply) => {
       try {
-        const filter: { issue?: number; status?: string; repository?: string } = {}
-        if (request.query.issue) {
-          const n = parseInt(request.query.issue, 10)
-          if (Number.isFinite(n)) filter.issue = n
+        const filter: { rootTaskId?: string; status?: string; repository?: string } = {}
+        if (request.query.rootTaskId) {
+          if (!TASK_ID_PATTERN.test(request.query.rootTaskId)) {
+            return reply.status(400).send({ error: 'A full root task-dag v2 Task-ID is required' })
+          }
+          filter.rootTaskId = request.query.rootTaskId
         }
         if (request.query.status) filter.status = request.query.status
         if (request.query.repository) filter.repository = request.query.repository
@@ -73,11 +80,14 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
     },
   )
 
-  server.get<{ Params: { repository: string; sha: string } }>(
-    '/api/tasks/repositories/:repository/tasks/:sha',
+  server.get<{ Params: { repository: string; taskId: string } }>(
+    '/api/tasks/repositories/:repository/tasks/:taskId',
     async (request, reply) => {
       try {
-        const detail = await taskDagRepo.getTaskDetail(request.params.sha, request.params.repository)
+        if (!TASK_ID_PATTERN.test(request.params.taskId)) {
+          return reply.status(400).send({ error: 'A full task-dag v2 Task-ID is required' })
+        }
+        const detail = await taskDagRepo.getTaskDetail(request.params.taskId, request.params.repository)
         if (!detail) return reply.status(404).send({ error: 'Task not found' })
         return reply.send(detail)
       } catch (error) {

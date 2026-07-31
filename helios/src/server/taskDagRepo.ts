@@ -74,24 +74,17 @@ export interface TaskNode {
   requirements: string[]
   directChildren: string[]
   lifecycleRecord: JsonValue
-  sha: string
-  shortSha: string
   status: TaskStatus
   type: TaskType
   issueNumber?: number
   author?: string
-  parentTask?: string
-  dependencies: string[]
   dependents: string[]
-  breakdownChildren: string[]
-  refs: string[]
   isFrontier: boolean
   isActive: boolean
   isBlocked: boolean
   isReady: boolean
   dependenciesMet: boolean
-  completedBy: string[]
-  epicSha?: string
+  rootTaskId: string
   epicIssueNumber?: number
   epicTitle?: string
   githubUrl?: string
@@ -101,44 +94,45 @@ export interface TaskEdge { source: string; target: string; kind: 'breakdown' | 
 export interface EpicSummary {
   repository: string
   githubRepository?: string
-  issueNumber?: number
-  epicRef: string
-  sha: string
-  shortSha: string
+  taskId: string
+  taskOid: string
+  stateOid: string
   title: string
+  issueNumber?: number
   githubUrl?: string
   statusCounts: Record<string, number>
   frontierCount: number
   readyCount: number
   activeCount: number
   blockedCount: number
+  waitingCount: number
   completionPct: number
   totalTasks: number
 }
 export interface EpicsView { source: TaskDagSourceStatus; epics: EpicSummary[] }
 export interface DagResult {
   source: TaskDagSourceStatus
-  epic: { repository: string; githubRepository?: string; sha: string; shortSha: string; issueNumber?: number; title: string; githubUrl?: string }
+  epic: { repository: string; githubRepository?: string; taskId: string; taskOid: string; stateOid: string; issueNumber?: number; title: string; githubUrl?: string }
   nodes: TaskNode[]
   edges: TaskEdge[]
   summary: { totalTasks: number; statusCounts: Record<string, number> }
 }
 export interface FrontierGroup {
-  epic: { repository: string; githubRepository?: string; sha: string; shortSha: string; issueNumber?: number; title: string; githubUrl?: string } | null
-  counts: { total: number; ready: number; active: number; blocked: number; done: number }
+  epic: { repository: string; githubRepository?: string; taskId: string; taskOid: string; stateOid: string; issueNumber?: number; title: string; githubUrl?: string } | null
+  counts: { total: number; ready: number; active: number; blocked: number; waiting: number; done: number }
   tasks: TaskNode[]
 }
 export interface FrontierView {
   source: TaskDagSourceStatus
-  summary: { totalFrontier: number; ready: number; active: number; blocked: number; done: number; epicCount: number }
+  summary: { totalFrontier: number; ready: number; active: number; blocked: number; waiting: number; done: number; epicCount: number }
   groups: FrontierGroup[]
 }
-export interface TaskDetail { source: TaskDagSourceStatus; task: TaskNode; parent: TaskNode | null; dependencies: TaskNode[]; dependents: TaskNode[]; children: TaskNode[] }
+export interface TaskDetail { source: TaskDagSourceStatus; task: TaskNode; parent: TaskNode | null; requirements: TaskNode[]; dependents: TaskNode[]; children: TaskNode[] }
 export interface TaskIndex {
   nodes: Map<string, TaskNode>
-  epicShas: string[]
+  rootTaskIds: string[]
   epicsByIssue: Map<number, string>
-  frontierShas: string[]
+  frontierTaskIds: string[]
   fingerprint: string
   builtAtMs: number
 }
@@ -315,14 +309,12 @@ export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
       title: context.task.title, description: context.task.description, structuralParent,
       requirements: context.directRequirements.map((requirement) => requirement.taskId),
       directChildren: context.directChildren.map((child) => child.taskId), lifecycleRecord: show.record,
-      sha: context.taskId, shortSha: context.taskId.slice(0, 10), status: legacyStatus(context.state),
+      status: legacyStatus(context.state),
       type: structuralParent ? (context.directChildren.length ? 'task' : 'leaf') : 'epic',
-      parentTask: structuralParent,
-      dependencies: context.directRequirements.map((requirement) => requirement.taskId), dependents: [],
-      breakdownChildren: context.directChildren.map((child) => child.taskId), refs: [lifecycle.ref],
+      dependents: [],
       isFrontier: context.state === 'frontier', isActive: context.state === 'active',
       isBlocked: context.state === 'blocked' || context.state === 'waiting', isReady: false,
-      dependenciesMet: false, completedBy: context.state === 'done' ? [context.stateOid] : [],
+      dependenciesMet: false, rootTaskId: context.taskId,
     })
   }
   for (const { context } of records) {
@@ -348,13 +340,13 @@ export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
     node.dependenciesMet = node.requirements.every((id) => nodes.get(id)?.state === 'done')
     node.isReady = node.state === 'frontier' && node.dependenciesMet
     const root = findRoot(node, nodes)
-    node.epicSha = root.taskId
+    node.rootTaskId = root.taskId
     node.epicTitle = root.title
   }
-  const epicShas = [...nodes.values()].filter((node) => !node.structuralParent).map((node) => node.taskId)
+  const rootTaskIds = [...nodes.values()].filter((node) => !node.structuralParent).map((node) => node.taskId)
   const index: TaskIndex = {
-    nodes, epicShas, epicsByIssue: new Map(),
-    frontierShas: [...nodes.values()].filter((node) => node.state === 'frontier').map((node) => node.taskId),
+    nodes, rootTaskIds, epicsByIssue: new Map(),
+    frontierTaskIds: [...nodes.values()].filter((node) => node.state === 'frontier').map((node) => node.taskId),
     fingerprint: start.fingerprint, builtAtMs: Date.now(),
   }
   cachedIndexes.set(repository, index)
@@ -405,17 +397,18 @@ async function loadConfiguredTaskIndexes(requested?: string) {
 }
 
 function epicRef(index: TaskIndex, task: TaskNode) {
-  const root = task.epicSha ? index.nodes.get(task.epicSha) : undefined
-  return root ? { repository: root.repository, githubRepository: root.githubRepository, sha: root.taskId, shortSha: root.shortSha, title: root.title } : null
+  const root = index.nodes.get(task.rootTaskId)
+  return root ? { repository: root.repository, githubRepository: root.githubRepository, taskId: root.taskId, taskOid: root.taskOid, stateOid: root.stateOid, title: root.title } : null
 }
-export async function getFrontierView(filter?: { issue?: number; status?: string; repository?: string }): Promise<FrontierView> {
+export async function getFrontierView(filter?: { rootTaskId?: string; status?: string; repository?: string }): Promise<FrontierView> {
   const { indexes, source } = await loadConfiguredTaskIndexes(filter?.repository)
   const groups: FrontierGroup[] = []
   for (const index of indexes.values()) {
     const byRoot = new Map<string, TaskNode[]>()
     for (const task of index.nodes.values()) {
+      if (filter?.rootTaskId && task.rootTaskId !== filter.rootTaskId) continue
       if (filter?.status && task.status !== filter.status) continue
-      const root = task.epicSha ?? task.taskId
+      const root = task.rootTaskId
       const list = byRoot.get(root)
       if (list) list.push(task); else byRoot.set(root, [task])
     }
@@ -423,24 +416,25 @@ export async function getFrontierView(filter?: { issue?: number; status?: string
       tasks.sort((a, b) => Number(b.isReady) - Number(a.isReady) || a.title.localeCompare(b.title))
       groups.push({ epic: epicRef(index, tasks[0]), counts: {
         total: tasks.length, ready: tasks.filter((task) => task.isReady).length,
-        active: tasks.filter((task) => task.isActive).length, blocked: tasks.filter((task) => task.isBlocked).length,
+        active: tasks.filter((task) => task.state === 'active').length, blocked: tasks.filter((task) => task.state === 'blocked').length,
+        waiting: tasks.filter((task) => task.state === 'waiting' || (task.state === 'frontier' && !task.isReady)).length,
         done: tasks.filter((task) => task.state === 'done').length,
       }, tasks })
     }
   }
   groups.sort((a, b) => b.counts.ready - a.counts.ready || (a.epic?.repository ?? '').localeCompare(b.epic?.repository ?? ''))
   const tasks = groups.flatMap((group) => group.tasks)
-  return { source, summary: { totalFrontier: tasks.length, ready: tasks.filter((task) => task.isReady).length, active: tasks.filter((task) => task.isActive).length, blocked: tasks.filter((task) => task.isBlocked).length, done: tasks.filter((task) => task.state === 'done').length, epicCount: groups.length }, groups }
+  return { source, summary: { totalFrontier: tasks.length, ready: tasks.filter((task) => task.isReady).length, active: tasks.filter((task) => task.state === 'active').length, blocked: tasks.filter((task) => task.state === 'blocked').length, waiting: tasks.filter((task) => task.state === 'waiting' || (task.state === 'frontier' && !task.isReady)).length, done: tasks.filter((task) => task.state === 'done').length, epicCount: groups.length }, groups }
 }
-export async function getFrontier(filter?: { issue?: number; status?: string; repository?: string }): Promise<TaskNode[]> { return (await getFrontierView(filter)).groups.flatMap((group) => group.tasks) }
+export async function getFrontier(filter?: { rootTaskId?: string; status?: string; repository?: string }): Promise<TaskNode[]> { return (await getFrontierView(filter)).groups.flatMap((group) => group.tasks) }
 
 function summaries(repository: string, index: TaskIndex): EpicSummary[] {
-  return index.epicShas.map((rootId) => {
+  return index.rootTaskIds.map((rootId) => {
     const root = index.nodes.get(rootId) as TaskNode
-    const members = [...index.nodes.values()].filter((node) => node.epicSha === rootId)
+    const members = [...index.nodes.values()].filter((node) => node.rootTaskId === rootId)
     const statusCounts: Record<string, number> = {}
     members.forEach((node) => { statusCounts[node.status] = (statusCounts[node.status] ?? 0) + 1 })
-    return { repository, githubRepository: root.githubRepository, epicRef: rootId, sha: rootId, shortSha: root.shortSha, title: root.title, statusCounts, frontierCount: members.filter((node) => node.state === 'frontier').length, readyCount: members.filter((node) => node.isReady).length, activeCount: members.filter((node) => node.isActive).length, blockedCount: members.filter((node) => node.isBlocked).length, completionPct: members.length ? members.filter((node) => node.state === 'done').length / members.length : 0, totalTasks: members.length }
+    return { repository, githubRepository: root.githubRepository, taskId: rootId, taskOid: root.taskOid, stateOid: root.stateOid, title: root.title, statusCounts, frontierCount: members.filter((node) => node.state === 'frontier').length, readyCount: members.filter((node) => node.isReady).length, activeCount: members.filter((node) => node.state === 'active').length, blockedCount: members.filter((node) => node.state === 'blocked').length, waitingCount: members.filter((node) => node.state === 'waiting' || (node.state === 'frontier' && !node.isReady)).length, completionPct: members.length ? members.filter((node) => node.state === 'done').length / members.length : 0, totalTasks: members.length }
   })
 }
 export async function getEpics(): Promise<EpicsView> {
@@ -452,7 +446,7 @@ export async function getEpicDag(rootId: string, repository: string): Promise<Da
   const index = indexes.get(repository) as TaskIndex
   const root = index.nodes.get(rootId)
   if (!root || root.structuralParent) throw new Error(`Epic not found: ${rootId}`)
-  const nodes = [...index.nodes.values()].filter((node) => node.epicSha === rootId)
+  const nodes = [...index.nodes.values()].filter((node) => node.rootTaskId === rootId)
   const memberIds = new Set(nodes.map((node) => node.taskId))
   const edges: TaskEdge[] = []
   for (const node of nodes) {
@@ -461,7 +455,7 @@ export async function getEpicDag(rootId: string, repository: string): Promise<Da
   }
   const statusCounts: Record<string, number> = {}
   nodes.forEach((node) => { statusCounts[node.status] = (statusCounts[node.status] ?? 0) + 1 })
-  return { source, epic: { repository, githubRepository: root.githubRepository, sha: root.taskId, shortSha: root.shortSha, title: root.title }, nodes, edges, summary: { totalTasks: nodes.length, statusCounts } }
+  return { source, epic: { repository, githubRepository: root.githubRepository, taskId: root.taskId, taskOid: root.taskOid, stateOid: root.stateOid, title: root.title }, nodes, edges, summary: { totalTasks: nodes.length, statusCounts } }
 }
 export async function getTaskDetail(taskId: string, repository: string): Promise<TaskDetail | null> {
   const { indexes, source } = await loadConfiguredTaskIndexes(repository)
@@ -469,7 +463,7 @@ export async function getTaskDetail(taskId: string, repository: string): Promise
   const task = index.nodes.get(taskId)
   if (!task) return null
   const lookup = (id: string): TaskNode | null => index.nodes.get(id) ?? null
-  return { source, task, parent: task.structuralParent ? lookup(task.structuralParent) : null, dependencies: task.requirements.map(lookup).filter((node): node is TaskNode => node !== null), dependents: task.dependents.map(lookup).filter((node): node is TaskNode => node !== null), children: task.directChildren.map(lookup).filter((node): node is TaskNode => node !== null) }
+  return { source, task, parent: task.structuralParent ? lookup(task.structuralParent) : null, requirements: task.requirements.map(lookup).filter((node): node is TaskNode => node !== null), dependents: task.dependents.map(lookup).filter((node): node is TaskNode => node !== null), children: task.directChildren.map(lookup).filter((node): node is TaskNode => node !== null) }
 }
 export async function getActivity() {
   const view = await getFrontierView(); const epics = await getEpics()
