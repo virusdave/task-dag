@@ -11958,10 +11958,6 @@ span.metric-chart-legend-item {
   font-size: 0.8125rem;
   color: var(--text-muted);
 }
-.task-card-sha {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8125rem;
-}
 .task-card-epic {
   font-size: 0.8125rem;
   overflow: hidden;
@@ -11984,6 +11980,9 @@ span.metric-chart-legend-item {
 }
 .task-technical-details { margin-bottom: 1.5rem; }
 .task-technical-details > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
+.task-technical-details .mini-card-row > :last-child { min-width: 0; }
+.task-technical-details code { overflow-wrap: anywhere; word-break: break-word; }
+.task-description { max-width: 80ch; white-space: pre-wrap; }
 
 .task-section-title {
   font-size: 1rem;

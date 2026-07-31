@@ -55,6 +55,7 @@ export function TaskDetailPage() {
         <div>
           <p className="subtle-copy">{task.repository}</p>
           <h2>{task.title}</h2>
+          <p className="subtle-copy task-description">{task.description}</p>
           <div className="task-card-badges" style={{ marginTop: '0.5rem' }}>
             <StatusBadge task={task} />
           </div>

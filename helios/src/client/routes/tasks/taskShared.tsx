@@ -1,12 +1,23 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Pill } from '../../components/Pill.js'
+import { nyShortDateTime } from '../../app/nyTime.js'
 
 // --- shared types (mirror server/taskDagRepo.ts) ---------------------------
 
 export type TaskStatus = 'pending' | 'in-progress' | 'blocked' | 'done'
 export type TaskState = 'frontier' | 'active' | 'blocked' | 'waiting' | 'done'
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+export interface LifecycleEvidence {
+  state: TaskState
+  owner?: string
+  claimedAt?: number
+  expiresAt?: number
+  reason?: string
+  blockedAt?: number
+  publicationCommit?: string
+  completionDescription?: string
+  waitingChildCount?: number
+}
 
 export interface TaskDagSourceStatus {
   available: boolean
@@ -35,7 +46,7 @@ export interface TaskNode {
   structuralParent?: string
   requirements: string[]
   directChildren: string[]
-  lifecycleRecord: JsonValue
+  lifecycleEvidence: LifecycleEvidence
   issueNumber?: number
   status: TaskStatus
   type: 'epic' | 'task' | 'leaf'
@@ -693,28 +704,33 @@ function TaskCardDisclosure({
   )
 }
 
-function lifecycleString(task: TaskNode, key: string): string | undefined {
-  const record = task.lifecycleRecord
-  if (record === null || Array.isArray(record) || typeof record !== 'object') return undefined
-  const value = record[key]
-  return typeof value === 'string' ? value : undefined
-}
-
 function TaskStatusEvidence({ task }: { task: TaskNode }) {
   const label = statusLabel(task)
   let explanation = 'This task is waiting. One or more current readiness conditions are not met.'
   if (label === 'Ready') explanation = 'This task is pickable now; all known prerequisites are satisfied.'
-  if (label === 'In progress') explanation = task.isActive
-    ? 'A current claim marks this task as in progress.'
-    : 'Current task metadata reports in progress, but claim evidence is unavailable in this snapshot.'
-  if (label === 'Blocked') explanation = task.isBlocked
-    ? 'A current block prevents this task from being picked up.'
-    : 'Current task metadata reports blocked, but block evidence is unavailable in this snapshot.'
+  if (label === 'In progress') explanation = task.lifecycleEvidence.owner
+    ? `Claimed by ${task.lifecycleEvidence.owner}.`
+    : 'A current claim marks this task as in progress.'
+  if (label === 'Blocked') explanation = task.lifecycleEvidence.reason
+    ? task.lifecycleEvidence.reason
+    : 'A current block prevents this task from being picked up.'
+  if (task.state === 'waiting' && task.lifecycleEvidence.waitingChildCount != null) {
+    explanation = `Waiting for ${task.lifecycleEvidence.waitingChildCount} direct child task${task.lifecycleEvidence.waitingChildCount === 1 ? '' : 's'} to finish.`
+  }
   if (label === 'Done') explanation = 'Durable completion evidence exists for this task.'
-  const publicationCommit = lifecycleString(task, 'publicationCommit')
+  const publicationCommit = task.lifecycleEvidence.publicationCommit
   return (
     <div>
       <p>{explanation}</p>
+      {task.state === 'active' && (task.lifecycleEvidence.claimedAt != null || task.lifecycleEvidence.expiresAt != null) && (
+        <ul className="task-card-disclosure__list">
+          {task.lifecycleEvidence.claimedAt != null && <li>Claimed {nyShortDateTime(task.lifecycleEvidence.claimedAt * 1000)} NY</li>}
+          {task.lifecycleEvidence.expiresAt != null && <li>Claim expires {nyShortDateTime(task.lifecycleEvidence.expiresAt * 1000)} NY</li>}
+        </ul>
+      )}
+      {task.state === 'done' && task.lifecycleEvidence.completionDescription && (
+        <p>{task.lifecycleEvidence.completionDescription}</p>
+      )}
       {task.state === 'done' && publicationCommit && (
         <ul className="task-card-disclosure__list">
           <li>

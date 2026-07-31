@@ -19,7 +19,8 @@ const missingB = 'b'.repeat(40)
 const fullTaskId = `v2-${'c'.repeat(64)}`
 const task: TaskNode = {
   repository: 'automation', taskId: fullTaskId, taskOid: '1'.repeat(40), stateOid: '2'.repeat(40),
-  state: 'active', title: 'Improve task UX', description: 'Improve task UX', lifecycleRecord: {},
+  state: 'active', title: 'Improve task UX', description: 'Improve task UX',
+  lifecycleEvidence: { state: 'active', owner: 'amp-local', claimedAt: 10, expiresAt: 20 },
   status: 'in-progress', type: 'leaf', requirements: ['first', missingB, missingA], dependents: [],
   directChildren: ['child'], isFrontier: false, isActive: true, isBlocked: false,
   isReady: false, dependenciesMet: false, rootTaskId: 'root', epicIssueNumber: 89,
@@ -140,7 +141,8 @@ describe('TaskCard disclosures', () => {
     const subtasksButton = [...host.querySelectorAll('button')].find((button) => button.textContent === '1 subtask')!
     await act(async () => statusButton.click())
     expect(host.querySelectorAll('.task-card-disclosure')).toHaveLength(1)
-    expect(host.textContent).toContain('current claim')
+    expect(host.textContent).toContain('Claimed by amp-local')
+    expect(host.textContent).toContain('Claim expires')
     expect(fetch).not.toHaveBeenCalled()
 
     await act(async () => prerequisitesButton.click())

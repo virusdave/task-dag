@@ -24,6 +24,17 @@ export type TaskState = typeof STATES[number]
 export type TaskStatus = 'pending' | 'in-progress' | 'blocked' | 'done'
 export type TaskType = 'epic' | 'task' | 'leaf'
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+export interface LifecycleEvidence {
+  state: TaskState
+  owner?: string
+  claimedAt?: number
+  expiresAt?: number
+  reason?: string
+  blockedAt?: number
+  publicationCommit?: string
+  completionDescription?: string
+  waitingChildCount?: number
+}
 
 function isJsonValue(value: unknown): value is JsonValue {
   if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return true
@@ -73,7 +84,7 @@ export interface TaskNode {
   structuralParent?: string
   requirements: string[]
   directChildren: string[]
-  lifecycleRecord: JsonValue
+  lifecycleEvidence: LifecycleEvidence
   status: TaskStatus
   type: TaskType
   issueNumber?: number
@@ -271,6 +282,27 @@ function legacyStatus(state: TaskState): TaskStatus {
   return 'pending'
 }
 
+function lifecycleEvidence(state: TaskState, record: JsonValue): LifecycleEvidence {
+  const evidence: LifecycleEvidence = { state }
+  if (record === null || Array.isArray(record) || typeof record !== 'object') return evidence
+  const stringField = (key: string): string | undefined => typeof record[key] === 'string' ? record[key] : undefined
+  const numberField = (key: string): number | undefined => typeof record[key] === 'number' ? record[key] : undefined
+  if (state === 'active') {
+    evidence.owner = stringField('owner')
+    evidence.claimedAt = numberField('claimedAt')
+    evidence.expiresAt = numberField('expiresAt')
+  } else if (state === 'blocked') {
+    evidence.reason = stringField('reason')
+    evidence.blockedAt = numberField('blockedAt')
+  } else if (state === 'done') {
+    evidence.publicationCommit = stringField('publicationCommit')
+    evidence.completionDescription = stringField('description')
+  } else if (state === 'waiting') {
+    evidence.waitingChildCount = Array.isArray(record.children) ? record.children.length : undefined
+  }
+  return evidence
+}
+
 export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
   const source = requireSource(repository)
   const originUrl = await git(source.gitDir, ['remote', 'get-url', 'origin'])
@@ -308,7 +340,8 @@ export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
       taskId: context.taskId, taskOid: context.taskOid, stateOid: context.stateOid, state: context.state,
       title: context.task.title, description: context.task.description, structuralParent,
       requirements: context.directRequirements.map((requirement) => requirement.taskId),
-      directChildren: context.directChildren.map((child) => child.taskId), lifecycleRecord: show.record,
+      directChildren: context.directChildren.map((child) => child.taskId),
+      lifecycleEvidence: lifecycleEvidence(context.state, show.record),
       status: legacyStatus(context.state),
       type: structuralParent ? (context.directChildren.length ? 'task' : 'leaf') : 'epic',
       dependents: [],

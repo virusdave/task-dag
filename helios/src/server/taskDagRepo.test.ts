@@ -77,7 +77,16 @@ function fakeRunner() {
         structuralParent: parentIdentity, requirements: requirementIdentities,
       },
     }
-    return { taskId: id, state, ref: `refs/heads/tasks/${state}/${id}`, stateOid: headOid, record: { event: state, evidence: [id] } }
+    const record = state === 'active'
+      ? { owner: 'amp-local', claimedAt: 10, expiresAt: 20, claimToken: 'must-not-leak' }
+      : state === 'blocked'
+        ? { reason: 'Operator decision required', blockedAt: 30, authorization: 'private detail' }
+        : state === 'done'
+          ? { publicationCommit: headOid, description: 'Published implementation' }
+          : state === 'waiting'
+            ? { children: children.map(identity) }
+            : { operationId: 'fixture-frontier' }
+    return { taskId: id, state, ref: `refs/heads/tasks/${state}/${id}`, stateOid: headOid, record }
   }
 }
 
@@ -120,7 +129,7 @@ describe('bounded task-dag v2 adapter', () => {
     const node = index.nodes.get(ids.frontier)
     expect(node).toMatchObject({ taskId: ids.frontier, stateOid: headOid, description: 'description for frontier' })
     expect(node?.taskOid).toMatch(/^[0-9a-f]{40}$/)
-    expect(node?.lifecycleRecord).toEqual({ event: 'frontier', evidence: [ids.frontier] })
+    expect(node?.lifecycleEvidence).toEqual({ state: 'frontier' })
   })
 
   it('keeps structural parent separate from requirements and derives relationships/readiness', async () => {
@@ -226,6 +235,15 @@ describe('task-dag v2 API identity', () => {
       expect(full.statusCode).toBe(200)
       expect(full.json().task).toMatchObject({ taskId: ids.frontier, taskOid: expect.any(String), stateOid: headOid })
       expect(full.json().task).not.toHaveProperty('sha')
+
+      const active = await server.inject({
+        method: 'GET',
+        url: `/api/tasks/repositories/automation/tasks/${ids.active}`,
+      })
+      expect(active.json().task.lifecycleEvidence).toEqual({
+        state: 'active', owner: 'amp-local', claimedAt: 10, expiresAt: 20,
+      })
+      expect(active.body).not.toContain('must-not-leak')
 
       const legacy = await server.inject({
         method: 'GET',

@@ -13,7 +13,7 @@ import type { DagResult, TaskNode } from './taskShared.js'
 const node = (sha: string, type: TaskNode['type'], status: TaskNode['status']): TaskNode => ({
   repository: 'automation', taskId: sha, taskOid: '1'.repeat(40), stateOid: '2'.repeat(40),
   state: status === 'done' ? 'done' : status === 'blocked' ? 'blocked' : 'frontier',
-  title: sha, description: sha, lifecycleRecord: {}, status, type, requirements: [],
+  title: sha, description: sha, lifecycleEvidence: { state: status === 'done' ? 'done' : status === 'blocked' ? 'blocked' : 'frontier' }, status, type, requirements: [],
   dependents: [], directChildren: [], isFrontier: status === 'pending', isActive: false,
   isBlocked: status === 'blocked', isReady: false, dependenciesMet: true, rootTaskId: 'epic',
 })
