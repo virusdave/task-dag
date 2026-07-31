@@ -230,6 +230,28 @@ describe('existing mirror configuration behavior', () => {
     }
   })
 
+  it('never falls back from a missing configured checkout to a persisted mirror', async () => {
+    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-local-no-fallback-'))
+    const mirrorConfig = path.join(mirrorRoot, 'repos.conf')
+    const localPaths = path.join(mirrorRoot, 'paths.conf')
+    execFileSync('git', ['clone', '--mirror', repoDir, path.join(mirrorRoot, 'repo.git')], { stdio: 'ignore' })
+    fs.writeFileSync(mirrorConfig, 'repo https://github.com/Example/repo.git\n')
+    fs.writeFileSync(localPaths, 'repo /missing/configured/checkout\n')
+    try {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = mirrorConfig
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = localPaths
+      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
+      __resetTaskDagMirrorForTests()
+      expect((await initTaskDagMirror()).repositories[0]).toMatchObject({ available: false, mode: 'none' })
+    } finally {
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
+      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
+      __resetTaskDagMirrorForTests()
+      fs.rmSync(mirrorRoot, { recursive: true, force: true })
+    }
+  })
+
   it('preserves a valid last-good mirror on auth failure and removes a wrong-origin mirror', async () => {
     const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-auth-failure-'))
     const mirror = path.join(mirrorRoot, 'repo.git')
