@@ -184,9 +184,14 @@ legacy closure refs. Exact operation replay is checked before discovery. Keep
 the freeze active if post-write readback reports that master or either v1
 authority changed.
 Direct-child blocked overlays (with optional valid blocked metadata) and local
-`requires/all` graph edges wholly inside the imported closure are preserved.
-Nested structural closures, cross-boundary/delegated edges, `satisfies` edges,
-and root-active or delegated lifecycle state fail closed without mutation.
+`requires/all` graph edges are preserved. Nested scheduled closures are
+flattened into the native structural model. Incomplete same-repository
+cross-root requirements become exact native requirements, and strictly paired
+legacy delegation refs and graph edges become native delegation intent plus
+waiting state. The importer validates global ownership, requirement cycles,
+activation-v3 fleet identity for delegated imports, and the complete write plan
+before one atomic transition. Malformed, ambiguous, unpaired, `satisfies`, or
+unsupported active-root state continues to fail closed without mutation.
 
 `breakdown` accepts
 `{"operationId":"...","children":[{"key":"...","title":"...","description":"...","requires":[],"claim":false}]}`.
