@@ -269,7 +269,6 @@ async function captureRefs(gitDir: string): Promise<RefCapture> {
     seen.set(taskId, state)
     lifecycle.push({ taskId, state, ref: `refs/heads/tasks/${state}/${taskId}`, oid: match[3] })
   }
-  if (lifecycle.length === 0) throw new Error('No grammatical task-dag v2 lifecycle refs found; refusing v1-only repository')
   if (lifecycle.length > MAX_LIFECYCLE_TASKS) {
     throw new Error(`Task repository exceeds the ${MAX_LIFECYCLE_TASKS}-task Helios read bound`)
   }

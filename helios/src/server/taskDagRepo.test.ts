@@ -205,11 +205,12 @@ describe('bounded task-dag v2 adapter', () => {
     await expect(loadTaskIndex('automation')).rejects.toThrow(/identity mismatch/)
   })
 
-  it('refuses a v1-only repository', async () => {
+  it('accepts an activated repository with no v2 lifecycle tasks', async () => {
     for (const [id, state] of states) git(['update-ref', '-d', `refs/heads/tasks/${state}/${id}`])
     git(['update-ref', 'refs/heads/tasks/frontier/deadbee', headOid])
     try {
-      await expect(loadTaskIndex('automation')).rejects.toThrow(/refusing v1-only/)
+      await expect(loadTaskIndex('automation')).resolves.toMatchObject({ nodes: new Map() })
+      await expect(probeTaskDagReader('automation')).resolves.toEqual({ taskCount: 0 })
     } finally {
       git(['update-ref', '-d', 'refs/heads/tasks/frontier/deadbee'])
       installRefs()
