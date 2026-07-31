@@ -6,7 +6,11 @@ import { listLiveLotsForProduct } from '../../server/catalog/stockTransferServic
 import { getPool } from '../../server/db/pool.js'
 import type { Queryable } from '../../server/db/pool.js'
 import { callSweedRpc } from '../sweed/rpc.js'
+import { isSafeTerminalWorkerError, SafeTerminalWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
+
+const POST_TRANSFER_VERIFICATION_ATTEMPTS = 10
+const POST_TRANSFER_VERIFICATION_RETRY_MS = 1_000
 
 export async function assertTradeSampleJobLease(context: JobHandlerContext): Promise<void> {
   if (!context.leaseToken) throw new Error('Destructive trade sample job has no mutation lease.')
@@ -20,12 +24,14 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
     audit?: typeof appendAuditEvent
     db?: Queryable
     assertLease?: () => Promise<void>
+    delay?: (milliseconds: number) => Promise<void>
   } = {},
 ): Promise<void> {
   const rpc = injected.rpc ?? callSweedRpc
   const audit = injected.audit ?? appendAuditEvent
   const db = injected.db ?? getPool()
   const assertLease = injected.assertLease ?? (() => assertTradeSampleJobLease(context))
+  const delay = injected.delay ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)))
   const d = { rpc }
   const outcomes: TradeSampleStageResult['outcomes'] = []
   const stagedItems: TradeSampleZeroItem[] = []
@@ -79,10 +85,7 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
         items: [{ id: item.inventoryItemId, qty: item.currentQty, externalTrackCode: item.externalTrackCode }],
       })
       transferPhase = 'post-transfer verification'
-      const matchingLots = (await listLiveLotsForProduct(payload.siteDealerId, item.productId, rpc))
-        .filter((lot) => lot.externalTrackCode?.trim() === item.externalTrackCode)
-      const after = matchingLots.length === 1 ? matchingLots[0] : undefined
-      if (!after || !after.isTradeSample || after.currentQty !== item.currentQty || after.availableQty !== item.currentQty || after.stockLocationId !== payload.destination.id || after.stockLocationName?.trim() !== payload.destination.name || after.stockTypeId !== payload.destination.stockTypeId) throw new Error('Transfer outcome could not be verified by package tag at the destination.')
+      const after = await verifyTransferredLot(payload, item, rpc, delay)
       stagedItems.push({
         ...item,
         inventoryItemId: after.inventoryItemId,
@@ -95,6 +98,7 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
       const failure = stageFailure(transferPhase, error, item.inventoryItemId)
       console.error(`[trade-sample-stage][job ${context.id}] ${failure}`)
       await persistStageResult(context, payload, outcomes, false, audit, db, failure)
+      if (isSafeTerminalWorkerError(error)) throw new SafeTerminalWorkerError(failure, { cause: error })
       throw error
     }
     outcomes.push({ inventoryItemId: item.inventoryItemId, status: 'completed' })
@@ -173,7 +177,39 @@ function countOutcomes(outcomes: TradeSampleStageResult['outcomes']): TradeSampl
 }
 
 function stageFailure(phase: string, error: unknown, inventoryItemId?: string): string {
-  const detail = error instanceof Error ? error.message : 'Unknown worker error.'
+  const detail = isSafeTerminalWorkerError(error) ? error.message : 'An unexpected internal error occurred.'
   const packageContext = inventoryItemId ? ` for package ${inventoryItemId}` : ''
   return `Staging stopped during ${phase}${packageContext}: ${detail}`
+}
+
+async function verifyTransferredLot(
+  payload: CatalogInventoryStageTradeSamplesJobPayload,
+  item: TradeSampleZeroItem,
+  rpc: typeof callSweedRpc,
+  delay: (milliseconds: number) => Promise<void>,
+): Promise<Awaited<ReturnType<typeof listLiveLotsForProduct>>[number]> {
+  let lastObservation = 'no verification observation was recorded'
+  for (let attempt = 1; attempt <= POST_TRANSFER_VERIFICATION_ATTEMPTS; attempt += 1) {
+    const matchingLots = (await listLiveLotsForProduct(payload.siteDealerId, item.productId, rpc))
+      .filter((lot) => lot.externalTrackCode?.trim() === item.externalTrackCode)
+    const after = matchingLots.length === 1 ? matchingLots[0] : undefined
+    if (after && after.isTradeSample && after.currentQty === item.currentQty && after.availableQty === item.currentQty && after.stockLocationId === payload.destination.id && after.stockLocationName?.trim() === payload.destination.name && after.stockTypeId === payload.destination.stockTypeId) return after
+    lastObservation = describeMatchingLots(matchingLots)
+    if (attempt < POST_TRANSFER_VERIFICATION_ATTEMPTS) await delay(POST_TRANSFER_VERIFICATION_RETRY_MS)
+  }
+  throw new SafeTerminalWorkerError(
+    `Transfer outcome was not visible after read ${POST_TRANSFER_VERIFICATION_ATTEMPTS} of ${POST_TRANSFER_VERIFICATION_ATTEMPTS}; ${lastObservation}.`,
+  )
+}
+
+function describeMatchingLots(lots: Awaited<ReturnType<typeof listLiveLotsForProduct>>): string {
+  if (lots.length === 0) return 'no live lot matched the package tag'
+  return `${lots.length} live lot(s) matched: ${lots.map((lot) => [
+    `id=${lot.inventoryItemId}`,
+    `qty=${lot.currentQty ?? 'missing'}`,
+    `available=${lot.availableQty ?? 'missing'}`,
+    `location=${lot.stockLocationId ?? 'missing'}`,
+    `stockType=${lot.stockTypeId ?? 'missing'}`,
+    `tradeSample=${lot.isTradeSample}`,
+  ].join(',')).join('; ')}`
 }

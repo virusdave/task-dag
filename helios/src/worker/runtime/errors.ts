@@ -22,3 +22,15 @@ export class DependencyUnavailableWorkerError extends RetryableWorkerError {
 export function isDependencyUnavailableWorkerError(error: unknown): error is DependencyUnavailableWorkerError {
   return error instanceof DependencyUnavailableWorkerError
 }
+
+/** A terminal failure message explicitly constructed for operator display. */
+export class SafeTerminalWorkerError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'SafeTerminalWorkerError'
+  }
+}
+
+export function isSafeTerminalWorkerError(error: unknown): error is SafeTerminalWorkerError {
+  return error instanceof SafeTerminalWorkerError
+}

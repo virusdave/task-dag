@@ -37,7 +37,17 @@ const groupedItems = (values: Array<typeof item>, atTarget = false) => ({
 })
 
 function dependencies(responses: unknown[], audit = vi.fn().mockResolvedValue(1)) {
-  return { rpc: vi.fn(async () => responses.shift()), audit, db: { query: vi.fn() }, assertLease: vi.fn().mockResolvedValue(undefined) }
+  return {
+    rpc: vi.fn(async () => {
+      const response = responses.shift()
+      if (response instanceof Error) throw response
+      return response
+    }),
+    audit,
+    db: { query: vi.fn() },
+    assertLease: vi.fn().mockResolvedValue(undefined),
+    delay: vi.fn().mockResolvedValue(undefined),
+  }
 }
 
 describe('stage trade sample worker', () => {
@@ -86,6 +96,22 @@ describe('stage trade sample worker', () => {
     })
   })
 
+  it('waits one second and retries read-only verification without replaying the transfer', async () => {
+    const deps = dependencies([
+      locations, grouped(), detail(), {},
+      productLots(false), productLots(false), productLots(),
+      grouped(true),
+    ])
+
+    await runCatalogInventoryStageTradeSamplesJob(context, payload, deps)
+
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.item.transfer')).toHaveLength(1)
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.product.item.list')).toHaveLength(3)
+    expect(deps.delay).toHaveBeenCalledTimes(2)
+    expect(deps.delay).toHaveBeenNthCalledWith(1, 1_000)
+    expect(deps.delay).toHaveBeenNthCalledWith(2, 1_000)
+  })
+
   it('accepts Sweed padding around the destination name during post-transfer verification', async () => {
     const padded = ` ${destination.name}`
     const paddedLocations = { data: [{ id: 88, name: padded, enabled: true, stockType: { id: 7 } }] }
@@ -107,18 +133,21 @@ describe('stage trade sample worker', () => {
 
   it('records an unknown terminal package outcome when transfer verification fails', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const deps = dependencies([locations, grouped(), detail(), {}, productLots(false)])
+    const deps = dependencies([locations, grouped(), detail(), {}, ...Array.from({ length: 10 }, () => productLots(false))])
     await expect(runCatalogInventoryStageTradeSamplesJob(context, payload, deps)).rejects.toThrow()
     expect(deps.audit.mock.calls.at(-1)?.[1].payload).toMatchObject({
       complete: false,
       outcomes: [{ inventoryItemId: '44', status: 'failed_unknown' }],
     })
     expect(deps.audit.mock.calls.at(-1)?.[1].payload.message).toContain(
-      'Staging stopped during post-transfer verification for package 44: Transfer outcome could not be verified by package tag at the destination.',
+      'Staging stopped during post-transfer verification for package 44: Transfer outcome was not visible after read 10 of 10; 1 live lot(s) matched: id=44,qty=2,available=2,location=12,stockType=3,tradeSample=true.',
     )
     expect(log).toHaveBeenCalledWith(
-      '[trade-sample-stage][job 8] Staging stopped during post-transfer verification for package 44: Transfer outcome could not be verified by package tag at the destination.',
+      '[trade-sample-stage][job 8] Staging stopped during post-transfer verification for package 44: Transfer outcome was not visible after read 10 of 10; 1 live lot(s) matched: id=44,qty=2,available=2,location=12,stockType=3,tradeSample=true.',
     )
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.item.transfer')).toHaveLength(1)
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.product.item.list')).toHaveLength(10)
+    expect(deps.delay).toHaveBeenCalledTimes(9)
     log.mockRestore()
   })
 
@@ -129,17 +158,17 @@ describe('stage trade sample worker', () => {
       externalTrackCode: index === 0 ? item.externalTrackCode : `OTHER-${index}`,
     }))
     const duplicateTag = { ...productLots().data[0], id: '2000' }
-    const deps = dependencies([
-      locations, grouped(), detail(), {},
+    const duplicatePages = Array.from({ length: 10 }, () => [
       { data: firstPage, totalCount: 101 },
       { data: [duplicateTag], totalCount: 101 },
-    ])
+    ]).flat()
+    const deps = dependencies([locations, grouped(), detail(), {}, ...duplicatePages])
 
     await expect(runCatalogInventoryStageTradeSamplesJob(context, payload, deps)).rejects.toThrow(
-      'Transfer outcome could not be verified by package tag at the destination.',
+      'Transfer outcome was not visible after read 10 of 10',
     )
 
-    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.product.item.list')).toHaveLength(2)
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.product.item.list')).toHaveLength(20)
     expect(deps.audit.mock.calls.at(-1)?.[1].payload).toMatchObject({
       complete: false,
       outcomes: [{ inventoryItemId: '44', status: 'failed_unknown' }],
@@ -156,8 +185,27 @@ describe('stage trade sample worker', () => {
       'Sweed returned an incomplete live-lot list for product 9.',
     )
     expect(deps.audit.mock.calls.at(-1)?.[1].payload.message).toContain(
-      'Staging stopped during post-transfer verification for package 44: Sweed returned an incomplete live-lot list for product 9.',
+      'Staging stopped during post-transfer verification for package 44: An unexpected internal error occurred.',
     )
+    expect(deps.delay).not.toHaveBeenCalled()
+  })
+
+  it('keeps arbitrary Sweed failure details out of durable and console diagnostics', async () => {
+    const secret = 'rpc failed with bearer SECRET-VALUE'
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const deps = dependencies([locations, grouped(), detail(), new Error(secret)])
+
+    await expect(runCatalogInventoryStageTradeSamplesJob(context, payload, deps)).rejects.toThrow(secret)
+
+    const message = deps.audit.mock.calls.at(-1)?.[1].payload.message
+    expect(message).toContain('Staging stopped during transfer RPC for package 44: An unexpected internal error occurred.')
+    expect(message).not.toContain('SECRET-VALUE')
+    expect(log).toHaveBeenCalledWith(
+      '[trade-sample-stage][job 8] Staging stopped during transfer RPC for package 44: An unexpected internal error occurred.',
+    )
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.item.transfer')).toHaveLength(1)
+    expect(deps.delay).not.toHaveBeenCalled()
+    log.mockRestore()
   })
 
   it('stops later transfers when terminal audit fails', async () => {

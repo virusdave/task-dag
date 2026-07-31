@@ -4,7 +4,7 @@ import { JOB_PRIORITY_URGENT } from '../../server/jobs/enqueueJob.js'
 import { recordAuthEvent, withJobAuthContext } from '../sweed/authLog.js'
 import { tickConfigWorkersScheduler } from './configWorkersScheduler.js'
 import { ensureDependenciesReadyForJob, warmDependencyHealth } from './dependencyHealth.js'
-import { isDependencyUnavailableWorkerError, isRetryableWorkerError } from './errors.js'
+import { isDependencyUnavailableWorkerError, isRetryableWorkerError, isSafeTerminalWorkerError } from './errors.js'
 import {
   getJobTypesForPoolSelector,
   shouldRunConfigWorkersSchedulerTickForPoolSelector,
@@ -39,7 +39,9 @@ export function classifyWorkerFailure(jobType: JobType, error: unknown): {
     delayMs: dependencyUnavailable ? error.delayMs ?? undefined : undefined,
     destructiveTradeSample,
     message: destructiveTradeSample
-      ? 'Destructive trade-sample operation stopped safely; inspect Sweed. It will not retry automatically.'
+      ? isSafeTerminalWorkerError(error)
+        ? `${error.message} It will not retry automatically.`
+        : 'Destructive trade-sample operation stopped safely; inspect Sweed. It will not retry automatically.'
       : error instanceof Error ? error.message : 'Unknown worker error.',
   }
 }
