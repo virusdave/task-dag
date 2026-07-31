@@ -187,10 +187,15 @@ Direct-child blocked overlays (with optional valid blocked metadata) and local
 `requires/all` graph edges are preserved. Nested scheduled closures are
 flattened into the native structural model. Incomplete same-repository
 cross-root requirements become exact native requirements, and strictly paired
-legacy delegation refs and graph edges become native delegation intent plus
+legacy delegation declarations are authority by their exact ref, OID, and root
+parent; a matching requires/all graph edge is optional retained provenance.
+Open declarations become native delegation intent plus
 waiting state. The importer validates global ownership, requirement cycles,
 activation-v3 fleet identity for delegated imports, and the complete write plan
-before one atomic transition. Malformed, ambiguous, unpaired, `satisfies`, or
+before one atomic transition. A strictly bound immutable delegated-close/v1
+record instead becomes a migration-specific done child, with the parent waiting
+manifest and reconcile marker published atomically and no live intent. Malformed,
+ambiguous, incomplete `satisfies`, or
 unsupported active-root state continues to fail closed without mutation.
 
 `breakdown` accepts

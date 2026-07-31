@@ -500,6 +500,28 @@ impl Fixture {
         }
         (reference, delegation)
     }
+    fn add_legacy_close(&self, declaration_ref: &str, declaration: &str) -> (String, String) {
+        let close_ref = declaration_ref.replacen(
+            "refs/heads/tasks/delegated/",
+            "refs/heads/tasks/delegated-close/v1/",
+            1,
+        );
+        let close = commit(
+            &self.work,
+            &format!(
+                "Record delegated close\n\nTask-Dag-Delegated-Close: v1\nParent-Repo: owner/repo\nParent-Issue: #1\nPeer-Repo: peer/repo\nPeer-Issue: #2\nLegacy-Delegation: {declaration}\nPeer-Tip: {}\nPeer-Close: {}\nPeer-Epic: {}",
+                "1".repeat(40),
+                "2".repeat(40),
+                "3".repeat(40)
+            ),
+            &[declaration],
+        );
+        ok(
+            &self.work,
+            &["push", "origin", &format!("{close}:{close_ref}")],
+        );
+        (close_ref, close)
+    }
     fn migrate_with_terminal_edge(&self, operation: &str, edge: &str) -> Output {
         Self::run_raw(
             &self.work,
@@ -634,6 +656,139 @@ fn paired_legacy_delegation_becomes_native_waiting_child_and_replays_exactly() {
     assert_eq!(first.stdout, replay.stdout);
 }
 
+#[test]
+fn unpaired_declaration_imports_waiting_and_exact_close_imports_done() {
+    let waiting = Fixture::new(false, true);
+    waiting.remove_other_root();
+    let (declaration_ref, _) = waiting.add_delegation("peer/repo", 2, None, 2, &[]);
+    let out = waiting.migrate("no-edge-delegation", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(value["delegations"][0]["pairedEdgeBlobOid"].is_null());
+    assert!(waiting.remote(&declaration_ref).is_none());
+
+    let completed = Fixture::new(false, true);
+    completed.remove_other_root();
+    let (declaration_ref, declaration) = completed.add_delegation("peer/repo", 2, None, 2, &[]);
+    let (close_ref, close) = completed.add_legacy_close(&declaration_ref, &declaration);
+    let out = completed.migrate("closed-delegation", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let imported = &value["delegations"][0];
+    assert_eq!(imported["disposition"], "completed-delegation");
+    assert_eq!(imported["legacyCloseOid"], close);
+    assert!(imported["doneOid"].as_str().is_some());
+    assert!(imported["doneRef"].as_str().is_some());
+    assert!(imported["intentOid"].is_null());
+    assert!(completed.remote(&declaration_ref).is_none());
+    assert!(completed.remote(&close_ref).is_none());
+    assert!(
+        completed
+            .remote(&format!(
+                "refs/heads/tasks/done/{}",
+                imported["syntheticTaskId"].as_str().unwrap()
+            ))
+            .is_some()
+    );
+    assert!(
+        completed
+            .remote(&format!(
+                "refs/heads/tasks/reconcile/{}",
+                value["rootTaskId"].as_str().unwrap()
+            ))
+            .is_some()
+    );
+    let root_waiting = completed
+        .remote(&format!(
+            "refs/heads/tasks/waiting/{}",
+            value["rootTaskId"].as_str().unwrap()
+        ))
+        .unwrap();
+    let children = body(&completed.work, &root_waiting)["children"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let historical = children
+        .iter()
+        .find(|child| child["taskId"] == imported["syntheticTaskId"])
+        .unwrap();
+    assert!(historical["ref"].as_str().unwrap().contains("/active/"));
+    assert_eq!(historical["owner"], "migration:v1-delegation");
+    assert!(historical["claimToken"].as_str().is_some());
+    assert!(
+        completed
+            .remote(historical["ref"].as_str().unwrap())
+            .is_none()
+    );
+
+    // A semantically identical root Task with different Git identity must not
+    // be accepted as the structural parent of historical migration evidence.
+    let done_ref = imported["doneRef"].as_str().unwrap();
+    let done_oid = imported["doneOid"].as_str().unwrap();
+    let done_value = body(&completed.work, done_oid);
+    let parents = ok(&completed.work, &["show", "-s", "--format=%P", done_oid]);
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let task_oid = done_value["taskOid"].as_str().unwrap();
+    let task_value = body(&completed.work, task_oid);
+    let root_task_oid = task_value["structuralParent"]["taskOid"].as_str().unwrap();
+    let forged_root = commit(
+        &completed.work,
+        &serde_json::to_string(&body(&completed.work, root_task_oid)).unwrap(),
+        &[],
+    );
+    assert_ne!(forged_root, root_task_oid);
+    let mut forged_task_value = task_value;
+    forged_task_value["structuralParent"]["taskOid"] = json!(forged_root);
+    let forged_task = commit(
+        &completed.work,
+        &serde_json::to_string(&forged_task_value).unwrap(),
+        &[&forged_root],
+    );
+    let mut forged_active_value = body(&completed.work, parents[0]);
+    forged_active_value["taskOid"] = json!(forged_task);
+    let forged_active = commit(
+        &completed.work,
+        &serde_json::to_string(&forged_active_value).unwrap(),
+        &[&forged_task],
+    );
+    let mut forged_done_value = done_value;
+    forged_done_value["taskOid"] = json!(forged_task);
+    let forged_done = commit(
+        &completed.work,
+        &serde_json::to_string(&forged_done_value).unwrap(),
+        &[&forged_active, &forged_task, parents[2]],
+    );
+    ok(
+        &completed.work,
+        &[
+            "push",
+            "--force",
+            "origin",
+            &format!("{forged_done}:{done_ref}"),
+        ],
+    );
+    let rejected = Fixture::run_raw(
+        &completed.work,
+        &["show", imported["syntheticTaskId"].as_str().unwrap()],
+        None,
+        None,
+    );
+    assert!(!rejected.status.success());
+    let error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        error.contains("migration done historical active identity is malformed"),
+        "{error}"
+    );
+}
+
 fn crate_manifest_valid(work: &Path, oid: &str, task_id: &str) {
     let out = Fixture::run_raw(work, &["show", task_id], None, None);
     assert!(
@@ -653,7 +808,6 @@ fn malformed_or_unpaired_legacy_delegation_fails_before_writes() {
             vec![("Parent-Repo-Node-Id", "partial")],
         ),
         ("peer/repo", Some("peer/repo"), 3, Vec::new()),
-        ("peer/repo", None, 2, Vec::new()),
         ("outside/repo", Some("outside/repo"), 2, Vec::new()),
     ] {
         let f = Fixture::new(false, true);

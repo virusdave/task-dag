@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::{Result, model::oid};
+use crate::{Result, model, model::oid};
 
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -113,4 +113,51 @@ pub(crate) fn output<const N: usize>(args: [&str; N]) -> Result<String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().into());
     }
     String::from_utf8(out.stdout).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TrailerValues {
+    pub(crate) occurrences: usize,
+    pub(crate) values: Vec<String>,
+}
+
+pub(crate) fn trailer_values(object: &str, key: &str) -> Result<TrailerValues> {
+    oid(object)?;
+    model::bounded("trailer key", key, 256)?;
+    let extract = |mode: &str| -> Result<Vec<u8>> {
+        let format = format!("format:%(trailers:key={key},{mode},separator=%x00)");
+        let out = Command::new("git")
+            .args(["show", "-s", &format!("--format={format}"), object])
+            .output()
+            .map_err(|e| format!("run git trailer parser: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().into());
+        }
+        Ok(out.stdout)
+    };
+    // Count key-only records independently: value extraction alone cannot
+    // distinguish an absent trailer from one trailer with an empty value.
+    let keys = extract("keyonly")?;
+    let occurrences = if keys.is_empty() {
+        0
+    } else {
+        keys.split(|byte| *byte == 0).count()
+    };
+    let raw_values = extract("valueonly")?;
+    let values = if occurrences == 0 {
+        Vec::new()
+    } else {
+        let values = raw_values
+            .split(|byte| *byte == 0)
+            .map(|value| String::from_utf8(value.to_vec()).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>>>()?;
+        if values.len() != occurrences {
+            return Err("Git trailer key/value extraction cardinality disagrees".into());
+        }
+        values
+    };
+    Ok(TrailerValues {
+        occurrences,
+        values,
+    })
 }

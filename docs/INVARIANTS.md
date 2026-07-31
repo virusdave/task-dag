@@ -803,6 +803,15 @@ are the contract you must preserve when editing a minter.
   first parent == task commit, **deterministic** identity (fixed
   author/committer + `Blocked-At` date) so re-blocking is idempotent.
 - **Delegation** (`tasks/delegated/…`): `kind: delegated`, parent = epic.
+  For bounded v1 import, the exact declaration ref and OID parented by the
+  selected root are authority. A unique matching `requires`/`all` graph edge is
+  optional provenance, not authority. A locally fenced, structurally and
+  identity-bound `delegated-close/v1` record is imported as a dedicated done
+  child (without live intent), while the parent waiting manifest and exact
+  reconcile marker are published in the same atomic transaction. This local
+  immutable validation is the safe boundary because the importer has no bounded
+  authoritative peer-checkout resolver; it does not consult mutable network
+  aliases or GitHub state.
   Canonical materialisation also binds the immutable parent/peer repository
   and issue node IDs, materialisation operation ID, and declaration digest;
   delegated-close evidence must repeat those exact bindings. A legacy

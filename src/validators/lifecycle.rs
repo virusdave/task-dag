@@ -68,6 +68,13 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 &["attemptId", "authorization", "description", "evidence"],
                 &["children", "manifestOid", "operationId"],
                 &["acceptedOid", "intentOid", "operationId"],
+                &[
+                    "closeOid",
+                    "closeRef",
+                    "declarationOid",
+                    "declarationRef",
+                    "operationId",
+                ],
             ],
         )?,
         _ => return Err(format!("unsupported lifecycle validator {state}")),
@@ -88,7 +95,7 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
             "{state} record has wrong immediate Task parent ordering"
         ));
     }
-    task(&task_oid, id)?;
+    let task_value = task(&task_oid, id)?;
     if let Some(v) = value.get("semanticId") {
         digest("semanticId", v)?;
     }
@@ -141,6 +148,88 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
             )?;
             digest("claimTokenDigest", &value["claimTokenDigest"])?;
             value["blockedAt"].as_u64().ok_or("blockedAt malformed")?;
+        }
+        "done" if value.get("closeOid").is_some() => {
+            let declaration = value["declarationOid"]
+                .as_str()
+                .ok_or("migration done declaration OID malformed")?;
+            let close = value["closeOid"]
+                .as_str()
+                .ok_or("migration done close OID malformed")?;
+            model::oid(declaration)?;
+            model::oid(close)?;
+            let declaration_ref = value["declarationRef"]
+                .as_str()
+                .ok_or("migration done declaration ref malformed")?;
+            let close_ref = value["closeRef"]
+                .as_str()
+                .ok_or("migration done close ref malformed")?;
+            if parents.len() != 3 || parents[1] != task_oid || parents[2] != close {
+                return Err("migration done Task/declaration/close identity or parent ordering is malformed".into());
+            }
+            let (root, _, _, peer_repository, peer_issue) =
+                crate::migration::scan::validate_declaration_close_binding(
+                    declaration_ref,
+                    declaration,
+                    close_ref,
+                    close,
+                )?;
+            let active = lifecycle("active", &parents[0], id)?;
+            let expected_operation = model::framed_digest(
+                "migrate-v1-delegation-operation",
+                &[&root, declaration_ref, declaration],
+            );
+            let operation = value["operationId"]
+                .as_str()
+                .ok_or("migration done operation ID malformed")?;
+            let expected_task_id = model::task_id(
+                "legacy-v1-delegation-source",
+                &[&root, declaration_ref, declaration],
+            );
+            let expected_semantic = model::framed_digest(
+                "migrate-v1-delegation-semantic",
+                &[&root, declaration_ref, declaration],
+            );
+            let expected_done_logical = model::framed_digest(
+                "migration-delegation-done",
+                &[&expected_operation, declaration, close],
+            );
+            let root_task_oid = crate::migration::scan::expected_imported_root_task(&root)?;
+            let expected_task = serde_json::json!({
+                "description": format!(
+                    "Imported legacy delegation {declaration} at {declaration_ref} for {peer_repository}#{peer_issue}"
+                ),
+                "formatVersion": 2,
+                "operationId": expected_operation,
+                "requirements": [],
+                "structuralParent": {
+                    "taskId": model::task_id("legacy-v1-sha", &[&root]),
+                    "taskOid": root_task_oid,
+                },
+                "taskId": expected_task_id,
+                "title": format!("Delegated issue {peer_repository}#{peer_issue}"),
+            });
+            let expected_task_oid =
+                git::migration_task_commit(&expected_task, std::slice::from_ref(&root_task_oid))?;
+            if id != expected_task_id
+                || operation != expected_operation
+                || value["logicalId"] != expected_done_logical
+                || task_value != expected_task
+                || task_oid != expected_task_oid
+                || active["taskId"] != expected_task_id
+                || active["taskOid"] != task_oid
+                || active["owner"] != "migration:v1-delegation"
+                || active["host"] != "migration"
+                || active["sessionId"] != "migration"
+                || active["operationId"] != expected_operation
+                || active["logicalId"] != expected_semantic
+                || active["attemptId"]
+                    != model::framed_digest("migration-delegation-active", &[&expected_operation])
+                || active["claimToken"]
+                    != model::framed_digest("migration-delegation-token", &[&expected_operation])
+            {
+                return Err("migration done historical active identity is malformed".into());
+            }
         }
         "done" if value.get("publicationCommit").is_some() => {
             validate_done_active_parent(&parents, &task_oid, id)?;

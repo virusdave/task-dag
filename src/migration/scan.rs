@@ -23,7 +23,8 @@ pub(super) struct LegacyTask {
 pub(super) struct LegacyDelegation {
     pub(super) reference: String,
     pub(super) oid: String,
-    pub(super) edge_oid: String,
+    pub(super) edge_oid: Option<String>,
+    pub(super) close: Option<LegacyDelegatedClose>,
     pub(super) source_issue: String,
     pub(super) peer_repository: String,
     pub(super) peer_issue: String,
@@ -31,6 +32,12 @@ pub(super) struct LegacyDelegation {
     pub(super) source_repository_id: String,
     pub(super) target_repository_id: String,
     pub(super) fleet_digest: String,
+}
+#[derive(Clone)]
+pub(super) struct LegacyDelegatedClose {
+    pub(super) reference: String,
+    pub(super) oid: String,
+    pub(super) trailers: BTreeMap<String, String>,
 }
 pub(super) struct Frozen {
     pub(super) refs: BTreeMap<String, String>,
@@ -62,6 +69,7 @@ fn migration_patterns() -> Vec<String> {
         "refs/heads/tasks/blocked-meta/*".into(),
         "refs/heads/tasks/root-active/*".into(),
         "refs/heads/tasks/delegated/*".into(),
+        "refs/heads/tasks/delegated-close/v1/*".into(),
         "refs/heads/tasks/v2/activation".into(),
         "refs/heads/tasks/system/transitions".into(),
     ]
@@ -73,6 +81,7 @@ pub(super) fn census() -> Result<Value> {
     if snapshot.refs.len() > 500 {
         return Err("migration discovery exceeds 500 refs".into());
     }
+    validate_global_delegated_closes(&snapshot)?;
     let pending: Vec<_> = snapshot
         .refs
         .iter()
@@ -122,6 +131,10 @@ pub(super) fn census() -> Result<Value> {
 pub(super) fn discover(root: &str) -> Result<Frozen> {
     let patterns = migration_patterns();
     let snap = repository::advertise(&patterns)?;
+    if snap.refs.len() > 500 {
+        return Err("migration discovery exceeds 500 refs".into());
+    }
+    validate_global_delegated_closes(&snap)?;
     let master = snap
         .refs
         .get("refs/heads/master")
@@ -202,6 +215,47 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
     Ok(selected)
 }
 
+fn validate_global_delegated_closes(snap: &repository::Snapshot) -> Result<()> {
+    let declarations: BTreeMap<_, _> = snap
+        .refs
+        .iter()
+        .filter(|(reference, _)| reference.starts_with("refs/heads/tasks/delegated/"))
+        .map(|(reference, oid)| (reference.as_str(), oid.as_str()))
+        .collect();
+    let closes: Vec<_> = snap
+        .refs
+        .iter()
+        .filter(|(reference, _)| reference.starts_with("refs/heads/tasks/delegated-close/v1/"))
+        .collect();
+    let mut objects: Vec<_> = declarations.values().map(|oid| (*oid).to_owned()).collect();
+    objects.extend(closes.iter().map(|(_, oid)| (*oid).clone()));
+    repository::materialize(&objects)?;
+    let mut total = 0_u64;
+    for oid in objects.iter().collect::<BTreeSet<_>>() {
+        add_object_size(oid, &mut total)?;
+    }
+    for (declaration_ref, declaration_oid) in &declarations {
+        validate_standalone_declaration(declaration_ref, declaration_oid)?;
+    }
+    for (close_ref, close_oid) in closes {
+        let declaration_ref = close_ref.replacen(
+            "refs/heads/tasks/delegated-close/v1/",
+            "refs/heads/tasks/delegated/",
+            1,
+        );
+        let declaration_oid = declarations
+            .get(declaration_ref.as_str())
+            .ok_or("orphan or mismatched legacy delegated-close ref")?;
+        validate_declaration_close_binding(
+            &declaration_ref,
+            declaration_oid,
+            close_ref,
+            close_oid,
+        )?;
+    }
+    Ok(())
+}
+
 fn discover_from_snapshot(
     root: &str,
     patterns: Vec<String>,
@@ -240,6 +294,7 @@ fn discover_from_snapshot(
     let mut blocked_meta = BTreeMap::new();
     let mut root_active = Vec::new();
     let mut delegated = Vec::new();
+    let mut delegated_closes = Vec::new();
     let mut pending_tasks = Vec::new();
     for (r, o) in &snap.refs {
         let state = if let Some(suffix) = r.strip_prefix("refs/heads/tasks/frontier/") {
@@ -278,6 +333,9 @@ fn discover_from_snapshot(
             objects.push(o.clone());
         } else if r.starts_with("refs/heads/tasks/delegated/") {
             delegated.push((r.clone(), o.clone()));
+            objects.push(o.clone());
+        } else if r.starts_with("refs/heads/tasks/delegated-close/v1/") {
+            delegated_closes.push((r.clone(), o.clone()));
             objects.push(o.clone());
         } else if r.starts_with("refs/heads/tasks/pending/") {
             pending_tasks.push(o.clone());
@@ -391,8 +449,22 @@ fn discover_from_snapshot(
             )?);
         }
     }
+    let computed_completion_facts = if precomputed_completion_facts.is_none() {
+        Some(completion_facts(&master)?)
+    } else {
+        None
+    };
+    let completion_facts = precomputed_completion_facts
+        .or(computed_completion_facts.as_ref())
+        .ok_or("legacy completion facts unavailable")?;
     let mut graph_inspection = match graph.as_deref() {
-        Some(graph) => inspect_graph(graph, &closure, &repository, &mut metadata)?,
+        Some(graph) => inspect_graph(
+            graph,
+            &closure,
+            &repository,
+            completion_facts,
+            &mut metadata,
+        )?,
         None => GraphInspection::empty(),
     };
     for delegation in &mut parsed_delegations {
@@ -408,15 +480,40 @@ fn discover_from_snapshot(
             })
             .cloned()
             .collect();
-        if matches.len() != 1 {
-            return Err(
-                "legacy delegation must have exactly one non-tombstoned paired graph edge".into(),
-            );
+        if matches.len() > 1 {
+            return Err("legacy delegation has ambiguous paired graph edges".into());
         }
-        delegation.edge_oid = matches[0].0.clone();
-        graph_inspection
-            .terminal
-            .retain(|entry| entry.0 != matches[0].0);
+        if let Some(edge) = matches.first() {
+            delegation.edge_oid = Some(edge.0.clone());
+            graph_inspection.terminal.retain(|entry| entry.0 != edge.0);
+        }
+        let expected_close = delegation.reference.replacen(
+            "refs/heads/tasks/delegated/",
+            "refs/heads/tasks/delegated-close/v1/",
+            1,
+        );
+        let close_matches: Vec<_> = delegated_closes
+            .iter()
+            .filter(|(reference, _)| reference == &expected_close)
+            .collect();
+        if close_matches.len() == 1 {
+            delegation.close = Some(parse_delegated_close(
+                &close_matches[0].0,
+                &close_matches[0].1,
+                delegation,
+                &repository,
+            )?);
+        }
+    }
+    let mut normalized = BTreeSet::new();
+    for delegation in &parsed_delegations {
+        if !normalized.insert((
+            delegation.source_issue.clone(),
+            delegation.peer_repository.to_ascii_lowercase(),
+            delegation.peer_issue.clone(),
+        )) {
+            return Err("duplicate normalized legacy delegation tuple".into());
+        }
     }
     if graph_inspection.requires.contains_key(root) {
         return Err(
@@ -429,14 +526,6 @@ fn discover_from_snapshot(
         .map(|entry| entry.0.clone())
         .collect();
     let guard = parse_guard(&activation)?;
-    let computed_completion_facts = if precomputed_completion_facts.is_none() {
-        Some(completion_facts(&master)?)
-    } else {
-        None
-    };
-    let completion_facts = precomputed_completion_facts
-        .or(computed_completion_facts.as_ref())
-        .ok_or("legacy completion facts unavailable")?;
     let mut root_state = "pending".to_owned();
     let mut root_lifecycle = vec![(pending[0].0.clone(), pending[0].1.clone())];
     let mut root_blocked_reason = None;
@@ -482,7 +571,11 @@ fn discover_from_snapshot(
             .get(root)
             .cloned()
             .unwrap_or_default(),
-        completed_parent_requirements: Vec::new(),
+        completed_parent_requirements: graph_inspection
+            .completed
+            .get(root)
+            .cloned()
+            .unwrap_or_default(),
     });
     let mut remaining: BTreeSet<_> = closure
         .iter()
@@ -544,7 +637,7 @@ fn discover_from_snapshot(
             .filter(|parent| !closure.contains(*parent))
             .cloned()
             .collect();
-        let completed_parent_requirements: Vec<_> = external_parents
+        let mut completed_parent_requirements: Vec<_> = external_parents
             .iter()
             .filter_map(|parent| {
                 completion_facts
@@ -552,6 +645,14 @@ fn discover_from_snapshot(
                     .map(|witness| (parent.clone(), witness.clone()))
             })
             .collect();
+        completed_parent_requirements.extend(
+            graph_inspection
+                .completed
+                .get(&next)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
         let mut requires: BTreeSet<_> = task_parents[&next]
             .iter()
             .skip(1)
@@ -945,7 +1046,10 @@ fn parse_rfc3339(value: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{descendant_closure, edge_id_for_value, inspect_edges, validate_terminal_edges};
+    use super::{
+        EdgeUse, descendant_closure, edge_id_for_value, inspect_edge, inspect_edges,
+        validate_terminal_edges,
+    };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1003,6 +1107,50 @@ mod tests {
             "to":"issue:owner/repo#2"
         });
         assert!(!inspect_edges(&unrelated_64, &closure, "owner/repo").unwrap());
+    }
+
+    #[test]
+    fn completed_satisfies_requires_both_frozen_completion_witnesses() {
+        let from = "1".repeat(40);
+        let to = "2".repeat(40);
+        let closure = BTreeSet::from([from.clone()]);
+        let edge = serde_json::json!({
+            "from":format!("task:owner/repo@{from}"),
+            "mode":"any",
+            "origin":{"repo-id":1,"witness":"fixture"},
+            "relation":"satisfies",
+            "schema":1,
+            "to":format!("task:owner/repo@{to}")
+        });
+        let mut facts = BTreeMap::from([(from.clone(), "3".repeat(40))]);
+        assert!(inspect_edge(&edge, &closure, "owner/repo", &facts).is_err());
+        facts.insert(to.clone(), "4".repeat(40));
+        match inspect_edge(&edge, &closure, "owner/repo", &facts).unwrap() {
+            EdgeUse::Completed(task, endpoints) => {
+                assert_eq!(task, from);
+                assert_eq!(endpoints.len(), 2);
+            }
+            _ => panic!("completed satisfies was not classified as inert provenance"),
+        }
+
+        let foreign_source = serde_json::json!({
+            "from":format!("task:foreign/repo@{from}"),
+            "mode":"any",
+            "origin":{"repo-id":1,"witness":"fixture"},
+            "relation":"satisfies",
+            "schema":1,
+            "to":format!("task:owner/repo@{to}")
+        });
+        assert!(inspect_edge(&foreign_source, &closure, "owner/repo", &facts).is_err());
+        let foreign_target = serde_json::json!({
+            "from":format!("task:owner/repo@{from}"),
+            "mode":"any",
+            "origin":{"repo-id":1,"witness":"fixture"},
+            "relation":"satisfies",
+            "schema":1,
+            "to":format!("task:foreign/repo@{to}")
+        });
+        assert!(inspect_edge(&foreign_target, &closure, "owner/repo", &facts).is_err());
     }
 
     proptest! {
@@ -1141,6 +1289,7 @@ struct GraphInspection {
     terminal: Vec<(String, String, String)>,
     requires: BTreeMap<String, BTreeSet<String>>,
     provenance: BTreeMap<String, Vec<String>>,
+    completed: BTreeMap<String, Vec<(String, String)>>,
 }
 
 impl GraphInspection {
@@ -1149,6 +1298,7 @@ impl GraphInspection {
             terminal: Vec::new(),
             requires: BTreeMap::new(),
             provenance: BTreeMap::new(),
+            completed: BTreeMap::new(),
         }
     }
 }
@@ -1157,6 +1307,7 @@ fn inspect_graph(
     graph: &str,
     closure: &BTreeSet<String>,
     repository: &str,
+    completion_facts: &BTreeMap<String, String>,
     total: &mut u64,
 ) -> Result<GraphInspection> {
     let tree = git::output(["show", "-s", "--format=%T", graph])?
@@ -1202,9 +1353,10 @@ fn inspect_graph(
     let mut terminal_edges = Vec::new();
     let mut requires: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut provenance: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut completed: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (edge_id, (blob_oid, value)) in edges {
         if !tombstones.contains(&edge_id) {
-            match inspect_edge(&value, closure, repository)? {
+            match inspect_edge(&value, closure, repository, completion_facts)? {
                 EdgeUse::Unrelated => {}
                 EdgeUse::Terminal(task) => {
                     provenance
@@ -1217,6 +1369,10 @@ fn inspect_graph(
                     requires.entry(from.clone()).or_default().insert(to);
                     provenance.entry(from).or_default().push(blob_oid);
                 }
+                EdgeUse::Completed(from, endpoints) => {
+                    provenance.entry(from.clone()).or_default().push(blob_oid);
+                    completed.entry(from).or_default().extend(endpoints);
+                }
             }
         }
     }
@@ -1225,6 +1381,7 @@ fn inspect_graph(
         terminal: terminal_edges,
         requires,
         provenance,
+        completed,
     })
 }
 
@@ -1264,7 +1421,7 @@ fn add_object_size(oid: &str, total: &mut u64) -> Result<()> {
 #[cfg(test)]
 fn inspect_edges(value: &Value, closure: &BTreeSet<String>, repository: &str) -> Result<bool> {
     Ok(!matches!(
-        inspect_edge(value, closure, repository)?,
+        inspect_edge(value, closure, repository, &BTreeMap::new())?,
         EdgeUse::Unrelated
     ))
 }
@@ -1273,9 +1430,15 @@ enum EdgeUse {
     Unrelated,
     Terminal(String),
     Local(String, String),
+    Completed(String, Vec<(String, String)>),
 }
 
-fn inspect_edge(value: &Value, closure: &BTreeSet<String>, repository: &str) -> Result<EdgeUse> {
+fn inspect_edge(
+    value: &Value,
+    closure: &BTreeSet<String>,
+    repository: &str,
+    completion_facts: &BTreeMap<String, String>,
+) -> Result<EdgeUse> {
     let map = value
         .as_object()
         .ok_or("graph edge JSON has malformed shape")?;
@@ -1290,13 +1453,36 @@ fn inspect_edge(value: &Value, closure: &BTreeSet<String>, repository: &str) -> 
     if !from_in_closure {
         return Ok(EdgeUse::Unrelated);
     }
+    let task_oid = |endpoint: &str| endpoint.rsplit_once('@').map(|(_, oid)| oid.to_owned());
+    if map["relation"] == "satisfies" && map["mode"] == "any" {
+        let expected_prefix = format!("task:{repository}@");
+        if !from.starts_with(&expected_prefix) || !to.starts_with(&expected_prefix) {
+            return Err(
+                "completed satisfies endpoints must name Tasks in the current repository".into(),
+            );
+        }
+        let from_task = task_oid(from).ok_or("graph satisfies source is not a Task")?;
+        let to_task = task_oid(to).ok_or("graph satisfies target is not a Task")?;
+        let from_witness = completion_facts
+            .get(&from_task)
+            .ok_or("graph satisfies source lacks immutable completion witness")?;
+        let to_witness = completion_facts
+            .get(&to_task)
+            .ok_or("graph satisfies target lacks immutable completion witness")?;
+        return Ok(EdgeUse::Completed(
+            from_task.clone(),
+            vec![
+                (from_task, from_witness.clone()),
+                (to_task, to_witness.clone()),
+            ],
+        ));
+    }
     if map["relation"] != "requires" || map["mode"] != "all" {
         return Err(
             "v1 graph edge touching migration closure is not a terminal external requirement"
                 .into(),
         );
     }
-    let task_oid = |endpoint: &str| endpoint.rsplit_once('@').map(|(_, oid)| oid.to_owned());
     let from_task = task_oid(from).ok_or("graph requirement source is not a Task")?;
     if to.starts_with(&format!("task:{repository}@")) {
         let to_task = task_oid(to).ok_or("graph requirement target is not a Task")?;
@@ -1440,7 +1626,7 @@ fn canonical_repository(value: &str) -> bool {
         })
 }
 
-fn current_repository() -> Result<String> {
+pub(crate) fn current_repository() -> Result<String> {
     #[cfg(feature = "test-seam")]
     if let Ok(value) = std::env::var("TASKDAG_TEST_CURRENT_REPOSITORY") {
         if canonical_repository(&value) {
@@ -1519,24 +1705,14 @@ fn parse_delegation(
         "Materialisation-Operation-Id",
         "Declaration-Digest",
     ];
-    let mut trailers = BTreeMap::new();
+    let mut trailers: BTreeMap<String, String> = BTreeMap::new();
     for name in trailer_names {
-        let occurrences = message
-            .lines()
-            .filter(|line| line.starts_with(&format!("{name}:")))
-            .count();
-        let values: Vec<_> = message
-            .lines()
-            .filter_map(|line| line.strip_prefix(&format!("{name}: ")))
-            .collect();
-        if occurrences != values.len()
-            || values.len() > 1
-            || values.first().is_some_and(|value| value.is_empty())
-        {
+        let extracted = git::trailer_values(oid, name)?;
+        if extracted.occurrences > 1 || extracted.values.first().is_some_and(String::is_empty) {
             return Err("legacy delegation trailer duplicated or empty".into());
         }
-        if let Some(value) = values.first() {
-            trailers.insert(name.to_owned(), (*value).to_owned());
+        if let Some(value) = extracted.values.first() {
+            trailers.insert(name.to_owned(), value.clone());
         }
     }
     if !matches!(trailers.len(), 0 | 6) {
@@ -1559,7 +1735,8 @@ fn parse_delegation(
     Ok(LegacyDelegation {
         reference: reference.into(),
         oid: oid.into(),
-        edge_oid: String::new(),
+        edge_oid: None,
+        close: None,
         source_issue: parts[0].into(),
         peer_repository,
         peer_issue: parts[3].into(),
@@ -1568,6 +1745,180 @@ fn parse_delegation(
         target_repository_id,
         fleet_digest: fleet_digest.into(),
     })
+}
+
+fn parse_delegated_close(
+    reference: &str,
+    oid: &str,
+    delegation: &LegacyDelegation,
+    repository: &str,
+) -> Result<LegacyDelegatedClose> {
+    let expected = delegation.reference.replacen(
+        "refs/heads/tasks/delegated/",
+        "refs/heads/tasks/delegated-close/v1/",
+        1,
+    );
+    if reference != expected {
+        return Err("legacy delegated-close path does not exactly match declaration".into());
+    }
+    if git::parents(oid)? != [delegation.oid.clone()]
+        || git::output(["show", "-s", "--format=%T", oid])?.trim()
+            != "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    {
+        return Err(
+            "legacy delegated-close must be empty-tree with sole declaration parent".into(),
+        );
+    }
+    let required = [
+        "Task-Dag-Delegated-Close",
+        "Parent-Repo",
+        "Parent-Issue",
+        "Peer-Repo",
+        "Peer-Issue",
+        "Peer-Tip",
+        "Peer-Close",
+        "Peer-Epic",
+    ];
+    let identity = [
+        "Parent-Repo-Node-Id",
+        "Parent-Issue-Node-Id",
+        "Peer-Repo-Node-Id",
+        "Peer-Issue-Node-Id",
+        "Materialisation-Operation-Id",
+        "Declaration-Digest",
+    ];
+    let mut trailers: BTreeMap<String, String> = BTreeMap::new();
+    for key in required
+        .iter()
+        .chain(identity.iter())
+        .chain(std::iter::once(&"Legacy-Delegation"))
+    {
+        let extracted = git::trailer_values(oid, key)?;
+        if extracted.occurrences > 1 || extracted.values.first().is_some_and(String::is_empty) {
+            return Err("legacy delegated-close trailer duplicated or empty".into());
+        }
+        if let Some(value) = extracted.values.first() {
+            trailers.insert((*key).into(), value.clone());
+        }
+    }
+    if required.iter().any(|key| !trailers.contains_key(*key))
+        || trailers["Task-Dag-Delegated-Close"] != "v1"
+        || !trailers["Parent-Repo"].eq_ignore_ascii_case(repository)
+        || trailers["Parent-Issue"] != format!("#{}", delegation.source_issue)
+        || !trailers["Peer-Repo"].eq_ignore_ascii_case(&delegation.peer_repository)
+        || trailers["Peer-Issue"] != format!("#{}", delegation.peer_issue)
+    {
+        return Err("legacy delegated-close binding is malformed".into());
+    }
+    for key in ["Peer-Tip", "Peer-Close", "Peer-Epic"] {
+        let value = &trailers[key];
+        if value.len() != 40
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err("legacy delegated-close peer OID is malformed".into());
+        }
+    }
+    if delegation.trailers.is_empty() {
+        if identity.iter().any(|key| trailers.contains_key(*key))
+            || trailers.get("Legacy-Delegation") != Some(&delegation.oid)
+        {
+            return Err("legacy delegated-close legacy identity is inconsistent".into());
+        }
+    } else if trailers.contains_key("Legacy-Delegation")
+        || identity
+            .iter()
+            .any(|key| trailers.get(*key) != delegation.trailers.get(*key))
+    {
+        return Err("legacy delegated-close modern identity is inconsistent".into());
+    }
+    Ok(LegacyDelegatedClose {
+        reference: reference.into(),
+        oid: oid.into(),
+        trailers,
+    })
+}
+
+/// Validate the immutable v1 declaration/close pair without relying on an
+/// advertised ref snapshot. Lifecycle validation uses this same strict parser
+/// as migration discovery so imported historical state cannot outlive weaker
+/// scan-only checks.
+pub(crate) fn validate_declaration_close_binding(
+    declaration_ref: &str,
+    declaration_oid: &str,
+    close_ref: &str,
+    close_oid: &str,
+) -> Result<(String, String, String, String, String)> {
+    let (root, source_id, delegation) =
+        validate_standalone_declaration(declaration_ref, declaration_oid)?;
+    let repository = current_repository()?;
+    parse_delegated_close(close_ref, close_oid, &delegation, &repository)?;
+    Ok((
+        root,
+        source_id,
+        delegation.target_repository_id,
+        delegation.peer_repository,
+        delegation.peer_issue,
+    ))
+}
+
+/// Validate the exact migrated root Task that a historical delegated child is
+/// structurally attached to. Generic Task validation alone is insufficient:
+/// without these migration bindings, an unrelated synthetic parent could be
+/// substituted while retaining a grammatically valid Task graph.
+pub(crate) fn expected_imported_root_task(root: &str) -> Result<String> {
+    if git::output(["show", "-s", "--format=%T", root])?.trim()
+        != "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        || git::parents(root)?.len() > 1
+    {
+        return Err("migration delegated Task names a malformed legacy root".into());
+    }
+    let task_id = model::task_id("legacy-v1-sha", &[root]);
+    let expected = json!({
+        "description": description(root)?,
+        "formatVersion": 2,
+        "operationId": model::framed_digest("migrate-v1-task-operation", &[root]),
+        "requirements": [],
+        "structuralParent": Value::Null,
+        "taskId": task_id,
+        "title": subject(root)?,
+    });
+    git::migration_task_commit(&expected, &[])
+}
+
+fn validate_standalone_declaration(
+    declaration_ref: &str,
+    declaration_oid: &str,
+) -> Result<(String, String, LegacyDelegation)> {
+    let root = git::parents(declaration_oid)?;
+    if root.len() != 1 {
+        return Err("legacy delegation must have exactly one structural-root parent".into());
+    }
+    let suffix = declaration_ref
+        .strip_prefix("refs/heads/tasks/delegated/")
+        .ok_or("legacy delegation ref malformed")?;
+    let parts: Vec<_> = suffix.split('/').collect();
+    if parts.len() != 4 || !positive_number(parts[0]) || !positive_number(parts[3]) {
+        return Err("legacy delegation ref malformed".into());
+    }
+    let peer = format!("{}/{}", parts[1], parts[2]);
+    let repository = current_repository()?;
+    // Reuse the complete declaration parser. Repository/fleet identity is
+    // supplied only to satisfy its activation-era checks and does not loosen
+    // any object, ref, grammar, or message binding validation.
+    let source_id = model::repository_id_for_path(&repository)?;
+    let target_id = model::repository_id_for_path(&peer)?;
+    let delegation = parse_delegation(
+        declaration_ref,
+        declaration_oid,
+        &root[0],
+        &repository,
+        &source_id,
+        "lifecycle-validation",
+        &[source_id.clone(), target_id],
+    )?;
+    Ok((root[0].clone(), source_id, delegation))
 }
 
 fn positive_number(value: &str) -> bool {

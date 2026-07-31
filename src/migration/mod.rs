@@ -1,4 +1,4 @@
-mod scan;
+pub(crate) mod scan;
 
 use crate::{
     Result, git, journal,
@@ -207,21 +207,11 @@ pub(crate) fn run(
     for delegation in &frozen.delegations {
         let delegated_operation = model::framed_digest(
             "migrate-v1-delegation-operation",
-            &[
-                root,
-                &delegation.reference,
-                &delegation.oid,
-                &delegation.edge_oid,
-            ],
+            &[root, &delegation.reference, &delegation.oid],
         );
         let synthetic_source_id = model::task_id(
             "legacy-v1-delegation-source",
-            &[
-                root,
-                &delegation.reference,
-                &delegation.oid,
-                &delegation.edge_oid,
-            ],
+            &[root, &delegation.reference, &delegation.oid],
         );
         let target_id = model::task_id(
             "delegated-task",
@@ -237,13 +227,53 @@ pub(crate) fn run(
         crate::validators::task(&synthetic_source_task, &synthetic_source_id)?;
         let semantic_id = model::framed_digest(
             "migrate-v1-delegation-semantic",
-            &[
-                root,
-                &delegation.reference,
-                &delegation.oid,
-                &delegation.edge_oid,
-            ],
+            &[root, &delegation.reference, &delegation.oid],
         );
+        if let Some(close) = &delegation.close {
+            let claim_token =
+                model::framed_digest("migration-delegation-token", &[&delegated_operation]);
+            let owner = "migration:v1-delegation";
+            let active = git::migration_task_commit(
+                &json!({"attemptId":model::framed_digest("migration-delegation-active", &[&delegated_operation]),"claimToken":claim_token,"claimedAt":1,"expiresAt":2,"formatVersion":2,"host":"migration","logicalId":semantic_id,"operationId":delegated_operation,"owner":owner,"sessionId":"migration","taskId":synthetic_source_id,"taskOid":synthetic_source_task}),
+                std::slice::from_ref(&synthetic_source_task),
+            )?;
+            crate::validators::lifecycle("active", &active, &synthetic_source_id)?;
+            let logical_id = model::framed_digest(
+                "migration-delegation-done",
+                &[&delegated_operation, &delegation.oid, &close.oid],
+            );
+            let done = git::migration_task_commit(
+                &json!({"closeOid":close.oid,"closeRef":close.reference,"declarationOid":delegation.oid,"declarationRef":delegation.reference,"formatVersion":2,"logicalId":logical_id,"operationId":delegated_operation,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}),
+                &[
+                    active.clone(),
+                    synthetic_source_task.clone(),
+                    close.oid.clone(),
+                ],
+            )?;
+            crate::validators::lifecycle("done", &done, &synthetic_source_id)?;
+            let done_ref = model::state_ref("done", &synthetic_source_id);
+            updates.extend([
+                Update {
+                    semantic_ref: done_ref.clone(),
+                    old: None,
+                    new: Some(done.clone()),
+                },
+                Update {
+                    semantic_ref: delegation.reference.clone(),
+                    old: Some(delegation.oid.clone()),
+                    new: None,
+                },
+                Update {
+                    semantic_ref: close.reference.clone(),
+                    old: Some(close.oid.clone()),
+                    new: None,
+                },
+            ]);
+            outputs.push((done_ref.clone(), done.clone()));
+            children.push(json!({"claimToken":claim_token,"owner":owner,"ref":model::state_ref("active", &synthetic_source_id),"stateOid":active,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}));
+            delegation_provenance.push(json!({"closeTrailers":close.trailers,"disposition":"completed-delegation","doneOid":done,"doneRef":done_ref,"legacyCloseOid":close.oid,"legacyCloseRef":close.reference,"declarationTrailers":delegation.trailers,"fleetDigest":delegation.fleet_digest,"legacyDelegatedOid":delegation.oid,"legacyDelegatedRef":delegation.reference,"operationId":delegated_operation,"pairedEdgeBlobOid":delegation.edge_oid,"peerIssue":delegation.peer_issue,"peerRepository":delegation.peer_repository,"sourceIssue":delegation.source_issue,"sourceRepositoryId":delegation.source_repository_id,"syntheticTaskId":synthetic_source_id,"syntheticTaskOid":synthetic_source_task,"targetRepositoryId":delegation.target_repository_id,"targetTaskId":target_id}));
+            continue;
+        }
         let intent_ref = model::delegation_intent_ref(&delegated_operation);
         let intent = git::migration_task_commit(
             &json!({"description":task_value["description"],"fleetDigest":delegation.fleet_digest,"formatVersion":2,"operationId":delegated_operation,"repositoryPath":[delegation.source_repository_id,delegation.target_repository_id],"semanticId":semantic_id,"sourceRepositoryId":delegation.source_repository_id,"sourceTaskId":synthetic_source_id,"sourceTaskOid":synthetic_source_task,"targetRepositoryId":delegation.target_repository_id,"targetTaskId":target_id,"title":task_value["title"]}),
@@ -336,7 +366,18 @@ pub(crate) fn run(
             old: None,
             new: Some(manifest.clone()),
         });
-        outputs.push((waiting_ref, manifest));
+        outputs.push((waiting_ref, manifest.clone()));
+        if frozen
+            .delegations
+            .iter()
+            .any(|delegation| delegation.close.is_some())
+        {
+            updates.push(Update {
+                semantic_ref: format!("refs/heads/tasks/reconcile/{root_id}"),
+                old: None,
+                new: Some(manifest),
+            });
+        }
     }
     for legacy in &frozen.tasks {
         let mapping_ref = format!("refs/heads/tasks/v2/imports/v1/by-sha/{}", legacy.task);
@@ -358,6 +399,11 @@ pub(crate) fn run(
                     .delegations
                     .iter()
                     .map(|delegation| delegation.oid.clone()),
+            );
+            mapping_parents.extend(
+                frozen.delegations.iter().filter_map(|delegation| {
+                    delegation.close.as_ref().map(|close| close.oid.clone())
+                }),
             );
         }
         let mapping = git::commit(
