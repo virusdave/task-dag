@@ -44,7 +44,8 @@ fn valid_scope(pattern: &str) -> bool {
         .bytes()
         .filter(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
         .count();
-    let shape = metacharacters == 0
+    let shape = pattern == "refs/heads/tasks/frontier/v2-*"
+        || metacharacters == 0
         || (metacharacters == 1
             && pattern.ends_with("/*")
             && (pattern
@@ -269,6 +270,7 @@ mod tests {
         assert!(valid_scope("refs/heads/master"));
         assert!(valid_scope("refs/heads/gh/issues/*"));
         assert!(valid_scope("refs/heads/tasks/frontier/*"));
+        assert!(valid_scope("refs/heads/tasks/frontier/v2-*"));
         assert!(valid_scope("refs/heads/tasks/delegation/intent/*"));
         for invalid in [
             "refs/*",
@@ -276,6 +278,8 @@ mod tests {
             "refs/tags/*",
             "refs/heads/tasks/*",
             "refs/heads/tasks/frontier/**",
+            "refs/heads/tasks/frontier/v1-*",
+            "refs/heads/tasks/active/v2-*",
             "refs/heads/tasks/frontier/?",
             "refs/heads/tasks/frontier/[a]",
             "refs/heads/tasks//frontier",
