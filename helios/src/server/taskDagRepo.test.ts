@@ -386,4 +386,14 @@ describe('existing mirror configuration behavior', () => {
     expect(diagnostic).not.toContain('super-secret-token')
     expect(diagnostic).not.toContain('/var/lib/helios')
   })
+
+  it('distinguishes v2 activation, runtime, repository, and fetch failures', () => {
+    expect(publicTaskDagError(new Error('Task repository has no canonical v2 activation ref'))).toMatch(/not activated/)
+    expect(publicTaskDagError(new Error('HELIOS_TASK_DAG_BIN must name an existing file'))).toMatch(/runtime is missing or incompatible/)
+    expect(publicTaskDagError(new Error('runtime abc is not authorized by activation'))).toMatch(/runtime is missing or incompatible/)
+    expect(publicTaskDagError(new Error('activation record has missing or unknown fields'))).toMatch(/malformed or inconsistent/)
+    expect(publicTaskDagError(new Error('task must have exactly one lifecycle ref'))).toMatch(/malformed or inconsistent/)
+    expect(publicTaskDagError(new Error('journal activation does not equal advertised activation'))).toMatch(/malformed or inconsistent/)
+    expect(publicTaskDagError(new Error('getaddrinfo ENOTFOUND github.com'))).toMatch(/DNS resolution failed/)
+  })
 })

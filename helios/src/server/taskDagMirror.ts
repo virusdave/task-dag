@@ -78,6 +78,15 @@ function isRepo(dir: string): boolean {
 }
 export function publicTaskDagError(error: unknown): string {
   const raw = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  if (/no canonical v2 activation ref/.test(raw)) {
+    return 'This repository has not activated task-dag v2.'
+  }
+  if (/helios_task_dag_bin|unrecognized subcommand|unknown (subcommand|command)|unexpected token.*json|runtime .* is not authorized by activation/.test(raw)) {
+    return 'The configured Helios task-dag runtime is missing or incompatible with the activated v2 reader contract.'
+  }
+  if (/no canonical v2 transition journal|no grammatical task-dag v2 lifecycle refs|lifecycle namespaces|canonical task-dag .*disagrees|expected .*received|activation record has missing or unknown fields|task must have exactly one lifecycle ref|journal activation does not equal advertised activation/.test(raw)) {
+    return 'The repository contains malformed or inconsistent activated task-dag v2 state.'
+  }
   if (/github app request .* failed with http (401|403)/.test(raw)) {
     return 'GitHub rejected the Helios App credential. Verify the App key, installation, and repository read permission.'
   }
