@@ -60,18 +60,17 @@ export async function registerTaskDagRoutes(server: FastifyInstance) {
   )
 
   // GET /api/tasks/frontier - grouped frontier view
-  server.get<{ Querystring: { rootTaskId?: string; status?: string; repository?: string } }>(
+  server.get<{ Querystring: { rootTaskId?: string; repository?: string } }>(
     '/api/tasks/frontier',
     async (request, reply) => {
       try {
-        const filter: { rootTaskId?: string; status?: string; repository?: string } = {}
+        const filter: { rootTaskId?: string; repository?: string } = {}
         if (request.query.rootTaskId) {
           if (!TASK_ID_PATTERN.test(request.query.rootTaskId)) {
             return reply.status(400).send({ error: 'A full root task-dag v2 Task-ID is required' })
           }
           filter.rootTaskId = request.query.rootTaskId
         }
-        if (request.query.status) filter.status = request.query.status
         if (request.query.repository) filter.repository = request.query.repository
         return reply.send(await taskDagRepo.getFrontierView(filter))
       } catch (error) {

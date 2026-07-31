@@ -14,6 +14,8 @@ const execFileAsync = promisify(execFile)
 const COMMAND_TIMEOUT_MS = 10_000
 const COMMAND_MAX_BUFFER = 2 * 1024 * 1024
 const CONCURRENCY = 8
+const MAX_LIFECYCLE_TASKS = 500
+const GENERATION_DEADLINE_MS = 30_000
 const TASK_ID_PATTERN = /^v2-[0-9a-f]{64}$/
 const OID_PATTERN = /^[0-9a-f]{40}$/
 const STATES = ['frontier', 'active', 'blocked', 'waiting', 'done'] as const
@@ -69,6 +71,11 @@ const showSchema = z.object({
   state: stateSchema,
   ref: z.string(),
   stateOid: oidSchema,
+  record: jsonSchema,
+}).strict()
+const activationSchema = z.object({
+  activationOid: oidSchema,
+  journalOid: oidSchema,
   record: jsonSchema,
 }).strict()
 
@@ -163,12 +170,12 @@ export class TaskDagRepositoryNotFoundError extends Error {
   }
 }
 
-type CanonicalCommand = 'context' | 'show'
+type CanonicalCommand = 'activation' | 'context' | 'show'
 type CanonicalRunner = (
   gitDir: string,
   originUrl: string,
   command: CanonicalCommand,
-  taskId: string,
+  taskId?: string,
 ) => Promise<unknown>
 let testRunner: CanonicalRunner | undefined
 const cachedIndexes = new Map<string, TaskIndex>()
@@ -220,20 +227,23 @@ async function runCanonical(
   gitDir: string,
   originUrl: string,
   command: CanonicalCommand,
-  taskId: string,
+  taskId?: string,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   if (testRunner) return testRunner(gitDir, originUrl, command, taskId)
-  const { stdout } = await execFileAsync(canonicalBinary(), [command, taskId], {
+  const args = taskId === undefined ? [command] : [command, taskId]
+  const { stdout } = await execFileAsync(canonicalBinary(), args, {
     cwd: gitDir,
     timeout: COMMAND_TIMEOUT_MS,
     maxBuffer: COMMAND_MAX_BUFFER,
+    signal,
     env: localOnlyGitEnvironment(gitDir, originUrl),
   })
   return JSON.parse(stdout)
 }
 
 interface LifecycleRef { taskId: string; state: TaskState; ref: string; oid: string }
-interface RefCapture { fingerprint: string; lifecycle: LifecycleRef[] }
+interface RefCapture { fingerprint: string; activationOid: string; journalOid: string; lifecycle: LifecycleRef[] }
 
 async function captureRefs(gitDir: string): Promise<RefCapture> {
   const raw = await git(gitDir, ['for-each-ref', '--format=%(refname) %(objectname)',
@@ -246,6 +256,7 @@ async function captureRefs(gitDir: string): Promise<RefCapture> {
   if (!relevant.some((line) => line.startsWith(`${JOURNAL_REF} `))) {
     throw new Error('Task repository has no canonical v2 transition journal')
   }
+  const oidFor = (ref: string): string => oidSchema.parse(relevant.find((line) => line.startsWith(`${ref} `))?.split(' ')[1])
   const lifecycle: LifecycleRef[] = []
   const seen = new Map<string, TaskState>()
   for (const line of relevant) {
@@ -259,19 +270,31 @@ async function captureRefs(gitDir: string): Promise<RefCapture> {
     lifecycle.push({ taskId, state, ref: `refs/heads/tasks/${state}/${taskId}`, oid: match[3] })
   }
   if (lifecycle.length === 0) throw new Error('No grammatical task-dag v2 lifecycle refs found; refusing v1-only repository')
-  return { fingerprint: crypto.createHash('sha256').update(relevant.join('\n')).digest('hex'), lifecycle }
+  if (lifecycle.length > MAX_LIFECYCLE_TASKS) {
+    throw new Error(`Task repository exceeds the ${MAX_LIFECYCLE_TASKS}-task Helios read bound`)
+  }
+  return {
+    fingerprint: crypto.createHash('sha256').update(relevant.join('\n')).digest('hex'),
+    activationOid: oidFor(ACTIVATION_REF), journalOid: oidFor(JOURNAL_REF), lifecycle,
+  }
 }
 
 async function mapBounded<T, R>(values: T[], fn: (value: T) => Promise<R>): Promise<R[]> {
   const output = new Array<R>(values.length)
   let cursor = 0
+  let firstError: unknown
   async function worker(): Promise<void> {
-    while (cursor < values.length) {
+    while (cursor < values.length && firstError === undefined) {
       const index = cursor++
-      output[index] = await fn(values[index])
+      try {
+        output[index] = await fn(values[index])
+      } catch (error) {
+        firstError ??= error
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, values.length) }, () => worker()))
+  if (firstError !== undefined) throw firstError
   return output
 }
 
@@ -303,25 +326,37 @@ function lifecycleEvidence(state: TaskState, record: JsonValue): LifecycleEviden
   return evidence
 }
 
-export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
+class GenerationChangedError extends Error {}
+
+function validateActivation(capture: RefCapture, raw: unknown): void {
+  const activation = activationSchema.parse(raw)
+  if (activation.activationOid !== capture.activationOid || activation.journalOid !== capture.journalOid) {
+    throw new GenerationChangedError('Canonical activation disagrees with the captured task-dag generation')
+  }
+}
+
+async function loadTaskIndexAttempt(repository: string, signal: AbortSignal): Promise<TaskIndex> {
   const source = requireSource(repository)
   const originUrl = await git(source.gitDir, ['remote', 'get-url', 'origin'])
   if (!originUrl) throw new Error(`Task repository ${repository} has no origin URL to isolate`)
   const start = await captureRefs(source.gitDir)
+  validateActivation(start, await runCanonical(source.gitDir, originUrl, 'activation', undefined, signal))
   const cached = cachedIndexes.get(repository)
   if (cached?.fingerprint === start.fingerprint) return cached
 
   const records = await mapBounded(start.lifecycle, async (lifecycle) => {
     const [contextRaw, showRaw] = await Promise.all([
-      runCanonical(source.gitDir, originUrl, 'context', lifecycle.taskId),
-      runCanonical(source.gitDir, originUrl, 'show', lifecycle.taskId),
+      runCanonical(source.gitDir, originUrl, 'context', lifecycle.taskId, signal),
+      runCanonical(source.gitDir, originUrl, 'show', lifecycle.taskId, signal),
     ])
     const context = contextSchema.parse(contextRaw)
     const show = showSchema.parse(showRaw)
-    if (context.taskId !== lifecycle.taskId || context.task.taskId !== lifecycle.taskId || show.taskId !== lifecycle.taskId ||
-      context.state !== lifecycle.state || show.state !== lifecycle.state ||
-      context.stateOid !== lifecycle.oid || show.stateOid !== lifecycle.oid || show.ref !== lifecycle.ref) {
+    if (context.taskId !== lifecycle.taskId || context.task.taskId !== lifecycle.taskId || show.taskId !== lifecycle.taskId) {
       throw new Error(`Canonical task-dag output disagrees with lifecycle ref for ${lifecycle.taskId}`)
+    }
+    if (context.state !== lifecycle.state || show.state !== lifecycle.state ||
+      context.stateOid !== lifecycle.oid || show.stateOid !== lifecycle.oid || show.ref !== lifecycle.ref) {
+      throw new GenerationChangedError(`Task-dag lifecycle generation changed while reading ${lifecycle.taskId}`)
     }
     if (JSON.stringify(context.structuralParent) !== JSON.stringify(context.task.structuralParent) ||
       JSON.stringify(context.directRequirements) !== JSON.stringify(context.task.requirements)) {
@@ -330,7 +365,8 @@ export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
     return { context, show, lifecycle }
   })
   const end = await captureRefs(source.gitDir)
-  if (end.fingerprint !== start.fingerprint) throw new Error('Task-dag lifecycle generation changed during read')
+  validateActivation(end, await runCanonical(source.gitDir, originUrl, 'activation', undefined, signal))
+  if (end.fingerprint !== start.fingerprint) throw new GenerationChangedError('Task-dag lifecycle generation changed during read')
 
   const nodes = new Map<string, TaskNode>()
   for (const { context, show, lifecycle } of records) {
@@ -340,15 +376,32 @@ export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
       taskId: context.taskId, taskOid: context.taskOid, stateOid: context.stateOid, state: context.state,
       title: context.task.title, description: context.task.description, structuralParent,
       requirements: context.directRequirements.map((requirement) => requirement.taskId),
-      directChildren: context.directChildren.map((child) => child.taskId),
+      directChildren: [],
       lifecycleEvidence: lifecycleEvidence(context.state, show.record),
       status: legacyStatus(context.state),
-      type: structuralParent ? (context.directChildren.length ? 'task' : 'leaf') : 'epic',
+      type: structuralParent ? 'leaf' : 'epic',
       dependents: [],
       isFrontier: context.state === 'frontier', isActive: context.state === 'active',
       isBlocked: context.state === 'blocked' || context.state === 'waiting', isReady: false,
       dependenciesMet: false, rootTaskId: context.taskId,
     })
+  }
+  const childrenByParent = new Map<string, string[]>()
+  for (const node of nodes.values()) {
+    if (!node.structuralParent) continue
+    const children = childrenByParent.get(node.structuralParent)
+    if (children) children.push(node.taskId)
+    else childrenByParent.set(node.structuralParent, [node.taskId])
+  }
+  for (const { context } of records) {
+    const derived = (childrenByParent.get(context.taskId) ?? []).sort()
+    const declared = context.directChildren.map((child) => child.taskId).sort()
+    if (declared.length > 0 && JSON.stringify(declared) !== JSON.stringify(derived)) {
+      throw new Error(`Canonical waiting children disagree with structural parents for ${context.taskId}`)
+    }
+    const node = nodes.get(context.taskId) as TaskNode
+    node.directChildren = derived
+    node.type = node.structuralParent ? (derived.length > 0 ? 'task' : 'leaf') : 'epic'
   }
   for (const { context } of records) {
     const checkIdentity = (identity: z.infer<typeof taskIdentitySchema>, relationship: string): TaskNode => {
@@ -384,6 +437,21 @@ export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
   }
   cachedIndexes.set(repository, index)
   return index
+}
+
+export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), GENERATION_DEADLINE_MS)
+    try {
+      return await loadTaskIndexAttempt(repository, controller.signal)
+    } catch (error) {
+      if (!(error instanceof GenerationChangedError) || attempt === 1) throw error
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+  throw new Error('Task-dag generation could not be captured')
 }
 
 function findRoot(node: TaskNode, nodes: Map<string, TaskNode>): TaskNode {
@@ -433,14 +501,14 @@ function epicRef(index: TaskIndex, task: TaskNode) {
   const root = index.nodes.get(task.rootTaskId)
   return root ? { repository: root.repository, githubRepository: root.githubRepository, taskId: root.taskId, taskOid: root.taskOid, stateOid: root.stateOid, title: root.title } : null
 }
-export async function getFrontierView(filter?: { rootTaskId?: string; status?: string; repository?: string }): Promise<FrontierView> {
+export async function getFrontierView(filter?: { rootTaskId?: string; repository?: string }): Promise<FrontierView> {
   const { indexes, source } = await loadConfiguredTaskIndexes(filter?.repository)
   const groups: FrontierGroup[] = []
   for (const index of indexes.values()) {
     const byRoot = new Map<string, TaskNode[]>()
     for (const task of index.nodes.values()) {
+      if (!task.structuralParent) continue
       if (filter?.rootTaskId && task.rootTaskId !== filter.rootTaskId) continue
-      if (filter?.status && task.status !== filter.status) continue
       const root = task.rootTaskId
       const list = byRoot.get(root)
       if (list) list.push(task); else byRoot.set(root, [task])
@@ -459,12 +527,12 @@ export async function getFrontierView(filter?: { rootTaskId?: string; status?: s
   const tasks = groups.flatMap((group) => group.tasks)
   return { source, summary: { totalFrontier: tasks.length, ready: tasks.filter((task) => task.isReady).length, active: tasks.filter((task) => task.state === 'active').length, blocked: tasks.filter((task) => task.state === 'blocked').length, waiting: tasks.filter((task) => task.state === 'waiting' || (task.state === 'frontier' && !task.isReady)).length, done: tasks.filter((task) => task.state === 'done').length, epicCount: groups.length }, groups }
 }
-export async function getFrontier(filter?: { rootTaskId?: string; status?: string; repository?: string }): Promise<TaskNode[]> { return (await getFrontierView(filter)).groups.flatMap((group) => group.tasks) }
+export async function getFrontier(filter?: { rootTaskId?: string; repository?: string }): Promise<TaskNode[]> { return (await getFrontierView(filter)).groups.flatMap((group) => group.tasks) }
 
 function summaries(repository: string, index: TaskIndex): EpicSummary[] {
   return index.rootTaskIds.map((rootId) => {
     const root = index.nodes.get(rootId) as TaskNode
-    const members = [...index.nodes.values()].filter((node) => node.rootTaskId === rootId)
+    const members = [...index.nodes.values()].filter((node) => node.rootTaskId === rootId && node.taskId !== rootId)
     const statusCounts: Record<string, number> = {}
     members.forEach((node) => { statusCounts[node.status] = (statusCounts[node.status] ?? 0) + 1 })
     return { repository, githubRepository: root.githubRepository, taskId: rootId, taskOid: root.taskOid, stateOid: root.stateOid, title: root.title, statusCounts, frontierCount: members.filter((node) => node.state === 'frontier').length, readyCount: members.filter((node) => node.isReady).length, activeCount: members.filter((node) => node.state === 'active').length, blockedCount: members.filter((node) => node.state === 'blocked').length, waitingCount: members.filter((node) => node.state === 'waiting' || (node.state === 'frontier' && !node.isReady)).length, completionPct: members.length ? members.filter((node) => node.state === 'done').length / members.length : 0, totalTasks: members.length }
@@ -479,7 +547,7 @@ export async function getEpicDag(rootId: string, repository: string): Promise<Da
   const index = indexes.get(repository) as TaskIndex
   const root = index.nodes.get(rootId)
   if (!root || root.structuralParent) throw new Error(`Epic not found: ${rootId}`)
-  const nodes = [...index.nodes.values()].filter((node) => node.rootTaskId === rootId)
+  const nodes = [...index.nodes.values()].filter((node) => node.rootTaskId === rootId && node.taskId !== rootId)
   const memberIds = new Set(nodes.map((node) => node.taskId))
   const edges: TaskEdge[] = []
   for (const node of nodes) {

@@ -7,6 +7,7 @@ import {
   DataStatus,
   TaskLocalNav,
   TaskUnavailable,
+  StaleDataWarning,
   sourceFromError,
   githubIssueUrl,
   type EpicsView,
@@ -37,10 +38,10 @@ export function TasksPage() {
   const fatal = epicsQ.error && !epicsQ.data
   const refreshing = epicsQ.refreshing || activityQ.refreshing
   const source =
-    sourceFromError(activityQ.error) ??
+    epicsQ.data?.source ??
     sourceFromError(epicsQ.error) ??
     activityQ.data?.source ??
-    epicsQ.data?.source
+    sourceFromError(activityQ.error)
 
   const completionTone = (pct: number): 'success' | 'warning' | 'muted' => {
     if (pct >= 0.8) return 'success'
@@ -63,6 +64,7 @@ export function TasksPage() {
           activityQ.refresh()
         }}
       />
+      {(activityQ.data || epicsQ.data) && <StaleDataWarning error={activityQ.error ?? epicsQ.error} />}
 
       {activityQ.data && (
         <div className="task-summary-row">

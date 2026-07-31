@@ -3,6 +3,7 @@ import {
   fetchTaskJson,
   usePolledData,
   SourceBanner,
+  StaleDataWarning,
   DataStatus,
   sourceFromError,
   TaskUnavailable,
@@ -62,7 +63,8 @@ export function TaskDetailPage() {
         </div>
       </div>
 
-      <SourceBanner source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
+      <SourceBanner source={data.source} onRefresh={refresh} refreshing={refreshing} />
+      <StaleDataWarning error={error} />
 
       <div className="inline-row wrap-row module-card-links task-nav-row">
         <Link to="/tasks/frontier">Task queue</Link>
@@ -140,7 +142,7 @@ export function TaskDetailPage() {
         title="Subtasks"
         tasks={data.children}
       />
-      <DataStatus source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
+      <DataStatus source={data.source} onRefresh={refresh} refreshing={refreshing} />
     </section>
   )
 }

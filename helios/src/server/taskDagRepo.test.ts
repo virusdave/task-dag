@@ -53,9 +53,15 @@ function fakeRunner() {
   return async (
     _gitDir: string,
     _originUrl: string,
-    command: 'context' | 'show',
-    taskId: string,
+    command: 'activation' | 'context' | 'show',
+    taskId?: string,
   ): Promise<unknown> => {
+    if (command === 'activation') return {
+      activationOid: git(['rev-parse', 'refs/heads/tasks/v2/activation']),
+      journalOid: git(['rev-parse', 'refs/heads/tasks/system/transitions']),
+      record: { state: 'enabled' },
+    }
+    if (taskId === undefined) throw new Error(`${command} requires a task ID`)
     const id = taskId as FixtureId
     const state = states.get(id)
     if (!state) throw new Error(`unknown fixture task ${taskId}`)
@@ -71,7 +77,7 @@ function fakeRunner() {
     const requirementIdentities = requirements.map(identity)
     if (command === 'context') return {
       taskId: id, taskOid, state, stateOid: headOid, structuralParent: parentIdentity,
-      directRequirements: requirementIdentities, directChildren: children.map(identity),
+      directRequirements: requirementIdentities, directChildren: state === 'waiting' ? children.map(identity) : [],
       task: {
         taskId: id, title: `${state} task`, description: `description for ${state}`,
         structuralParent: parentIdentity, requirements: requirementIdentities,
@@ -142,8 +148,10 @@ describe('bounded task-dag v2 adapter', () => {
     expect(index.nodes.get(ids.done)?.dependents).toContain(ids.frontier)
     const root = await getTaskDetail(ids.root, 'automation')
     expect(root?.children.map((node) => node.taskId)).toContain(ids.frontier)
-    expect((await getEpicDag(ids.root, 'automation')).edges).toEqual(expect.arrayContaining([
-      { source: ids.root, target: ids.frontier, kind: 'breakdown' },
+    expect(root?.task.type).toBe('epic')
+    const plan = await getEpicDag(ids.root, 'automation')
+    expect(plan.nodes.map((node) => node.taskId)).not.toContain(ids.root)
+    expect(plan.edges).toEqual(expect.arrayContaining([
       { source: ids.done, target: ids.frontier, kind: 'dependency' },
     ]))
   })
@@ -163,6 +171,14 @@ describe('bounded task-dag v2 adapter', () => {
       return command === 'context' ? { ...(response as object), task: undefined } : response
     })
     await expect(loadTaskIndex('automation')).rejects.toThrow(/expected object/)
+  })
+
+  it('rejects canonical activation that does not bind the captured journal', async () => {
+    __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
+      const response = await fakeRunner()(gitDir, originUrl, command, taskId)
+      return command === 'activation' ? { ...(response as object), journalOid: 'a'.repeat(40) } : response
+    })
+    await expect(loadTaskIndex('automation')).rejects.toThrow(/activation disagrees/)
   })
 
   it('rejects identity inconsistencies in canonical reader output', async () => {
@@ -189,7 +205,7 @@ describe('bounded task-dag v2 adapter', () => {
     }
   })
 
-  it('rejects generation movement and does not cache the unstable capture', async () => {
+  it('retries generation movement and caches only the stable capture', async () => {
     let moved = false
     __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
       const result = await fakeRunner()(gitDir, originUrl, command, taskId)
@@ -199,10 +215,47 @@ describe('bounded task-dag v2 adapter', () => {
       }
       return result
     })
-    await expect(loadTaskIndex('automation')).rejects.toThrow(/generation changed/)
-    git(['update-ref', 'refs/heads/tasks/system/transitions', headOid])
-    __setTaskDagRunnerForTests(fakeRunner())
     await expect(loadTaskIndex('automation')).resolves.toMatchObject({ nodes: expect.any(Map) })
+    git(['update-ref', 'refs/heads/tasks/system/transitions', headOid])
+    __resetTaskIndexCacheForTests()
+    __setTaskDagRunnerForTests(fakeRunner())
+  })
+
+  it('retries when canonical task output observes a newer lifecycle state', async () => {
+    let staleRead = true
+    __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
+      const result = await fakeRunner()(gitDir, originUrl, command, taskId)
+      if (staleRead && command === 'show' && taskId === ids.frontier) {
+        staleRead = false
+        return { ...(result as object), stateOid: movedOid }
+      }
+      return result
+    })
+    await expect(loadTaskIndex('automation')).resolves.toMatchObject({ nodes: expect.any(Map) })
+  })
+
+  it('settles the failed generation before starting its retry', async () => {
+    let activationCalls = 0
+    let driftObserved = false
+    let releaseSibling!: () => void
+    const blockedSibling = new Promise<void>((resolve) => { releaseSibling = resolve })
+    __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
+      if (command === 'activation') activationCalls++
+      if (activationCalls === 1 && command === 'context' && taskId === ids.active) await blockedSibling
+      const result = await fakeRunner()(gitDir, originUrl, command, taskId)
+      if (activationCalls === 1 && command === 'show' && taskId === ids.frontier) {
+        driftObserved = true
+        return { ...(result as object), stateOid: movedOid }
+      }
+      return result
+    })
+    const loading = loadTaskIndex('automation')
+    await vi.waitFor(() => expect(driftObserved).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(activationCalls).toBe(1)
+    releaseSibling()
+    await expect(loading).resolves.toMatchObject({ nodes: expect.any(Map) })
+    expect(activationCalls).toBeGreaterThan(1)
   })
 
   it('returns healthy peers when another configured repository fails', async () => {

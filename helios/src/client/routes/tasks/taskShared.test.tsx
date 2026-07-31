@@ -10,6 +10,7 @@ import {
   TaskCard,
   statusLabel,
   taskSourceWarningSignature,
+  usePolledData,
   type TaskDagSourceStatus,
   type TaskNode,
 } from './taskShared.js'
@@ -27,6 +28,11 @@ const task: TaskNode = {
 }
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+function PollProbe({ id, load }: { id: string; load: () => Promise<string> }) {
+  const query = usePolledData(load, [id], 60_000)
+  return <output>{query.data ?? (query.error ? 'error' : 'loading')}</output>
+}
 
 const degradedSource: TaskDagSourceStatus = {
   available: true,
@@ -100,6 +106,25 @@ describe('TaskCard disclosures', () => {
     host = null
     root = null
     vi.unstubAllGlobals()
+  })
+
+  it('discards prior identity data and stale responses when navigation changes', async () => {
+    let resolveFirst!: (value: string) => void
+    let resolveSecond!: (value: string) => void
+    const first = new Promise<string>((resolve) => { resolveFirst = resolve })
+    const second = new Promise<string>((resolve) => { resolveSecond = resolve })
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+
+    await act(async () => root?.render(<PollProbe id="first" load={() => first} />))
+    expect(host.textContent).toBe('loading')
+    await act(async () => root?.render(<PollProbe id="second" load={() => second} />))
+    expect(host.textContent).toBe('loading')
+    await act(async () => resolveFirst('stale first'))
+    expect(host.textContent).toBe('loading')
+    await act(async () => resolveSecond('current second'))
+    expect(host.textContent).toBe('current second')
   })
 
   it('uses one tray for status and relationships and restores focus on Escape', async () => {

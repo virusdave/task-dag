@@ -110,6 +110,15 @@ describe('task plan', () => {
     expect(location()).toBe(`/tasks/automation/epic/${fullRootTaskId}?view=graph`)
     await act(async () => navigate?.(1))
     expect(location()).toContain('status=blocked')
+
+    await act(async () => button('Dependency graph').click())
+    const graphNode = host.querySelector<SVGGElement>('g[role="button"]')
+    await act(async () => graphNode?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    expect(host.textContent).toContain('Selected task')
+    const nextRootTaskId = `v2-${'e'.repeat(64)}`
+    await act(async () => navigate?.(`/tasks/automation/epic/${nextRootTaskId}`))
+    expect(host.textContent).not.toContain('Selected task')
+    expect(host.textContent).not.toContain('selected task is no longer available')
   })
 })
 

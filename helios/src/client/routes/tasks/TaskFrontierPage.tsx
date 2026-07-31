@@ -5,6 +5,7 @@ import {
   fetchTaskJson,
   usePolledData,
   SourceBanner,
+  StaleDataWarning,
   DataStatus,
   TaskLocalNav,
   sourceFromError,
@@ -207,7 +208,8 @@ export function TaskFrontierPage() {
       </div>
       <TaskLocalNav />
 
-      <SourceBanner source={sourceFromError(error) ?? data?.source} onRefresh={refresh} refreshing={refreshing} />
+      <SourceBanner source={data?.source ?? sourceFromError(error)} onRefresh={refresh} refreshing={refreshing} />
+      {data && <StaleDataWarning error={error} />}
 
       {(rootTaskIdFilter || repositoryFilter) && (
         <p className="task-scope">
@@ -338,7 +340,7 @@ export function TaskFrontierPage() {
         </div>
       )}
 
-      <DataStatus source={sourceFromError(error) ?? data?.source} onRefresh={refresh} refreshing={refreshing} />
+      <DataStatus source={data?.source ?? sourceFromError(error)} onRefresh={refresh} refreshing={refreshing} />
     </section>
   )
 }

@@ -157,6 +157,15 @@ export function sourceFromError(error: Error | null): TaskDagSourceStatus | unde
   return error instanceof TaskDataUnavailableError ? error.source : undefined
 }
 
+export function StaleDataWarning({ error }: { error: Error | null }) {
+  if (!error) return null
+  return (
+    <p role="status" className="task-source-warning">
+      Latest refresh failed; showing the last successful task snapshot. {error.message}
+    </p>
+  )
+}
+
 export async function fetchTaskJson<T>(url: string): Promise<T> {
   const res = await fetch(url)
   if (res.status === 503) {
@@ -186,31 +195,32 @@ export function usePolledData<T>(
   deps: unknown[],
   intervalMs = 30_000,
 ): { data: T | null; error: Error | null; loading: boolean; refreshing: boolean; refresh: () => void } {
-  const [data, setData] = useState<T | null>(null)
-  const [error, setError] = useState<Error | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
+  const key = JSON.stringify(deps)
+  const [dataState, setDataState] = useState<{ key: string; value: T } | null>(null)
+  const [errorState, setErrorState] = useState<{ key: string; value: Error } | null>(null)
+  const [refreshingKey, setRefreshingKey] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
   const loaderRef = useRef(loader)
   loaderRef.current = loader
 
   useEffect(() => {
     let cancelled = false
+    let latestRun = 0
     async function run() {
-      if (!cancelled) setRefreshing(true)
+      const runId = ++latestRun
+      if (!cancelled) setRefreshingKey(key)
       try {
         const result = await loaderRef.current()
-        if (!cancelled) {
-          setData(result)
-          setError(null)
+        if (!cancelled && runId === latestRun) {
+          setDataState({ key, value: result })
+          setErrorState(null)
         }
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err : new Error('Unknown error'))
-      } finally {
-        if (!cancelled) {
-          setLoading(false)
-          setRefreshing(false)
+        if (!cancelled && runId === latestRun) {
+          setErrorState({ key, value: err instanceof Error ? err : new Error('Unknown error') })
         }
+      } finally {
+        if (!cancelled && runId === latestRun) setRefreshingKey(null)
       }
     }
     run()
@@ -219,10 +229,17 @@ export function usePolledData<T>(
       cancelled = true
       clearInterval(id)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick, intervalMs])
+  }, [key, tick, intervalMs])
 
-  return { data, error, loading, refreshing, refresh: () => setTick((t) => t + 1) }
+  const data = dataState?.key === key ? dataState.value : null
+  const error = errorState?.key === key ? errorState.value : null
+  return {
+    data,
+    error,
+    loading: data === null && error === null,
+    refreshing: refreshingKey === key,
+    refresh: () => setTick((t) => t + 1),
+  }
 }
 
 // --- formatting / links ----------------------------------------------------

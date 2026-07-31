@@ -5,6 +5,7 @@ import {
   fetchTaskJson,
   usePolledData,
   SourceBanner,
+  StaleDataWarning,
   DataStatus,
   sourceFromError,
   TaskUnavailable,
@@ -54,6 +55,10 @@ export function EpicDagPage() {
     if (normalized == null) return
     setSearchParams(normalized, { replace: true })
   }, [rawStatus, searchParams, setSearchParams])
+
+  useEffect(() => {
+    setSelectedKey(null)
+  }, [repository, taskId])
 
   const { data, error, loading, refreshing, refresh } = usePolledData<DagResult>(
     () => fetchTaskJson<DagResult>(`/api/tasks/repositories/${repository}/epics/${taskId}/dag`),
@@ -122,7 +127,8 @@ export function EpicDagPage() {
         </div>
       </div>
 
-      <SourceBanner source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
+      <SourceBanner source={data.source} onRefresh={refresh} refreshing={refreshing} />
+      <StaleDataWarning error={error} />
 
       <div className="task-summary-row" role="group" aria-label="Filter tasks by status">
         {([
@@ -195,7 +201,7 @@ export function EpicDagPage() {
           onSelect={(node) => setSelectedKey(node ? taskNodeKey(node) : null)}
         />
       )}
-      <DataStatus source={sourceFromError(error) ?? data.source} onRefresh={refresh} refreshing={refreshing} />
+      <DataStatus source={data.source} onRefresh={refresh} refreshing={refreshing} />
 
     </section>
   )
