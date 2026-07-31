@@ -154,6 +154,7 @@ task-dag frontier
 task-dag blocked
 task-dag deps <TASK-ID>
 task-dag context <TASK-ID>
+task-dag migrate-v1-census
 task-dag migrate-v1 --root <LEGACY-OID> --operation-id <KEY>
 ```
 
@@ -165,6 +166,11 @@ provider-free readers. Commands that are outside minimal v2 (`comment`,
 `delegate`, dependency mutation, `dag`, epic creation/composition, project,
 and provider operations) fail without network access or mutation and point to
 supported task-dag commands rather than suggesting raw Git edits.
+
+`migrate-v1-census` is a read-only, bounded reader for the exceptional
+importer. It validates every legacy pending root against one frozen snapshot,
+reports the exact terminal external edge blob OIDs required by `migrate-v1`,
+and fails if the importer-scoped refs change before readback.
 
 `migrate-v1` is an exceptional, single-repository importer and requires an
 operator-enforced writer freeze for its entire run. The operator must drain

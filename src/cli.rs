@@ -128,6 +128,7 @@ enum Commands {
     EpicCompose(BreakdownArgs),
     Project(Unsupported),
     Provider(Unsupported),
+    MigrateV1Census,
     MigrateV1 {
         #[arg(long)]
         root: String,
@@ -378,6 +379,7 @@ pub(crate) fn run() -> Result<()> {
         }
         Commands::Project(_) => commands::unsupported::fail("project"),
         Commands::Provider(_) => commands::unsupported::fail("provider"),
+        Commands::MigrateV1Census => crate::migration::census(),
         Commands::MigrateV1 {
             root,
             operation_id,

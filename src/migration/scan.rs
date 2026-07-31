@@ -1,5 +1,5 @@
 use crate::{Result, git, model, repository};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -31,8 +31,8 @@ pub(super) struct Frozen {
     pub(super) terminal_edges: Vec<String>,
 }
 
-pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> {
-    let patterns = vec![
+fn migration_patterns() -> Vec<String> {
+    vec![
         "refs/heads/master".into(),
         "refs/heads/tasks/v1/activation".into(),
         "refs/heads/tasks/v1/graph".into(),
@@ -45,8 +45,60 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
         "refs/heads/tasks/delegated/*".into(),
         "refs/heads/tasks/v2/activation".into(),
         "refs/heads/tasks/system/transitions".into(),
-    ];
+    ]
+}
+
+pub(super) fn census() -> Result<Value> {
+    let patterns = migration_patterns();
+    let snapshot = repository::advertise(&patterns)?;
+    if snapshot.refs.len() > 500 {
+        return Err("migration discovery exceeds 500 refs".into());
+    }
+    let pending: Vec<_> = snapshot
+        .refs
+        .iter()
+        .filter(|(reference, _)| reference.starts_with("refs/heads/tasks/pending/"))
+        .map(|(reference, root)| (reference.clone(), root.clone()))
+        .collect();
+    if pending.len() > 100 {
+        return Err("migration census exceeds 100 pending roots".into());
+    }
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (pending_ref, root) in pending {
+        if !seen.insert(root.clone()) {
+            return Err("migration root has more than one legacy pending ref".into());
+        }
+        let frozen = discover_from_snapshot(&root, patterns.clone(), snapshot.clone())?;
+        roots.push(json!({
+            "pendingRef": pending_ref,
+            "root": root,
+            "snapshotDigest": frozen.digest,
+            "taskCount": frozen.tasks.len(),
+            "terminalExternalEdges": frozen.terminal_edges,
+            "v1ActivationOid": frozen.activation,
+            "v1GraphOid": frozen.graph,
+            "v1MasterOid": frozen.master,
+        }));
+    }
+    census_race_seam()?;
+    if repository::advertise(&patterns)?.refs != snapshot.refs {
+        return Err("v1 migration census changed during readback".into());
+    }
+    Ok(json!({"formatVersion":1,"roots":roots}))
+}
+
+pub(super) fn discover(root: &str) -> Result<Frozen> {
+    let patterns = migration_patterns();
     let snap = repository::advertise(&patterns)?;
+    discover_from_snapshot(root, patterns, snap)
+}
+
+fn discover_from_snapshot(
+    root: &str,
+    patterns: Vec<String>,
+    snap: repository::Snapshot,
+) -> Result<Frozen> {
     if snap.refs.len() > 500 {
         return Err("migration discovery exceeds 500 refs".into());
     }
@@ -214,7 +266,6 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
         );
     }
     let observed_terminal_edges = graph_inspection.terminal;
-    validate_terminal_edges(&observed_terminal_edges, terminal_edges)?;
     let guard = parse_guard(&activation)?;
     let mut tasks = Vec::new();
     tasks.push(LegacyTask {
@@ -370,6 +421,40 @@ pub(super) fn discover(root: &str, terminal_edges: &[String]) -> Result<Frozen> 
         digest,
         terminal_edges: observed_terminal_edges,
     })
+}
+
+#[cfg(feature = "test-seam")]
+fn census_race_seam() -> Result<()> {
+    let Ok(value) = std::env::var("TASKDAG_TEST_CENSUS_UPDATE") else {
+        return Ok(());
+    };
+    let parts: Vec<_> = value.split('|').collect();
+    if parts.len() != 3 || !parts[0].starts_with("refs/heads/tasks/") {
+        return Err("census race seam is malformed".into());
+    }
+    if !parts[1].is_empty() {
+        model::oid(parts[1])?;
+    }
+    model::oid(parts[2])?;
+    let status = std::process::Command::new("git")
+        .args([
+            "push",
+            &format!("--force-with-lease={}:{}", parts[0], parts[1]),
+            "origin",
+            &format!("{}:{}", parts[2], parts[0]),
+        ])
+        .status()
+        .map_err(|error| format!("run census race seam: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("census race seam could not update the remote ref".into())
+    }
+}
+
+#[cfg(not(feature = "test-seam"))]
+fn census_race_seam() -> Result<()> {
+    Ok(())
 }
 
 fn descendant_closure(
@@ -932,7 +1017,7 @@ fn validate_edge_shape(map: &serde_json::Map<String, Value>, tombstone: bool) ->
     }
 }
 
-fn validate_terminal_edges(observed: &[String], supplied: &[String]) -> Result<()> {
+pub(super) fn validate_terminal_edges(observed: &[String], supplied: &[String]) -> Result<()> {
     if observed == supplied {
         Ok(())
     } else {

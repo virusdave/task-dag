@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 
 const DOMAIN: &str = "migrate-v1";
 
+pub(crate) fn census() -> Result<()> {
+    crate::commands::print_json(&scan::census()?)
+}
+
 pub(crate) fn run(
     root: &str,
     operation: &str,
@@ -64,7 +68,8 @@ pub(crate) fn run(
     if let Some(value) = replay(&receipt_ref, operation, &semantic)? {
         return crate::commands::print_json(&value);
     }
-    let frozen = scan::discover(root, &terminal_edges)?;
+    let frozen = scan::discover(root)?;
+    scan::validate_terminal_edges(&frozen.terminal_edges, &terminal_edges)?;
     let snap = repository::checked_snapshot(frozen.patterns.clone())?;
     if snap.refs != frozen.refs {
         return Err("v1 discovery changed between frozen scan and activation capture".into());

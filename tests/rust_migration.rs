@@ -326,6 +326,29 @@ impl Fixture {
             Some("migration-token-0001"),
         )
     }
+    fn census(&self) -> Output {
+        Self::run_raw(&self.work, &["migrate-v1-census"], None, None)
+    }
+    fn census_with_update(&self, reference: &str, old: &str, new: &str) -> Output {
+        Self::run_raw(
+            &self.work,
+            &["migrate-v1-census"],
+            Some((
+                "TASKDAG_TEST_CENSUS_UPDATE",
+                &format!("{reference}|{old}|{new}"),
+            )),
+            None,
+        )
+    }
+    fn remove_other_root(&self) {
+        for reference in self
+            .refs
+            .keys()
+            .filter(|reference| reference.contains("other"))
+        {
+            ok(&self.work, &["push", "origin", "--delete", reference]);
+        }
+    }
     fn migrate_with_terminal_edge(&self, operation: &str, edge: &str) -> Output {
         Self::run_raw(
             &self.work,
@@ -362,6 +385,94 @@ impl Fixture {
             ok(&self.work, &["show", "-s", "--format=%T", prior])
         );
     }
+}
+
+#[test]
+fn census_reports_exact_bounded_roots_without_writes() {
+    let f = Fixture::new(false, false);
+    f.remove_other_root();
+    let second = commit(&f.work, "Second root", &[]);
+    ok(
+        &f.work,
+        &[
+            "push",
+            "origin",
+            &format!("{second}:refs/heads/tasks/pending/second"),
+        ],
+    );
+    let refs_before = ok(&f.work, &["ls-remote", "--refs", "origin"]);
+    let out = f.census();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["formatVersion"], 1);
+    assert_eq!(result["roots"].as_array().unwrap().len(), 2);
+    let root = result["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["root"] == f.root)
+        .unwrap();
+    assert_eq!(root["pendingRef"], "refs/heads/tasks/pending/root");
+    assert_eq!(root["taskCount"], 6);
+    assert_eq!(root["terminalExternalEdges"], json!([]));
+    assert_eq!(root["v1ActivationOid"], f.activation);
+    assert_eq!(root["v1GraphOid"], f.graph);
+    assert_eq!(ok(&f.work, &["ls-remote", "--refs", "origin"]), refs_before);
+}
+
+#[test]
+fn census_rejects_pending_graph_and_lifecycle_races_without_import_writes() {
+    let pending = Fixture::new(false, true);
+    pending.remove_other_root();
+    let added = commit(&pending.work, "Concurrently added root", &[]);
+    let out = pending.census_with_update("refs/heads/tasks/pending/added", "", &added);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("changed during readback"));
+    assert!(
+        ok(
+            &pending.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+
+    let graph = Fixture::new(false, true);
+    graph.remove_other_root();
+    let changed_graph = commit(&graph.work, "concurrent graph", &[&graph.graph]);
+    let out = graph.census_with_update("refs/heads/tasks/v1/graph", &graph.graph, &changed_graph);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("changed during readback"));
+    assert!(
+        ok(
+            &graph.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+
+    let lifecycle = Fixture::new(false, false);
+    lifecycle.remove_other_root();
+    let reference = "refs/heads/tasks/active/active";
+    let old = lifecycle.remote(reference).unwrap();
+    let replacement = commit(
+        &lifecycle.work,
+        "Claim\n\nClaimer: replacement-worker",
+        &[&lifecycle.tasks["active"]],
+    );
+    let out = lifecycle.census_with_update(reference, &old, &replacement);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("changed during readback"));
+    assert!(
+        ok(
+            &lifecycle.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -852,6 +963,7 @@ fn unsupported_structural_census_and_metadata_fail_before_writes() {
 #[test]
 fn exact_terminal_external_edge_is_preserved_as_immutable_provenance() {
     let f = Fixture::new(false, true);
+    f.remove_other_root();
     let touching = Fixture::graph_commit(&f.work, &f.root, Some(&f.graph));
     ok(
         &f.work,
@@ -866,6 +978,20 @@ fn exact_terminal_external_edge_is_preserved_as_immutable_provenance() {
         &f.work,
         &["ls-tree", "-r", "--format=%(objectname)", &touching],
     );
+    let census = f.census();
+    assert!(
+        census.status.success(),
+        "{}",
+        String::from_utf8_lossy(&census.stderr)
+    );
+    let census: Value = serde_json::from_slice(&census.stdout).unwrap();
+    let root = census["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["root"] == f.root)
+        .unwrap();
+    assert_eq!(root["terminalExternalEdges"], json!([edge]));
     let out = f.migrate_with_terminal_edge("terminal-edge", &edge);
     assert!(
         out.status.success(),
