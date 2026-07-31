@@ -522,6 +522,48 @@ impl Fixture {
         );
         (close_ref, close)
     }
+    fn add_completed_issue(&self, issue: u64, title: &str) -> (String, String) {
+        let task = commit(&self.work, title, &[]);
+        let master = self.remote("refs/heads/master").unwrap();
+        let completion = commit(
+            &self.work,
+            &format!(
+                "Complete {title}\n\nIssue: #{issue}\nStatus: completed\n\nRelated: migration fixture"
+            ),
+            &[&master, &task],
+        );
+        ok(
+            &self.work,
+            &["push", "origin", &format!("{completion}:refs/heads/master")],
+        );
+        (task, completion)
+    }
+    fn add_issue_close(&self, issue: u64, root: &str) -> String {
+        ok(
+            &self.work,
+            &[
+                "push",
+                "origin",
+                &format!("{root}:refs/heads/gh/issues/{issue}"),
+            ],
+        );
+        let master = self.remote("refs/heads/master").unwrap();
+        let close = commit(
+            &self.work,
+            &format!("Close epic\n\nCloses-Epic: #{issue}"),
+            &[&master, root],
+        );
+        ok(
+            &self.work,
+            &["push", "origin", &format!("{close}:refs/heads/master")],
+        );
+        close
+    }
+    fn add_closed_issue(&self, issue: u64, title: &str) -> (String, String) {
+        let root = commit(&self.work, title, &[]);
+        let close = self.add_issue_close(issue, &root);
+        (root, close)
+    }
     fn migrate_with_terminal_edge(&self, operation: &str, edge: &str) -> Output {
         Self::run_raw(
             &self.work,
@@ -787,6 +829,439 @@ fn unpaired_declaration_imports_waiting_and_exact_close_imports_done() {
         error.contains("migration done historical active identity is malformed"),
         "{error}"
     );
+}
+
+#[test]
+fn same_repository_delegation_becomes_a_conjunctive_local_child() {
+    let f = Fixture::new(false, true);
+    let target_root = commit(&f.work, "Same-repository target", &[]);
+    ok(
+        &f.work,
+        &[
+            "push",
+            "origin",
+            &format!("{target_root}:refs/heads/tasks/pending/2"),
+        ],
+    );
+    let (declaration_ref, _) = f.add_delegation("owner/repo", 2, None, 2, &[]);
+    let out = f.migrate("same-repository-delegation", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let delegation = &result["delegations"][0];
+    assert_eq!(delegation["disposition"], "open-local-requirement");
+    assert_eq!(
+        delegation["normalization"],
+        "same-repository delegation->requires/all"
+    );
+    assert!(f.remote(&declaration_ref).is_none());
+    assert!(delegation["intentOid"].is_null());
+    let synthetic = body(&f.work, delegation["syntheticTaskOid"].as_str().unwrap());
+    assert_eq!(synthetic["requirements"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        synthetic["requirements"][0]["taskId"],
+        delegation["targetTaskId"]
+    );
+    let root_waiting = f
+        .remote(&format!(
+            "refs/heads/tasks/waiting/{}",
+            result["rootTaskId"].as_str().unwrap()
+        ))
+        .unwrap();
+    assert!(
+        body(&f.work, &root_waiting)["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|child| child["taskId"] == delegation["syntheticTaskId"])
+    );
+    let claim = Fixture::run_raw(
+        &f.work,
+        &[
+            "claim",
+            delegation["syntheticTaskId"].as_str().unwrap(),
+            "--owner",
+            "premature-worker",
+            "--operation-id",
+            "premature-local-dependency-claim",
+        ],
+        None,
+        Some("premature-local-dependency-token"),
+    );
+    assert!(!claim.status.success());
+    let error = String::from_utf8_lossy(&claim.stderr);
+    assert!(error.contains("is not done"), "{error}");
+}
+
+#[test]
+fn completed_same_repository_delegation_preserves_exact_witness() {
+    let f = Fixture::new(false, true);
+    f.remove_other_root();
+    let (target, witness) = f.add_closed_issue(2, "Completed same-repository target");
+    let (declaration_ref, _) = f.add_delegation("owner/repo", 2, None, 2, &[]);
+    let out = f.migrate("completed-same-repository-delegation", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let delegation = &result["delegations"][0];
+    assert_eq!(delegation["disposition"], "completed-local-requirement");
+    assert_eq!(delegation["targetLegacyTaskOid"], target);
+    assert_eq!(delegation["targetCompletionWitnessOid"], witness);
+    assert!(delegation["syntheticTaskId"].is_null());
+    assert!(f.remote(&declaration_ref).is_none());
+}
+
+#[test]
+fn missing_or_ambiguous_same_repository_target_fails_before_writes() {
+    let missing = Fixture::new(false, true);
+    missing.remove_other_root();
+    let (missing_ref, missing_oid) = missing.add_delegation("owner/repo", 2, None, 2, &[]);
+    let out = missing.migrate("missing-local-target", None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no authoritative root"));
+    assert_eq!(
+        missing.remote(&missing_ref).as_deref(),
+        Some(missing_oid.as_str())
+    );
+
+    let child_only = Fixture::new(false, true);
+    child_only.remove_other_root();
+    let historical_root = commit(&child_only.work, "Historical issue root", &[]);
+    ok(
+        &child_only.work,
+        &[
+            "push",
+            "origin",
+            &format!("{historical_root}:refs/heads/gh/issues/2"),
+        ],
+    );
+    child_only.add_completed_issue(2, "Completed child, not issue root");
+    let (child_only_ref, _) = child_only.add_delegation("owner/repo", 2, None, 2, &[]);
+    let out = child_only.migrate("child-completion-is-not-issue-close", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let delegation = &result["delegations"][0];
+    assert_eq!(delegation["disposition"], "unresolved-local-requirement");
+    assert_eq!(delegation["targetHistoricalRootOid"], historical_root);
+    assert!(child_only.remote(&child_only_ref).is_none());
+    let synthetic = body(
+        &child_only.work,
+        delegation["syntheticTaskOid"].as_str().unwrap(),
+    );
+    assert!(synthetic["requirements"].as_array().unwrap().is_empty());
+
+    let ambiguous = Fixture::new(false, true);
+    ambiguous.remove_other_root();
+    let target = commit(&ambiguous.work, "Ambiguously closed target", &[]);
+    ambiguous.add_issue_close(2, &target);
+    ambiguous.add_issue_close(2, &target);
+    let (ambiguous_ref, ambiguous_oid) = ambiguous.add_delegation("owner/repo", 2, None, 2, &[]);
+    let out = ambiguous.migrate("ambiguous-local-target", None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("completion is ambiguous"));
+    assert_eq!(
+        ambiguous.remote(&ambiguous_ref).as_deref(),
+        Some(ambiguous_oid.as_str())
+    );
+    assert!(
+        ok(
+            &ambiguous.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn expired_root_claim_is_preserved_as_provenance_and_retired() {
+    let f = Fixture::new(false, true);
+    let digest = "a".repeat(64);
+    let pending_ref = format!("refs/heads/tasks/pending/epic-v1/{digest}");
+    let claim_ref = format!("refs/heads/tasks/root-active/epic-v1/{digest}");
+    ok(
+        &f.work,
+        &[
+            "push",
+            "origin",
+            "--delete",
+            "refs/heads/tasks/pending/root",
+        ],
+    );
+    ok(
+        &f.work,
+        &["push", "origin", &format!("{}:{pending_ref}", f.root)],
+    );
+    let claim = commit(
+        &f.work,
+        &format!(
+            "Claim: Root\n\nClaim-Kind: root\nEpic-ID: epic-v1:{digest}\nRoot-Ref: {pending_ref}\nClaim-ID: fixture-claim\nTask-Commit: {}\nClaimer: old-worker\nClaimer-Host: test\nClaimer-PID: 1\nClaimed-At: 2026-07-27T00:00:00Z\nTTL-Hours: 12",
+            f.root
+        ),
+        &[&f.root],
+    );
+    ok(
+        &f.work,
+        &["push", "origin", &format!("{claim}:{claim_ref}")],
+    );
+    let out = f.migrate("expired-root-claim", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(f.remote(&claim_ref).is_none());
+    let mapping = f
+        .remote(&format!("refs/heads/tasks/v2/imports/v1/by-sha/{}", f.root))
+        .unwrap();
+    assert!(
+        body(&f.work, &mapping)["provenance"]["legacyLifecycleRefs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["ref"] == claim_ref && entry["oid"] == claim)
+    );
+}
+
+#[test]
+fn invalid_root_claims_fail_before_writes() {
+    for (claim_ref, parent, task, claimed_at, expected) in [
+        (
+            "refs/heads/tasks/root-active/1",
+            "root",
+            "root",
+            "2026-07-29T00:00:00Z",
+            "still live",
+        ),
+        (
+            "refs/heads/tasks/root-active/2",
+            "root",
+            "root",
+            "2026-07-27T00:00:00Z",
+            "identity or object shape is malformed",
+        ),
+        (
+            "refs/heads/tasks/root-active/1",
+            "other_root",
+            "root",
+            "2026-07-27T00:00:00Z",
+            "identity or object shape is malformed",
+        ),
+        (
+            "refs/heads/tasks/root-active/1",
+            "root",
+            "other_root",
+            "2026-07-27T00:00:00Z",
+            "does not bind its pending root",
+        ),
+    ] {
+        let f = Fixture::new(false, true);
+        ok(
+            &f.work,
+            &[
+                "push",
+                "origin",
+                "--delete",
+                "refs/heads/tasks/pending/root",
+            ],
+        );
+        ok(
+            &f.work,
+            &[
+                "push",
+                "origin",
+                &format!("{}:refs/heads/tasks/pending/1", f.root),
+            ],
+        );
+        let parent = &f.tasks[parent];
+        let task = &f.tasks[task];
+        let claim = commit(
+            &f.work,
+            &format!(
+                "Claim: Root\n\nClaim-Kind: root\nIssue: #1\nClaim-ID: fixture-claim\nTask-Commit: {task}\nClaimer: old-worker\nClaimer-Host: test\nClaimer-PID: 1\nClaimed-At: {claimed_at}\nTTL-Hours: 12"
+            ),
+            &[parent],
+        );
+        ok(
+            &f.work,
+            &["push", "origin", &format!("{claim}:{claim_ref}")],
+        );
+        let out = f.migrate("invalid-root-claim", None);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(expected));
+        assert_eq!(f.remote(claim_ref).as_deref(), Some(claim.as_str()));
+        assert!(
+            ok(
+                &f.work,
+                &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+            )
+            .is_empty()
+        );
+    }
+}
+
+#[test]
+fn root_claim_expiry_honors_v1_grace_and_same_host_pid() {
+    for (index, (claimed_at, expired)) in [
+        ("2026-07-27T23:00:00Z", false),
+        ("2026-07-27T22:55:00Z", false),
+        ("2026-07-27T22:54:59Z", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let f = Fixture::new(false, true);
+        ok(
+            &f.work,
+            &[
+                "push",
+                "origin",
+                "--delete",
+                "refs/heads/tasks/pending/root",
+            ],
+        );
+        ok(
+            &f.work,
+            &[
+                "push",
+                "origin",
+                &format!("{}:refs/heads/tasks/pending/1", f.root),
+            ],
+        );
+        let claim = commit(
+            &f.work,
+            &format!(
+                "Claim: Root\n\nClaim-Kind: root\nIssue: #1\nClaim-ID: boundary-claim\nTask-Commit: {}\nClaimer: old-worker\nClaimer-Host: remote-host\nClaimed-At: {claimed_at}\nTTL-Hours: 1",
+                f.root
+            ),
+            &[&f.root],
+        );
+        let claim_ref = "refs/heads/tasks/root-active/1";
+        ok(
+            &f.work,
+            &["push", "origin", &format!("{claim}:{claim_ref}")],
+        );
+        let out = f.migrate(&format!("root-claim-boundary-{index}"), None);
+        assert_eq!(
+            out.status.success(),
+            expired,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(f.remote(claim_ref).is_none(), expired);
+    }
+
+    let f = Fixture::new(false, true);
+    ok(
+        &f.work,
+        &[
+            "push",
+            "origin",
+            "--delete",
+            "refs/heads/tasks/pending/root",
+        ],
+    );
+    ok(
+        &f.work,
+        &[
+            "push",
+            "origin",
+            &format!("{}:refs/heads/tasks/pending/1", f.root),
+        ],
+    );
+    let claim = commit(
+        &f.work,
+        &format!(
+            "Claim: Root\n\nClaim-Kind: root\nIssue: #1\nClaim-ID: live-pid-claim\nTask-Commit: {}\nClaimer: live-worker\nClaimer-Host: migration-test-host\nClaimer-PID: {}\nClaimed-At: 2026-07-20T00:00:00Z\nTTL-Hours: 1",
+            f.root,
+            std::process::id()
+        ),
+        &[&f.root],
+    );
+    let claim_ref = "refs/heads/tasks/root-active/1";
+    ok(
+        &f.work,
+        &["push", "origin", &format!("{claim}:{claim_ref}")],
+    );
+    let out = f.migrate(
+        "same-host-live-root-claim",
+        Some(("TASK_DAG_CLAIMER_HOST", "migration-test-host")),
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("same-host PID evidence"));
+    assert_eq!(f.remote(claim_ref).as_deref(), Some(claim.as_str()));
+}
+
+#[test]
+fn noncanonical_root_claim_fields_fail_before_writes() {
+    let uppercase = "A".repeat(64);
+    for (suffix, identity, pid, ttl, expected) in [
+        (
+            "1".to_owned(),
+            "Issue: #1".to_owned(),
+            "Claimer-PID:  123".to_owned(),
+            "12",
+            "Claimer-PID field is malformed",
+        ),
+        (
+            "1".to_owned(),
+            "Issue: #1".to_owned(),
+            "Claimer-PID: 1".to_owned(),
+            "1e-9",
+            "TTL is malformed",
+        ),
+        (
+            format!("epic-v1/{uppercase}"),
+            format!(
+                "Epic-ID: epic-v1:{uppercase}\nRoot-Ref: refs/heads/tasks/pending/epic-v1/{uppercase}"
+            ),
+            "Claimer-PID: 1".to_owned(),
+            "12",
+            "path dialect is malformed",
+        ),
+    ] {
+        let f = Fixture::new(false, true);
+        ok(
+            &f.work,
+            &[
+                "push",
+                "origin",
+                "--delete",
+                "refs/heads/tasks/pending/root",
+            ],
+        );
+        let pending_ref = format!("refs/heads/tasks/pending/{suffix}");
+        let claim_ref = format!("refs/heads/tasks/root-active/{suffix}");
+        ok(
+            &f.work,
+            &["push", "origin", &format!("{}:{pending_ref}", f.root)],
+        );
+        let claim = commit(
+            &f.work,
+            &format!(
+                "Claim: Root\n\nClaim-Kind: root\n{identity}\nClaim-ID: malformed-claim\nTask-Commit: {}\nClaimer: old-worker\nClaimer-Host: remote-host\n{pid}\nClaimed-At: 2026-07-20T00:00:00Z\nTTL-Hours: {ttl}",
+                f.root
+            ),
+            &[&f.root],
+        );
+        ok(
+            &f.work,
+            &["push", "origin", &format!("{claim}:{claim_ref}")],
+        );
+        let out = f.migrate("noncanonical-root-claim", None);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(expected));
+        assert_eq!(f.remote(&claim_ref).as_deref(), Some(claim.as_str()));
+    }
 }
 
 fn crate_manifest_valid(work: &Path, oid: &str, task_id: &str) {
@@ -1549,6 +2024,99 @@ fn local_graph_requirement_is_immutable_and_structural_root_cycle_is_rejected() 
     assert_eq!(
         rejected.remote("refs/heads/tasks/frontier/c").as_deref(),
         rejected.refs["refs/heads/tasks/frontier/c"].as_str().into()
+    );
+}
+
+#[test]
+fn satisfies_any_normalizes_to_open_or_completed_conjunctive_provenance() {
+    let open = Fixture::new(false, false);
+    let edge = json!({
+        "from":format!("task:owner/repo@{}", open.tasks["b"]),
+        "mode":"any",
+        "origin":{"repo-id":1,"witness":"obsolete-or-edge"},
+        "relation":"satisfies",
+        "schema":1,
+        "to":format!("task:owner/repo@{}", open.tasks["sibling"])
+    });
+    let graph = Fixture::graph_commit_edge(&open.work, &edge, Some(&open.graph));
+    ok(
+        &open.work,
+        &[
+            "push",
+            "--force",
+            "origin",
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = open.migrate("open-satisfies-normalization", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mapping = open
+        .remote(&format!(
+            "refs/heads/tasks/v2/imports/v1/by-sha/{}",
+            open.tasks["b"]
+        ))
+        .unwrap();
+    let mapping = body(&open.work, &mapping);
+    let task = body(&open.work, mapping["taskOid"].as_str().unwrap());
+    assert!(
+        task["requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|requirement| {
+                requirement["taskId"] == result["mapping"][&open.tasks["sibling"]]
+            })
+    );
+    assert_eq!(
+        mapping["provenance"]["graphNormalizations"],
+        json!(["satisfies/any->requires/all"])
+    );
+
+    let completed = Fixture::new(false, false);
+    let (target, witness) = completed.add_completed_issue(99, "Completed graph target");
+    let edge = json!({
+        "from":format!("task:owner/repo@{}", completed.tasks["b"]),
+        "mode":"any",
+        "origin":{"repo-id":1,"witness":"obsolete-completed-or-edge"},
+        "relation":"satisfies",
+        "schema":1,
+        "to":format!("task:owner/repo@{target}")
+    });
+    let graph = Fixture::graph_commit_edge(&completed.work, &edge, Some(&completed.graph));
+    ok(
+        &completed.work,
+        &[
+            "push",
+            "--force",
+            "origin",
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = completed.migrate("completed-satisfies-normalization", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mapping = completed
+        .remote(&format!(
+            "refs/heads/tasks/v2/imports/v1/by-sha/{}",
+            completed.tasks["b"]
+        ))
+        .unwrap();
+    let mapping = body(&completed.work, &mapping);
+    assert_eq!(
+        mapping["provenance"]["completedParentRequirements"],
+        json!([{"completionWitnessOid":witness,"taskOid":target}])
+    );
+    assert_eq!(
+        mapping["provenance"]["graphNormalizations"],
+        json!(["satisfies/any->requires/all"])
     );
 }
 

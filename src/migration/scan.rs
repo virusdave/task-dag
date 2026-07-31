@@ -18,6 +18,7 @@ pub(super) struct LegacyTask {
     pub(super) blocked_at: Option<u64>,
     pub(super) graph_edges: Vec<String>,
     pub(super) completed_parent_requirements: Vec<(String, String)>,
+    pub(super) graph_normalizations: Vec<String>,
 }
 #[derive(Clone)]
 pub(super) struct LegacyDelegation {
@@ -32,6 +33,14 @@ pub(super) struct LegacyDelegation {
     pub(super) source_repository_id: String,
     pub(super) target_repository_id: String,
     pub(super) fleet_digest: String,
+    pub(super) local_target: Option<LocalDelegationTarget>,
+}
+
+#[derive(Clone)]
+pub(super) enum LocalDelegationTarget {
+    Open { root: String },
+    Completed { task: String, witness: String },
+    Unresolved { root: String },
 }
 #[derive(Clone)]
 pub(super) struct LegacyDelegatedClose {
@@ -57,11 +66,18 @@ pub(super) struct Frozen {
     pub(super) delegations: Vec<LegacyDelegation>,
 }
 
+#[derive(Default)]
+struct CompletionFacts {
+    by_task: BTreeMap<String, String>,
+    by_issue: BTreeMap<String, Vec<(String, String)>>,
+}
+
 fn migration_patterns() -> Vec<String> {
     vec![
         "refs/heads/master".into(),
         "refs/heads/tasks/v1/activation".into(),
         "refs/heads/tasks/v1/graph".into(),
+        "refs/heads/gh/issues/*".into(),
         "refs/heads/tasks/pending/*".into(),
         "refs/heads/tasks/frontier/*".into(),
         "refs/heads/tasks/active/*".into(),
@@ -96,7 +112,7 @@ pub(super) fn census() -> Result<Value> {
         .get("refs/heads/master")
         .ok_or("migration requires refs/heads/master")?;
     repository::materialize(std::slice::from_ref(master))?;
-    let completion_facts = completion_facts(master)?;
+    let completion_facts = completion_facts(master, &snapshot)?;
     let mut roots = Vec::new();
     let mut seen = BTreeSet::new();
     for (pending_ref, root) in pending {
@@ -140,7 +156,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         .get("refs/heads/master")
         .ok_or("migration requires refs/heads/master")?;
     repository::materialize(std::slice::from_ref(master))?;
-    let completion = completion_facts(master)?;
+    let completion = completion_facts(master, &snap)?;
     let roots: BTreeSet<_> = snap
         .refs
         .iter()
@@ -168,7 +184,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         let Some(requirement) = unresolved else { break };
         let mut owners = Vec::new();
         for candidate in &roots {
-            if reaches_structural_root(&requirement, candidate, 100)? {
+            if &requirement == candidate || reaches_structural_root(&requirement, candidate, 100)? {
                 owners.push(candidate);
             }
         }
@@ -260,7 +276,7 @@ fn discover_from_snapshot(
     root: &str,
     patterns: Vec<String>,
     snap: repository::Snapshot,
-    precomputed_completion_facts: Option<&BTreeMap<String, String>>,
+    precomputed_completion_facts: Option<&CompletionFacts>,
 ) -> Result<Frozen> {
     if snap.refs.len() > 500 {
         return Err("migration discovery exceeds 500 refs".into());
@@ -398,13 +414,13 @@ fn discover_from_snapshot(
         .0
         .strip_prefix("refs/heads/tasks/pending/")
         .unwrap();
+    let mut expired_root_claims = Vec::new();
     for (reference, oid) in &root_active {
         if git::parents(oid)?.iter().any(|parent| parent == root)
             || reference == &format!("refs/heads/tasks/root-active/{pending_suffix}")
         {
-            return Err(format!(
-                "legacy root-active or delegated state {reference} at {oid} is unsupported by bounded migration"
-            ));
+            validate_expired_root_claim(reference, oid, pending[0].0, root, pending_suffix)?;
+            expired_root_claims.push((reference.clone(), oid.clone()));
         }
     }
     let repository = current_repository()?;
@@ -450,7 +466,7 @@ fn discover_from_snapshot(
         }
     }
     let computed_completion_facts = if precomputed_completion_facts.is_none() {
-        Some(completion_facts(&master)?)
+        Some(completion_facts(&master, &snap)?)
     } else {
         None
     };
@@ -504,6 +520,44 @@ fn discover_from_snapshot(
                 &repository,
             )?);
         }
+        if delegation.target_repository_id == delegation.source_repository_id {
+            if delegation.close.is_some() {
+                return Err("same-repository legacy delegation cannot carry a peer close".into());
+            }
+            let target_ref = format!("refs/heads/tasks/pending/{}", delegation.peer_issue);
+            if let Some(target) = snap.refs.get(&target_ref) {
+                if target == root {
+                    return Err("same-repository legacy delegation self-cycle".into());
+                }
+                delegation.local_target = Some(LocalDelegationTarget::Open {
+                    root: target.clone(),
+                });
+            } else {
+                let witnesses = completion_facts.by_issue.get(&delegation.peer_issue);
+                if witnesses.is_some_and(|witnesses| witnesses.len() > 1) {
+                    return Err(
+                        "same-repository legacy delegation target completion is ambiguous".into(),
+                    );
+                }
+                if let Some(witness) = witnesses.and_then(|witnesses| witnesses.first()) {
+                    delegation.local_target = Some(LocalDelegationTarget::Completed {
+                        task: witness.0.clone(),
+                        witness: witness.1.clone(),
+                    });
+                } else {
+                    let historical_ref = format!("refs/heads/gh/issues/{}", delegation.peer_issue);
+                    let historical_root = snap.refs.get(&historical_ref).ok_or(
+                        "same-repository legacy delegation target has no authoritative root",
+                    )?;
+                    if historical_root == root {
+                        return Err("same-repository legacy delegation self-cycle".into());
+                    }
+                    delegation.local_target = Some(LocalDelegationTarget::Unresolved {
+                        root: historical_root.clone(),
+                    });
+                }
+            }
+        }
     }
     let mut normalized = BTreeSet::new();
     for delegation in &parsed_delegations {
@@ -528,6 +582,7 @@ fn discover_from_snapshot(
     let guard = parse_guard(&activation)?;
     let mut root_state = "pending".to_owned();
     let mut root_lifecycle = vec![(pending[0].0.clone(), pending[0].1.clone())];
+    root_lifecycle.extend(expired_root_claims);
     let mut root_blocked_reason = None;
     let mut root_blocked_at = None;
     if let Some(states) = task_states.get(root) {
@@ -556,13 +611,20 @@ fn discover_from_snapshot(
         }
     }
     let mut tasks = Vec::new();
+    let local_open_requirements: Vec<_> = parsed_delegations
+        .iter()
+        .filter_map(|delegation| match &delegation.local_target {
+            Some(LocalDelegationTarget::Open { root }) => Some(root.clone()),
+            _ => None,
+        })
+        .collect();
     tasks.push(LegacyTask {
         task: root.into(),
         state: root_state,
         owner: String::new(),
         title: subject(root)?,
         description: description(root)?,
-        requires: vec![],
+        requires: local_open_requirements,
         lifecycle: root_lifecycle,
         blocked_reason: root_blocked_reason,
         blocked_at: root_blocked_at,
@@ -573,6 +635,11 @@ fn discover_from_snapshot(
             .unwrap_or_default(),
         completed_parent_requirements: graph_inspection
             .completed
+            .get(root)
+            .cloned()
+            .unwrap_or_default(),
+        graph_normalizations: graph_inspection
+            .normalizations
             .get(root)
             .cloned()
             .unwrap_or_default(),
@@ -641,6 +708,7 @@ fn discover_from_snapshot(
             .iter()
             .filter_map(|parent| {
                 completion_facts
+                    .by_task
                     .get(parent)
                     .map(|witness| (parent.clone(), witness.clone()))
             })
@@ -668,10 +736,10 @@ fn discover_from_snapshot(
                 .cloned(),
         );
         for parent in external_parents {
-            if !completion_facts.contains_key(&parent) {
+            if !completion_facts.by_task.contains_key(&parent) {
                 let mut owners = Vec::new();
                 for candidate in &pending_tasks {
-                    if reaches_structural_root(&parent, candidate, 100)? {
+                    if &parent == candidate || reaches_structural_root(&parent, candidate, 100)? {
                         owners.push(candidate);
                     }
                 }
@@ -721,6 +789,11 @@ fn discover_from_snapshot(
                 .cloned()
                 .unwrap_or_default(),
             completed_parent_requirements,
+            graph_normalizations: graph_inspection
+                .normalizations
+                .get(&next)
+                .cloned()
+                .unwrap_or_default(),
         });
     }
     let root_was_blocked = tasks[0].state == "blocked";
@@ -914,9 +987,9 @@ fn legacy_lifecycle_suffix(suffix: &str) -> Result<bool> {
     }
 }
 
-fn completion_facts(master: &str) -> Result<BTreeMap<String, String>> {
+fn completion_facts(master: &str, snapshot: &repository::Snapshot) -> Result<CompletionFacts> {
     let scan = git::output(["rev-list", "--first-parent", "--parents", master])?;
-    let mut facts = BTreeMap::new();
+    let mut facts = CompletionFacts::default();
     for line in scan.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
         if fields.len() != 3 {
@@ -933,18 +1006,194 @@ fn completion_facts(master: &str) -> Result<BTreeMap<String, String>> {
             "--format=%(trailers:keyonly,separator=%x0A)",
             fields[0],
         ])?;
-        if trailer_keys
+        let close_keys = trailer_keys
             .lines()
-            .any(|key| matches!(key, "Closes-Epic" | "Closes-Epic-ID"))
-        {
+            .filter(|key| *key == "Closes-Epic")
+            .count();
+        let typed_close_keys = trailer_keys
+            .lines()
+            .filter(|key| *key == "Closes-Epic-ID")
+            .count();
+        if close_keys > 0 || typed_close_keys > 0 {
+            if close_keys == 1 && typed_close_keys == 0 {
+                let close = git::output([
+                    "show",
+                    "-s",
+                    "--format=%(trailers:key=Closes-Epic,valueonly,separator=%x0A)",
+                    fields[0],
+                ])?;
+                let issue = close
+                    .trim()
+                    .strip_prefix('#')
+                    .filter(|issue| positive_number(issue));
+                if let Some(issue) = issue {
+                    let gh_root = snapshot.refs.get(&format!("refs/heads/gh/issues/{issue}"));
+                    let pending_root = snapshot
+                        .refs
+                        .get(&format!("refs/heads/tasks/pending/{issue}"));
+                    if gh_root.is_some() && pending_root.is_some() && gh_root != pending_root {
+                        return Err("legacy issue root authorities disagree".into());
+                    }
+                    if gh_root
+                        .or(pending_root)
+                        .is_some_and(|root| root == fields[2])
+                    {
+                        facts
+                            .by_issue
+                            .entry(issue.to_owned())
+                            .or_default()
+                            .push((fields[2].to_owned(), fields[0].to_owned()));
+                    }
+                }
+            }
             continue;
         }
         let task_tree = git::output(["show", "-s", "--format=%T", fields[2]])?;
         if task_tree.trim() == "4b825dc642cb6eb9a060e54bf8d69288fbee4904" {
-            facts.insert(fields[2].to_owned(), fields[0].to_owned());
+            facts
+                .by_task
+                .insert(fields[2].to_owned(), fields[0].to_owned());
         }
     }
     Ok(facts)
+}
+
+fn validate_expired_root_claim(
+    reference: &str,
+    oid: &str,
+    pending_ref: &str,
+    root: &str,
+    epic_id: &str,
+) -> Result<()> {
+    if reference != format!("refs/heads/tasks/root-active/{epic_id}")
+        || git::parents(oid)? != [root]
+        || git::output(["show", "-s", "--format=%T", oid])?.trim()
+            != git::output(["show", "-s", "--format=%T", root])?.trim()
+    {
+        return Err("legacy root claim identity or object shape is malformed".into());
+    }
+    let message = git::output(["show", "-s", "--format=%B", oid])?;
+    let field = |name: &str| -> Result<&str> {
+        let prefix = format!("{name}:");
+        let values: Vec<_> = message
+            .lines()
+            .filter_map(|line| line.strip_prefix(&prefix))
+            .collect();
+        let value = values
+            .first()
+            .and_then(|value| value.strip_prefix(' '))
+            .filter(|value| !value.is_empty() && !value.starts_with(char::is_whitespace));
+        if values.len() != 1 || value.is_none() {
+            return Err(format!("legacy root claim {name} field is malformed"));
+        }
+        Ok(value.unwrap())
+    };
+    if field("Claim-Kind")? != "root" || field("Task-Commit")? != root {
+        return Err("legacy root claim does not bind its pending root".into());
+    }
+    for required in ["Claim-ID", "Claimer", "Claimer-Host"] {
+        field(required)?;
+    }
+    let optional_pid: Vec<_> = message
+        .lines()
+        .filter_map(|line| line.strip_prefix("Claimer-PID:"))
+        .collect();
+    if optional_pid.len() > 1 || (optional_pid.len() == 1 && field("Claimer-PID").is_err()) {
+        return Err("legacy root claim Claimer-PID field is malformed".into());
+    }
+    for reserved in ["Issue", "Epic-ID", "Root-Ref"] {
+        if message.lines().any(|line| {
+            line.strip_prefix(reserved).is_some_and(|suffix| {
+                suffix.starts_with(char::is_whitespace) && suffix.trim_start().starts_with(':')
+            })
+        }) {
+            return Err("legacy root claim contains malformed reserved identity field".into());
+        }
+    }
+    let identity_count = |name: &str| {
+        message
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}:")))
+            .count()
+    };
+    if positive_number(epic_id) {
+        if identity_count("Issue") != 1
+            || identity_count("Epic-ID") != 0
+            || identity_count("Root-Ref") != 0
+            || field("Issue")? != format!("#{epic_id}")
+        {
+            return Err("legacy numeric root claim does not bind its pending root".into());
+        }
+    } else {
+        let digest = epic_id
+            .strip_prefix("epic-v1/")
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+            })
+            .ok_or("legacy root claim path dialect is malformed")?;
+        if identity_count("Issue") != 0
+            || identity_count("Epic-ID") != 1
+            || identity_count("Root-Ref") != 1
+            || field("Epic-ID")? != format!("epic-v1:{digest}")
+            || field("Root-Ref")? != pending_ref
+        {
+            return Err("legacy typed root claim does not bind its pending root".into());
+        }
+    }
+    let claimed_at = parse_rfc3339(field("Claimed-At")?)?;
+    let ttl_raw = field("TTL-Hours")?;
+    let ttl_grammar = ttl_raw.chars().all(|c| c.is_ascii_digit())
+        || ttl_raw.split_once('.').is_some_and(|(whole, fraction)| {
+            !whole.is_empty()
+                && whole.chars().all(|c| c.is_ascii_digit())
+                && !fraction.is_empty()
+                && fraction.chars().all(|c| c.is_ascii_digit())
+        });
+    if !ttl_grammar {
+        return Err("legacy root claim TTL is malformed".into());
+    }
+    let ttl = ttl_raw
+        .parse::<f64>()
+        .map_err(|_| "legacy root claim TTL is malformed")?;
+    if !ttl.is_finite() || ttl <= 0.0 {
+        return Err("legacy root claim TTL is malformed".into());
+    }
+    let host = std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|host| host.trim().to_owned())
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    let configured_host = std::env::var("TASK_DAG_CLAIMER_HOST").unwrap_or_else(|_| host.clone());
+    let claimer_host = field("Claimer-Host")?;
+    if claimer_host == host || claimer_host == configured_host {
+        if let Some(pid) = optional_pid
+            .first()
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+        {
+            match std::fs::metadata(format!("/proc/{pid}")) {
+                Ok(_) => {
+                    return Err("legacy root claim is still live by same-host PID evidence".into());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err("legacy root claim PID liveness is indeterminate".into());
+                }
+            }
+        }
+    }
+    let expires = claimed_at as f64 + ttl * 3600.0 + 300.0;
+    if !expires.is_finite() || crate::commands::timestamp()? as f64 <= expires.round() {
+        return Err("legacy root claim is still live".into());
+    }
+    Ok(())
 }
 
 fn parse_blocked_metadata(body: &str, task: &str) -> Result<(Option<String>, u64)> {
@@ -1047,8 +1296,8 @@ fn parse_rfc3339(value: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EdgeUse, descendant_closure, edge_id_for_value, inspect_edge, inspect_edges,
-        validate_terminal_edges,
+        CompletionFacts, EdgeUse, descendant_closure, edge_id_for_value, inspect_edge,
+        inspect_edges, validate_terminal_edges,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -1110,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_satisfies_requires_both_frozen_completion_witnesses() {
+    fn satisfies_any_normalizes_to_a_conjunctive_requirement() {
         let from = "1".repeat(40);
         let to = "2".repeat(40);
         let closure = BTreeSet::from([from.clone()]);
@@ -1122,13 +1371,16 @@ mod tests {
             "schema":1,
             "to":format!("task:owner/repo@{to}")
         });
-        let mut facts = BTreeMap::from([(from.clone(), "3".repeat(40))]);
-        assert!(inspect_edge(&edge, &closure, "owner/repo", &facts).is_err());
-        facts.insert(to.clone(), "4".repeat(40));
+        let mut facts = CompletionFacts::default();
+        assert!(matches!(
+            inspect_edge(&edge, &closure, "owner/repo", &facts).unwrap(),
+            EdgeUse::Local(task, requirement) if task == from && requirement == to
+        ));
+        facts.by_task.insert(to.clone(), "4".repeat(40));
         match inspect_edge(&edge, &closure, "owner/repo", &facts).unwrap() {
             EdgeUse::Completed(task, endpoints) => {
                 assert_eq!(task, from);
-                assert_eq!(endpoints.len(), 2);
+                assert_eq!(endpoints, vec![(to.clone(), "4".repeat(40))]);
             }
             _ => panic!("completed satisfies was not classified as inert provenance"),
         }
@@ -1290,6 +1542,7 @@ struct GraphInspection {
     requires: BTreeMap<String, BTreeSet<String>>,
     provenance: BTreeMap<String, Vec<String>>,
     completed: BTreeMap<String, Vec<(String, String)>>,
+    normalizations: BTreeMap<String, Vec<String>>,
 }
 
 impl GraphInspection {
@@ -1299,6 +1552,7 @@ impl GraphInspection {
             requires: BTreeMap::new(),
             provenance: BTreeMap::new(),
             completed: BTreeMap::new(),
+            normalizations: BTreeMap::new(),
         }
     }
 }
@@ -1307,7 +1561,7 @@ fn inspect_graph(
     graph: &str,
     closure: &BTreeSet<String>,
     repository: &str,
-    completion_facts: &BTreeMap<String, String>,
+    completion_facts: &CompletionFacts,
     total: &mut u64,
 ) -> Result<GraphInspection> {
     let tree = git::output(["show", "-s", "--format=%T", graph])?
@@ -1354,8 +1608,10 @@ fn inspect_graph(
     let mut requires: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut provenance: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut completed: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut normalizations: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (edge_id, (blob_oid, value)) in edges {
         if !tombstones.contains(&edge_id) {
+            let normalized = value["relation"] == "satisfies" && value["mode"] == "any";
             match inspect_edge(&value, closure, repository, completion_facts)? {
                 EdgeUse::Unrelated => {}
                 EdgeUse::Terminal(task) => {
@@ -1367,10 +1623,20 @@ fn inspect_graph(
                 }
                 EdgeUse::Local(from, to) => {
                     requires.entry(from.clone()).or_default().insert(to);
-                    provenance.entry(from).or_default().push(blob_oid);
+                    provenance.entry(from.clone()).or_default().push(blob_oid);
+                    if normalized {
+                        normalizations
+                            .entry(from)
+                            .or_default()
+                            .push("satisfies/any->requires/all".into());
+                    }
                 }
                 EdgeUse::Completed(from, endpoints) => {
                     provenance.entry(from.clone()).or_default().push(blob_oid);
+                    normalizations
+                        .entry(from.clone())
+                        .or_default()
+                        .push("satisfies/any->requires/all".into());
                     completed.entry(from).or_default().extend(endpoints);
                 }
             }
@@ -1382,6 +1648,7 @@ fn inspect_graph(
         requires,
         provenance,
         completed,
+        normalizations,
     })
 }
 
@@ -1421,7 +1688,7 @@ fn add_object_size(oid: &str, total: &mut u64) -> Result<()> {
 #[cfg(test)]
 fn inspect_edges(value: &Value, closure: &BTreeSet<String>, repository: &str) -> Result<bool> {
     Ok(!matches!(
-        inspect_edge(value, closure, repository, &BTreeMap::new())?,
+        inspect_edge(value, closure, repository, &CompletionFacts::default())?,
         EdgeUse::Unrelated
     ))
 }
@@ -1437,7 +1704,7 @@ fn inspect_edge(
     value: &Value,
     closure: &BTreeSet<String>,
     repository: &str,
-    completion_facts: &BTreeMap<String, String>,
+    completion_facts: &CompletionFacts,
 ) -> Result<EdgeUse> {
     let map = value
         .as_object()
@@ -1463,19 +1730,13 @@ fn inspect_edge(
         }
         let from_task = task_oid(from).ok_or("graph satisfies source is not a Task")?;
         let to_task = task_oid(to).ok_or("graph satisfies target is not a Task")?;
-        let from_witness = completion_facts
-            .get(&from_task)
-            .ok_or("graph satisfies source lacks immutable completion witness")?;
-        let to_witness = completion_facts
-            .get(&to_task)
-            .ok_or("graph satisfies target lacks immutable completion witness")?;
-        return Ok(EdgeUse::Completed(
-            from_task.clone(),
-            vec![
-                (from_task, from_witness.clone()),
-                (to_task, to_witness.clone()),
-            ],
-        ));
+        if let Some(to_witness) = completion_facts.by_task.get(&to_task) {
+            return Ok(EdgeUse::Completed(
+                from_task,
+                vec![(to_task, to_witness.clone())],
+            ));
+        }
+        return Ok(EdgeUse::Local(from_task, to_task));
     }
     if map["relation"] != "requires" || map["mode"] != "all" {
         return Err(
@@ -1727,10 +1988,8 @@ fn parse_delegation(
         return Err("legacy delegation declaration digest malformed".into());
     }
     let target_repository_id = model::repository_id_for_path(&peer_repository)?;
-    if target_repository_id == source_repository_id || !fleet.contains(&target_repository_id) {
-        return Err(
-            "legacy delegation target repository is not a distinct activation fleet member".into(),
-        );
+    if !fleet.contains(&target_repository_id) {
+        return Err("legacy delegation target repository is not an activation fleet member".into());
     }
     Ok(LegacyDelegation {
         reference: reference.into(),
@@ -1744,6 +2003,7 @@ fn parse_delegation(
         source_repository_id: source_repository_id.into(),
         target_repository_id,
         fleet_digest: fleet_digest.into(),
+        local_target: None,
     })
 }
 

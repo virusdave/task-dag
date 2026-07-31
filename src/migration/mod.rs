@@ -213,6 +213,138 @@ pub(crate) fn run(
             "legacy-v1-delegation-source",
             &[root, &delegation.reference, &delegation.oid],
         );
+        if let Some(local_target) = &delegation.local_target {
+            match local_target {
+                scan::LocalDelegationTarget::Completed { task, witness } => {
+                    updates.push(Update {
+                        semantic_ref: delegation.reference.clone(),
+                        old: Some(delegation.oid.clone()),
+                        new: None,
+                    });
+                    delegation_provenance.push(json!({
+                        "declarationTrailers": delegation.trailers,
+                        "disposition": "completed-local-requirement",
+                        "legacyDelegatedOid": delegation.oid,
+                        "legacyDelegatedRef": delegation.reference,
+                        "normalization": "same-repository delegation->completed requires/all",
+                        "operationId": delegated_operation,
+                        "pairedEdgeBlobOid": delegation.edge_oid,
+                        "peerIssue": delegation.peer_issue,
+                        "peerRepository": delegation.peer_repository,
+                        "sourceIssue": delegation.source_issue,
+                        "targetCompletionWitnessOid": witness,
+                        "targetLegacyTaskOid": task,
+                    }));
+                }
+                scan::LocalDelegationTarget::Open { root: target_root } => {
+                    let target_id = &ids[target_root];
+                    let target_task = &task_oids[target_root];
+                    let task_value = json!({
+                        "description": format!("Imported same-repository legacy delegation {} at {} for {}#{} as a conjunctive requirement", delegation.oid, delegation.reference, delegation.peer_repository, delegation.peer_issue),
+                        "formatVersion": 2,
+                        "operationId": delegated_operation,
+                        "requirements": [{"taskId": target_id, "taskOid": target_task}],
+                        "structuralParent": {"taskId": root_id, "taskOid": root_task},
+                        "taskId": synthetic_source_id,
+                        "title": format!("Require issue {}#{}", delegation.peer_repository, delegation.peer_issue),
+                    });
+                    let synthetic_source_task = git::migration_task_commit(
+                        &task_value,
+                        &[root_task.clone(), target_task.clone()],
+                    )?;
+                    crate::validators::task(&synthetic_source_task, &synthetic_source_id)?;
+                    let frontier = git::migration_task_commit(
+                        &json!({"formatVersion":2,"operationId":delegated_operation,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}),
+                        std::slice::from_ref(&synthetic_source_task),
+                    )?;
+                    crate::validators::lifecycle("frontier", &frontier, &synthetic_source_id)?;
+                    let frontier_ref = model::state_ref("frontier", &synthetic_source_id);
+                    updates.extend([
+                        Update {
+                            semantic_ref: frontier_ref.clone(),
+                            old: None,
+                            new: Some(frontier.clone()),
+                        },
+                        Update {
+                            semantic_ref: delegation.reference.clone(),
+                            old: Some(delegation.oid.clone()),
+                            new: None,
+                        },
+                    ]);
+                    outputs.push((frontier_ref.clone(), frontier.clone()));
+                    children.push(json!({"claimToken":null,"owner":null,"ref":frontier_ref,"stateOid":frontier,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}));
+                    delegation_provenance.push(json!({
+                        "declarationTrailers": delegation.trailers,
+                        "disposition": "open-local-requirement",
+                        "legacyDelegatedOid": delegation.oid,
+                        "legacyDelegatedRef": delegation.reference,
+                        "normalization": "same-repository delegation->requires/all",
+                        "operationId": delegated_operation,
+                        "pairedEdgeBlobOid": delegation.edge_oid,
+                        "peerIssue": delegation.peer_issue,
+                        "peerRepository": delegation.peer_repository,
+                        "sourceIssue": delegation.source_issue,
+                        "syntheticTaskId": synthetic_source_id,
+                        "syntheticTaskOid": synthetic_source_task,
+                        "targetLegacyRootOid": target_root,
+                        "targetTaskId": target_id,
+                        "targetTaskOid": target_task,
+                    }));
+                }
+                scan::LocalDelegationTarget::Unresolved {
+                    root: historical_root,
+                } => {
+                    let task_value = json!({
+                        "description": format!("Verify historical same-repository issue {}#{} closure. Legacy delegation {} at {} was still present, its pending ref was absent, and no canonical issue-close witness exists. Historical issue root: {}", delegation.peer_repository, delegation.peer_issue, delegation.oid, delegation.reference, historical_root),
+                        "formatVersion": 2,
+                        "operationId": delegated_operation,
+                        "requirements": [],
+                        "structuralParent": {"taskId": root_id, "taskOid": root_task},
+                        "taskId": synthetic_source_id,
+                        "title": format!("Verify historical closure of issue {}#{}", delegation.peer_repository, delegation.peer_issue),
+                    });
+                    let synthetic_source_task =
+                        git::migration_task_commit(&task_value, std::slice::from_ref(root_task))?;
+                    crate::validators::task(&synthetic_source_task, &synthetic_source_id)?;
+                    let frontier = git::migration_task_commit(
+                        &json!({"formatVersion":2,"operationId":delegated_operation,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}),
+                        std::slice::from_ref(&synthetic_source_task),
+                    )?;
+                    crate::validators::lifecycle("frontier", &frontier, &synthetic_source_id)?;
+                    let frontier_ref = model::state_ref("frontier", &synthetic_source_id);
+                    updates.extend([
+                        Update {
+                            semantic_ref: frontier_ref.clone(),
+                            old: None,
+                            new: Some(frontier.clone()),
+                        },
+                        Update {
+                            semantic_ref: delegation.reference.clone(),
+                            old: Some(delegation.oid.clone()),
+                            new: None,
+                        },
+                    ]);
+                    outputs.push((frontier_ref.clone(), frontier.clone()));
+                    children.push(json!({"claimToken":null,"owner":null,"ref":frontier_ref,"stateOid":frontier,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}));
+                    delegation_provenance.push(json!({
+                        "declarationTrailers": delegation.trailers,
+                        "disposition": "unresolved-local-requirement",
+                        "legacyDelegatedOid": delegation.oid,
+                        "legacyDelegatedRef": delegation.reference,
+                        "normalization": "same-repository delegation->explicit closure verification child",
+                        "operationId": delegated_operation,
+                        "pairedEdgeBlobOid": delegation.edge_oid,
+                        "peerIssue": delegation.peer_issue,
+                        "peerRepository": delegation.peer_repository,
+                        "sourceIssue": delegation.source_issue,
+                        "syntheticTaskId": synthetic_source_id,
+                        "syntheticTaskOid": synthetic_source_task,
+                        "targetHistoricalRootOid": historical_root,
+                    }));
+                }
+            }
+            continue;
+        }
         let target_id = model::task_id(
             "delegated-task",
             &[
@@ -407,7 +539,7 @@ pub(crate) fn run(
             );
         }
         let mapping = git::commit(
-            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"completedParentRequirements":legacy.completed_parent_requirements.iter().map(|(task,witness)|json!({"taskOid":task,"completionWitnessOid":witness})).collect::<Vec<_>>(),"delegations":if legacy.task == root {json!(delegation_provenance)} else {json!([])},"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
+            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"completedParentRequirements":legacy.completed_parent_requirements.iter().map(|(task,witness)|json!({"taskOid":task,"completionWitnessOid":witness})).collect::<Vec<_>>(),"delegations":if legacy.task == root {json!(delegation_provenance)} else {json!([])},"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"graphNormalizations":legacy.graph_normalizations,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
             &mapping_parents,
         )?;
         updates.push(Update {

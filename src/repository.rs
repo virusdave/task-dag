@@ -47,10 +47,11 @@ fn valid_scope(pattern: &str) -> bool {
     let shape = metacharacters == 0
         || (metacharacters == 1
             && pattern.ends_with("/*")
-            && pattern
+            && (pattern
                 .strip_prefix("refs/heads/tasks/")
                 .and_then(|rest| rest.strip_suffix("/*"))
-                .is_some_and(|scope| !scope.is_empty()));
+                .is_some_and(|scope| !scope.is_empty())
+                || pattern == "refs/heads/gh/issues/*"));
     let check = if metacharacters == 0 {
         pattern.to_owned()
     } else {
@@ -266,6 +267,7 @@ mod tests {
     #[test]
     fn remote_advertisement_scopes_are_bounded_and_well_formed() {
         assert!(valid_scope("refs/heads/master"));
+        assert!(valid_scope("refs/heads/gh/issues/*"));
         assert!(valid_scope("refs/heads/tasks/frontier/*"));
         assert!(valid_scope("refs/heads/tasks/delegation/intent/*"));
         for invalid in [
