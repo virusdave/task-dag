@@ -1626,6 +1626,20 @@ pre {
   flex: 0 0 auto;
 }
 
+.trade-sample-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.trade-sample-confirmation input {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: 0 0 auto;
+}
+
 .pp-refinement-included-rows ul {
   display: grid;
   gap: 0.35rem;

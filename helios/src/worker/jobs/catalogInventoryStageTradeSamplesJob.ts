@@ -1,7 +1,7 @@
 import type { CatalogInventoryStageTradeSamplesJobPayload, TradeSampleStageResult, TradeSampleZeroItem } from '../../shared/contracts/index.js'
 import { TradeSampleStageResultSchema } from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
-import { assertTargetContents, readExactItem, readLiveInventory, resolveTradeSampleDestination, tradeSampleZeroDigest } from '../../server/catalog/tradeSampleZeroService.js'
+import { assertTargetContents, readExactItem, readLiveInventory, reconcileTargetContents, resolveTradeSampleDestination, tradeSampleQuantityUnits, tradeSampleZeroDigest } from '../../server/catalog/tradeSampleZeroService.js'
 import { listLiveLotsForProduct } from '../../server/catalog/stockTransferService.js'
 import { getPool } from '../../server/db/pool.js'
 import type { Queryable } from '../../server/db/pool.js'
@@ -34,7 +34,6 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
   const delay = injected.delay ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)))
   const d = { rpc }
   const outcomes: TradeSampleStageResult['outcomes'] = []
-  const stagedItems: TradeSampleZeroItem[] = []
 
   try {
     await assertLease()
@@ -85,14 +84,7 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
         items: [{ id: item.inventoryItemId, qty: item.currentQty, externalTrackCode: item.externalTrackCode }],
       })
       transferPhase = 'post-transfer verification'
-      const after = await verifyTransferredLot(payload, item, rpc, delay)
-      stagedItems.push({
-        ...item,
-        inventoryItemId: after.inventoryItemId,
-        sourceLocationId: payload.destination.id,
-        sourceLocationName: payload.destination.name,
-        sourceStockTypeId: payload.destination.stockTypeId,
-      })
+      await verifyTransferredGroup(payload, item, payload.items.slice(0, index + 1), rpc, delay)
     } catch (error) {
       appendTerminalOutcomes(payload, outcomes, index, 'failed_unknown')
       const failure = stageFailure(transferPhase, error, item.inventoryItemId)
@@ -113,8 +105,13 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
     }
   }
 
+  let stagedItems: TradeSampleZeroItem[]
   try {
-    assertTargetContents(await readLiveInventory(payload.siteDealerId, payload.destination, d), payload.destination, stagedItems)
+    stagedItems = reconcileTargetContents(
+      await readLiveInventory(payload.siteDealerId, payload.destination, d),
+      payload.destination,
+      payload.items,
+    )
   } catch (error) {
     const failure = stageFailure('final destination validation', error)
     console.error(`[trade-sample-stage][job ${context.id}] ${failure}`)
@@ -182,25 +179,39 @@ function stageFailure(phase: string, error: unknown, inventoryItemId?: string): 
   return `Staging stopped during ${phase}${packageContext}: ${detail}`
 }
 
-async function verifyTransferredLot(
+async function verifyTransferredGroup(
   payload: CatalogInventoryStageTradeSamplesJobPayload,
   item: TradeSampleZeroItem,
+  processedItems: TradeSampleZeroItem[],
   rpc: typeof callSweedRpc,
   delay: (milliseconds: number) => Promise<void>,
-): Promise<Awaited<ReturnType<typeof listLiveLotsForProduct>>[number]> {
+): Promise<void> {
+  const expectedQuantity = processedItems
+    .filter((candidate) =>
+      candidate.productId === item.productId
+      && candidate.externalTrackCode === item.externalTrackCode
+      && candidate.productName === item.productName
+      && candidate.productSku === item.productSku
+      && candidate.packageLabel === item.packageLabel,
+    )
+    .reduce((sum, candidate) => sum + tradeSampleQuantityUnits(candidate.currentQty), 0n)
   let lastObservation = 'no verification observation was recorded'
   for (let attempt = 1; attempt <= POST_TRANSFER_VERIFICATION_ATTEMPTS; attempt += 1) {
     const matchingLots = (await listLiveLotsForProduct(payload.siteDealerId, item.productId, rpc))
       .filter((lot) => lot.externalTrackCode?.trim() === item.externalTrackCode)
     const destinationMatches = matchingLots.filter((lot) =>
       lot.isTradeSample
-      && lot.currentQty === item.currentQty
-      && lot.availableQty === item.currentQty
+      && lot.currentQty !== null
+      && lot.availableQty === lot.currentQty
       && lot.stockLocationId === payload.destination.id
       && lot.stockLocationName?.trim() === payload.destination.name
       && lot.stockTypeId === payload.destination.stockTypeId,
     )
-    if (destinationMatches.length === 1) return destinationMatches[0]!
+    const observedQuantity = destinationMatches.reduce(
+      (sum, lot) => sum + tradeSampleQuantityUnits(lot.currentQty!),
+      0n,
+    )
+    if (destinationMatches.length > 0 && observedQuantity === expectedQuantity) return
     lastObservation = describeMatchingLots(matchingLots)
     if (attempt < POST_TRANSFER_VERIFICATION_ATTEMPTS) await delay(POST_TRANSFER_VERIFICATION_RETRY_MS)
   }

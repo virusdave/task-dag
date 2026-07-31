@@ -92,18 +92,19 @@ export const CatalogInventoryZeroTradeSamplesJobPayloadSchema = z.object({
   siteDealerId: z.number().int().positive(),
   items: z.array(TradeSampleZeroItemSchema).max(500),
   destination: z.object({ id: z.number().int().positive(), name: z.literal('NOT FOR SALE - Samples'), stockTypeId: z.number().int().positive() }).strict(),
-  confirmation: z.literal('I VERIFIED ONLY TRADE SAMPLES'),
+  confirmed: z.literal(true).optional(),
+  confirmation: z.literal('I VERIFIED ONLY TRADE SAMPLES').optional(),
   stageJobId: z.number().int().positive(),
   actorUserId: z.number().int().positive(),
   requestId: z.string().min(1),
-}).strict()
+}).strict().refine((payload) => payload.confirmed === true || payload.confirmation === 'I VERIFIED ONLY TRADE SAMPLES')
 export type CatalogInventoryZeroTradeSamplesJobPayload = z.infer<typeof CatalogInventoryZeroTradeSamplesJobPayloadSchema>
 
 export const CatalogInventoryStageTradeSamplesJobPayloadSchema = z.object({
   siteDealerId: z.number().int().positive(), digest: z.string().regex(/^[a-f0-9]{64}$/), items: z.array(TradeSampleZeroItemSchema).max(500),
   destination: z.object({ id: z.number().int().positive(), name: z.literal('NOT FOR SALE - Samples'), stockTypeId: z.number().int().positive() }).strict(),
-  previewId: z.uuid(), confirmation: z.literal('STAGE TRADE SAMPLES'), actorUserId: z.number().int().positive(), requestId: z.string().min(1),
-}).strict()
+  previewId: z.uuid(), confirmed: z.literal(true).optional(), confirmation: z.literal('STAGE TRADE SAMPLES').optional(), actorUserId: z.number().int().positive(), requestId: z.string().min(1),
+}).strict().refine((payload) => payload.confirmed === true || payload.confirmation === 'STAGE TRADE SAMPLES')
 export type CatalogInventoryStageTradeSamplesJobPayload = z.infer<typeof CatalogInventoryStageTradeSamplesJobPayloadSchema>
 
 /**

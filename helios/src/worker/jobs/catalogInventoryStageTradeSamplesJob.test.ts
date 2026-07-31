@@ -120,6 +120,57 @@ describe('stage trade sample worker', () => {
     expect(deps.audit.mock.calls.at(-1)?.[1].payload).toMatchObject({ complete: true, counts: { completed: 2 } })
   })
 
+  it('accepts Sweed merging same-tag source packages into one destination lot', async () => {
+    const first = { ...item, currentQty: 1, availableQty: 1 }
+    const sibling = { ...item, currentQty: 4, availableQty: 4, inventoryItemId: '45' }
+    const items = [first, sibling]
+    const sameTagPayload = { ...payload, items, digest: tradeSampleZeroDigest(210249, items, destination) }
+    const firstDestination = transferredLot(first).data[0]
+    const siblingSource = { ...transferredLot(sibling).data[0], id: sibling.inventoryItemId, stockLocation: { id: 12, name: 'Back Stock' }, stockType: { id: 3 } }
+    const mergedDestination = { ...firstDestination, id: 'merged-live', currentQty: 5, availableQty: 5 }
+    const finalGrouped = {
+      data: [{ product: { id: 9, name: 'Sample', sku: null }, items: [mergedDestination] }],
+      totalCount: 1,
+    }
+    const deps = dependencies([
+      locations, groupedItems(items),
+      exactDetail(first), {}, { data: [firstDestination, siblingSource], totalCount: 2 },
+      exactDetail(sibling), {}, { data: [mergedDestination], totalCount: 1 },
+      finalGrouped,
+    ])
+
+    await runCatalogInventoryStageTradeSamplesJob(context, sameTagPayload, deps)
+
+    expect(deps.audit.mock.calls.at(-1)?.[1].payload).toMatchObject({
+      complete: true,
+      items: [{ inventoryItemId: 'merged-live', currentQty: 5 }],
+    })
+  })
+
+  it('accepts Sweed splitting one source package into multiple destination lots', async () => {
+    const firstSplit = { ...productLots().data[0], id: 'split-1', currentQty: 1, availableQty: 1 }
+    const secondSplit = { ...productLots().data[0], id: 'split-2', currentQty: 1, availableQty: 1 }
+    const finalGrouped = {
+      data: [{ product: { id: 9, name: 'Sample', sku: null }, items: [firstSplit, secondSplit] }],
+      totalCount: 1,
+    }
+    const deps = dependencies([
+      locations, grouped(), detail(), {},
+      { data: [firstSplit, secondSplit], totalCount: 2 },
+      finalGrouped,
+    ])
+
+    await runCatalogInventoryStageTradeSamplesJob(context, payload, deps)
+
+    expect(deps.audit.mock.calls.at(-1)?.[1].payload).toMatchObject({
+      complete: true,
+      items: [
+        { inventoryItemId: 'split-1', currentQty: 1 },
+        { inventoryItemId: 'split-2', currentQty: 1 },
+      ],
+    })
+  })
+
   it('waits one second and retries read-only verification without replaying the transfer', async () => {
     const deps = dependencies([
       locations, grouped(), detail(), {},

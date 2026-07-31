@@ -3,7 +3,6 @@ import { Link, useLoaderData } from 'react-router-dom'
 
 import {
   JobStatusResponseSchema,
-  TRADE_SAMPLE_APPROVAL_CONFIRMATION,
   TradeSampleZeroEnqueueResponseSchema,
   buildHeliosModulePath,
   type JobStatusResponse,
@@ -183,7 +182,7 @@ export function JobDetailPage() {
 }
 
 export function TradeSampleStageResults({ jobId, result }: { jobId: number; result: NonNullable<JobStatusResponse['tradeSampleStageResult']> }) {
-  const [confirmation, setConfirmation] = useState('')
+  const [confirmed, setConfirmed] = useState(false)
   const [zeroJob, setZeroJob] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [approvalRequested, setApprovalRequested] = useState(false)
@@ -195,12 +194,12 @@ export function TradeSampleStageResults({ jobId, result }: { jobId: number; resu
     setApproving(true)
     setOutcomeUnknown(false)
     setError(null)
-    setConfirmation('')
+    setConfirmed(false)
     try {
       const response = await mutateJson(
         `/api/catalog/inventory/trade-samples/stage-jobs/${jobId}/approve-zero`,
         TradeSampleZeroEnqueueResponseSchema,
-        { method: 'POST', body: JSON.stringify({ confirmation: TRADE_SAMPLE_APPROVAL_CONFIRMATION }) },
+        { method: 'POST', body: JSON.stringify({ confirmed: true }) },
       )
       setZeroJob(response.jobId)
     } catch (caught) {
@@ -208,7 +207,7 @@ export function TradeSampleStageResults({ jobId, result }: { jobId: number; resu
       setOutcomeUnknown(!knownRejected)
       setApprovalRequested(!knownRejected)
       setError(knownRejected
-        ? 'The staged scope changed. Zero was not queued. Reinspect every package before approving again.'
+        ? caught.message
         : 'The approval outcome is unknown. Do not submit a new approval; check this exact request below.')
     } finally {
       setApproving(false)
@@ -218,18 +217,19 @@ export function TradeSampleStageResults({ jobId, result }: { jobId: number; resu
   return <article className="detail-panel" style={{ marginBottom: '1rem' }}>
     <h3>Staged trade samples</h3>
     <p>{result.message}</p>
-    <TradeSampleScopeSummary destination={result.destination} items={result.items} siteDealerId={result.siteDealerId} />
+    <TradeSampleScopeSummary destination={result.destination} itemKind="recorded transfer rows" items={result.items} siteDealerId={result.siteDealerId} />
     <div className="inline-row wrap-row">
       <strong>Staged: {result.counts.completed}</strong>
       <span>Unknown: {result.counts.failedUnknown}</span>
       <span>Not moved: {result.counts.notAppliedStale + result.counts.notAppliedAuditFailure}</span>
     </div>
     {result.complete && zeroJob === null && !approvalRequested ? <>
-      <p>After physically confirming that every package above is a trade sample, this permanently sets each listed quantity to zero.</p>
-      <label htmlFor="stage-approval">Type <strong>{TRADE_SAMPLE_APPROVAL_CONFIRMATION}</strong></label>
-      <input id="stage-approval" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off"
-        style={{ display: 'block', margin: '0.5rem 0', minHeight: '2.75rem', width: 'min(100%,30rem)' }} />
-      <button className="danger-button" disabled={confirmation !== TRADE_SAMPLE_APPROVAL_CONFIRMATION || approving} onClick={() => void approve()}>
+      <p>Helios will re-read the dedicated location and zero only live lots whose product, Metrc tag, and aggregate quantity match this reviewed transfer.</p>
+      <label className="trade-sample-confirmation" htmlFor="stage-approval">
+        <input id="stage-approval" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+        <span>I physically confirmed all lots currently in the dedicated location are trade samples and approve permanently setting the freshly verified live quantities to zero.</span>
+      </label>
+      <button className="danger-button" disabled={!confirmed || approving} onClick={() => void approve()}>
         Approve permanent zero job
       </button>
     </> : null}
@@ -244,7 +244,7 @@ export function TradeSampleZeroResults({ result }: { result: NonNullable<JobStat
   return <article className="detail-panel" style={{ marginBottom: '1rem' }}>
     <h3 style={{ marginTop: 0 }}>Trade sample adjustment results</h3>
     <p>{result.message}</p>
-    <TradeSampleScopeSummary destination={result.destination} items={result.items} siteDealerId={result.siteDealerId} />
+    <TradeSampleScopeSummary destination={result.destination} itemKind="fresh live lots" items={result.items} siteDealerId={result.siteDealerId} />
     <p><Link to={`/jobs/${result.stageJobId}`}>Open inspected stage job #{result.stageJobId}</Link>.</p>
     <div className="inline-row wrap-row">
       <strong>Completed: {result.counts.completed}</strong>

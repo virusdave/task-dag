@@ -4,7 +4,6 @@ import { Link } from 'react-router-dom'
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type JobStatusResponse,
-  TRADE_SAMPLE_STAGE_CONFIRMATION,
   TradeSampleRecentStageJobResponseSchema,
   TradeSampleZeroEnqueueResponseSchema,
   TradeSampleZeroPreviewResponseSchema,
@@ -17,7 +16,6 @@ import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 import { TradeSampleScopeSummary } from './TradeSampleScopeSummary.js'
 
-const CONFIRMATION = TRADE_SAMPLE_STAGE_CONFIRMATION
 const JOB_POLL_MS = 1_500
 
 type RecentStageJobState =
@@ -32,7 +30,7 @@ export function TradeSamplesPage() {
   const [preview, setPreview] = useState<TradeSampleZeroPreviewResponse | null>(null)
   const [recentStageJob, setRecentStageJob] = useState<RecentStageJobState>({ kind: 'loading' })
   const [recentReload, setRecentReload] = useState(0)
-  const [confirmation, setConfirmation] = useState('')
+  const [confirmed, setConfirmed] = useState(false)
   const [loading, setLoading] = useState(false)
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -89,7 +87,7 @@ export function TradeSamplesPage() {
   async function handlePreview(): Promise<void> {
     setLoading(true)
     setPreview(null)
-    setConfirmation('')
+    setConfirmed(false)
     setError(null)
     setQueueOutcomeUnknown(false)
     try {
@@ -111,11 +109,11 @@ export function TradeSamplesPage() {
   }
 
   async function handleApply(): Promise<void> {
-    if (!preview || preview.items.length === 0 || confirmation !== CONFIRMATION) return
+    if (!preview || preview.items.length === 0 || !confirmed) return
     const reviewed = preview
     setApplying(true)
     setPreview(null)
-    setConfirmation('')
+    setConfirmed(false)
     setError(null)
     setQueueOutcomeUnknown(false)
     try {
@@ -131,7 +129,7 @@ export function TradeSamplesPage() {
             previewToken: reviewed.previewToken,
             items: reviewed.items,
             destination: reviewed.destination,
-            confirmation: CONFIRMATION,
+            confirmed: true,
           }),
         },
       )
@@ -175,7 +173,7 @@ export function TradeSamplesPage() {
           setSiteDealerId(Number(event.target.value))
           setRecentStageJob({ kind: 'loading' })
           setPreview(null)
-          setConfirmation('')
+          setConfirmed(false)
           setError(null)
           setQueueOutcomeUnknown(false)
         }}
@@ -201,14 +199,15 @@ export function TradeSamplesPage() {
     {preview ? <article className="mini-card">
       <header><strong>Reviewed preview</strong></header>
       {preview.items.length === 0 ? <p role="status">No trade sample packages with quantity to reduce at this site.</p> : <>
-        <TradeSampleScopeSummary destination={preview.destination} items={preview.items} showSource siteDealerId={preview.siteDealerId} />
+        <TradeSampleScopeSummary destination={preview.destination} itemKind="reviewed source rows" items={preview.items} showSource siteDealerId={preview.siteDealerId} />
         <p>This step only transfers this exact reviewed set for physical inspection. It does not zero inventory.</p>
-        <label htmlFor="trade-sample-confirmation">Type <strong>{CONFIRMATION}</strong> to confirm</label>
-        <input id="trade-sample-confirmation" value={confirmation} disabled={applying} autoComplete="off"
-          onChange={(event) => setConfirmation(event.target.value)}
-          style={{ display: 'block', margin: '0.5rem 0', minHeight: '2.75rem', width: 'min(100%, 24rem)' }} />
+        <label className="trade-sample-confirmation" htmlFor="trade-sample-confirmation">
+          <input id="trade-sample-confirmation" type="checkbox" checked={confirmed} disabled={applying}
+            onChange={(event) => setConfirmed(event.target.checked)} />
+          <span>I confirm this is the exact reviewed product, Metrc-tag, and quantity set to move for physical inspection.</span>
+        </label>
         <button className="danger-button" type="button"
-          disabled={applying || loading || confirmation !== CONFIRMATION}
+          disabled={applying || loading || !confirmed}
           onClick={() => void handleApply()}>Queue staging transfer</button>
       </>}
     </article> : null}

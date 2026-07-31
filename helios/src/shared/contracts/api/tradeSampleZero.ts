@@ -1,8 +1,6 @@
 import { z } from 'zod'
 
 export const TRADE_SAMPLE_LOCATION_NAME = 'NOT FOR SALE - Samples'
-export const TRADE_SAMPLE_STAGE_CONFIRMATION = 'STAGE TRADE SAMPLES'
-export const TRADE_SAMPLE_APPROVAL_CONFIRMATION = 'I VERIFIED ONLY TRADE SAMPLES'
 
 export const TradeSampleLocationSchema = z.object({ id: z.number().int().positive(), name: z.literal(TRADE_SAMPLE_LOCATION_NAME), stockTypeId: z.number().int().positive() }).strict()
 export const TradeSampleZeroItemSchema = z.object({
@@ -17,8 +15,8 @@ export const TradeSampleZeroPreviewRequestSchema = z.object({ siteDealerId: z.nu
 export const TradeSampleZeroPreviewResponseSchema = z.object({ digest: z.string().regex(/^[a-f0-9]{64}$/), destination: TradeSampleLocationSchema,
   items: z.array(TradeSampleZeroItemSchema), previewId: z.uuid(), previewToken: z.string().min(1), siteDealerId: z.number().int().positive() })
 export type TradeSampleZeroPreviewResponse = z.infer<typeof TradeSampleZeroPreviewResponseSchema>
-export const TradeSampleZeroApplyRequestSchema = TradeSampleZeroPreviewResponseSchema.extend({ confirmation: z.literal(TRADE_SAMPLE_STAGE_CONFIRMATION) })
-export const TradeSampleZeroApprovalRequestSchema = z.object({ confirmation: z.literal(TRADE_SAMPLE_APPROVAL_CONFIRMATION) })
+export const TradeSampleZeroApplyRequestSchema = TradeSampleZeroPreviewResponseSchema.extend({ confirmed: z.literal(true) })
+export const TradeSampleZeroApprovalRequestSchema = z.object({ confirmed: z.literal(true) })
 export const TradeSampleZeroEnqueueResponseSchema = z.object({ jobId: z.number().int().positive() })
 
 export const TradeSampleZeroOutcomeSchema = z.object({ inventoryItemId: z.string(), status: z.enum(['completed', 'failed_unknown', 'not_applied_stale', 'not_applied_audit_failure']) })

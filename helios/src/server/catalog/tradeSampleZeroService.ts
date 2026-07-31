@@ -102,6 +102,67 @@ export function assertTargetContents(all: Array<TradeSampleZeroItem & { isTradeS
   }
 }
 
+/**
+ * Reconciles a reviewed source set with the fresh destination lots. Sweed may
+ * replace package IDs and may merge or split lots that share a product and
+ * Metrc tag during transfer, so IDs and per-lot quantities are not stable
+ * across the physical-inspection handoff. Product/tag metadata and aggregate
+ * quantity are stable and remain the fail-closed boundary.
+ */
+export function reconcileTargetContents(
+  all: Array<TradeSampleZeroItem & { isTradeSample: boolean }>,
+  destination: Location,
+  reviewed: TradeSampleZeroItem[],
+): TradeSampleZeroItem[] {
+  const actual = all.filter((item) => item.sourceLocationId === destination.id)
+  if (actual.some((item) =>
+    !item.isTradeSample
+    || item.availableQty !== item.currentQty
+    || item.sourceLocationName.trim() !== TRADE_SAMPLE_LOCATION_NAME
+    || item.sourceStockTypeId !== destination.stockTypeId
+  )) {
+    throw new TradeSampleTargetError('The dedicated location contains a non-sample, reserved, or incorrectly located package.')
+  }
+
+  const expectedTotals = aggregateTradeSampleQuantities(reviewed)
+  const actualTotals = aggregateTradeSampleQuantities(actual)
+  if (expectedTotals.size !== actualTotals.size) {
+    throw new TradeSampleTargetError('The dedicated location does not contain the reviewed product/tag set.')
+  }
+  for (const [key, expectedQuantity] of expectedTotals) {
+    if (actualTotals.get(key) !== expectedQuantity) {
+      throw new TradeSampleTargetError('A reviewed product/tag has a different aggregate quantity in the dedicated location.')
+    }
+  }
+  return actual.map(({ isTradeSample: _, ...item }) => item)
+}
+
+function aggregateTradeSampleQuantities(items: readonly TradeSampleZeroItem[]): Map<string, bigint> {
+  const totals = new Map<string, bigint>()
+  for (const item of items) {
+    const key = JSON.stringify([
+      item.productId,
+      item.externalTrackCode,
+      item.productName,
+      item.productSku,
+      item.packageLabel,
+    ])
+    totals.set(key, (totals.get(key) ?? 0n) + tradeSampleQuantityUnits(item.currentQty))
+  }
+  return totals
+}
+
+// Sweed quantities are accepted to six decimal places, which is finer than
+// the package quantities observed in this workflow. Integer units avoid both
+// floating-point false mismatches (0.1 + 0.2) and unsafe large-number sums.
+export function tradeSampleQuantityUnits(quantity: number): bigint {
+  const scaled = quantity * 1_000_000
+  if (!Number.isSafeInteger(scaled) || scaled <= 0 || scaled / 1_000_000 !== quantity) {
+    throw new TradeSampleTargetError('A package quantity is outside the supported six-decimal safe range.')
+  }
+  return BigInt(scaled)
+}
+
 export function tradeSampleZeroDigest(
   dealerId: number,
   items: readonly TradeSampleZeroItem[],

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   poolQuery: vi.fn(),
   preview: vi.fn(),
   readInventory: vi.fn(),
+  reconcile: vi.fn(),
   requireSessionUser: vi.fn().mockResolvedValue({ id: 17, role: 'editor' }),
   resolveDestination: vi.fn(),
   verify: vi.fn(() => true),
@@ -24,6 +25,7 @@ vi.mock('../catalog/tradeSampleZeroService.js', () => ({
   assertTargetContents: vi.fn(),
   previewTradeSampleZero: mocks.preview,
   readLiveInventory: mocks.readInventory,
+  reconcileTargetContents: mocks.reconcile,
   resolveTradeSampleDestination: mocks.resolveDestination,
   verifyTradeSampleZeroPreview: mocks.verify,
 }))
@@ -57,11 +59,23 @@ const jobStatus = {
 
 describe('trade sample routes', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
+    mocks.appendAudit.mockReset()
+    mocks.enqueue.mockReset()
+    mocks.getJobStatus.mockReset()
+    mocks.poolQuery.mockReset()
+    mocks.preview.mockReset()
+    mocks.readInventory.mockReset()
+    mocks.reconcile.mockReset()
+    mocks.requireSessionUser.mockReset()
+    mocks.resolveDestination.mockReset()
+    mocks.verify.mockReset()
+    mocks.withSession.mockReset()
     mocks.requireSessionUser.mockResolvedValue({ id: 17, role: 'editor' })
+    mocks.withSession.mockImplementation(async (run: () => Promise<unknown>) => run())
     mocks.verify.mockReturnValue(true)
     mocks.resolveDestination.mockResolvedValue(destination)
     mocks.readInventory.mockResolvedValue([])
+    mocks.reconcile.mockReturnValue([stagedItem])
     mocks.appendAudit.mockResolvedValue(1)
   })
 
@@ -71,12 +85,12 @@ describe('trade sample routes', () => {
     const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
     expect((await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/preview-zero', payload: { siteDealerId: 210249 } })).statusCode).toBe(200)
-    const response = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/apply-zero', payload: { ...preview, confirmation: 'STAGE TRADE SAMPLES' } })
+    const response = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/apply-zero', payload: { ...preview, confirmed: true } })
     expect(response.json()).toEqual({ jobId: 42 })
     expect(mocks.enqueue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       jobType: 'catalog.inventory.stage_trade_samples',
       dedupeKey: `catalog.inventory.stage_trade_samples:210249:${preview.previewId}`,
-      payload: expect.objectContaining({ confirmation: 'STAGE TRADE SAMPLES', digest: preview.digest }),
+      payload: expect.objectContaining({ confirmed: true, digest: preview.digest }),
       scope: { entityType: 'trade_sample_site', entityId: '210249' },
     }))
     expect(mocks.enqueue.mock.calls[0]?.[1].payload).not.toHaveProperty('previewToken')
@@ -130,8 +144,8 @@ describe('trade sample routes', () => {
     mocks.enqueue.mockResolvedValue({ inserted: true, jobId: 43 })
     const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
-    expect((await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmation: 'close enough' } })).statusCode).toBe(400)
-    const response = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' } })
+    expect((await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmed: false } })).statusCode).toBe(400)
+    const response = await server.inject({ method: 'POST', url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmed: true } })
     expect(response.json()).toEqual({ jobId: 43 })
     expect(mocks.resolveDestination).toHaveBeenCalledWith(210249)
     expect(mocks.enqueue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -152,38 +166,38 @@ describe('trade sample routes', () => {
       .mockResolvedValueOnce({ rows: [] })
     const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
-    const request = { method: 'POST' as const, url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' } }
+    const request = { method: 'POST' as const, url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero', payload: { confirmed: true } }
     expect((await server.inject(request)).statusCode).toBe(409)
-    mocks.resolveDestination.mockRejectedValueOnce(new Error('extra package'))
+    mocks.reconcile.mockImplementationOnce(() => { throw new Error('extra package') })
     expect((await server.inject(request)).statusCode).toBe(409)
     expect(mocks.enqueue).not.toHaveBeenCalled()
     await server.close()
   })
 
-  it('rejects a stage result that changes reviewed package metadata', async () => {
+  it('rejects a stage result that changes reviewed package quantities', async () => {
     const changedStage = { ...stage, items: [{ ...stagedItem, currentQty: 3, availableQty: 3 }] }
     mocks.poolQuery.mockResolvedValueOnce({ rows: [{ status: 'succeeded', job_payload_json: stagePayload, result_payload_json: changedStage }] })
+    mocks.reconcile.mockImplementationOnce(() => { throw new Error('quantity mismatch') })
     const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
 
     const response = await server.inject({
       method: 'POST',
       url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero',
-      payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' },
+      payload: { confirmed: true },
     })
 
     expect(response.statusCode).toBe(409)
-    expect(mocks.resolveDestination).not.toHaveBeenCalled()
     expect(mocks.enqueue).not.toHaveBeenCalled()
     await server.close()
   })
 
-  it('rejects duplicate staged package identities even under different destination IDs', async () => {
+  it('rejects a recorded staged package outside the dedicated destination', async () => {
     const secondReviewedItem = { ...item, inventoryItemId: '45', externalTrackCode: 'TAG-2', productId: 10, productName: 'Second sample' }
     const twoItemPayload = { ...stagePayload, items: [item, secondReviewedItem] }
     const duplicateIdentityStage = {
       ...stage,
-      items: [stagedItem, { ...stagedItem, inventoryItemId: '100' }],
+      items: [stagedItem, { ...stagedItem, inventoryItemId: '100', sourceLocationId: 89 }],
       counts: { ...stage.counts, completed: 2 },
       outcomes: [
         { inventoryItemId: '44', status: 'completed' },
@@ -197,7 +211,7 @@ describe('trade sample routes', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero',
-      payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' },
+      payload: { confirmed: true },
     })
 
     expect(response.statusCode).toBe(409)
@@ -206,13 +220,15 @@ describe('trade sample routes', () => {
     await server.close()
   })
 
-  it('accepts distinct reviewed rows that share a product and package tag', async () => {
-    const sibling = { ...item, inventoryItemId: '45', currentQty: 4, availableQty: 4 }
-    const siblingStaged = { ...stagedItem, inventoryItemId: '100', currentQty: 4, availableQty: 4 }
-    const sameTagPayload = { ...stagePayload, items: [item, sibling] }
+  it('approves a merged live lot after duplicate-ID stage evidence reconciles to reviewed totals', async () => {
+    const first = { ...item, currentQty: 1, availableQty: 1 }
+    const sibling = { ...item, inventoryItemId: '45', currentQty: 1, availableQty: 1 }
+    const duplicateStaged = { ...stagedItem, inventoryItemId: 'merged-stale', currentQty: 1, availableQty: 1 }
+    const mergedLive = { ...stagedItem, inventoryItemId: 'merged-live', currentQty: 2, availableQty: 2 }
+    const sameTagPayload = { ...stagePayload, items: [first, sibling] }
     const sameTagStage = {
       ...stage,
-      items: [stagedItem, siblingStaged],
+      items: [duplicateStaged, duplicateStaged],
       counts: { ...stage.counts, completed: 2 },
       outcomes: [
         { inventoryItemId: '44', status: 'completed' },
@@ -221,6 +237,7 @@ describe('trade sample routes', () => {
     }
     mocks.poolQuery.mockResolvedValueOnce({ rows: [{ status: 'succeeded', job_payload_json: sameTagPayload, result_payload_json: sameTagStage }] })
       .mockResolvedValueOnce({ rows: [] })
+    mocks.reconcile.mockReturnValueOnce([duplicateStaged, duplicateStaged]).mockReturnValueOnce([mergedLive])
     mocks.enqueue.mockResolvedValue({ inserted: true, jobId: 43 })
     const server = Fastify()
     await registerTradeSampleZeroRoutes(server)
@@ -228,12 +245,16 @@ describe('trade sample routes', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero',
-      payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' },
+      payload: { confirmed: true },
     })
 
     expect(response.statusCode).toBe(200)
     expect(mocks.enqueue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      payload: expect.objectContaining({ items: [stagedItem, siblingStaged] }),
+      payload: expect.objectContaining({ items: [mergedLive] }),
+    }))
+    expect(mocks.appendAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      eventType: 'trade_sample.zero.approved',
+      payload: expect.objectContaining({ items: [mergedLive] }),
     }))
     await server.close()
   })
@@ -246,7 +267,7 @@ describe('trade sample routes', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero',
-      payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' },
+      payload: { confirmed: true },
     })
     expect(response.json()).toEqual({ jobId: 43 })
     expect(mocks.resolveDestination).not.toHaveBeenCalled()

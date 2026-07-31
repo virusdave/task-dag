@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import type { TradeSampleStageResult, TradeSampleZeroItem } from '../../shared/contracts/index.js'
+import type { TradeSampleZeroItem } from '../../shared/contracts/index.js'
 
 import {
   CatalogInventoryStageTradeSamplesJobPayloadSchema,
@@ -18,9 +18,9 @@ import { withSweedSession } from '../../worker/sweed/session.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import {
-  assertTargetContents,
   previewTradeSampleZero,
   readLiveInventory,
+  reconcileTargetContents,
   resolveTradeSampleDestination,
   TradeSampleTargetError,
   verifyTradeSampleZeroPreview,
@@ -82,6 +82,7 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
     const { previewToken: _previewToken, ...reviewed } = parsed.data
     const payload = CatalogInventoryStageTradeSamplesJobPayloadSchema.parse({
       ...reviewed,
+      confirmed: parsed.data.confirmed,
       actorUserId: user.id,
       requestId: operationId,
     })
@@ -107,7 +108,7 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
     const jobId = Number((request.params as { jobId?: string }).jobId)
     const approval = TradeSampleZeroApprovalRequestSchema.safeParse(request.body ?? {})
     if (!Number.isInteger(jobId) || jobId < 1 || !approval.success) {
-      return reply.status(400).send({ error: 'Exact approval confirmation is required.' })
+      return reply.status(400).send({ error: 'Confirmation is required.' })
     }
 
     const query = await getPool().query<{ job_payload_json: unknown; result_payload_json: unknown; status: string }>(
@@ -133,28 +134,36 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
       || stage.data.operationId !== stagedJob.data.requestId
       || stage.data.siteDealerId !== stagedJob.data.siteDealerId
       || JSON.stringify(stage.data.destination) !== JSON.stringify(stagedJob.data.destination)
-      || !isTrustedStagedItemSet(stagedJob.data.items, stage.data.items, stage.data.destination)
     ) {
       return reply.status(409).send({ error: 'A complete successful stage result is required.' })
     }
 
+    try {
+      if (stage.data.items.some((item) =>
+        item.sourceLocationId !== stage.data.destination.id
+        || item.sourceLocationName.trim() !== stage.data.destination.name
+        || item.sourceStockTypeId !== stage.data.destination.stockTypeId
+      )) {
+        throw new TradeSampleTargetError('A recorded staged package is outside the dedicated destination.')
+      }
+      reconcileTargetContents(
+        stage.data.items.map((item) => ({ ...item, isTradeSample: true })),
+        stage.data.destination,
+        stagedJob.data.items,
+      )
+    } catch (error) {
+      request.log.error({ err: error, jobId, requestId: request.id }, 'trade sample stage result did not reconcile')
+      return reply.status(409).send({ error: 'The recorded stage result does not match the reviewed package totals.' })
+    }
+
     const requestId = `catalog.inventory.zero_trade_samples:stage:${jobId}`
-    const payload = CatalogInventoryZeroTradeSamplesJobPayloadSchema.parse({
-      siteDealerId: stage.data.siteDealerId,
-      destination: stage.data.destination,
-      items: stage.data.items,
-      confirmation: approval.data.confirmation,
-      stageJobId: jobId,
-      actorUserId: user.id,
-      requestId,
-    })
     const existing = await getPool().query<{ exact_payload: boolean; id: number }>(
-      `select id, payload_json = $2::jsonb as exact_payload
+      `select id, true as exact_payload
          from job_queue
         where dedupe_key = $1
           and status in ('queued', 'running', 'succeeded', 'failed', 'dead_letter')
         limit 1`,
-      [requestId, JSON.stringify(payload)],
+      [requestId],
     )
     if (existing.rows[0]) {
       if (!existing.rows[0].exact_payload) {
@@ -163,17 +172,35 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
       return reply.send(TradeSampleZeroEnqueueResponseSchema.parse({ jobId: existing.rows[0].id }))
     }
 
+    let liveItems: TradeSampleZeroItem[]
     try {
-      await withSweedSession(async () => {
+      liveItems = await withSweedSession(async () => {
         const destination = await resolveTradeSampleDestination(stage.data.siteDealerId)
         if (JSON.stringify(destination) !== JSON.stringify(stage.data.destination)) throw new Error('Destination changed.')
-        assertTargetContents(await readLiveInventory(stage.data.siteDealerId, destination), destination, stage.data.items)
+        return reconcileTargetContents(
+          await readLiveInventory(stage.data.siteDealerId, destination),
+          destination,
+          stagedJob.data.items,
+        )
       })
-    } catch {
+    } catch (error) {
+      request.log.error({ err: error, jobId, requestId: request.id }, 'trade sample approval live reconciliation failed')
       return reply.status(409).send({
-        error: 'Dedicated location no longer exactly matches the staged trade samples. Zero was not queued.',
+        error: error instanceof TradeSampleTargetError
+          ? `${error.message} Zero was not queued.`
+          : 'The dedicated location could not be verified safely. Zero was not queued.',
       })
     }
+
+    const payload = CatalogInventoryZeroTradeSamplesJobPayloadSchema.parse({
+      siteDealerId: stage.data.siteDealerId,
+      destination: stage.data.destination,
+      items: liveItems,
+      confirmed: approval.data.confirmed,
+      stageJobId: jobId,
+      actorUserId: user.id,
+      requestId,
+    })
 
     const result = await withTransaction(async (db) => {
       const enqueued = await enqueueJobExactOnce(db, {
@@ -201,7 +228,7 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
             zeroJobId: enqueued.jobId,
             siteDealerId: stage.data.siteDealerId,
             destination: stage.data.destination,
-            items: stage.data.items,
+            items: liveItems,
           },
           undoPayload: null,
         })
@@ -213,44 +240,4 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
     }
     return reply.send(TradeSampleZeroEnqueueResponseSchema.parse({ jobId: result.jobId }))
   })
-}
-
-function isTrustedStagedItemSet(
-  reviewed: TradeSampleZeroItem[],
-  staged: TradeSampleZeroItem[],
-  destination: TradeSampleStageResult['destination'],
-): boolean {
-  if (reviewed.length !== staged.length) return false
-  const reviewedCounts = new Map<string, number>()
-  for (const item of reviewed) {
-    const key = trustedItemIdentity(item)
-    reviewedCounts.set(key, (reviewedCounts.get(key) ?? 0) + 1)
-  }
-  const stagedIds = new Set(staged.map((item) => item.inventoryItemId))
-  if (stagedIds.size !== staged.length) return false
-  for (const item of staged) {
-    const key = trustedItemIdentity(item)
-    const remaining = reviewedCounts.get(key) ?? 0
-    if (
-      remaining === 0
-      || item.sourceLocationId !== destination.id
-      || item.sourceLocationName !== destination.name
-      || item.sourceStockTypeId !== destination.stockTypeId
-    ) return false
-    if (remaining === 1) reviewedCounts.delete(key)
-    else reviewedCounts.set(key, remaining - 1)
-  }
-  return reviewedCounts.size === 0
-}
-
-function trustedItemIdentity(item: TradeSampleZeroItem): string {
-  return JSON.stringify([
-    item.productId,
-    item.externalTrackCode,
-    item.currentQty,
-    item.availableQty,
-    item.packageLabel,
-    item.productName,
-    item.productSku,
-  ])
 }

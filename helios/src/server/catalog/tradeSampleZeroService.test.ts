@@ -4,6 +4,7 @@ import type { TradeSampleZeroItem } from '../../shared/contracts/index.js'
 import {
   previewTradeSampleZero,
   readLiveInventory,
+  reconcileTargetContents,
   verifyTradeSampleZeroPreview,
   type TradeSampleZeroDeps,
 } from './tradeSampleZeroService.js'
@@ -165,5 +166,50 @@ describe('trade sample preview', () => {
       name: 'NOT FOR SALE - Samples',
       stockTypeId: 1,
     })
+  })
+
+  it('reconciles destination lot splits and merges by trusted aggregate quantity', () => {
+    const reviewed = [
+      expectedItem,
+      { ...expectedItem, inventoryItemId: '45', currentQty: 1.5, availableQty: 1.5 },
+    ]
+    const merged = {
+      ...expectedItem,
+      inventoryItemId: 'destination-1',
+      currentQty: 5,
+      availableQty: 5,
+      sourceLocationId: destination.id,
+      sourceLocationName: destination.name,
+      sourceStockTypeId: destination.stockTypeId,
+      isTradeSample: true,
+    }
+
+    expect(reconcileTargetContents([merged], destination, reviewed)).toEqual([
+      expect.objectContaining({ inventoryItemId: 'destination-1', currentQty: 5 }),
+    ])
+    expect(() => reconcileTargetContents([{ ...merged, currentQty: 4, availableQty: 4 }], destination, reviewed))
+      .toThrow('different aggregate quantity')
+    expect(() => reconcileTargetContents([{ ...merged, isTradeSample: false }], destination, reviewed))
+      .toThrow('non-sample')
+  })
+
+  it('reconciles decimal quantities as exact integer units', () => {
+    const reviewed = [
+      { ...expectedItem, currentQty: 0.1, availableQty: 0.1 },
+      { ...expectedItem, inventoryItemId: '45', currentQty: 0.2, availableQty: 0.2 },
+    ]
+    const merged = {
+      ...expectedItem,
+      inventoryItemId: 'destination-decimal',
+      currentQty: 0.3,
+      availableQty: 0.3,
+      sourceLocationId: destination.id,
+      sourceLocationName: destination.name,
+      sourceStockTypeId: destination.stockTypeId,
+      isTradeSample: true,
+    }
+    expect(reconcileTargetContents([merged], destination, reviewed)).toHaveLength(1)
+    expect(() => reconcileTargetContents([{ ...merged, currentQty: 0.300001, availableQty: 0.300001 }], destination, reviewed))
+      .toThrow('different aggregate quantity')
   })
 })

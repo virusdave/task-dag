@@ -134,10 +134,7 @@ describe('TradeSamplesPage', () => {
     )!
     expect(applyButton.disabled).toBe(true)
 
-    await act(async () => change(
-      host.querySelector<HTMLInputElement>('#trade-sample-confirmation')!,
-      'STAGE TRADE SAMPLES',
-    ))
+    await act(async () => host.querySelector<HTMLInputElement>('#trade-sample-confirmation')!.click())
     expect(applyButton.disabled).toBe(false)
     await act(async () => applyButton.click())
 
@@ -151,7 +148,7 @@ describe('TradeSamplesPage', () => {
         previewToken: preview.previewToken,
         items: preview.items,
         destination: preview.destination,
-        confirmation: 'STAGE TRADE SAMPLES',
+        confirmed: true,
       }) }),
     )
     expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/77"]')?.textContent).toBe('Open staging job #77')
@@ -174,7 +171,7 @@ describe('TradeSamplesPage', () => {
     const pendingQueue = new Promise((_, reject) => { rejectQueue = reject })
     mocks.mutateJson.mockResolvedValueOnce(preview).mockReturnValueOnce(pendingQueue)
     await act(async () => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Preview trade samples')!.click())
-    await act(async () => change(host.querySelector<HTMLInputElement>('#trade-sample-confirmation')!, 'STAGE TRADE SAMPLES'))
+    await act(async () => host.querySelector<HTMLInputElement>('#trade-sample-confirmation')!.click())
     act(() => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Queue staging transfer')!.click())
     expect(host.textContent).not.toContain('Reviewed preview')
     expect(host.textContent).toContain('preview is disarmed')
@@ -245,7 +242,7 @@ describe('TradeSamplesPage', () => {
     expect(host.textContent).toContain('Bronx (dealer #210249)')
     expect(host.textContent).toContain('location #88, stock type #7')
     expect(host.textContent).toContain('Package package-44 · METRC tag METRC-TAG · Qty 2')
-    await act(async () => change(host.querySelector<HTMLInputElement>('#stage-approval')!, 'I VERIFIED ONLY TRADE SAMPLES'))
+    await act(async () => host.querySelector<HTMLInputElement>('#stage-approval')!.click())
     act(() => [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('Approve permanent'))!.click())
     expect(host.textContent).toContain('action is disarmed')
     expect(host.querySelector('#stage-approval')).toBeNull()
