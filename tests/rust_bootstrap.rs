@@ -212,6 +212,97 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
             &format!(":refs/heads/tasks/blocked/{malformed_id}"),
         ],
     );
+    let legacy_created = success(
+        &a,
+        &[
+            "create",
+            "--operation-id",
+            "legacy-block-fixture",
+            "--title",
+            "Legacy blocked fixture",
+            "--description",
+            "Exercise bounded compatibility normalization",
+            "--claim",
+        ],
+        "legacy-block-token",
+        100,
+    );
+    let legacy_id = legacy_created["taskId"].as_str().unwrap();
+    let legacy_active_ref = format!("refs/heads/tasks/active/{legacy_id}");
+    let legacy_blocked_ref = format!("refs/heads/tasks/blocked/{legacy_id}");
+    let legacy_active = ok(&a, &["ls-remote", "origin", &legacy_active_ref])
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    ok(&a, &["fetch", "origin", &legacy_active]);
+    let legacy_active_value: serde_json::Value =
+        serde_json::from_str(&ok(&a, &["show", "-s", "--format=%B", &legacy_active])).unwrap();
+    let legacy_task = legacy_active_value["taskOid"].as_str().unwrap();
+    let legacy_body = root.join("legacy-blocked-v2.json");
+    fs::write(
+        &legacy_body,
+        serde_json::to_vec(&serde_json::json!({
+            "authorizationRequired": true,
+            "condition": {"kind": "manual"},
+            "evidence": ["fixture:evidence"],
+            "formatVersion": 2,
+            "logicalId": "1".repeat(64),
+            "operationId": "legacy-block-operation",
+            "question": "Keep this task paused?",
+            "reason": "Legacy operator pause",
+            "taskId": legacy_id,
+            "taskOid": legacy_task,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let legacy_blocked = ok(
+        &a,
+        &[
+            "commit-tree",
+            empty_tree,
+            "-p",
+            &legacy_active,
+            "-p",
+            legacy_task,
+            "-F",
+            legacy_body.to_str().unwrap(),
+        ],
+    );
+    ok(
+        &a,
+        &[
+            "push",
+            "--atomic",
+            "origin",
+            &format!(":{legacy_active_ref}"),
+            &format!("{legacy_blocked}:{legacy_blocked_ref}"),
+        ],
+    );
+    assert_eq!(
+        success(&a, &["show", legacy_id], "unused-token-000", 100)["state"],
+        "blocked"
+    );
+    success(
+        &a,
+        &[
+            "unblock",
+            legacy_id,
+            "--block-lease",
+            &legacy_blocked,
+            "--authorization",
+            "fixture schema repair",
+            "--operation-id",
+            "legacy-block-unblock",
+        ],
+        "unused-token-000",
+        100,
+    );
+    assert_eq!(
+        success(&a, &["show", legacy_id], "unused-token-000", 100)["state"],
+        "frontier"
+    );
     let intervening_completion = ok(
         &a,
         &[

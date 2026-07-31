@@ -48,16 +48,22 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
             oid,
             "blocked",
             &[
-                "authorization",
-                "blockedAt",
-                "claimTokenDigest",
                 "formatVersion",
                 "operationId",
                 "reason",
                 "taskId",
                 "taskOid",
             ],
-            &[&[]],
+            &[
+                &["authorization", "blockedAt", "claimTokenDigest"],
+                &[
+                    "authorizationRequired",
+                    "condition",
+                    "evidence",
+                    "logicalId",
+                    "question",
+                ],
+            ],
         )?,
         "done" => object(
             oid,
@@ -139,15 +145,44 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 value["reason"].as_str().ok_or("block reason malformed")?,
                 16_384,
             )?;
-            model::bounded(
-                "block authorization",
-                value["authorization"]
-                    .as_str()
-                    .ok_or("block authorization malformed")?,
-                4_096,
-            )?;
-            digest("claimTokenDigest", &value["claimTokenDigest"])?;
-            value["blockedAt"].as_u64().ok_or("blockedAt malformed")?;
+            if value.get("authorizationRequired").is_some() {
+                if value["authorizationRequired"] != true
+                    || value["condition"] != serde_json::json!({"kind":"manual"})
+                {
+                    return Err("legacy blocked manual authorization is malformed".into());
+                }
+                digest("logicalId", &value["logicalId"])?;
+                model::bounded(
+                    "block question",
+                    value["question"]
+                        .as_str()
+                        .ok_or("block question malformed")?,
+                    4_096,
+                )?;
+                let evidence = value["evidence"]
+                    .as_array()
+                    .ok_or("block evidence malformed")?;
+                if evidence.len() > 64 {
+                    return Err("block evidence has too many entries".into());
+                }
+                for item in evidence {
+                    model::bounded(
+                        "block evidence",
+                        item.as_str().ok_or("block evidence malformed")?,
+                        4_096,
+                    )?;
+                }
+            } else {
+                model::bounded(
+                    "block authorization",
+                    value["authorization"]
+                        .as_str()
+                        .ok_or("block authorization malformed")?,
+                    4_096,
+                )?;
+                digest("claimTokenDigest", &value["claimTokenDigest"])?;
+                value["blockedAt"].as_u64().ok_or("blockedAt malformed")?;
+            }
         }
         "done" if value.get("closeOid").is_some() => {
             let declaration = value["declarationOid"]
