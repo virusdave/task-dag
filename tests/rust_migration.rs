@@ -349,6 +349,83 @@ impl Fixture {
             ok(&self.work, &["push", "origin", "--delete", reference]);
         }
     }
+    fn replace_singleton_root(&mut self, parents: &[&str]) {
+        assert_eq!(self.refs.get("refs/heads/tasks/frontier/a"), None);
+        let replacement = commit(&self.work, "Root\n\nLegacy project context", parents);
+        ok(
+            &self.work,
+            &[
+                "push",
+                &format!(
+                    "--force-with-lease=refs/heads/tasks/pending/root:{}",
+                    self.root
+                ),
+                "origin",
+                &format!("{replacement}:refs/heads/tasks/pending/root"),
+            ],
+        );
+        self.root = replacement.clone();
+        self.tasks.insert("root", replacement.clone());
+        self.refs
+            .insert("refs/heads/tasks/pending/root".into(), replacement);
+    }
+    fn remove_graph(&self) {
+        ok(
+            &self.work,
+            &["push", "origin", "--delete", "refs/heads/tasks/v1/graph"],
+        );
+    }
+    fn add_v2_blocked_state(&self) {
+        let task_id = format!("v2-{}", "1".repeat(64));
+        let task = commit(
+            &self.work,
+            &serde_json::to_string(&json!({
+                "description":"already native v2",
+                "formatVersion":2,
+                "operationId":"fixture-v2",
+                "requirements":[],
+                "structuralParent":null,
+                "taskId":task_id,
+                "title":"Native v2 task"
+            }))
+            .unwrap(),
+            &[],
+        );
+        let blocked = commit(
+            &self.work,
+            &serde_json::to_string(&json!({
+                "authorization":"fixture",
+                "blockedAt":1785196800_u64,
+                "claimTokenDigest":"a".repeat(64),
+                "formatVersion":2,
+                "operationId":"fixture-v2-block",
+                "reason":"native v2 state",
+                "taskId":task_id,
+                "taskOid":task
+            }))
+            .unwrap(),
+            &[&task],
+        );
+        ok(
+            &self.work,
+            &[
+                "push",
+                "origin",
+                &format!("{blocked}:refs/heads/tasks/blocked/{task_id}"),
+                &format!("{blocked}:refs/heads/tasks/blocked-meta/{task_id}"),
+            ],
+        );
+    }
+    fn add_malformed_v2_state(&self) {
+        ok(
+            &self.work,
+            &[
+                "push",
+                "origin",
+                &format!("{}:refs/heads/tasks/frontier/v2-short", self.root),
+            ],
+        );
+    }
     fn migrate_with_terminal_edge(&self, operation: &str, edge: &str) -> Output {
         Self::run_raw(
             &self.work,
@@ -391,6 +468,7 @@ impl Fixture {
 fn census_reports_exact_bounded_roots_without_writes() {
     let f = Fixture::new(false, false);
     f.remove_other_root();
+    f.add_v2_blocked_state();
     let second = commit(&f.work, "Second root", &[]);
     ok(
         &f.work,
@@ -426,6 +504,20 @@ fn census_reports_exact_bounded_roots_without_writes() {
 
 #[test]
 fn census_rejects_pending_graph_and_lifecycle_races_without_import_writes() {
+    let malformed_v2 = Fixture::new(false, true);
+    malformed_v2.remove_other_root();
+    malformed_v2.add_malformed_v2_state();
+    let out = malformed_v2.census();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("malformed v2 lifecycle ref suffix"));
+    assert!(
+        ok(
+            &malformed_v2.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+
     let pending = Fixture::new(false, true);
     pending.remove_other_root();
     let added = commit(&pending.work, "Concurrently added root", &[]);
@@ -469,6 +561,112 @@ fn census_rejects_pending_graph_and_lifecycle_races_without_import_writes() {
     assert!(
         ok(
             &lifecycle.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn legacy_roots_allow_one_provenance_parent_but_reject_multiple_parents() {
+    let mut modern = Fixture::new(false, true);
+    modern.remove_other_root();
+    modern.replace_singleton_root(&[env!("TASKDAG_BUILD_COMMIT")]);
+    let census = modern.census();
+    assert!(
+        census.status.success(),
+        "{}",
+        String::from_utf8_lossy(&census.stderr)
+    );
+    let migrated = modern.migrate("modern-root", None);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+
+    let mut task_parent = Fixture::new(false, true);
+    task_parent.remove_other_root();
+    let old_root = task_parent.root.clone();
+    task_parent.replace_singleton_root(&[&old_root]);
+    let accepted = task_parent.census();
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+
+    let mut multi_parent = Fixture::new(false, true);
+    multi_parent.remove_other_root();
+    let first = commit(&multi_parent.work, "first provenance", &[]);
+    let second = commit(&multi_parent.work, "second provenance", &[]);
+    multi_parent.replace_singleton_root(&[&first, &second]);
+    let rejected = multi_parent.census();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("more than one provenance parent"));
+}
+
+#[test]
+fn absent_graph_is_frozen_as_empty_and_concurrent_creation_aborts() {
+    let migration = Fixture::new(false, true);
+    migration.remove_other_root();
+    migration.remove_graph();
+    let census = migration.census();
+    assert!(
+        census.status.success(),
+        "{}",
+        String::from_utf8_lossy(&census.stderr)
+    );
+    let census: Value = serde_json::from_slice(&census.stdout).unwrap();
+    assert!(census["roots"][0]["v1GraphOid"].is_null());
+    let migrated = migration.migrate("absent-graph", None);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let initialized_graph = migration.remote("refs/heads/tasks/v1/graph").unwrap();
+    assert_eq!(
+        ok(
+            &migration.work,
+            &["show", "-s", "--format=%T", &initialized_graph]
+        ),
+        EMPTY_TREE
+    );
+    assert!(
+        ok(
+            &migration.work,
+            &["show", "-s", "--format=%P", &initialized_graph]
+        )
+        .is_empty()
+    );
+    let result: Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    let mapping = migration
+        .remote(&format!(
+            "refs/heads/tasks/v2/imports/v1/by-sha/{}",
+            migration.root
+        ))
+        .unwrap();
+    assert!(body(&migration.work, &mapping)["provenance"]["graph"].is_null());
+    assert_eq!(result["terminalExternalEdges"], json!([]));
+
+    let raced = Fixture::new(false, true);
+    raced.remove_other_root();
+    raced.remove_graph();
+    let new_graph = Fixture::graph_commit(&raced.work, &raced.root, None);
+    let failed = raced.migrate(
+        "absent-graph-race",
+        Some(("TASKDAG_TEST_RACE_V1_GRAPH", &new_graph)),
+    );
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("conflicting or indeterminate"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        ok(
+            &raced.work,
             &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
         )
         .is_empty()
@@ -523,6 +721,78 @@ fn singleton_pending_root_becomes_open_frontier_with_preserved_context() {
         "{}",
         String::from_utf8_lossy(&claim.stderr)
     );
+}
+
+#[test]
+fn blocked_root_and_nested_scheduled_leaf_preserve_actionable_state() {
+    let blocked = Fixture::new(false, true);
+    blocked.remove_other_root();
+    let blocked_at = "2026-07-28T00:00:00Z";
+    let metadata = commit(
+        &blocked.work,
+        &format!(
+            "Blocked-Meta: Root\n\nTask-Commit: {}\nBlocker-Kind: manual\nReason: Root-level pause\nBlocked-At: {blocked_at}",
+            blocked.root
+        ),
+        &[&blocked.root],
+    );
+    ok(
+        &blocked.work,
+        &[
+            "push",
+            "origin",
+            &format!("{}:refs/heads/tasks/blocked/{}", blocked.root, blocked.root),
+            &format!("{metadata}:refs/heads/tasks/blocked-meta/{}", blocked.root),
+        ],
+    );
+    let migrated = blocked.migrate("blocked-root", None);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let result: Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    let root_id = result["rootTaskId"].as_str().unwrap();
+    assert_eq!(
+        result["blockLeases"][root_id],
+        blocked
+            .remote(&format!("refs/heads/tasks/blocked/{root_id}"))
+            .unwrap()
+    );
+    let mapping = blocked
+        .remote(&format!(
+            "refs/heads/tasks/v2/imports/v1/by-sha/{}",
+            blocked.root
+        ))
+        .unwrap();
+    assert!(
+        ok(&blocked.work, &["show", "-s", "--format=%P", &mapping])
+            .split_whitespace()
+            .any(|parent| parent == metadata)
+    );
+
+    let nested = Fixture::new(false, true);
+    nested.remove_other_root();
+    let intermediate = commit(&nested.work, "Intermediate", &[&nested.root]);
+    let leaf = commit(&nested.work, "Nested scheduled leaf", &[&intermediate]);
+    ok(
+        &nested.work,
+        &[
+            "push",
+            "origin",
+            &format!("{leaf}:refs/heads/tasks/frontier/nested-leaf"),
+        ],
+    );
+    let migrated = nested.migrate("nested-scheduled-leaf", None);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let result: Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    assert_eq!(result["mapping"].as_object().unwrap().len(), 2);
+    assert!(result["mapping"].get(&leaf).is_some());
+    assert!(result["mapping"].get(&intermediate).is_none());
 }
 
 #[test]
@@ -896,7 +1166,7 @@ fn unsupported_structural_census_and_metadata_fail_before_writes() {
     );
     let out = nested.migrate("nested-pending", None);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("nested legacy structural"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nested legacy pending root"));
     assert!(
         ok(
             &nested.work,
@@ -928,6 +1198,49 @@ fn unsupported_structural_census_and_metadata_fail_before_writes() {
             &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
         )
         .is_empty()
+    );
+
+    let completed = Fixture::new(false, false);
+    let crossing = commit(
+        &completed.work,
+        "Completed cross-boundary requirement child",
+        &[&completed.root, &completed.tasks["other_frontier"]],
+    );
+    ok(
+        &completed.work,
+        &[
+            "push",
+            "origin",
+            &format!("{crossing}:refs/heads/tasks/frontier/completed-crossing"),
+        ],
+    );
+    let master = completed.remote("refs/heads/master").unwrap();
+    let witness = commit(
+        &completed.work,
+        "Complete external prerequisite",
+        &[&master, &completed.tasks["other_frontier"]],
+    );
+    ok(
+        &completed.work,
+        &[
+            "push",
+            &format!("--force-with-lease=refs/heads/master:{master}"),
+            "origin",
+            &format!("{witness}:refs/heads/master"),
+        ],
+    );
+    let out = completed.migrate("completed-cross-boundary-parent", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mapping = completed
+        .remote(&format!("refs/heads/tasks/v2/imports/v1/by-sha/{crossing}"))
+        .unwrap();
+    assert_eq!(
+        body(&completed.work, &mapping)["provenance"]["completedParentRequirements"],
+        json!([{"completionWitnessOid":witness,"taskOid":completed.tasks["other_frontier"]}])
     );
 
     let malformed = Fixture::new(true, false);

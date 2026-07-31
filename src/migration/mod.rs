@@ -179,18 +179,37 @@ pub(crate) fn run(
     }
     let root_task = &task_oids[root];
     if children.is_empty() {
-        let frontier = git::commit(
-            &json!({"formatVersion":2,"operationId":operation,"semanticId":semantic,"taskId":root_id,"taskOid":root_task}),
-            std::slice::from_ref(root_task),
-        )?;
-        crate::validators::lifecycle("frontier", &frontier, &root_id)?;
-        let frontier_ref = model::state_ref("frontier", &root_id);
-        updates.push(Update {
-            semantic_ref: frontier_ref.clone(),
-            old: None,
-            new: Some(frontier.clone()),
-        });
-        outputs.push((frontier_ref, frontier));
+        let legacy_root = &frozen.tasks[0];
+        if legacy_root.state == "blocked" {
+            let token = crate::commands::claim_token()?;
+            let active_record = json!({"attemptId":model::framed_digest("migration-blocked-root-active", &[root]),"claimToken":token,"claimedAt":now.saturating_sub(1),"expiresAt":now,"formatVersion":2,"host":"migration","logicalId":semantic,"operationId":operation,"owner":"migration:v1-blocked-root","reclaimRequired":true,"sessionId":"migration","taskId":root_id,"taskOid":root_task});
+            let active = git::commit(&active_record, std::slice::from_ref(root_task))?;
+            crate::validators::lifecycle("active", &active, &root_id)?;
+            let blocked_record = json!({"authorization":"factual v1 blocked-root migration","blockedAt":legacy_root.blocked_at.unwrap_or(now),"claimTokenDigest":model::digest(&token),"formatVersion":2,"operationId":operation,"reason":legacy_root.blocked_reason.as_deref().unwrap_or("Migrated from legacy v1 blocked root"),"taskId":root_id,"taskOid":root_task});
+            let blocked = git::commit(&blocked_record, &[active, root_task.clone()])?;
+            crate::validators::lifecycle("blocked", &blocked, &root_id)?;
+            let blocked_ref = model::state_ref("blocked", &root_id);
+            updates.push(Update {
+                semantic_ref: blocked_ref.clone(),
+                old: None,
+                new: Some(blocked.clone()),
+            });
+            outputs.push((blocked_ref, blocked.clone()));
+            block_leases.insert(root_id.clone(), blocked);
+        } else {
+            let frontier = git::commit(
+                &json!({"formatVersion":2,"operationId":operation,"semanticId":semantic,"taskId":root_id,"taskOid":root_task}),
+                std::slice::from_ref(root_task),
+            )?;
+            crate::validators::lifecycle("frontier", &frontier, &root_id)?;
+            let frontier_ref = model::state_ref("frontier", &root_id);
+            updates.push(Update {
+                semantic_ref: frontier_ref.clone(),
+                old: None,
+                new: Some(frontier.clone()),
+            });
+            outputs.push((frontier_ref, frontier));
+        }
     } else {
         let manifest = git::commit(
             &json!({"children":children,"formatVersion":2,"operationId":operation,"semanticId":semantic,"parentTaskId":root_id,"parentTaskOid":root_task}),
@@ -221,23 +240,18 @@ pub(crate) fn run(
         } else {
             Value::Null
         };
+        let mut mapping_parents = vec![task_oids[&legacy.task].clone(), legacy.task.clone()];
+        for (_, oid) in &legacy.lifecycle {
+            if !mapping_parents.contains(oid) {
+                mapping_parents.push(oid.clone());
+            }
+        }
+        if legacy.task == root {
+            mapping_parents.extend(frozen.graph.iter().cloned());
+        }
         let mapping = git::commit(
-            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
-            &if legacy.task == root {
-                vec![
-                    task_oids[&legacy.task].clone(),
-                    legacy.task.clone(),
-                    frozen.graph.clone(),
-                ]
-            } else {
-                let mut parents = vec![task_oids[&legacy.task].clone(), legacy.task.clone()];
-                for (_, oid) in &legacy.lifecycle {
-                    if !parents.contains(oid) {
-                        parents.push(oid.clone());
-                    }
-                }
-                parents
-            },
+            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"completedParentRequirements":legacy.completed_parent_requirements.iter().map(|(task,witness)|json!({"taskOid":task,"completionWitnessOid":witness})).collect::<Vec<_>>(),"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
+            &mapping_parents,
         )?;
         updates.push(Update {
             semantic_ref: mapping_ref.clone(),
@@ -306,18 +320,26 @@ pub(crate) fn run(
         old: Some(frozen.activation.clone()),
         new: Some(replacement_guard.clone()),
     });
-    let graph_tree = git::output(["show", "-s", "--format=%T", &frozen.graph])?
-        .trim()
-        .to_owned();
-    model::oid(&graph_tree)?;
-    let graph_guard = git::commit_with_tree(
-        &graph_tree,
-        &format!("Preserve v1 graph during bounded migration {safe_operation}"),
-        std::slice::from_ref(&frozen.graph),
-    )?;
+    let graph_guard = if let Some(graph) = &frozen.graph {
+        let graph_tree = git::output(["show", "-s", "--format=%T", graph])?
+            .trim()
+            .to_owned();
+        model::oid(&graph_tree)?;
+        git::commit_with_tree(
+            &graph_tree,
+            &format!("Preserve v1 graph during bounded migration {safe_operation}"),
+            std::slice::from_ref(graph),
+        )?
+    } else {
+        git::commit_with_tree(
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            &format!("Initialize empty v1 graph during bounded migration {safe_operation}"),
+            &[],
+        )?
+    };
     updates.push(Update {
         semantic_ref: "refs/heads/tasks/v1/graph".into(),
-        old: Some(frozen.graph.clone()),
+        old: frozen.graph.clone(),
         new: Some(graph_guard.clone()),
     });
     outputs.push((
@@ -355,13 +377,11 @@ pub(crate) fn run(
     #[cfg(feature = "test-seam")]
     if let Ok(raced) = std::env::var("TASKDAG_TEST_RACE_V1_GRAPH") {
         model::oid(&raced)?;
+        let expected = frozen.graph.as_deref().unwrap_or("");
         let status = std::process::Command::new("git")
             .args([
                 "push",
-                &format!(
-                    "--force-with-lease=refs/heads/tasks/v1/graph:{}",
-                    frozen.graph
-                ),
+                &format!("--force-with-lease=refs/heads/tasks/v1/graph:{}", expected),
                 "origin",
                 &format!("{raced}:refs/heads/tasks/v1/graph"),
             ])
