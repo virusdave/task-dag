@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify'
+import type { TradeSampleStageResult, TradeSampleZeroItem } from '../../shared/contracts/index.js'
 
 import {
   CatalogInventoryStageTradeSamplesJobPayloadSchema,
@@ -104,7 +105,7 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
       || stage.data.operationId !== stagedJob.data.requestId
       || stage.data.siteDealerId !== stagedJob.data.siteDealerId
       || JSON.stringify(stage.data.destination) !== JSON.stringify(stagedJob.data.destination)
-      || JSON.stringify(stage.data.items) !== JSON.stringify(stagedJob.data.items)
+      || !isTrustedStagedItemSet(stagedJob.data.items, stage.data.items, stage.data.destination)
     ) {
       return reply.status(409).send({ error: 'A complete successful stage result is required.' })
     }
@@ -184,4 +185,32 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
     }
     return reply.send(TradeSampleZeroEnqueueResponseSchema.parse({ jobId: result.jobId }))
   })
+}
+
+function isTrustedStagedItemSet(
+  reviewed: TradeSampleZeroItem[],
+  staged: TradeSampleZeroItem[],
+  destination: TradeSampleStageResult['destination'],
+): boolean {
+  if (reviewed.length !== staged.length) return false
+  const reviewedByTag = new Map(reviewed.map((item) => [`${item.productId}:${item.externalTrackCode}`, item]))
+  const stagedIds = new Set(staged.map((item) => item.inventoryItemId))
+  if (reviewedByTag.size !== reviewed.length || stagedIds.size !== staged.length) return false
+  for (const item of staged) {
+    const key = `${item.productId}:${item.externalTrackCode}`
+    const original = reviewedByTag.get(key)
+    if (
+      original === undefined
+      || item.currentQty !== original.currentQty
+      || item.availableQty !== original.availableQty
+      || item.packageLabel !== original.packageLabel
+      || item.productName !== original.productName
+      || item.productSku !== original.productSku
+      || item.sourceLocationId !== destination.id
+      || item.sourceLocationName !== destination.name
+      || item.sourceStockTypeId !== destination.stockTypeId
+    ) return false
+    reviewedByTag.delete(key)
+  }
+  return reviewedByTag.size === 0
 }

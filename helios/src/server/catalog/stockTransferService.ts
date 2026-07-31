@@ -118,20 +118,14 @@ const InventoryProductItemSchema = z
   })
   .passthrough()
 
-const InventoryProductItemListResponseSchema = z
-  .object({
-    result: z
-      .object({
-        data: z.array(InventoryProductItemSchema).default([]),
-        totalCount: z.coerce.number().int().min(0).optional(),
-      })
-      .passthrough()
-      .nullable()
-      .optional(),
-    data: z.array(InventoryProductItemSchema).optional(),
-  })
-  .passthrough()
-  .transform((value) => value.result?.data ?? value.data ?? [])
+const InventoryProductItemPageSchema = z.object({
+  data: z.array(InventoryProductItemSchema),
+  totalCount: z.coerce.number().int().min(0),
+}).passthrough()
+const InventoryProductItemListResponseSchema = z.union([
+  InventoryProductItemPageSchema,
+  z.object({ result: InventoryProductItemPageSchema }).passthrough().transform((value) => value.result),
+])
 
 /** Sweed sometimes wraps payloads in `{ result, id, version }`. */
 function extractRpcResult(raw: unknown): unknown {
@@ -231,20 +225,30 @@ function lotQty(item: z.infer<typeof InventoryProductItemSchema>): {
 export async function listLiveLotsForProduct(
   dealerId: number,
   productId: number,
+  rpc: typeof callSweedRpc = callSweedRpc,
 ): Promise<LiveInventoryLot[]> {
   const out: LiveInventoryLot[] = []
+  const seenIds = new Set<string>()
+  let totalCount: number | null = null
   for (let page = 1; page <= LIVE_LOT_MAX_PAGES; page += 1) {
-    const raw = await callSweedRpc<unknown>(dealerId, 'store.inventory.product.item.list', {
+    const raw = await rpc<unknown>(dealerId, 'store.inventory.product.item.list', {
       productId: String(productId),
       page,
       pageSize: LIVE_LOT_PAGE_SIZE,
       isOnStock: true,
     })
-    const items = InventoryProductItemListResponseSchema.parse(raw)
-    for (const item of items) {
+    const response = InventoryProductItemListResponseSchema.parse(raw)
+    totalCount ??= response.totalCount
+    if (response.totalCount !== totalCount) throw new StockTransferError(`Live lot count changed while reading product ${productId}.`)
+    if (totalCount > LIVE_LOT_MAX_PAGES * LIVE_LOT_PAGE_SIZE) throw new StockTransferError(`Product ${productId} has too many live lots to verify safely.`)
+    if (response.data.length > LIVE_LOT_PAGE_SIZE) throw new StockTransferError(`Sweed returned an oversized live-lot page for product ${productId}.`)
+    for (const item of response.data) {
       const { availableQty, currentQty } = lotQty(item)
+      const inventoryItemId = String(item.id)
+      if (seenIds.has(inventoryItemId)) throw new StockTransferError(`Sweed returned duplicate inventory item ${inventoryItemId} for product ${productId}.`)
+      seenIds.add(inventoryItemId)
       out.push({
-        inventoryItemId: String(item.id),
+        inventoryItemId,
         externalTrackCode: item.externalTrackCode ?? null,
         availableQty,
         currentQty,
@@ -254,9 +258,8 @@ export async function listLiveLotsForProduct(
         isTradeSample: item.isTradeSample === true,
       })
     }
-    if (items.length < LIVE_LOT_PAGE_SIZE) {
-      return out
-    }
+    if (out.length === totalCount) return out
+    if (response.data.length === 0 || response.data.length < LIVE_LOT_PAGE_SIZE || out.length > totalCount) throw new StockTransferError(`Sweed returned an incomplete live-lot list for product ${productId}.`)
   }
   throw new StockTransferError(
     `Could not list live lots for product ${productId}: Sweed returned more than ` +
