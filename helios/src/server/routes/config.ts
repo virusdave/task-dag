@@ -6,6 +6,9 @@ import {
   ConfigBackgroundTaskRunNowResponseSchema,
   ConfigBackgroundTaskScheduleUpdateRequestSchema,
   ConfigBackgroundTasksListResponseSchema,
+  WorkerCapacityConfigSchema,
+  WorkerCapacityResponseSchema,
+  WORKER_CAPACITY_SETTINGS_KEY,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   getConfigBackgroundTaskDefinition,
   type ConfigBackgroundTaskKey,
@@ -13,6 +16,8 @@ import {
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { withTransaction } from '../db/tx.js'
+import { lockWorkerCapacityConfig } from '../db/queries/workerCapacityQueries.js'
+import { notifyJobQueueEnqueued } from '../db/notify.js'
 import {
   countPendingLitalertsRefreshRows,
   ensureDefaultConfigSchedules,
@@ -31,6 +36,36 @@ import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
 
 export async function registerConfigRoutes(server: FastifyInstance): Promise<void> {
+  server.get('/api/config/workers/capacity', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+    const result = await withTransaction((db) => lockWorkerCapacityConfig(db))
+    return reply.send(WorkerCapacityResponseSchema.parse(result))
+  })
+
+  server.put('/api/config/workers/capacity', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+    const after = WorkerCapacityConfigSchema.parse(request.body)
+    const result = await withTransaction(async (db) => {
+      const before = await lockWorkerCapacityConfig(db)
+      if (JSON.stringify(before.config) === JSON.stringify(after)) return before
+      const updated = await db.query<{ updated_at: Date }>(
+        `update app_settings set value = $2::jsonb, updated_by = $3, updated_at = now()
+         where key = $1 returning updated_at`,
+        [WORKER_CAPACITY_SETTINGS_KEY, JSON.stringify(after), user.email],
+      )
+      await appendAuditEvent(db, {
+        actorType: 'user', actorUserId: user.id, entityId: WORKER_CAPACITY_SETTINGS_KEY,
+        entityType: 'job', eventType: 'config.workers.capacity_updated', module: 'config',
+        payload: { before: before.config, after }, requestId: null, scope: null, undoPayload: null,
+      })
+      await notifyJobQueueEnqueued(db)
+      return { config: after, updatedBy: user.email, updatedAt: updated.rows[0]!.updated_at.toISOString() }
+    })
+    return reply.send(WorkerCapacityResponseSchema.parse(result))
+  })
+
   server.get('/api/config/workers/schedules', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'editor')
     if (!user) {

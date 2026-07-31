@@ -22,6 +22,11 @@ export function ConfigWorkersPage() {
 
       <div className="review-grid">
         <article className="mini-card">
+          <header><strong>Capacity</strong><Pill tone="success">live</Pill></header>
+          <p className="subtle-copy">Global slots and priority reserves for background work.</p>
+          <Link to={buildHeliosModulePath('config', 'workers/capacity')}>Open Capacity</Link>
+        </article>
+        <article className="mini-card">
           <header>
             <strong>Scheduling</strong>
             <Pill tone="success">live</Pill>

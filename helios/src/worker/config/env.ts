@@ -32,21 +32,6 @@ export interface WorkerEnv {
   litAlertsStateCode: string
   litAlertsStateId: number
   pollIntervalMs: number
-  /**
-   * Fast-lane sub-loop cadence. The worker process runs a second
-   * lease loop alongside the main loop, scoped to
-   * `priority >= JOB_PRIORITY_URGENT`, so operator-flagged urgent
-   * work starts almost immediately instead of waiting behind a
-   * fully-occupied main loop.
-   */
-  fastlanePollIntervalMs: number
-  /**
-   * Per-tick concurrency cap for the fast-lane loop. Kept low (2)
-   * because urgent work is by definition rare and we want each
-   * urgent job to finish quickly, not to fan out a stampede that
-   * itself starves the main loop.
-   */
-  fastlaneMaxConcurrentJobs: number
   sweedApiUrl: string
   sweedAuthToken: string | null
   sweedLoginEmail: string | null
@@ -54,7 +39,6 @@ export interface WorkerEnv {
   sweedRequestTimeoutMs: number
   sweedStateDealerId: number
   workerMaxAttempts: number
-  workerMaxConcurrentJobs: number
   workerPool: WorkerPoolSelector
   workerRetryBaseDelayMs: number
 }
@@ -85,8 +69,6 @@ export function getWorkerEnv(): WorkerEnv {
     litAlertsStateCode: readOptionalEnv('LITALERTS_STATE_CODE') ?? 'NY',
     litAlertsStateId: readNumberEnv('LITALERTS_STATE_ID', 265),
     pollIntervalMs: readNumberEnv('WORKER_POLL_INTERVAL_MS', 3000),
-    fastlanePollIntervalMs: readNumberEnv('WORKER_FASTLANE_POLL_INTERVAL_MS', 10000),
-    fastlaneMaxConcurrentJobs: readNumberEnv('WORKER_FASTLANE_MAX_CONCURRENT_JOBS', 2),
     sweedApiUrl: readOptionalEnv('SWEED_API_URL') ?? 'https://prime.sweedpos.com/api/',
     sweedAuthToken: readOptionalSecretEnv('SWEED_AUTH_TOKEN', {
       defaultFilePaths: SWEED_AUTH_TOKEN_SECRET_FILE_PATHS,
@@ -100,13 +82,6 @@ export function getWorkerEnv(): WorkerEnv {
     sweedRequestTimeoutMs: readNumberEnv('SWEED_REQUEST_TIMEOUT_MS', 30000),
     sweedStateDealerId: readNumberEnv('SWEED_STATE_DEALER_ID', 210248),
     workerMaxAttempts: readNumberEnv('WORKER_MAX_ATTEMPTS', 5),
-    // Default raised from 2 → 8 once Sweed jobs stopped being
-    // serialized through `concurrency_key='sweed-session'`. With
-    // every Sweed job claiming its own exclusive pool row (see
-    // worker/sweed/activeSessionToken.ts), per-process concurrency
-    // is naturally bounded by pool size — extra leases that can't
-    // claim a token defer themselves via DependencyUnavailableWorkerError.
-    workerMaxConcurrentJobs: readNumberEnv('WORKER_MAX_CONCURRENT_JOBS', 8),
     workerPool: readWorkerPoolEnv(),
     workerRetryBaseDelayMs: readNumberEnv('WORKER_RETRY_BASE_DELAY_MS', 5000),
   }

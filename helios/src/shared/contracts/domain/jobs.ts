@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { JOB_PRIORITY_LIVE_REQUESTED, JOB_PRIORITY_URGENT } from './jobScheduling.js'
 
 import {
   FORCE_WITHOUT_REVIEW_APPROVAL,
@@ -153,8 +154,8 @@ export interface JobPriorityBandDefinition {
  * desc`, so this matches the order rows actually come out.
  */
 export const JOB_PRIORITY_BANDS: readonly JobPriorityBandDefinition[] = [
-  { code: 'urgent', label: 'Urgent', minPriority: 1000, sortOrder: 1, warnAfterSeconds: 15, dangerAfterSeconds: 60 },
-  { code: 'live_requested', label: 'Live requested', minPriority: 500, sortOrder: 2, warnAfterSeconds: 60, dangerAfterSeconds: 300 },
+  { code: 'urgent', label: 'Urgent', minPriority: JOB_PRIORITY_URGENT, sortOrder: 1, warnAfterSeconds: 15, dangerAfterSeconds: 60 },
+  { code: 'live_requested', label: 'Live requested', minPriority: JOB_PRIORITY_LIVE_REQUESTED, sortOrder: 2, warnAfterSeconds: 60, dangerAfterSeconds: 300 },
   { code: 'interactive', label: 'Interactive', minPriority: 100, sortOrder: 3, warnAfterSeconds: 120, dangerAfterSeconds: 600 },
   { code: 'backfill', label: 'Backfill', minPriority: 10, sortOrder: 4, warnAfterSeconds: 30 * 60, dangerAfterSeconds: 2 * 60 * 60 },
   { code: 'best_effort', label: 'Best effort', minPriority: 0, sortOrder: 5, warnAfterSeconds: 60 * 60, dangerAfterSeconds: 6 * 60 * 60 },

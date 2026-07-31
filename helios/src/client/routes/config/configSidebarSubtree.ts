@@ -48,6 +48,12 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
       to: buildHeliosModulePath('config', 'workers'),
       children: [
         {
+          kind: 'leaf',
+          navKey: 'config.workers.capacity',
+          label: 'Capacity',
+          to: buildHeliosModulePath('config', 'workers/capacity'),
+        },
+        {
           kind: 'branch',
           navKey: 'config.workers.scheduling',
           label: 'Scheduling',

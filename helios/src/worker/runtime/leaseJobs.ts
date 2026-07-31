@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
 
-import type { QueryResultRow } from 'pg'
+import type { Pool, QueryResultRow } from 'pg'
 
 import type { JobStatusResponse } from '../../shared/contracts/api/jobs.js'
 import type { JobType } from '../../shared/contracts/domain/jobs.js'
+import { JOB_PRIORITY_LIVE_REQUESTED, JOB_PRIORITY_URGENT, SCHEDULING_CANCELLATION_MARKER } from '../../shared/contracts/index.js'
 import { attachPoolClientErrorLogger, getPool } from '../../server/db/pool.js'
+import { lockWorkerCapacityConfig } from '../../server/db/queries/workerCapacityQueries.js'
 
 interface LeasedJobRow extends QueryResultRow {
   attempt_count: number
@@ -69,46 +71,48 @@ export interface LeaseJobsOptions {
    * `sweed-session` job.
    */
   jobTypes?: JobType[]
-  /**
-   * If provided, restrict leasing to jobs with `priority >= minPriority`.
-   * Used by the high-priority fast-lane loop (see
-   * `runWorkerLoop`) so that the dedicated 10-second fast scan never
-   * leases background backlog. Live-interactive / operator-flagged
-   * work (default `JOB_PRIORITY_HIGH = 100`) always wins the
-   * fast-lane slot even when the main 3-second loop is fully
-   * occupied by long-running background jobs.
-   */
-  minPriority?: number
+}
+
+export interface LeaseJobsDependencies {
+  pool?: Pick<Pool, 'connect'>
 }
 
 export const EXPIRED_LEASE_SWEEP_SQL = `
+  with changed as (
   update job_queue
-  set status = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then 'failed' else 'queued' end,
+  set status = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' or job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then 'failed' else 'queued' end,
       lease_token = null,
       leased_until = null,
-      started_at = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then started_at else null end,
-      finished_at = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then coalesce(finished_at, now()) else null end,
+      started_at = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' or job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then started_at else null end,
+      finished_at = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' or job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples') then coalesce(finished_at, now()) else null end,
       run_at = now(),
-      last_error = case when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples')
+      last_error = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then last_error
+        when job_type in ('catalog.inventory.stage_trade_samples','catalog.inventory.zero_trade_samples')
         then 'Destructive trade-sample job lease expired; inspect Sweed. It will not retry automatically.'
         else 'Worker lease expired before job completion; retrying.' end,
       updated_at = now()
   where status = 'running'
     and leased_until is not null
     and leased_until < now()
+  returning 1
+  )
+  select pg_notify('helios_job_queue', '')
+  where exists (select 1 from changed)
 `
 
-export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): Promise<LeasedJob[]> {
+export async function leaseJobs(
+  options: LeaseJobsOptions = {},
+  injected: LeaseJobsDependencies = {},
+): Promise<LeasedJob[]> {
   const leaseToken = randomUUID()
-  const pool = getPool()
+  const pool = injected.pool ?? getPool()
   const client = await pool.connect()
   const removeErrorLogger = attachPoolClientErrorLogger(client, 'leaseJobs')
 
   const jobTypeFilter = options.jobTypes && options.jobTypes.length > 0 ? options.jobTypes : null
-  const minPriority = typeof options.minPriority === 'number' ? options.minPriority : null
-
   try {
     await client.query('begin')
+    const capacity = (await lockWorkerCapacityConfig(client)).config
     // Gated expired-lease sweep — see the EXPIRED_LEASE_SWEEP_*
     // block at module top for the why. We do the time check
     // inside the transaction so two concurrent worker processes
@@ -123,7 +127,12 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
 
     const leaseResult = await client.query<LeasedJobRow>(
       `
-        with runnable as (
+        with running_counts as (
+          select count(*)::integer as total,
+                 count(*) filter (where priority < $4)::integer as below_urgent,
+                 count(*) filter (where priority < $3)::integer as general
+          from job_queue where status = 'running'
+        ), runnable as materialized (
           select
             jq.id,
             jq.priority,
@@ -149,24 +158,31 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
               )
             )
         ),
-        candidates as (
-          select jq.id
+        ranked as (
+          select jq.id, jq.priority,
+                 count(*) filter (where jq.priority < $3) over (order by jq.priority desc, jq.run_at, jq.id)::integer as general_rank,
+                 count(*) filter (where jq.priority < $4) over (order by jq.priority desc, jq.run_at, jq.id)::integer as below_urgent_rank,
+                 row_number() over (order by jq.priority desc, jq.run_at, jq.id)::integer as total_rank
           from job_queue jq
           inner join runnable on runnable.id = jq.id
           where jq.status = 'queued'
             and runnable.concurrency_rank = 1
-            and ($3::text[] is null or jq.job_type = any($3::text[]))
-            and ($4::integer is null or jq.priority >= $4::integer)
-          -- Lease ordering: high-priority jobs (operator-initiated) come
-          -- out before background-priority backlog regardless of age. Ties
-          -- break by run_at (oldest first) then id for determinism.
+            and ($2::text[] is null or jq.job_type = any($2::text[]))
           order by jq.priority desc, jq.run_at asc, jq.id asc
-          for update skip locked
-          limit $1
+        ), candidates as (
+          select jq.id
+          from ranked
+          inner join job_queue jq on jq.id = ranked.id
+          cross join running_counts
+          where running_counts.total + ranked.total_rank <= $7
+            and (ranked.priority >= $4 or running_counts.below_urgent + ranked.below_urgent_rank <= $6)
+            and (ranked.priority >= $3 or running_counts.general + ranked.general_rank <= $5)
+          order by ranked.priority desc, ranked.id
+          for update of jq skip locked
         )
         update job_queue jq
         set status = 'running',
-            lease_token = $2,
+            lease_token = $1,
             leased_until = now() + interval '5 minutes',
             started_at = now(),
             attempt_count = jq.attempt_count + 1,
@@ -176,7 +192,10 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
         where jq.id = candidates.id
         returning jq.id, jq.job_type, jq.module_code, jq.scope_entity_type, jq.scope_entity_id, jq.payload_json, jq.attempt_count
       `,
-      [limit, leaseToken, jobTypeFilter, minPriority],
+      [leaseToken, jobTypeFilter, JOB_PRIORITY_LIVE_REQUESTED, JOB_PRIORITY_URGENT,
+        capacity.generalSlots,
+        capacity.generalSlots + capacity.liveRequestedReservedSlots,
+        capacity.generalSlots + capacity.liveRequestedReservedSlots + capacity.urgentReservedSlots],
     )
     await client.query('commit')
 

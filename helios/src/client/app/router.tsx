@@ -59,6 +59,7 @@ import {
   configParsingPendingPurchasesLoader,
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
+import { ConfigWorkerCapacityPage, configWorkerCapacityLoader } from '../routes/config/ConfigWorkerCapacityPage.js'
 import { AgentWasteReviewPage } from '../routes/config/AgentWasteReviewPage.js'
 import {
   PendingMigrationDetailsPage,
@@ -582,6 +583,11 @@ export const router = createBrowserRouter([
       {
         element: <ConfigWorkersPage />,
         path: 'config/workers',
+      },
+      {
+        element: <ConfigWorkerCapacityPage />,
+        loader: configWorkerCapacityLoader,
+        path: 'config/workers/capacity',
       },
       {
         // Admin-gated agent-waste review queue (issue #57). Route-level

@@ -4,6 +4,7 @@ import type { QueryResultRow } from 'pg'
 import type { FastifyInstance } from 'fastify'
 
 import {
+  schedulingCancellationError,
   MutationAcceptedResponseSchema,
   QueueSchedulingCandidateGenerationAcceptedResponseSchema,
   QueueSchedulingCandidateGenerationRequestSchema,
@@ -21,6 +22,7 @@ import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import { withTransaction } from '../db/tx.js'
+import { notifyJobQueueEnqueued } from '../db/notify.js'
 import { listSchedulingRuns, getSchedulingRunDetail } from '../db/queries/schedulingQueries.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
 
@@ -350,15 +352,15 @@ export async function registerSchedulingRoutes(server: FastifyInstance): Promise
         throw new Error('Only queued, extracting, or generating scheduling runs can be cancelled.')
       }
 
-      const cancellationMessage = `Cancelled by ${user.name ?? 'operator'} from the scheduling run detail page.`
+      const cancellationMessage = schedulingCancellationError(`Cancelled by ${user.name ?? 'operator'} from the scheduling run detail page.`)
 
       const cancelledJobsResult = await db.query<CancelledJobRow>(
         `
           update job_queue
-          set status = 'failed',
-              lease_token = null,
-              leased_until = null,
-              finished_at = now(),
+          set status = case when status = 'queued' then 'failed' else status end,
+              lease_token = case when status = 'queued' then null else lease_token end,
+              leased_until = case when status = 'queued' then null else leased_until end,
+              finished_at = case when status = 'queued' then now() else finished_at end,
               last_error = $2,
               updated_at = now()
           where scope_entity_type = 'scheduling_run'
@@ -402,6 +404,7 @@ export async function registerSchedulingRoutes(server: FastifyInstance): Promise
         },
         undoPayload: null,
       })
+      await notifyJobQueueEnqueued(db)
 
       return { auditEventId }
     })

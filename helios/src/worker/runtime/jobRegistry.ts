@@ -98,7 +98,8 @@ import { runConfigWorkersRefreshSweedCustomerSegmentsJob } from '../jobs/refresh
 import { runConfigWorkersRefreshSweedSegmentMembersJob } from '../jobs/refreshSweedSegmentMembersJob.js'
 import { runConfigWorkersGeoSegmentRuleEvalJob } from '../jobs/geoSegmentRuleEvalJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
-import { getPool } from '../../server/db/pool.js'
+import { getPool, type Queryable } from '../../server/db/pool.js'
+import { SCHEDULING_CANCELLATION_MARKER } from '../../shared/contracts/index.js'
 import {
   markStaffDirectoryRefreshSucceeded,
   upsertStaffDirectoryCache,
@@ -482,16 +483,17 @@ export async function runJob(context: JobHandlerContext): Promise<void> {
   })
 }
 
-export async function markJobSucceeded(jobId: number, leaseToken: string): Promise<void> {
-  await getPool().query(
+export async function markJobSucceeded(jobId: number, leaseToken: string, db: Queryable = getPool()): Promise<void> {
+  await db.query(
     `
-      update job_queue
-      set status = 'succeeded',
+      with changed as (update job_queue
+      set status = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then 'failed' else 'succeeded' end,
           lease_token = null,
           leased_until = null,
           finished_at = now(),
           updated_at = now()
       where id = $1 and lease_token = $2
+      returning 1) select pg_notify('helios_job_queue', '') from changed
     `,
     [jobId, leaseToken],
   )
@@ -511,17 +513,18 @@ export async function renewJobLease(jobId: number, leaseToken: string): Promise<
   )
 }
 
-export async function markJobFailed(jobId: number, leaseToken: string, errorMessage: string): Promise<void> {
-  await getPool().query(
+export async function markJobFailed(jobId: number, leaseToken: string, errorMessage: string, db: Queryable = getPool()): Promise<void> {
+  await db.query(
     `
-      update job_queue
+      with changed as (update job_queue
       set status = 'failed',
           lease_token = null,
           leased_until = null,
           finished_at = now(),
-          last_error = $3,
+          last_error = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then last_error else $3 end,
           updated_at = now()
       where id = $1 and lease_token = $2
+      returning 1) select pg_notify('helios_job_queue', '') from changed
     `,
     [jobId, leaseToken, errorMessage],
   )
@@ -532,19 +535,21 @@ export async function markJobForRetry(
   leaseToken: string,
   errorMessage: string,
   retryAt: Date,
+  db: Queryable = getPool(),
 ): Promise<void> {
-  await getPool().query(
+  await db.query(
     `
-      update job_queue
-      set status = 'queued',
+      with changed as (update job_queue
+      set status = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then 'failed' else 'queued' end,
           lease_token = null,
           leased_until = null,
-          started_at = null,
-          finished_at = null,
+          started_at = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then started_at else null end,
+          finished_at = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then now() else null end,
           run_at = $3,
-          last_error = $4,
+          last_error = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then last_error else $4 end,
           updated_at = now()
       where id = $1 and lease_token = $2
+      returning 1) select pg_notify('helios_job_queue', '') from changed
     `,
     [jobId, leaseToken, retryAt, errorMessage],
   )
@@ -555,36 +560,39 @@ export async function markJobDeferred(
   leaseToken: string,
   errorMessage: string,
   retryAt: Date,
+  db: Queryable = getPool(),
 ): Promise<void> {
-  await getPool().query(
+  await db.query(
     `
-      update job_queue
-      set status = 'queued',
+      with changed as (update job_queue
+      set status = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then 'failed' else 'queued' end,
           lease_token = null,
           leased_until = null,
-          started_at = null,
-          finished_at = null,
+          started_at = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then started_at else null end,
+          finished_at = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then now() else null end,
           run_at = $3,
-          last_error = $4,
-          attempt_count = greatest(job_queue.attempt_count - 1, 0),
+          last_error = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then last_error else $4 end,
+          attempt_count = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then attempt_count else greatest(job_queue.attempt_count - 1, 0) end,
           updated_at = now()
       where id = $1 and lease_token = $2
+      returning 1) select pg_notify('helios_job_queue', '') from changed
     `,
     [jobId, leaseToken, retryAt, errorMessage],
   )
 }
 
-export async function markJobDeadLetter(jobId: number, leaseToken: string, errorMessage: string): Promise<void> {
-  await getPool().query(
+export async function markJobDeadLetter(jobId: number, leaseToken: string, errorMessage: string, db: Queryable = getPool()): Promise<void> {
+  await db.query(
     `
-      update job_queue
-      set status = 'dead_letter',
+      with changed as (update job_queue
+      set status = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then 'failed' else 'dead_letter' end,
           lease_token = null,
           leased_until = null,
           finished_at = now(),
-          last_error = $3,
+          last_error = case when last_error like '${SCHEDULING_CANCELLATION_MARKER}%' then last_error else $3 end,
           updated_at = now()
       where id = $1 and lease_token = $2
+      returning 1) select pg_notify('helios_job_queue', '') from changed
     `,
     [jobId, leaseToken, errorMessage],
   )

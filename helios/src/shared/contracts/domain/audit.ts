@@ -105,6 +105,7 @@ export const AuditEventTypeSchema = z.enum([
   'catalog.annotation.retracted',
   'catalog.warehouse_location.assigned',
   'config.workers.schedule_updated',
+  'config.workers.capacity_updated',
   'config.workers.stock_refresh.requested',
   'config.workers.stock_refresh.completed',
   'config.workers.litalerts_refresh.requested',

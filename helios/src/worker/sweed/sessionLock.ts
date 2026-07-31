@@ -3,8 +3,8 @@
  * the server-side dealer context (the per-auth-token dealer that
  * Sweed remembers between `store.auth.dealer.set` calls).
  *
- * Helios runs multiple worker jobs concurrently (default
- * WORKER_MAX_CONCURRENT_JOBS=2). All jobs share a single
+ * Helios runs multiple worker jobs concurrently under the database-backed
+ * worker capacity policy. All jobs share a single
  * SWEED_AUTH_TOKEN and therefore a single server-side dealer
  * context. Without this lock, job A can call
  * `store.auth.dealer.set(midtownSite)` followed by job B calling

@@ -1,6 +1,8 @@
 import type { QueryResultRow } from 'pg'
 
 import {
+  JOB_PRIORITY_LIVE_REQUESTED,
+  JOB_PRIORITY_URGENT,
   parseCatalogGroupIdFromModuleScope,
   type HeliosModuleCode,
   type HeliosModuleScope,
@@ -80,18 +82,15 @@ export interface EnqueueJobInput {
  *   maintenance click queued a few minutes ago. Stays below
  *   `URGENT` so the fast-lane is reserved for true incidents.
  * - `JOB_PRIORITY_URGENT` (1000) — operator-flagged "must start
- *   immediately" work. The worker process runs a dedicated
- *   fast-lane loop (see `runWorkerLoop`) that polls every
- *   `WORKER_FASTLANE_POLL_INTERVAL_MS` (default 10 seconds) and
- *   leases only jobs at or above this priority, so urgent work
- *   never gets stuck behind a fully-occupied main loop.
+ *   immediately" work. The database-backed capacity policy reserves
+ *   an urgent-only slot, so urgent work never gets stuck behind lower
+ *   priority jobs.
  */
 export const JOB_PRIORITY_BEST_EFFORT = 0
 export const JOB_PRIORITY_BACKFILL = 10
 export const JOB_PRIORITY_SCHEDULED_INGEST = 50
 export const JOB_PRIORITY_INTERACTIVE = 100
-export const JOB_PRIORITY_LIVE_REQUESTED = 500
-export const JOB_PRIORITY_URGENT = 1000
+export { JOB_PRIORITY_LIVE_REQUESTED, JOB_PRIORITY_URGENT }
 
 /**
  * Back-compat aliases. Existing call sites passed

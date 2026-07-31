@@ -18,7 +18,6 @@ vi.mock('../config/env.js', () => ({
     sweedRequestTimeoutMs: 500,
     sweedStateDealerId: 210248,
     workerMaxAttempts: 5,
-    workerMaxConcurrentJobs: 1,
     workerRetryBaseDelayMs: 1000,
   }),
 }))
