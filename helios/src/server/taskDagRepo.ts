@@ -1,47 +1,84 @@
-/**
- * Git-DAG Task Management - query layer.
- *
- * Builds an in-memory index of the task DAG by reading git refs +
- * commit graph out of the task-DAG git mirror (see taskDagMirror.ts).
- * The model matches the canonical `task-dag` CLI
- * (virusdave/top-level:scripts/task-dag):
- *
- *   - refs/heads/tasks/pending/<N>          epic per GitHub issue N
- *   - refs/heads/tasks/frontier/<short-sha> pickable leaf task
- *   - refs/heads/tasks/active/<short-sha>   in-flight CLAIM commit; its
- *                                           FIRST parent is the task it claims
- *   - refs/heads/tasks/blocked/<full-sha>   overlay: task is parked
- *   - task commits are empty-tree commits; FIRST parent = breakdown
- *     parent (epic/parent task), 2nd+ parents = dependencies.
- *   - a task is DONE when its sha appears as a non-first parent of a
- *     commit on master (a real impl commit landed with the task commit
- *     as a 2nd parent, trailer `Task-Commit: <sha>`).
- */
+/** Bounded task-dag v2 query adapter. Task semantics come only from the canonical CLI. */
 
-import { execFile, spawn } from 'node:child_process'
-import { promisify } from 'node:util'
+import { execFile } from 'node:child_process'
 import crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { promisify } from 'node:util'
+import { z } from 'zod'
 
 import { getTaskDagSources, getTaskDagSourceStatus, publicTaskDagError } from './taskDagMirror.js'
 import type { TaskDagSourceStatus } from './taskDagMirror.js'
 
 const execFileAsync = promisify(execFile)
+const COMMAND_TIMEOUT_MS = 10_000
+const COMMAND_MAX_BUFFER = 2 * 1024 * 1024
+const CONCURRENCY = 8
+const TASK_ID_PATTERN = /^v2-[0-9a-f]{64}$/
+const OID_PATTERN = /^[0-9a-f]{40}$/
+const STATES = ['frontier', 'active', 'blocked', 'waiting', 'done'] as const
+const ACTIVATION_REF = 'refs/heads/tasks/v2/activation'
+const JOURNAL_REF = 'refs/heads/tasks/system/transitions'
 
-const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
-const CACHE_TTL_MS = 30_000
-
+export type TaskState = typeof STATES[number]
 export type TaskStatus = 'pending' | 'in-progress' | 'blocked' | 'done'
 export type TaskType = 'epic' | 'task' | 'leaf'
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return true
+  if (Array.isArray(value)) return value.every(isJsonValue)
+  if (typeof value !== 'object') return false
+  return Object.values(value).every(isJsonValue)
+}
+const jsonSchema = z.custom<JsonValue>(isJsonValue, 'Expected a JSON value')
+const taskIdSchema = z.string().regex(TASK_ID_PATTERN)
+const oidSchema = z.string().regex(OID_PATTERN)
+const stateSchema = z.enum(STATES)
+const taskIdentitySchema = z.object({ taskId: taskIdSchema, taskOid: oidSchema }).strict()
+const taskSchema = z.object({
+  taskId: taskIdSchema,
+  title: z.string(),
+  description: z.string(),
+  structuralParent: taskIdentitySchema.nullable(),
+  requirements: z.array(taskIdentitySchema),
+})
+const contextSchema = z.object({
+  taskId: taskIdSchema,
+  taskOid: oidSchema,
+  state: stateSchema,
+  stateOid: oidSchema,
+  structuralParent: taskIdentitySchema.nullable(),
+  directRequirements: z.array(taskIdentitySchema),
+  directChildren: z.array(taskIdentitySchema),
+  task: taskSchema,
+}).strict()
+const showSchema = z.object({
+  taskId: taskIdSchema,
+  state: stateSchema,
+  ref: z.string(),
+  stateOid: oidSchema,
+  record: jsonSchema,
+}).strict()
 
 export interface TaskNode {
   repository: string
   githubRepository?: string
+  taskId: string
+  taskOid: string
+  stateOid: string
+  state: TaskState
+  title: string
+  description: string
+  structuralParent?: string
+  requirements: string[]
+  directChildren: string[]
+  lifecycleRecord: JsonValue
   sha: string
   shortSha: string
-  title: string
-  issueNumber?: number
   status: TaskStatus
   type: TaskType
+  issueNumber?: number
   author?: string
   parentTask?: string
   dependencies: string[]
@@ -51,26 +88,16 @@ export interface TaskNode {
   isFrontier: boolean
   isActive: boolean
   isBlocked: boolean
-  /** Frontier task with all dependencies complete (or no deps). */
   isReady: boolean
-  /** All dependencies are complete. */
   dependenciesMet: boolean
-  /** Impl commits on master that completed this task. */
   completedBy: string[]
-  /** Owning epic (root of the first-parent breakdown chain). */
   epicSha?: string
   epicIssueNumber?: number
   epicTitle?: string
-  /** GitHub issue / comment URL if present in metadata. */
   githubUrl?: string
 }
 
-export interface TaskEdge {
-  source: string
-  target: string
-  kind: 'breakdown' | 'dependency'
-}
-
+export interface TaskEdge { source: string; target: string; kind: 'breakdown' | 'dependency' }
 export interface EpicSummary {
   repository: string
   githubRepository?: string
@@ -88,73 +115,25 @@ export interface EpicSummary {
   completionPct: number
   totalTasks: number
 }
-
-export interface EpicsView {
-  source: TaskDagSourceStatus
-  epics: EpicSummary[]
-}
-
+export interface EpicsView { source: TaskDagSourceStatus; epics: EpicSummary[] }
 export interface DagResult {
   source: TaskDagSourceStatus
-  epic: {
-    repository: string
-    githubRepository?: string
-    sha: string
-    shortSha: string
-    issueNumber?: number
-    title: string
-    githubUrl?: string
-  }
+  epic: { repository: string; githubRepository?: string; sha: string; shortSha: string; issueNumber?: number; title: string; githubUrl?: string }
   nodes: TaskNode[]
   edges: TaskEdge[]
-  summary: {
-    totalTasks: number
-    statusCounts: Record<string, number>
-  }
+  summary: { totalTasks: number; statusCounts: Record<string, number> }
 }
-
 export interface FrontierGroup {
-  epic: {
-    repository: string
-    githubRepository?: string
-    sha: string
-    shortSha: string
-    issueNumber?: number
-    title: string
-    githubUrl?: string
-  } | null
-  counts: {
-    total: number
-    ready: number
-    active: number
-    blocked: number
-    done: number
-  }
+  epic: { repository: string; githubRepository?: string; sha: string; shortSha: string; issueNumber?: number; title: string; githubUrl?: string } | null
+  counts: { total: number; ready: number; active: number; blocked: number; done: number }
   tasks: TaskNode[]
 }
-
 export interface FrontierView {
   source: TaskDagSourceStatus
-  summary: {
-    totalFrontier: number
-    ready: number
-    active: number
-    blocked: number
-    done: number
-    epicCount: number
-  }
+  summary: { totalFrontier: number; ready: number; active: number; blocked: number; done: number; epicCount: number }
   groups: FrontierGroup[]
 }
-
-export interface TaskDetail {
-  source: TaskDagSourceStatus
-  task: TaskNode
-  parent: TaskNode | null
-  dependencies: TaskNode[]
-  dependents: TaskNode[]
-  children: TaskNode[]
-}
-
+export interface TaskDetail { source: TaskDagSourceStatus; task: TaskNode; parent: TaskNode | null; dependencies: TaskNode[]; dependents: TaskNode[]; children: TaskNode[] }
 export interface TaskIndex {
   nodes: Map<string, TaskNode>
   epicShas: string[]
@@ -164,7 +143,6 @@ export interface TaskIndex {
   builtAtMs: number
 }
 
-/** Thrown when no task-DAG git source is currently readable. */
 export class TaskDagUnavailableError extends Error {
   status: TaskDagSourceStatus
   constructor(status: TaskDagSourceStatus) {
@@ -173,7 +151,6 @@ export class TaskDagUnavailableError extends Error {
     this.status = status
   }
 }
-
 export class TaskDagRepositoryNotFoundError extends Error {
   constructor(repository: string) {
     super(`Task repository not found: ${repository}`)
@@ -181,932 +158,324 @@ export class TaskDagRepositoryNotFoundError extends Error {
   }
 }
 
+type CanonicalCommand = 'context' | 'show'
+type CanonicalRunner = (
+  gitDir: string,
+  originUrl: string,
+  command: CanonicalCommand,
+  taskId: string,
+) => Promise<unknown>
+let testRunner: CanonicalRunner | undefined
 const cachedIndexes = new Map<string, TaskIndex>()
 
-/** Test-only: drop the cached index so a fresh repo is re-read. */
-export function __resetTaskIndexCacheForTests(): void {
-  cachedIndexes.clear()
-}
-
-// --- git helpers -----------------------------------------------------------
+export function __setTaskDagRunnerForTests(runner?: CanonicalRunner): void { testRunner = runner }
+export function __resetTaskIndexCacheForTests(): void { cachedIndexes.clear(); testRunner = undefined }
 
 function requireSource(repository: string) {
   const source = getTaskDagSources().find((candidate) => candidate.repository === repository)
   if (!source) throw new TaskDagRepositoryNotFoundError(repository)
-  if (!source.gitDir) {
-    throw new TaskDagUnavailableError(getTaskDagSourceStatus())
-  }
+  if (!source.gitDir) throw new TaskDagUnavailableError(getTaskDagSourceStatus())
   return { ...source, gitDir: source.gitDir }
 }
 
 async function git(dir: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, {
     cwd: dir,
-    maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: COMMAND_MAX_BUFFER,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' },
   })
   return stdout.trim()
 }
 
-interface RawCommit {
-  type: string
-  tree: string
-  parents: string[]
-  message: string
+function canonicalBinary(): string {
+  const binary = process.env.HELIOS_TASK_DAG_BIN
+  if (!binary || !path.isAbsolute(binary)) throw new Error('HELIOS_TASK_DAG_BIN must be an absolute file path')
+  let stat: fs.Stats
+  try { stat = fs.statSync(binary) } catch { throw new Error('HELIOS_TASK_DAG_BIN must name an existing file') }
+  if (!stat.isFile()) throw new Error('HELIOS_TASK_DAG_BIN must name a file')
+  try { fs.accessSync(binary, fs.constants.X_OK) } catch { throw new Error('HELIOS_TASK_DAG_BIN must be executable') }
+  return binary
 }
 
-/**
- * Batch-resolve commit objects via `git cat-file --batch`. Returns a map
- * sha -> parsed commit (or null when missing). One subprocess for the
- * whole set keeps this O(1) in process spawns.
- */
-function gitCatBatch(dir: string, shas: string[]): Promise<Map<string, RawCommit | null>> {
-  return new Promise((resolve, reject) => {
-    const result = new Map<string, RawCommit | null>()
-    if (shas.length === 0) {
-      resolve(result)
-      return
-    }
-    const child = spawn('git', ['cat-file', '--batch'], {
-      cwd: dir,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    })
-    const chunks: Buffer[] = []
-    const errChunks: Buffer[] = []
-    child.stdout.on('data', (d: Buffer) => chunks.push(d))
-    child.stderr.on('data', (d: Buffer) => errChunks.push(d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`git cat-file exited ${code}: ${Buffer.concat(errChunks).toString()}`))
-        return
-      }
-      try {
-        parseCatBatch(Buffer.concat(chunks), result)
-        resolve(result)
-      } catch (err) {
-        reject(err)
-      }
-    })
-    child.stdin.write(shas.join('\n') + '\n')
-    child.stdin.end()
-  })
-}
-
-function parseCatBatch(buf: Buffer, out: Map<string, RawCommit | null>): void {
-  let off = 0
-  while (off < buf.length) {
-    const nl = buf.indexOf(0x0a, off)
-    if (nl < 0) break
-    const header = buf.toString('utf8', off, nl)
-    off = nl + 1
-    const parts = header.split(' ')
-    const oid = parts[0]
-    if (parts[1] === 'missing') {
-      out.set(oid, null)
-      continue
-    }
-    const type = parts[1]
-    const size = parseInt(parts[2] ?? '0', 10)
-    const body = buf.toString('utf8', off, off + size)
-    off += size + 1 // skip trailing newline after object content
-    if (type !== 'commit') {
-      out.set(oid, { type, tree: '', parents: [], message: '' })
-      continue
-    }
-    out.set(oid, parseCommitObject(type, body))
-  }
-}
-
-function parseCommitObject(type: string, body: string): RawCommit {
-  const headerEnd = body.indexOf('\n\n')
-  const headerBlock = headerEnd >= 0 ? body.slice(0, headerEnd) : body
-  const message = headerEnd >= 0 ? body.slice(headerEnd + 2) : ''
-  let tree = ''
-  const parents: string[] = []
-  for (const line of headerBlock.split('\n')) {
-    if (line.startsWith('tree ')) tree = line.slice(5).trim()
-    else if (line.startsWith('parent ')) parents.push(line.slice(7).trim())
-  }
-  return { type, tree, parents, message }
-}
-
-// --- metadata parsing ------------------------------------------------------
-
-function extractHeaderField(message: string, field: string): string | undefined {
-  const m = message.match(new RegExp(`^${field}:\\s*(.+)$`, 'm'))
-  return m?.[1]?.trim()
-}
-
-/** Extract `key:` then a nested `child:` value from YAML-ish metadata. */
-function extractYamlNested(message: string, parent: string, child: string): string | undefined {
-  const lines = message.split('\n')
-  let inBlock = false
-  for (const line of lines) {
-    if (new RegExp(`^${parent}:\\s*$`).test(line)) {
-      inBlock = true
-      continue
-    }
-    if (inBlock) {
-      if (/^[^\s]/.test(line)) inBlock = false
-      const m = line.match(new RegExp(`^\\s+${child}:\\s*(.+)$`))
-      if (m) return m[1].trim()
-    }
-  }
-  return undefined
-}
-
-function parseIssueNumber(message: string): number | undefined {
-  const header = extractHeaderField(message, 'Issue')
-  if (header) {
-    const n = parseInt(header.replace(/^#/, ''), 10)
-    if (Number.isFinite(n)) return n
-  }
-  const yaml = extractYamlNested(message, 'issue', 'number')
-  if (yaml) {
-    const n = parseInt(yaml.replace(/^#/, ''), 10)
-    if (Number.isFinite(n)) return n
-  }
-  return undefined
-}
-
-function parseGithubUrl(message: string): string | undefined {
-  return (
-    extractHeaderField(message, 'URL') ??
-    extractYamlNested(message, 'github', 'url') ??
-    extractYamlNested(message, 'issue', 'url')
-  )
-}
-
-function isTaskStatus(v: string | undefined): v is TaskStatus {
-  return v === 'pending' || v === 'in-progress' || v === 'blocked' || v === 'done'
-}
-
-/**
- * First non-empty line of a YAML `body: |` block scalar (used by the
- * comment-sync `ingest-comment` format), with leading markdown heading /
- * quote markers stripped. Returns undefined when there is no body block.
- */
-function extractYamlBodyFirstLine(message: string): string | undefined {
-  const lines = message.split('\n')
-  let i = lines.findIndex((l) => /^body:\s*\|?\s*$/.test(l))
-  if (i < 0) return undefined
-  for (i = i + 1; i < lines.length; i++) {
-    const line = lines[i]
-    if (line.trim() === '') continue
-    if (!/^\s/.test(line)) break // dedent: body block ended
-    return line.replace(/^\s+/, '').replace(/^[#>\s]+/, '').trim() || undefined
-  }
-  return undefined
-}
-
-/** True when this commit message is the YAML comment-sync format. */
-function isYamlFormat(message: string): boolean {
-  return /^kind:\s*\w+/m.test(message)
-}
-
-function detectDeclaredEpic(message: string): boolean {
-  return (
-    extractHeaderField(message, 'Type') === 'epic' || extractHeaderField(message, 'kind') === 'epic'
-  )
-}
-
-function parseTitle(message: string, isEpic: boolean): string {
-  const first = (message.split('\n')[0] ?? '').trim()
-
-  // Header format: "Task: <title>".
-  if (first.startsWith('Task:')) {
-    const t = first.replace(/^Task:\s*/, '').trim()
-    if (t) return t
-  }
-
-  // YAML format: epics carry a clean issue.title; messages put the human
-  // text in a body block.
-  if (isYamlFormat(message)) {
-    if (isEpic) {
-      const issueTitle = extractYamlNested(message, 'issue', 'title')
-      if (issueTitle) return issueTitle
-    }
-    const bodyLine = extractYamlBodyFirstLine(message)
-    if (bodyLine) return bodyLine
-    const intent = extractHeaderField(message, 'intent')
-    return intent ? `(${intent})` : 'Untitled task'
-  }
-
-  // Plain commit: first non-metadata line.
-  if (first && !first.includes(':')) return first
-  return first || 'Untitled task'
-}
-
-// --- index build -----------------------------------------------------------
-
-async function resolveMasterRef(dir: string): Promise<string | null> {
-  for (const ref of ['refs/heads/master', 'refs/remotes/origin/master', 'HEAD']) {
-    try {
-      await git(dir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
-      return ref
-    } catch {
-      // try next
-    }
-  }
-  return null
-}
-
-/** Map: task sha -> impl commit shas on master that completed it. */
-async function buildCompletionMap(dir: string, masterRef: string): Promise<Map<string, string[]>> {
-  const map = new Map<string, string[]>()
-  const out = await git(dir, ['rev-list', '--parents', masterRef])
-  for (const line of out.split('\n')) {
-    if (!line) continue
-    const parts = line.split(' ')
-    const commit = parts[0]
-    for (let i = 2; i < parts.length; i++) {
-      const taskSha = parts[i]
-      const arr = map.get(taskSha)
-      if (arr) arr.push(commit)
-      else map.set(taskSha, [commit])
-    }
-  }
-  return map
-}
-
-interface RefSets {
-  fingerprint: string
-  epicByIssue: Map<number, string>
-  epicShas: Set<string>
-  epicRefBySha: Map<string, string>
-  frontierShas: Set<string>
-  activeClaimShas: string[]
-  blockedShas: Set<string>
-  refsBySha: Map<string, string[]>
-}
-
-async function readRefs(dir: string): Promise<RefSets> {
-  const raw = await git(dir, [
-    'for-each-ref',
-    'refs/heads/tasks/',
-    '--format=%(objectname) %(refname:short)',
-  ])
-  const fingerprint = crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16)
-
-  const epicByIssue = new Map<number, string>()
-  const epicShas = new Set<string>()
-  const epicRefBySha = new Map<string, string>()
-  const frontierShas = new Set<string>()
-  const activeClaimShas: string[] = []
-  const blockedShas = new Set<string>()
-  const refsBySha = new Map<string, string[]>()
-
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    const sp = line.indexOf(' ')
-    const sha = line.slice(0, sp)
-    const ref = line.slice(sp + 1)
-    const list = refsBySha.get(sha)
-    if (list) list.push(ref)
-    else refsBySha.set(sha, [ref])
-
-    if (ref.startsWith('tasks/pending/')) {
-      epicShas.add(sha)
-      epicRefBySha.set(sha, ref)
-      const n = parseInt(ref.slice('tasks/pending/'.length), 10)
-      if (Number.isFinite(n)) epicByIssue.set(n, sha)
-    } else if (ref.startsWith('tasks/frontier/')) {
-      frontierShas.add(sha)
-    } else if (ref.startsWith('tasks/active/')) {
-      activeClaimShas.push(sha)
-    } else if (ref.startsWith('tasks/blocked/')) {
-      blockedShas.add(sha)
-    }
-  }
-
+function localOnlyGitEnvironment(gitDir: string, originUrl: string): NodeJS.ProcessEnv {
+  const existing = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? '0', 10)
+  if (!Number.isSafeInteger(existing) || existing < 0) throw new Error('GIT_CONFIG_COUNT must be a non-negative integer')
   return {
-    fingerprint,
-    epicByIssue,
-    epicShas,
-    epicRefBySha,
-    frontierShas,
-    activeClaimShas,
-    blockedShas,
-    refsBySha,
+    ...process.env,
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_COUNT: String(existing + 1),
+    [`GIT_CONFIG_KEY_${existing}`]: `url.${gitDir}.insteadOf`,
+    [`GIT_CONFIG_VALUE_${existing}`]: originUrl,
   }
+}
+
+async function runCanonical(
+  gitDir: string,
+  originUrl: string,
+  command: CanonicalCommand,
+  taskId: string,
+): Promise<unknown> {
+  if (testRunner) return testRunner(gitDir, originUrl, command, taskId)
+  const { stdout } = await execFileAsync(canonicalBinary(), [command, taskId], {
+    cwd: gitDir,
+    timeout: COMMAND_TIMEOUT_MS,
+    maxBuffer: COMMAND_MAX_BUFFER,
+    env: localOnlyGitEnvironment(gitDir, originUrl),
+  })
+  return JSON.parse(stdout)
+}
+
+interface LifecycleRef { taskId: string; state: TaskState; ref: string; oid: string }
+interface RefCapture { fingerprint: string; lifecycle: LifecycleRef[] }
+
+async function captureRefs(gitDir: string): Promise<RefCapture> {
+  const raw = await git(gitDir, ['for-each-ref', '--format=%(refname) %(objectname)',
+    'refs/heads/tasks/frontier/', 'refs/heads/tasks/active/', 'refs/heads/tasks/blocked/',
+    'refs/heads/tasks/waiting/', 'refs/heads/tasks/done/', ACTIVATION_REF, JOURNAL_REF])
+  const relevant = raw ? raw.split('\n').sort() : []
+  if (!relevant.some((line) => line.startsWith(`${ACTIVATION_REF} `))) {
+    throw new Error('Task repository has no canonical v2 activation ref')
+  }
+  if (!relevant.some((line) => line.startsWith(`${JOURNAL_REF} `))) {
+    throw new Error('Task repository has no canonical v2 transition journal')
+  }
+  const lifecycle: LifecycleRef[] = []
+  const seen = new Map<string, TaskState>()
+  for (const line of relevant) {
+    const match = line.match(/^refs\/heads\/tasks\/(frontier|active|blocked|waiting|done)\/(v2-[0-9a-f]{64}) ([0-9a-f]{40,64})$/)
+    if (!match) continue
+    const state = stateSchema.parse(match[1])
+    const taskId = taskIdSchema.parse(match[2])
+    const prior = seen.get(taskId)
+    if (prior) throw new Error(`Task ${taskId} appears in both ${prior} and ${state} lifecycle namespaces`)
+    seen.set(taskId, state)
+    lifecycle.push({ taskId, state, ref: `refs/heads/tasks/${state}/${taskId}`, oid: match[3] })
+  }
+  if (lifecycle.length === 0) throw new Error('No grammatical task-dag v2 lifecycle refs found; refusing v1-only repository')
+  return { fingerprint: crypto.createHash('sha256').update(relevant.join('\n')).digest('hex'), lifecycle }
+}
+
+async function mapBounded<T, R>(values: T[], fn: (value: T) => Promise<R>): Promise<R[]> {
+  const output = new Array<R>(values.length)
+  let cursor = 0
+  async function worker(): Promise<void> {
+    while (cursor < values.length) {
+      const index = cursor++
+      output[index] = await fn(values[index])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, values.length) }, () => worker()))
+  return output
+}
+
+function legacyStatus(state: TaskState): TaskStatus {
+  if (state === 'active') return 'in-progress'
+  if (state === 'blocked' || state === 'waiting') return 'blocked'
+  if (state === 'done') return 'done'
+  return 'pending'
 }
 
 export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
   const source = requireSource(repository)
-  const dir = source.gitDir
-  const refs = await readRefs(dir)
-  const masterRef = await resolveMasterRef(dir)
-  const masterSha = masterRef ? await git(dir, ['rev-parse', masterRef]) : 'none'
-  const fingerprint = `${refs.fingerprint}:${masterSha.slice(0, 12)}`
+  const originUrl = await git(source.gitDir, ['remote', 'get-url', 'origin'])
+  if (!originUrl) throw new Error(`Task repository ${repository} has no origin URL to isolate`)
+  const start = await captureRefs(source.gitDir)
+  const cached = cachedIndexes.get(repository)
+  if (cached?.fingerprint === start.fingerprint) return cached
 
-  if (
-    cachedIndexes.get(repository)?.fingerprint === fingerprint &&
-    Date.now() - (cachedIndexes.get(repository)?.builtAtMs ?? 0) < CACHE_TTL_MS
-  ) {
-    return cachedIndexes.get(repository) as TaskIndex
-  }
-
-  const completion = masterRef ? await buildCompletionMap(dir, masterRef) : new Map<string, string[]>()
-
-  // Resolve active claim commits -> the task sha they claim (first parent).
-  const activeTaskShas = new Set<string>()
-  if (refs.activeClaimShas.length > 0) {
-    const claims = await gitCatBatch(dir, refs.activeClaimShas)
-    for (const claim of claims.values()) {
-      if (claim && claim.parents.length > 0) activeTaskShas.add(claim.parents[0])
+  const records = await mapBounded(start.lifecycle, async (lifecycle) => {
+    const [contextRaw, showRaw] = await Promise.all([
+      runCanonical(source.gitDir, originUrl, 'context', lifecycle.taskId),
+      runCanonical(source.gitDir, originUrl, 'show', lifecycle.taskId),
+    ])
+    const context = contextSchema.parse(contextRaw)
+    const show = showSchema.parse(showRaw)
+    if (context.taskId !== lifecycle.taskId || context.task.taskId !== lifecycle.taskId || show.taskId !== lifecycle.taskId ||
+      context.state !== lifecycle.state || show.state !== lifecycle.state ||
+      context.stateOid !== lifecycle.oid || show.stateOid !== lifecycle.oid || show.ref !== lifecycle.ref) {
+      throw new Error(`Canonical task-dag output disagrees with lifecycle ref for ${lifecycle.taskId}`)
     }
-  }
-
-  // Seed the node closure from every known task root, then walk parents
-  // (breakdown + dependency) but only across empty-tree task commits so we
-  // never wander into master's real history.
-  const seeds = new Set<string>([
-    ...refs.epicShas,
-    ...refs.frontierShas,
-    ...refs.blockedShas,
-    ...activeTaskShas,
-    ...completion.keys(),
-  ])
-
-  const raw = new Map<string, RawCommit>()
-  let pending = [...seeds]
-  while (pending.length > 0) {
-    const batch = await gitCatBatch(dir, pending)
-    const next: string[] = []
-    for (const [sha, commit] of batch.entries()) {
-      if (!commit || commit.type !== 'commit') continue
-      if (commit.tree !== EMPTY_TREE) continue // real (impl) commit, not a task
-      if (raw.has(sha)) continue
-      raw.set(sha, commit)
-      for (const p of commit.parents) {
-        if (!raw.has(p)) next.push(p)
-      }
+    if (JSON.stringify(context.structuralParent) !== JSON.stringify(context.task.structuralParent) ||
+      JSON.stringify(context.directRequirements) !== JSON.stringify(context.task.requirements)) {
+      throw new Error(`Canonical task-dag context disagrees with immutable task relationships for ${lifecycle.taskId}`)
     }
-    pending = next
-  }
+    return { context, show, lifecycle }
+  })
+  const end = await captureRefs(source.gitDir)
+  if (end.fingerprint !== start.fingerprint) throw new Error('Task-dag lifecycle generation changed during read')
 
-  // Build nodes.
   const nodes = new Map<string, TaskNode>()
-  const epicShas = new Set<string>(refs.epicShas)
-  for (const [sha, commit] of raw.entries()) {
-    const msg = commit.message
-    const parentTask = commit.parents[0]
-    const dependencies = commit.parents.slice(1)
-    const isFrontier = refs.frontierShas.has(sha)
-    const isActive = activeTaskShas.has(sha)
-    const isBlocked = refs.blockedShas.has(sha)
-    const completedBy = completion.get(sha) ?? []
-    // An epic is anything pointed at by tasks/pending/<N> OR declaring
-    // itself an epic (Type: epic / kind: epic). Comment-sync epics often
-    // have no pending ref, so the declaration is the reliable signal.
-    const isEpic = refs.epicShas.has(sha) || detectDeclaredEpic(msg)
-    if (isEpic) epicShas.add(sha)
-    const type: TaskType = isEpic ? 'epic' : isFrontier ? 'leaf' : 'task'
-
-    let status: TaskStatus
-    if (completedBy.length > 0) status = 'done'
-    else if (isBlocked) status = 'blocked'
-    else if (isActive) status = 'in-progress'
-    else {
-      const declared = extractHeaderField(msg, 'Status')
-      status = isTaskStatus(declared) ? declared : 'pending'
-    }
-
-    nodes.set(sha, {
-      repository,
-      githubRepository: source.githubRepository,
-      sha,
-      shortSha: sha.slice(0, 7),
-      title: parseTitle(msg, isEpic),
-      issueNumber: parseIssueNumber(msg),
-      status,
-      type,
-      author: extractHeaderField(msg, 'Author'),
-      parentTask,
-      dependencies,
-      dependents: [],
-      breakdownChildren: [],
-      refs: refs.refsBySha.get(sha) ?? [],
-      isFrontier,
-      isActive,
-      isBlocked,
-      isReady: false,
-      dependenciesMet: false,
-      completedBy,
-      githubUrl: parseGithubUrl(msg),
+  for (const { context, show, lifecycle } of records) {
+    const structuralParent = context.structuralParent?.taskId
+    nodes.set(context.taskId, {
+      repository, githubRepository: source.githubRepository,
+      taskId: context.taskId, taskOid: context.taskOid, stateOid: context.stateOid, state: context.state,
+      title: context.task.title, description: context.task.description, structuralParent,
+      requirements: context.directRequirements.map((requirement) => requirement.taskId),
+      directChildren: context.directChildren.map((child) => child.taskId), lifecycleRecord: show.record,
+      sha: context.taskId, shortSha: context.taskId.slice(0, 10), status: legacyStatus(context.state),
+      type: structuralParent ? (context.directChildren.length ? 'task' : 'leaf') : 'epic',
+      parentTask: structuralParent,
+      dependencies: context.directRequirements.map((requirement) => requirement.taskId), dependents: [],
+      breakdownChildren: context.directChildren.map((child) => child.taskId), refs: [lifecycle.ref],
+      isFrontier: context.state === 'frontier', isActive: context.state === 'active',
+      isBlocked: context.state === 'blocked' || context.state === 'waiting', isReady: false,
+      dependenciesMet: false, completedBy: context.state === 'done' ? [context.stateOid] : [],
     })
   }
-
-  // Relationships in one pass.
-  const isComplete = (sha: string): boolean => {
-    const n = nodes.get(sha)
-    if (n) return n.status === 'done'
-    return completion.has(sha)
+  for (const { context } of records) {
+    const checkIdentity = (identity: z.infer<typeof taskIdentitySchema>, relationship: string): TaskNode => {
+      const related = nodes.get(identity.taskId)
+      if (!related) throw new Error(`Missing ${relationship} ${identity.taskId} for ${context.taskId}`)
+      if (related.taskOid !== identity.taskOid) {
+        throw new Error(`Immutable identity mismatch for ${relationship} ${identity.taskId}`)
+      }
+      return related
+    }
+    if (context.structuralParent) checkIdentity(context.structuralParent, 'structural parent')
+    context.directRequirements.forEach((requirement) => checkIdentity(requirement, 'requirement'))
+    context.directChildren.forEach((child) => {
+      const childNode = checkIdentity(child, 'direct child')
+      if (childNode.structuralParent !== context.taskId) {
+        throw new Error(`Direct child ${child.taskId} does not name ${context.taskId} as structural parent`)
+      }
+    })
   }
   for (const node of nodes.values()) {
-    if (node.parentTask) {
-      const parent = nodes.get(node.parentTask)
-      if (parent) parent.breakdownChildren.push(node.sha)
-    }
-    for (const dep of node.dependencies) {
-      const depNode = nodes.get(dep)
-      if (depNode) depNode.dependents.push(node.sha)
-    }
-    node.dependenciesMet = node.dependencies.every(isComplete)
-    node.isReady =
-      node.isFrontier &&
-      !node.isBlocked &&
-      !node.isActive &&
-      node.status !== 'done' &&
-      node.dependenciesMet
+    for (const requirement of node.requirements) nodes.get(requirement)?.dependents.push(node.taskId)
+    node.dependenciesMet = node.requirements.every((id) => nodes.get(id)?.state === 'done')
+    node.isReady = node.state === 'frontier' && node.dependenciesMet
+    const root = findRoot(node, nodes)
+    node.epicSha = root.taskId
+    node.epicTitle = root.title
   }
-
-  // Epic inheritance: walk the first-parent breakdown chain to the epic.
-  for (const node of nodes.values()) {
-    const epic = findEpic(node, nodes, epicShas)
-    if (epic) {
-      node.epicSha = epic.sha
-      node.epicIssueNumber = epic.issueNumber
-      node.epicTitle = epic.title
-      if (!node.issueNumber) node.issueNumber = epic.issueNumber
-      if (!node.githubUrl && epic.githubUrl) node.githubUrl = epic.githubUrl
-    }
-  }
-
-  // Build the issue -> epic map from every epic-typed node, preferring the
-  // one carrying a pending ref when an issue has more than one candidate.
-  const epicsByIssue = new Map<number, string>(refs.epicByIssue)
-  for (const sha of epicShas) {
-    const node = nodes.get(sha)
-    if (!node || node.issueNumber == null) continue
-    if (!epicsByIssue.has(node.issueNumber)) epicsByIssue.set(node.issueNumber, sha)
-  }
-
+  const epicShas = [...nodes.values()].filter((node) => !node.structuralParent).map((node) => node.taskId)
   const index: TaskIndex = {
-    nodes,
-    epicShas: [...epicShas].filter((s) => nodes.has(s)),
-    epicsByIssue,
-    frontierShas: [...refs.frontierShas].filter((s) => nodes.has(s)),
-    fingerprint,
-    builtAtMs: Date.now(),
+    nodes, epicShas, epicsByIssue: new Map(),
+    frontierShas: [...nodes.values()].filter((node) => node.state === 'frontier').map((node) => node.taskId),
+    fingerprint: start.fingerprint, builtAtMs: Date.now(),
   }
   cachedIndexes.set(repository, index)
   return index
 }
 
-function findEpic(
-  node: TaskNode,
-  nodes: Map<string, TaskNode>,
-  epicShas: Set<string>,
-): TaskNode | null {
-  let current: TaskNode | undefined = node
+function findRoot(node: TaskNode, nodes: Map<string, TaskNode>): TaskNode {
+  let current = node
   const seen = new Set<string>()
-  while (current && !seen.has(current.sha)) {
-    seen.add(current.sha)
-    if (epicShas.has(current.sha)) return current
-    current = current.parentTask ? nodes.get(current.parentTask) : undefined
+  while (current.structuralParent) {
+    if (seen.has(current.taskId)) throw new Error(`Structural parent cycle at ${current.taskId}`)
+    seen.add(current.taskId)
+    const parent = nodes.get(current.structuralParent)
+    if (!parent) throw new Error(`Missing structural parent ${current.structuralParent} for ${current.taskId}`)
+    current = parent
   }
-  return null
+  return current
 }
 
-// --- public query API ------------------------------------------------------
-
-export function getSourceStatus(): TaskDagSourceStatus {
-  return getTaskDagSourceStatus()
-}
-
-function getFrontierViewForSource(repository: string, index: TaskIndex, filter?: {
-  issue?: number
-  status?: string
-}): FrontierView {
-  const source = getTaskDagSourceStatus()
-
-  const frontier: TaskNode[] = []
-  for (const sha of index.frontierShas) {
-    const node = index.nodes.get(sha)
-    if (!node) continue
-    if (filter?.issue && node.issueNumber !== filter.issue) continue
-    if (filter?.status && node.status !== filter.status) continue
-    frontier.push(node)
-  }
-
-  const groupsByEpic = new Map<string, FrontierGroup>()
-  for (const task of frontier) {
-    const key = groupKey(task)
-    let group = groupsByEpic.get(key)
-    if (!group) {
-      group = {
-        epic: epicRefOf(index, task),
-        counts: { total: 0, ready: 0, active: 0, blocked: 0, done: 0 },
-        tasks: [],
-      }
-      groupsByEpic.set(key, group)
-    }
-    group.tasks.push(task)
-    group.counts.total++
-    if (task.isReady) group.counts.ready++
-    if (task.isActive) group.counts.active++
-    if (task.isBlocked) group.counts.blocked++
-    if (task.status === 'done') group.counts.done++
-  }
-
-  for (const group of groupsByEpic.values()) {
-    group.tasks.sort((a, b) => taskSortRank(a) - taskSortRank(b) || a.title.localeCompare(b.title))
-  }
-
-  const groups = [...groupsByEpic.values()].sort((a, b) => {
-    // Most actionable epics first (more ready tasks), then by issue number.
-    if (b.counts.ready !== a.counts.ready) return b.counts.ready - a.counts.ready
-    return (a.epic?.issueNumber ?? 1e9) - (b.epic?.issueNumber ?? 1e9)
-  })
-
-  const summary = {
-    totalFrontier: frontier.length,
-    ready: frontier.filter((t) => t.isReady).length,
-    active: frontier.filter((t) => t.isActive).length,
-    blocked: frontier.filter((t) => t.isBlocked).length,
-    done: frontier.filter((t) => t.status === 'done').length,
-    epicCount: groups.filter((g) => g.epic).length,
-  }
-
-  return { source, summary, groups }
-}
-
-function taskSortRank(t: TaskNode): number {
-  if (t.isReady) return 0
-  if (t.isActive) return 1
-  if (t.status === 'pending') return 2
-  if (t.isBlocked) return 3
-  if (t.status === 'done') return 5
-  return 4
-}
-
-type EpicRef = FrontierGroup['epic']
-
-/**
- * Stable grouping key. Tasks are grouped by their owning GitHub issue,
- * NOT by the specific epic commit, because the comment-sync mints a fresh
- * `kind: epic` snapshot commit per sync run, so one issue has many epic
- * commits over time.
- */
-function groupKey(t: TaskNode): string {
-  if (t.epicIssueNumber != null) return `${t.repository}:issue:${t.epicIssueNumber}`
-  if (t.epicSha) return `${t.repository}:epic:${t.epicSha}`
-  return `${t.repository}:none`
-}
-
-function epicRefOf(index: TaskIndex, t: TaskNode): EpicRef {
-  if (t.epicIssueNumber != null) {
-    const sha = index.epicsByIssue.get(t.epicIssueNumber)
-    const node = sha ? index.nodes.get(sha) : undefined
-    return {
-      repository: t.repository,
-      githubRepository: t.githubRepository,
-      sha: node?.sha ?? t.epicSha ?? '',
-      shortSha: (node?.sha ?? t.epicSha ?? '').slice(0, 7),
-      issueNumber: t.epicIssueNumber,
-      title: node?.title ?? t.epicTitle ?? `Issue #${t.epicIssueNumber}`,
-      githubUrl: node?.githubUrl ?? t.githubUrl,
-    }
-  }
-  if (t.epicSha) {
-    const node = index.nodes.get(t.epicSha)
-    if (node) {
-      return {
-        repository: t.repository,
-        githubRepository: t.githubRepository,
-        sha: node.sha,
-        shortSha: node.shortSha,
-        issueNumber: node.issueNumber,
-        title: node.title,
-        githubUrl: node.githubUrl,
-      }
-    }
-  }
-  return null
-}
-
+export function getSourceStatus(): TaskDagSourceStatus { return getTaskDagSourceStatus() }
 function configuredRepositories(repository?: string): string[] {
   const repositories = getTaskDagSources().map((source) => source.repository)
-  if (!repository) return repositories
-  if (!repositories.includes(repository)) throw new TaskDagRepositoryNotFoundError(repository)
-  return [repository]
+  if (repository && !repositories.includes(repository)) throw new TaskDagRepositoryNotFoundError(repository)
+  return repository ? [repository] : repositories
 }
-
-function queryFailureMessage(error: unknown): string {
-  return publicTaskDagError(error)
-}
-
-function sourceStatusForQueryFailures(failedRepositories: ReadonlyMap<string, string>): TaskDagSourceStatus {
+function sourceStatusForQueryFailures(failures: ReadonlyMap<string, string>): TaskDagSourceStatus {
   const base = getTaskDagSourceStatus()
-  if (failedRepositories.size === 0) return base
-  const repositories = base.repositories.map((repository) => failedRepositories.has(repository.repository)
-    ? { ...repository, available: false, lastError: repository.lastError ?? failedRepositories.get(repository.repository) as string }
-    : repository)
-  const availableCount = repositories.filter((repository) => repository.available).length
-  return {
-    ...base,
-    available: availableCount > 0,
-    coverage: availableCount === 0 ? 'unavailable' : availableCount === repositories.length ? 'complete' : 'partial',
-    repositories,
-    lastError: 'One or more repositories could not be read',
-  }
+  if (!failures.size) return base
+  const repositories = base.repositories.map((item) => failures.has(item.repository)
+    ? { ...item, available: false, lastError: item.lastError ?? failures.get(item.repository) ?? 'Task data could not be read' }
+    : item)
+  const available = repositories.filter((item) => item.available).length
+  return { ...base, available: available > 0, coverage: available === 0 ? 'unavailable' : available === repositories.length ? 'complete' : 'partial', repositories, lastError: 'One or more repositories could not be read' }
 }
-
-async function loadConfiguredTaskIndexes(requestedRepository?: string): Promise<{
-  indexes: ReadonlyMap<string, TaskIndex>
-  source: TaskDagSourceStatus
-}> {
-  if (requestedRepository) configuredRepositories(requestedRepository)
+async function loadConfiguredTaskIndexes(requested?: string) {
+  if (requested) configuredRepositories(requested)
   const repositories = configuredRepositories()
-  const results = await Promise.allSettled(repositories.map((repository) => loadTaskIndex(repository)))
+  const results = await Promise.allSettled(repositories.map(loadTaskIndex))
   const indexes = new Map<string, TaskIndex>()
-  const failedRepositories = new Map<string, string>()
+  const failures = new Map<string, string>()
   results.forEach((result, index) => {
-    const repository = repositories[index]
-    if (result.status === 'fulfilled') {
-      indexes.set(repository, result.value)
-      return
-    }
-    console.error(`task-dag read failed for ${repository}`, result.reason)
-    failedRepositories.set(repository, queryFailureMessage(result.reason))
+    if (result.status === 'fulfilled') indexes.set(repositories[index], result.value)
+    else { console.error(`task-dag read failed for ${repositories[index]}`, result.reason); failures.set(repositories[index], publicTaskDagError(result.reason)) }
   })
-  const source = sourceStatusForQueryFailures(failedRepositories)
-  if (indexes.size === 0 || (requestedRepository && !indexes.has(requestedRepository))) {
-    throw new TaskDagUnavailableError(source)
-  }
+  const source = sourceStatusForQueryFailures(failures)
+  if (!indexes.size || (requested && !indexes.has(requested))) throw new TaskDagUnavailableError(source)
   return { indexes, source }
 }
 
-export async function getFrontierView(filter?: {
-  issue?: number
-  status?: string
-  repository?: string
-}): Promise<FrontierView> {
+function epicRef(index: TaskIndex, task: TaskNode) {
+  const root = task.epicSha ? index.nodes.get(task.epicSha) : undefined
+  return root ? { repository: root.repository, githubRepository: root.githubRepository, sha: root.taskId, shortSha: root.shortSha, title: root.title } : null
+}
+export async function getFrontierView(filter?: { issue?: number; status?: string; repository?: string }): Promise<FrontierView> {
   const { indexes, source } = await loadConfiguredTaskIndexes(filter?.repository)
-  const repositories = filter?.repository ? [filter.repository] : [...indexes.keys()]
-  const views = repositories.map((repository) =>
-    getFrontierViewForSource(repository, indexes.get(repository) as TaskIndex, filter),
-  )
-  const groups = views.flatMap((view) => view.groups).sort((a, b) =>
-    b.counts.ready - a.counts.ready ||
-    (a.epic?.repository ?? '').localeCompare(b.epic?.repository ?? '') ||
-    (a.epic?.issueNumber ?? 1e9) - (b.epic?.issueNumber ?? 1e9),
-  )
-  const tasks = groups.flatMap((group) => group.tasks)
-  return {
-    source,
-    summary: {
-      totalFrontier: tasks.length,
-      ready: tasks.filter((task) => task.isReady).length,
-      active: tasks.filter((task) => task.isActive).length,
-      blocked: tasks.filter((task) => task.isBlocked).length,
-      done: tasks.filter((task) => task.status === 'done').length,
-      epicCount: groups.filter((group) => group.epic).length,
-    },
-    groups,
-  }
-}
-
-export async function getFrontier(filter?: {
-  issue?: number
-  status?: string
-  repository?: string
-}): Promise<TaskNode[]> {
-  const view = await getFrontierView(filter)
-  return view.groups.flatMap((g) => g.tasks)
-}
-
-function getEpicsForSource(repository: string, index: TaskIndex): EpicSummary[] {
-
-  // Aggregate by GitHub issue (one issue may have many epic snapshot
-  // commits). Members are the non-epic task nodes belonging to the issue.
-  const membersByIssue = new Map<number, TaskNode[]>()
-  for (const node of index.nodes.values()) {
-    if (node.type === 'epic') continue
-    if (node.epicIssueNumber == null) continue
-    const arr = membersByIssue.get(node.epicIssueNumber)
-    if (arr) arr.push(node)
-    else membersByIssue.set(node.epicIssueNumber, [node])
-  }
-
-  const epics: EpicSummary[] = []
-  for (const [issue, epicSha] of index.epicsByIssue.entries()) {
-    const epicNode = index.nodes.get(epicSha)
-    const members = membersByIssue.get(issue) ?? []
-    const hasPendingRef = epicNode?.refs.some((r) => r.startsWith('tasks/pending/')) ?? false
-    // Skip stale epic snapshots for closed issues with no live work.
-    if (members.length === 0 && !hasPendingRef) continue
-
-    const statusCounts: Record<string, number> = {}
-    let frontierCount = 0
-    let readyCount = 0
-    let activeCount = 0
-    let blockedCount = 0
-    for (const n of members) {
-      statusCounts[n.status] = (statusCounts[n.status] ?? 0) + 1
-      if (n.isFrontier) frontierCount++
-      if (n.isReady) readyCount++
-      if (n.isActive) activeCount++
-      if (n.isBlocked) blockedCount++
+  const groups: FrontierGroup[] = []
+  for (const index of indexes.values()) {
+    const byRoot = new Map<string, TaskNode[]>()
+    for (const task of index.nodes.values()) {
+      if (filter?.status && task.status !== filter.status) continue
+      const root = task.epicSha ?? task.taskId
+      const list = byRoot.get(root)
+      if (list) list.push(task); else byRoot.set(root, [task])
     }
-
-    const totalTasks = members.length
-    const doneTasks = statusCounts['done'] ?? 0
-    epics.push({
-      repository,
-      githubRepository: epicNode?.githubRepository,
-      issueNumber: issue,
-      epicRef: epicNode?.refs.find((r) => r.startsWith('tasks/pending/')) ?? '',
-      sha: epicSha,
-      shortSha: epicSha.slice(0, 7),
-      title: epicNode?.title ?? `Issue #${issue}`,
-      githubUrl: epicNode?.githubUrl,
-      statusCounts,
-      frontierCount,
-      readyCount,
-      activeCount,
-      blockedCount,
-      completionPct: totalTasks > 0 ? doneTasks / totalTasks : 0,
-      totalTasks,
-    })
+    for (const tasks of byRoot.values()) {
+      tasks.sort((a, b) => Number(b.isReady) - Number(a.isReady) || a.title.localeCompare(b.title))
+      groups.push({ epic: epicRef(index, tasks[0]), counts: {
+        total: tasks.length, ready: tasks.filter((task) => task.isReady).length,
+        active: tasks.filter((task) => task.isActive).length, blocked: tasks.filter((task) => task.isBlocked).length,
+        done: tasks.filter((task) => task.state === 'done').length,
+      }, tasks })
+    }
   }
-
-  epics.sort((a, b) => {
-    if (b.readyCount !== a.readyCount) return b.readyCount - a.readyCount
-    if (b.frontierCount !== a.frontierCount) return b.frontierCount - a.frontierCount
-    return (a.issueNumber ?? 1e9) - (b.issueNumber ?? 1e9)
-  })
-  return epics
+  groups.sort((a, b) => b.counts.ready - a.counts.ready || (a.epic?.repository ?? '').localeCompare(b.epic?.repository ?? ''))
+  const tasks = groups.flatMap((group) => group.tasks)
+  return { source, summary: { totalFrontier: tasks.length, ready: tasks.filter((task) => task.isReady).length, active: tasks.filter((task) => task.isActive).length, blocked: tasks.filter((task) => task.isBlocked).length, done: tasks.filter((task) => task.state === 'done').length, epicCount: groups.length }, groups }
 }
+export async function getFrontier(filter?: { issue?: number; status?: string; repository?: string }): Promise<TaskNode[]> { return (await getFrontierView(filter)).groups.flatMap((group) => group.tasks) }
 
+function summaries(repository: string, index: TaskIndex): EpicSummary[] {
+  return index.epicShas.map((rootId) => {
+    const root = index.nodes.get(rootId) as TaskNode
+    const members = [...index.nodes.values()].filter((node) => node.epicSha === rootId)
+    const statusCounts: Record<string, number> = {}
+    members.forEach((node) => { statusCounts[node.status] = (statusCounts[node.status] ?? 0) + 1 })
+    return { repository, githubRepository: root.githubRepository, epicRef: rootId, sha: rootId, shortSha: root.shortSha, title: root.title, statusCounts, frontierCount: members.filter((node) => node.state === 'frontier').length, readyCount: members.filter((node) => node.isReady).length, activeCount: members.filter((node) => node.isActive).length, blockedCount: members.filter((node) => node.isBlocked).length, completionPct: members.length ? members.filter((node) => node.state === 'done').length / members.length : 0, totalTasks: members.length }
+  })
+}
 export async function getEpics(): Promise<EpicsView> {
   const { indexes, source } = await loadConfiguredTaskIndexes()
-  const epics = [...indexes].flatMap(([repository, index]) => getEpicsForSource(repository, index))
-    .sort((a, b) => b.readyCount - a.readyCount || a.repository.localeCompare(b.repository) ||
-      (a.issueNumber ?? 1e9) - (b.issueNumber ?? 1e9))
-  return { source, epics }
+  return { source, epics: [...indexes].flatMap(([repository, index]) => summaries(repository, index)) }
 }
-
-export async function getEpicDag(epicRefOrSha: string, repository: string): Promise<DagResult> {
+export async function getEpicDag(rootId: string, repository: string): Promise<DagResult> {
   const { indexes, source } = await loadConfiguredTaskIndexes(repository)
   const index = indexes.get(repository) as TaskIndex
-
-  // Resolve to an issue number when possible (the canonical epic identity),
-  // else to a specific epic commit sha.
-  let issueNumber: number | undefined
-  let epicSha: string | undefined
-  if (/^\d+$/.test(epicRefOrSha)) {
-    issueNumber = parseInt(epicRefOrSha, 10)
-    epicSha = index.epicsByIssue.get(issueNumber)
-  }
-  if (!epicSha) {
-    const dir = requireSource(repository).gitDir
-    try {
-      epicSha = await git(dir, ['rev-parse', epicRefOrSha])
-    } catch {
-      epicSha = epicRefOrSha
-    }
-    const resolved = epicSha ? index.nodes.get(epicSha) : undefined
-    if (resolved?.issueNumber != null) issueNumber = resolved.issueNumber
-  }
-
-  const epicNode = epicSha ? index.nodes.get(epicSha) : undefined
-  if (!epicNode && issueNumber == null) {
-    throw new Error(`Epic not found: ${epicRefOrSha}`)
-  }
-
-  // Collect the member set. When we have an issue number, take ALL task
-  // nodes belonging to that issue (across epic snapshots); else BFS from
-  // the single epic commit.
-  const nodes: TaskNode[] = []
+  const root = index.nodes.get(rootId)
+  if (!root || root.structuralParent) throw new Error(`Epic not found: ${rootId}`)
+  const nodes = [...index.nodes.values()].filter((node) => node.epicSha === rootId)
+  const memberIds = new Set(nodes.map((node) => node.taskId))
   const edges: TaskEdge[] = []
-  const memberSet = new Set<string>()
-  if (issueNumber != null) {
-    for (const node of index.nodes.values()) {
-      if (node.type === 'epic' && node.issueNumber !== issueNumber) continue
-      if (node.type !== 'epic' && node.epicIssueNumber !== issueNumber) continue
-      memberSet.add(node.sha)
-    }
-  } else if (epicSha) {
-    const queue = [epicSha]
-    while (queue.length > 0) {
-      const cur = queue.shift() as string
-      if (memberSet.has(cur)) continue
-      const node = index.nodes.get(cur)
-      if (!node) continue
-      memberSet.add(cur)
-      queue.push(...node.breakdownChildren)
-    }
+  for (const node of nodes) {
+    if (node.structuralParent && memberIds.has(node.structuralParent)) edges.push({ source: node.structuralParent, target: node.taskId, kind: 'breakdown' })
+    node.requirements.filter((id) => memberIds.has(id)).forEach((id) => edges.push({ source: id, target: node.taskId, kind: 'dependency' }))
   }
-
-  for (const sha of memberSet) {
-    const node = index.nodes.get(sha)
-    if (!node) continue
-    nodes.push(node)
-    if (node.parentTask && memberSet.has(node.parentTask)) {
-      edges.push({ source: node.parentTask, target: sha, kind: 'breakdown' })
-    }
-    for (const dep of node.dependencies) {
-      if (memberSet.has(dep)) edges.push({ source: dep, target: sha, kind: 'dependency' })
-    }
-  }
-
   const statusCounts: Record<string, number> = {}
-  for (const n of nodes) statusCounts[n.status] = (statusCounts[n.status] ?? 0) + 1
-
-  return {
-    source,
-    epic: {
-      repository,
-      githubRepository: epicNode?.githubRepository,
-      sha: epicNode?.sha ?? epicSha ?? '',
-      shortSha: (epicNode?.sha ?? epicSha ?? '').slice(0, 7),
-      issueNumber: epicNode?.issueNumber ?? issueNumber,
-      title: epicNode?.title ?? (issueNumber != null ? `Issue #${issueNumber}` : 'Epic'),
-      githubUrl: epicNode?.githubUrl,
-    },
-    nodes,
-    edges,
-    summary: { totalTasks: nodes.length, statusCounts },
-  }
+  nodes.forEach((node) => { statusCounts[node.status] = (statusCounts[node.status] ?? 0) + 1 })
+  return { source, epic: { repository, githubRepository: root.githubRepository, sha: root.taskId, shortSha: root.shortSha, title: root.title }, nodes, edges, summary: { totalTasks: nodes.length, statusCounts } }
 }
-
-export async function getTaskDetail(shaOrRef: string, repository: string): Promise<TaskDetail | null> {
+export async function getTaskDetail(taskId: string, repository: string): Promise<TaskDetail | null> {
   const { indexes, source } = await loadConfiguredTaskIndexes(repository)
   const index = indexes.get(repository) as TaskIndex
-
-  let task = index.nodes.get(shaOrRef)
-  if (!task) {
-    // Allow short-sha / ref lookups.
-    const dir = requireSource(repository).gitDir
-    try {
-      const full = await git(dir, ['rev-parse', shaOrRef])
-      task = index.nodes.get(full)
-    } catch {
-      // fall through
-    }
-  }
+  const task = index.nodes.get(taskId)
   if (!task) return null
-
-  const lookup = (sha: string): TaskNode | null => index.nodes.get(sha) ?? null
-  return {
-    source,
-    task,
-    parent: task.parentTask ? lookup(task.parentTask) : null,
-    dependencies: task.dependencies.map(lookup).filter((n): n is TaskNode => n != null),
-    dependents: task.dependents.map(lookup).filter((n): n is TaskNode => n != null),
-    children: task.breakdownChildren.map(lookup).filter((n): n is TaskNode => n != null),
-  }
+  const lookup = (id: string): TaskNode | null => index.nodes.get(id) ?? null
+  return { source, task, parent: task.structuralParent ? lookup(task.structuralParent) : null, dependencies: task.requirements.map(lookup).filter((node): node is TaskNode => node !== null), dependents: task.dependents.map(lookup).filter((node): node is TaskNode => node !== null), children: task.directChildren.map(lookup).filter((node): node is TaskNode => node !== null) }
 }
-
-export async function getActivity(): Promise<{
-  source: TaskDagSourceStatus
-  totalEpics: number
-  totalFrontier: number
-  readyTasks: number
-  activeTasks: number
-  blockedTasks: number
-}> {
-  const view = await getFrontierView()
-  const epics = await getEpics()
-  const unavailableInEither = new Map<string, string>()
-  for (const repository of [...view.source.repositories, ...epics.source.repositories]) {
-    if (!repository.available) {
-      unavailableInEither.set(repository.repository, repository.lastError ?? 'Task data could not be read from this repository')
-    }
-  }
-  const source = sourceStatusForQueryFailures(unavailableInEither)
-  return {
-    source,
-    totalEpics: epics.epics.length,
-    totalFrontier: view.summary.totalFrontier,
-    readyTasks: view.summary.ready,
-    activeTasks: view.summary.active,
-    blockedTasks: view.summary.blocked,
-  }
+export async function getActivity() {
+  const view = await getFrontierView(); const epics = await getEpics()
+  return { source: view.source, totalEpics: epics.epics.length, totalFrontier: view.summary.totalFrontier, readyTasks: view.summary.ready, activeTasks: view.summary.active, blockedTasks: view.summary.blocked }
 }
-
-export async function validateDag(): Promise<{
-  source: TaskDagSourceStatus
-  errors: number
-  warnings: number
-  valid: boolean
-}> {
-  const loaded = await loadConfiguredTaskIndexes()
-  const { source } = loaded
-  let errors = 0
-  let warnings = 0
-  for (const index of loaded.indexes.values()) {
-    for (const node of index.nodes.values()) {
-      // Frontier refs should point at task/leaf nodes.
-      if (node.isFrontier && node.type === 'epic') warnings++
-      // A dependency that isn't a known node and isn't completed is suspect.
-      for (const dep of node.dependencies) {
-        if (!index.nodes.has(dep)) warnings++
-      }
-    }
-  }
-  return { source, errors, warnings, valid: errors === 0 }
+export async function validateDag(): Promise<{ source: TaskDagSourceStatus; errors: number; warnings: number; valid: boolean }> {
+  const { source } = await loadConfiguredTaskIndexes()
+  return { source, errors: 0, warnings: 0, valid: true }
 }

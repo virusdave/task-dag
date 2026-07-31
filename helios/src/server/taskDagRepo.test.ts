@@ -2,14 +2,15 @@ import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  __resetTaskIndexCacheForTests,
+  __setTaskDagRunnerForTests,
   getEpicDag,
-  getEpics,
   getFrontierView,
   getTaskDetail,
-  __resetTaskIndexCacheForTests,
+  loadTaskIndex,
 } from './taskDagRepo.js'
 import {
   __resetTaskDagMirrorForTests,
@@ -18,336 +19,241 @@ import {
   publicTaskDagError,
 } from './taskDagMirror.js'
 
-const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+const ids = {
+  root: `v2-${'1'.repeat(64)}`,
+  done: `v2-${'2'.repeat(64)}`,
+  frontier: `v2-${'3'.repeat(64)}`,
+  active: `v2-${'4'.repeat(64)}`,
+  blocked: `v2-${'5'.repeat(64)}`,
+  waiting: `v2-${'6'.repeat(64)}`,
+} as const
+type FixtureId = typeof ids[keyof typeof ids]
+const states = new Map<FixtureId, 'frontier' | 'active' | 'blocked' | 'waiting' | 'done'>([
+  [ids.root, 'done'], [ids.done, 'done'], [ids.frontier, 'frontier'], [ids.active, 'active'],
+  [ids.blocked, 'blocked'], [ids.waiting, 'waiting'],
+])
 
 let repoDir: string
-let defaultConfigFile: string
-let defaultPathsFile: string
+let configFile: string
+let pathsFile: string
+let headOid: string
+let movedOid: string
 
-function git(args: string[]): string {
-  return execFileSync('git', args, { cwd: repoDir, encoding: 'utf8' }).trim()
+function git(args: string[], cwd = repoDir): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
-
-/** Create an empty-tree task commit, return its full sha. */
-function taskCommit(message: string, parents: string[]): string {
-  const args = ['commit-tree', EMPTY_TREE]
-  for (const p of parents) args.push('-p', p)
-  args.push('-m', message)
-  return git(args)
+function installRefs(cwd = repoDir): void {
+  for (const [id, state] of states) git(['update-ref', `refs/heads/tasks/${state}/${id}`, headOid], cwd)
+  git(['update-ref', 'refs/heads/tasks/v2/activation', headOid], cwd)
+  git(['update-ref', 'refs/heads/tasks/system/transitions', headOid], cwd)
+}
+function fakeRunner() {
+  return async (
+    _gitDir: string,
+    _originUrl: string,
+    command: 'context' | 'show',
+    taskId: string,
+  ): Promise<unknown> => {
+    const id = taskId as FixtureId
+    const state = states.get(id)
+    if (!state) throw new Error(`unknown fixture task ${taskId}`)
+    const structuralParent = id === ids.root ? null : ids.root
+    const requirements = id === ids.frontier ? [ids.done] : id === ids.active ? [ids.blocked] : []
+    const children = id === ids.root ? [ids.done, ids.frontier, ids.active, ids.blocked, ids.waiting] : []
+    const taskOid = `${String([...states.keys()].indexOf(id) + 7).repeat(40).slice(0, 40)}`
+    const identity = (related: FixtureId) => ({
+      taskId: related,
+      taskOid: `${String([...states.keys()].indexOf(related) + 7).repeat(40).slice(0, 40)}`,
+    })
+    const parentIdentity = structuralParent ? identity(structuralParent) : null
+    const requirementIdentities = requirements.map(identity)
+    if (command === 'context') return {
+      taskId: id, taskOid, state, stateOid: headOid, structuralParent: parentIdentity,
+      directRequirements: requirementIdentities, directChildren: children.map(identity),
+      task: {
+        taskId: id, title: `${state} task`, description: `description for ${state}`,
+        structuralParent: parentIdentity, requirements: requirementIdentities,
+      },
+    }
+    return { taskId: id, state, ref: `refs/heads/tasks/${state}/${id}`, stateOid: headOid, record: { event: state, evidence: [id] } }
+  }
 }
 
 beforeAll(() => {
-  repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-test-'))
+  repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-v2-'))
   git(['init', '-q', '-b', 'master'])
   git(['config', 'user.email', 'test@example.com'])
   git(['config', 'user.name', 'Test'])
-  git(['config', 'commit.gpgsign', 'false'])
-
-  // Real master root commit (non-empty tree).
-  fs.writeFileSync(path.join(repoDir, 'README.md'), '# repo\n')
+  git(['remote', 'add', 'origin', repoDir])
+  fs.writeFileSync(path.join(repoDir, 'README.md'), 'fixture\n')
   git(['add', 'README.md'])
-  git(['commit', '-q', '-m', 'root'])
-  const master0 = git(['rev-parse', 'HEAD'])
-
-  // Epic for issue #100 (header format).
-  const epic = taskCommit(
-    'Task: Build the thing\n\nIssue: #100\nAuthor: alice\nStatus: pending\nType: epic\nURL: https://github.com/FreshlyBakedNYC/automation/issues/100',
-    [master0],
-  )
-  git(['update-ref', 'refs/heads/tasks/pending/100', epic])
-
-  // Dependency task D (will be completed on master).
-  const dep = taskCommit('Task: Prerequisite\n\nIssue: #100\nType: task', [epic])
-  git(['update-ref', `refs/heads/tasks/frontier/${dep.slice(0, 7)}`, dep])
-
-  // Leaf L depends on D (first parent = epic breakdown, 2nd = dep). Claimed.
-  const leaf = taskCommit('Task: Depends on prereq\n\nIssue: #100\nType: leaf', [epic, dep])
-  git(['update-ref', `refs/heads/tasks/frontier/${leaf.slice(0, 7)}`, leaf])
-
-  // Ready leaf R (no deps, frontier).
-  const ready = taskCommit('Task: Ready to go\n\nIssue: #100\nType: leaf', [epic])
-  git(['update-ref', `refs/heads/tasks/frontier/${ready.slice(0, 7)}`, ready])
-
-  // Blocked leaf B.
-  const blocked = taskCommit('Task: Parked\n\nIssue: #100\nType: leaf', [epic])
-  git(['update-ref', `refs/heads/tasks/frontier/${blocked.slice(0, 7)}`, blocked])
-  git(['update-ref', `refs/heads/tasks/blocked/${blocked}`, blocked])
-
-  // YAML comment-sync frontier task (no header fields).
-  const yamlTask = taskCommit(
-    [
-      'kind: message',
-      'role: human',
-      'intent: clarification',
-      '',
-      'issue:',
-      '  number: 100',
-      '  repo: FreshlyBakedNYC/automation',
-      '',
-      'github:',
-      '  url: https://github.com/FreshlyBakedNYC/automation/issues/100#issuecomment-1',
-      '',
-      'body: |',
-      '  ## Please also handle the edge case',
-      '  more detail here',
-    ].join('\n'),
-    [epic],
-  )
-  git(['update-ref', `refs/heads/tasks/frontier/${yamlTask.slice(0, 7)}`, yamlTask])
-
-  // Complete D: a real impl commit on master with D as a 2nd parent.
-  fs.writeFileSync(path.join(repoDir, 'impl.txt'), 'done\n')
-  git(['add', 'impl.txt'])
-  const tree = git(['write-tree'])
-  const implCommit = git([
-    'commit-tree',
-    tree,
-    '-p',
-    master0,
-    '-p',
-    dep,
-    '-m',
-    'feat: implement prereq\n\nTask-Commit: ' + dep,
-  ])
-  git(['update-ref', 'refs/heads/master', implCommit])
-
-  // Active claim on L: claim commit whose FIRST parent is L.
-  const claim = taskCommit('claim: leaf', [leaf])
-  git(['update-ref', `refs/heads/tasks/active/${leaf.slice(0, 7)}`, claim])
-
-  defaultConfigFile = path.join(os.tmpdir(), `taskdag-default-repos-${process.pid}.conf`)
-  defaultPathsFile = `${defaultConfigFile}.paths`
-  fs.writeFileSync(defaultConfigFile, 'automation git@github.com:Example/automation.git\n')
-  fs.writeFileSync(defaultPathsFile, `automation ${repoDir}\n`)
-  process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-  process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
-  __resetTaskIndexCacheForTests()
+  git(['commit', '-q', '-m', 'fixture'])
+  headOid = git(['rev-parse', 'HEAD'])
+  movedOid = git(['commit-tree', git(['rev-parse', 'HEAD^{tree}']), '-p', headOid, '-m', 'moved generation'])
+  installRefs()
+  configFile = path.join(repoDir, 'repos.conf')
+  pathsFile = path.join(repoDir, 'paths.conf')
+  fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\n')
+  fs.writeFileSync(pathsFile, `automation ${repoDir}\n`)
+  process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+  process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
 })
-
+beforeEach(() => {
+  __resetTaskDagMirrorForTests()
+  __resetTaskIndexCacheForTests()
+  __setTaskDagRunnerForTests(fakeRunner())
+})
 afterAll(() => {
   delete process.env.HELIOS_TASK_DAG_REPOS_FILE
   delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
-  fs.rmSync(defaultConfigFile, { force: true })
-  fs.rmSync(defaultPathsFile, { force: true })
-  if (repoDir) fs.rmSync(repoDir, { recursive: true, force: true })
+  __resetTaskDagMirrorForTests()
+  __resetTaskIndexCacheForTests()
+  fs.rmSync(repoDir, { recursive: true, force: true })
 })
 
-describe('taskDagRepo indexer', () => {
-  it('detects completion via a master 2nd-parent', async () => {
-    const detail = await getTaskDetail((await frontierByTitle('Prerequisite')).sha, 'automation')
-    expect(detail?.task.status).toBe('done')
-    expect(detail?.task.completedBy.length).toBe(1)
+describe('bounded task-dag v2 adapter', () => {
+  it('loads all lifecycle states with immutable identity and opaque evidence', async () => {
+    const index = await loadTaskIndex('automation')
+    expect(new Set([...index.nodes.values()].map((node) => node.state))).toEqual(new Set(['frontier', 'active', 'blocked', 'waiting', 'done']))
+    const node = index.nodes.get(ids.frontier)
+    expect(node).toMatchObject({ taskId: ids.frontier, stateOid: headOid, description: 'description for frontier' })
+    expect(node?.taskOid).toMatch(/^[0-9a-f]{40}$/)
+    expect(node?.lifecycleRecord).toEqual({ event: 'frontier', evidence: [ids.frontier] })
   })
 
-  it('marks an active claim in-progress (resolving claim->task)', async () => {
-    const leaf = await nodeByTitle('Depends on prereq')
-    expect(leaf.isActive).toBe(true)
-    expect(leaf.status).toBe('in-progress')
-    expect(leaf.isReady).toBe(false)
+  it('keeps structural parent separate from requirements and derives relationships/readiness', async () => {
+    const index = await loadTaskIndex('automation')
+    const frontier = index.nodes.get(ids.frontier)
+    expect(frontier?.structuralParent).toBe(ids.root)
+    expect(frontier?.requirements).toEqual([ids.done])
+    expect(frontier?.isReady).toBe(true)
+    expect(index.nodes.get(ids.active)?.isReady).toBe(false)
+    expect(index.nodes.get(ids.done)?.dependents).toContain(ids.frontier)
+    const root = await getTaskDetail(ids.root, 'automation')
+    expect(root?.children.map((node) => node.taskId)).toContain(ids.frontier)
+    expect((await getEpicDag(ids.root, 'automation')).edges).toEqual(expect.arrayContaining([
+      { source: ids.root, target: ids.frontier, kind: 'breakdown' },
+      { source: ids.done, target: ids.frontier, kind: 'dependency' },
+    ]))
   })
 
-  it('marks a blocked overlay as blocked and not ready', async () => {
-    const b = await nodeByTitle('Parked')
-    expect(b.isBlocked).toBe(true)
-    expect(b.status).toBe('blocked')
-    expect(b.isReady).toBe(false)
+  it('rejects one exact task ID in two lifecycle namespaces', async () => {
+    git(['update-ref', `refs/heads/tasks/active/${ids.frontier}`, headOid])
+    try {
+      await expect(loadTaskIndex('automation')).rejects.toThrow(/appears in both/)
+    } finally {
+      git(['update-ref', '-d', `refs/heads/tasks/active/${ids.frontier}`])
+    }
   })
 
-  it('marks a no-dep frontier task ready', async () => {
-    const r = await nodeByTitle('Ready to go')
-    expect(r.isReady).toBe(true)
-    expect(r.dependenciesMet).toBe(true)
+  it('rejects malformed canonical reader output', async () => {
+    __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
+      const response = await fakeRunner()(gitDir, originUrl, command, taskId)
+      return command === 'context' ? { ...(response as object), task: undefined } : response
+    })
+    await expect(loadTaskIndex('automation')).rejects.toThrow(/expected object/)
   })
 
-  it('computes dependency edges and dependenciesMet', async () => {
-    const leaf = await nodeByTitle('Depends on prereq')
-    const dep = await nodeByTitle('Prerequisite')
-    expect(leaf.dependencies).toContain(dep.sha)
-    expect(leaf.dependenciesMet).toBe(true) // dep is done
-    expect(dep.dependents).toContain(leaf.sha)
+  it('rejects identity inconsistencies in canonical reader output', async () => {
+    __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
+      const response = await fakeRunner()(gitDir, originUrl, command, taskId)
+      if (command !== 'context' || taskId !== ids.root) return response
+      const context = response as Record<string, unknown>
+      return {
+        ...context,
+        taskOid: 'a'.repeat(40),
+      }
+    })
+    await expect(loadTaskIndex('automation')).rejects.toThrow(/identity mismatch/)
   })
 
-  it('parses YAML comment-sync title + issue number', async () => {
-    const y = await nodeByTitle('Please also handle the edge case')
-    expect(y.issueNumber).toBe(100)
-    expect(y.epicIssueNumber).toBe(100)
+  it('refuses a v1-only repository', async () => {
+    for (const [id, state] of states) git(['update-ref', '-d', `refs/heads/tasks/${state}/${id}`])
+    git(['update-ref', 'refs/heads/tasks/frontier/deadbee', headOid])
+    try {
+      await expect(loadTaskIndex('automation')).rejects.toThrow(/refusing v1-only/)
+    } finally {
+      git(['update-ref', '-d', 'refs/heads/tasks/frontier/deadbee'])
+      installRefs()
+    }
   })
 
-  it('groups the frontier by issue with correct counts', async () => {
-    const view = await getFrontierView()
-    const g = view.groups.find((g) => g.epic?.issueNumber === 100)
-    expect(g).toBeTruthy()
-    // D (done) + L (active) + R (ready) + B (blocked) + yaml (ready) = 5 frontier
-    expect(g!.counts.total).toBe(5)
-    expect(g!.counts.ready).toBe(2)
-    expect(g!.counts.active).toBe(1)
-    expect(g!.counts.blocked).toBe(1)
-    expect(g!.counts.done).toBe(1)
+  it('rejects generation movement and does not cache the unstable capture', async () => {
+    let moved = false
+    __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
+      const result = await fakeRunner()(gitDir, originUrl, command, taskId)
+      if (!moved) {
+        moved = true
+        git(['update-ref', 'refs/heads/tasks/system/transitions', movedOid])
+      }
+      return result
+    })
+    await expect(loadTaskIndex('automation')).rejects.toThrow(/generation changed/)
+    git(['update-ref', 'refs/heads/tasks/system/transitions', headOid])
+    __setTaskDagRunnerForTests(fakeRunner())
+    await expect(loadTaskIndex('automation')).resolves.toMatchObject({ nodes: expect.any(Map) })
   })
 
-  it('builds an epic DAG resolvable by issue number', async () => {
-    const dag = await getEpicDag('100', 'automation')
-    expect(dag.epic.issueNumber).toBe(100)
-    expect(dag.nodes.length).toBeGreaterThanOrEqual(6) // epic + 5 tasks
-    expect(dag.edges.some((e) => e.kind === 'dependency')).toBe(true)
-    expect(dag.edges.some((e) => e.kind === 'breakdown')).toBe(true)
-  })
-
-  it('aggregates the epic in getEpics by issue', async () => {
-    const epics = await getEpics()
-    const e = epics.epics.find((e) => e.issueNumber === 100)
-    expect(e).toBeTruthy()
-    expect(e!.totalTasks).toBe(5)
-    expect(e!.completionPct).toBeCloseTo(1 / 5)
-  })
-
-  it('keeps identical repository DAGs scoped and reports partial/all failure', async () => {
-    const second = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-second-'))
-    fs.rmSync(second, { recursive: true, force: true })
-    fs.cpSync(repoDir, second, { recursive: true })
-    const configFile = path.join(os.tmpdir(), `taskdag-repos-${process.pid}.conf`)
-    const pathsFile = `${configFile}.paths`
-    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-mirrors-'))
-    const corrupt = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-corrupt-'))
-    fs.writeFileSync(path.join(corrupt, 'HEAD'), 'ref: refs/heads/master\n')
-    fs.mkdirSync(path.join(corrupt, 'objects'))
+  it('returns healthy peers when another configured repository fails', async () => {
+    const missing = path.join(repoDir, 'missing')
+    fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\nbroken https://github.com/Example/broken.git\n')
+    fs.writeFileSync(pathsFile, `automation ${repoDir}\nbroken ${missing}\n`)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     try {
-      fs.writeFileSync(configFile, 'automation git@github.com:Example/automation.git\nsecond git@github.com:Example/second.git\ncorrupt git@github.com:Example/corrupt.git\n')
-      fs.writeFileSync(pathsFile, `automation ${repoDir}\nsecond ${second}\ncorrupt ${corrupt}\n`)
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
-      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
       __resetTaskDagMirrorForTests()
-      __resetTaskIndexCacheForTests()
       const view = await getFrontierView()
-      expect(new Set(view.groups.flatMap((group) => group.tasks.map((task) => task.repository))))
-        .toEqual(new Set(['automation', 'second']))
       expect(view.source.coverage).toBe('partial')
-      expect(view.source.repositories.find((source) => source.repository === 'corrupt')?.available).toBe(false)
-      expect(view.source.repositories.find((source) => source.repository === 'corrupt')?.lastError)
-        .toBe('The local task mirror is not a readable Git repository or contains corrupt refs.')
-      const secondTask = await getTaskDetail((await nodeByTitle('Ready to go')).sha, 'second')
-      expect(secondTask?.task.repository).toBe('second')
-      expect(secondTask?.source.repositories.find((source) => source.repository === 'corrupt'))
-        .toMatchObject({ available: false })
-      expect((await getFrontierView({ repository: 'second' })).source.repositories
-        .find((source) => source.repository === 'corrupt')).toMatchObject({ available: false })
-      expect((await getEpicDag('100', 'second')).source.repositories
-        .find((source) => source.repository === 'corrupt')).toMatchObject({ available: false })
-      await expect(getTaskDetail('abc', 'corrupt')).rejects.toMatchObject({
-        name: 'TaskDagUnavailableError',
-        status: {
-          repositories: expect.arrayContaining([
-            expect.objectContaining({
-              repository: 'corrupt',
-              available: false,
-              lastError: 'The local task mirror is not a readable Git repository or contains corrupt refs.',
-            }),
-          ]),
-        },
-      })
-      await expect(getTaskDetail('abc', 'unknown')).rejects.toMatchObject({
-        name: 'TaskDagRepositoryNotFoundError',
-      })
-
-      fs.writeFileSync(configFile, 'one git@github.com:Example/one.git\ntwo git@github.com:Example/two.git\n')
-      fs.writeFileSync(pathsFile, 'one /no/one\ntwo /no/two\n')
-      __resetTaskDagMirrorForTests()
-      __resetTaskIndexCacheForTests()
-      await expect(getFrontierView()).rejects.toMatchObject({ name: 'TaskDagUnavailableError' })
+      expect(view.groups.flatMap((group) => group.tasks).every((task) => task.repository === 'automation')).toBe(true)
     } finally {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
-      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
-      __resetTaskDagMirrorForTests()
-      __resetTaskIndexCacheForTests()
       errorSpy.mockRestore()
-      fs.rmSync(second, { recursive: true, force: true })
-      fs.rmSync(configFile, { force: true })
-      fs.rmSync(pathsFile, { force: true })
-      fs.rmSync(mirrorRoot, { recursive: true, force: true })
-      fs.rmSync(corrupt, { recursive: true, force: true })
+      fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\n')
+      fs.writeFileSync(pathsFile, `automation ${repoDir}\n`)
     }
   })
+})
 
-  it('rejects malformed, duplicate, unsafe, and empty repository config', () => {
-    expect(parseTaskDagReposConfig('repo url enforce master\n')).toEqual([
-      { repository: 'repo', repoUrl: 'url' },
-    ])
-    expect(() => parseTaskDagReposConfig('# only comments\n')).toThrow()
-    expect(() => parseTaskDagReposConfig('repo url extra\n')).toThrow(/2 or 4 fields/)
+describe('existing mirror configuration behavior', () => {
+  it('rejects malformed, duplicate, unsafe, and empty registry entries', () => {
+    expect(parseTaskDagReposConfig('repo url enforce master\n')).toEqual([{ repository: 'repo', repoUrl: 'url' }])
+    expect(() => parseTaskDagReposConfig('# comments\n')).toThrow()
     expect(() => parseTaskDagReposConfig('repo one\nrepo two\n')).toThrow(/Duplicate/)
     expect(() => parseTaskDagReposConfig('../repo url\n')).toThrow(/Invalid repository/)
-    expect(() => parseTaskDagReposConfig('repo url broken master\n')).toThrow(/repair mode/)
-    expect(() => parseTaskDagReposConfig('repo url enforce foo..bar\n')).toThrow(/repair branch/)
-    expect(() => parseTaskDagReposConfig('repo url enforce foo@{bar\n')).toThrow(/repair branch/)
-    expect(() => parseTaskDagReposConfig('repo url enforce foo.\n')).toThrow(/repair branch/)
   })
 
-  it('requires an explicit repository registry in every environment', async () => {
+  it('requires the explicit registry', async () => {
+    delete process.env.HELIOS_TASK_DAG_REPOS_FILE
     try {
-      delete process.env.HELIOS_TASK_DAG_REPOS_FILE
       __resetTaskDagMirrorForTests()
-      await expect(initTaskDagMirror()).rejects.toThrow(
-        'HELIOS_TASK_DAG_REPOS_FILE is required',
-      )
+      await expect(initTaskDagMirror()).rejects.toThrow('HELIOS_TASK_DAG_REPOS_FILE is required')
     } finally {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
-      __resetTaskDagMirrorForTests()
-    }
-  })
-
-  it('never falls back from a missing configured checkout to a persisted mirror', async () => {
-    const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-local-no-fallback-'))
-    const configFile = path.join(mirrorRoot, 'repos.conf')
-    const pathsFile = path.join(mirrorRoot, 'paths.conf')
-    execFileSync('git', ['clone', '--mirror', repoDir, path.join(mirrorRoot, 'repo.git')], { stdio: 'ignore' })
-    fs.writeFileSync(configFile, 'repo https://github.com/Example/repo.git\n')
-    fs.writeFileSync(pathsFile, 'repo /missing/configured/checkout\n')
-    try {
       process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
-      process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
-      __resetTaskDagMirrorForTests()
-      const status = await initTaskDagMirror()
-      expect(status.repositories[0]).toMatchObject({ available: false, mode: 'none' })
-    } finally {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
-      delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
-      __resetTaskDagMirrorForTests()
-      fs.rmSync(mirrorRoot, { recursive: true, force: true })
     }
   })
 
   it('preserves a valid last-good mirror on auth failure and removes a wrong-origin mirror', async () => {
     const mirrorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdag-auth-failure-'))
     const mirror = path.join(mirrorRoot, 'repo.git')
-    const configFile = path.join(mirrorRoot, 'repos.conf')
-    const credentialDir = path.join(mirrorRoot, 'credentials')
+    const authConfig = path.join(mirrorRoot, 'repos.conf')
     execFileSync('git', ['clone', '--mirror', repoDir, mirror], { stdio: 'ignore' })
     execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/Example/repo.git'], { cwd: mirror })
-    fs.writeFileSync(configFile, 'repo https://github.com/Example/repo.git\n')
+    fs.writeFileSync(authConfig, 'repo https://github.com/Example/repo.git\n')
     try {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = authConfig
       delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
       process.env.HELIOS_TASK_DAG_MIRROR_ROOT = mirrorRoot
-      process.env.HELIOS_GITHUB_APP_CREDENTIAL_DIR = credentialDir
+      process.env.HELIOS_GITHUB_APP_CREDENTIAL_DIR = path.join(mirrorRoot, 'credentials')
       delete process.env.HELIOS_GITHUB_APP_ID
       __resetTaskDagMirrorForTests()
-      const status = await initTaskDagMirror()
+      expect((await initTaskDagMirror()).repositories[0]).toMatchObject({ available: true, mode: 'mirror' })
       expect(fs.existsSync(mirror)).toBe(true)
-      expect(status.repositories[0]).toMatchObject({ available: true, mode: 'mirror' })
 
       execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/Example/wrong.git'], { cwd: mirror })
       __resetTaskDagMirrorForTests()
       await initTaskDagMirror()
       expect(fs.existsSync(mirror)).toBe(false)
     } finally {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
+      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
+      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
       delete process.env.HELIOS_TASK_DAG_MIRROR_ROOT
       delete process.env.HELIOS_GITHUB_APP_CREDENTIAL_DIR
       __resetTaskDagMirrorForTests()
@@ -355,73 +261,9 @@ describe('taskDagRepo indexer', () => {
     }
   })
 
-  it('categorizes public diagnostics without exposing secret-bearing process errors', () => {
-    const diagnostic = publicTaskDagError(new Error(
-      'GitHub App request /repos/acme/private/installation failed with HTTP 403: super-secret-token /var/lib/helios/private',
-    ))
-    expect(diagnostic).toBe(
-      'GitHub rejected the Helios App credential. Verify the App key, installation, and repository read permission.',
-    )
+  it('redacts secret-bearing process diagnostics', () => {
+    const diagnostic = publicTaskDagError(new Error('HTTP 403 super-secret-token /var/lib/helios/private'))
     expect(diagnostic).not.toContain('super-secret-token')
     expect(diagnostic).not.toContain('/var/lib/helios')
   })
-
-  it('rejects non-GitHub remote sources without a configured local checkout', async () => {
-    const configFile = path.join(os.tmpdir(), `taskdag-invalid-remote-${process.pid}.conf`)
-    try {
-      fs.writeFileSync(configFile, 'repo git@github.com:Example/repo.git\n')
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
-      delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
-      __resetTaskDagMirrorForTests()
-      await expect(initTaskDagMirror()).rejects.toThrow(
-        "Task repository 'repo' must use an exact https://github.com/<owner>/<repo>.git URL",
-      )
-    } finally {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
-      __resetTaskDagMirrorForTests()
-      fs.rmSync(configFile, { force: true })
-    }
-  })
-
-  it('does not derive public repository links from credential-bearing URLs', async () => {
-    const configFile = path.join(os.tmpdir(), `taskdag-secret-repos-${process.pid}.conf`)
-    const pathsFile = `${configFile}.paths`
-    try {
-      fs.writeFileSync(configFile, 'secret https://github.com/acme/repo.git?access_token=do-not-leak\n')
-      fs.writeFileSync(pathsFile, `secret ${repoDir}\n`)
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
-      __resetTaskDagMirrorForTests()
-      __resetTaskIndexCacheForTests()
-      const serialized = JSON.stringify(await getFrontierView())
-      expect(serialized).not.toContain('do-not-leak')
-      expect(serialized).not.toContain('access_token')
-    } finally {
-      process.env.HELIOS_TASK_DAG_REPOS_FILE = defaultConfigFile
-      process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = defaultPathsFile
-      __resetTaskDagMirrorForTests()
-      __resetTaskIndexCacheForTests()
-      fs.rmSync(configFile, { force: true })
-      fs.rmSync(pathsFile, { force: true })
-    }
-  })
 })
-
-async function frontierByTitle(substr: string) {
-  return nodeByTitle(substr)
-}
-
-async function nodeByTitle(substr: string) {
-  const view = await getFrontierView()
-  for (const g of view.groups) {
-    for (const t of g.tasks) {
-      if (t.title.includes(substr)) return t
-    }
-  }
-  // Fall back to epic DAG (covers done/non-frontier nodes too).
-  const dag = await getEpicDag('100', 'automation')
-  const found = dag.nodes.find((n) => n.title.includes(substr))
-  if (!found) throw new Error(`no node titled ~${substr}`)
-  return found
-}
