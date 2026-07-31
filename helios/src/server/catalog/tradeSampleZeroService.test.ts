@@ -12,6 +12,7 @@ const dealerId = 210249
 const location = {
   data: [{ id: 88, name: 'NOT FOR SALE - Samples', enabled: true, stockType: { id: 7 } }],
 }
+const destination = { id: 88, name: 'NOT FOR SALE - Samples', stockTypeId: 7 }
 const source = { id: 12, name: 'Sales Floor' }
 const stockType = { id: 3 }
 
@@ -82,23 +83,55 @@ describe('trade sample preview', () => {
   })
 
   it.each([null, '', false])('rejects malformed current quantity %j', async (currentQty) => {
-    await expect(readLiveInventory(dealerId, dependencies([page([row([packageItem({ currentQty })])])]))).rejects.toThrow()
+    await expect(readLiveInventory(dealerId, destination, dependencies([page([row([packageItem({ currentQty })])])]))).rejects.toThrow()
   })
 
   it.each([null, '', false])('rejects malformed available quantity %j', async (availableQty) => {
-    await expect(readLiveInventory(dealerId, dependencies([page([row([packageItem({ availableQty })])])]))).rejects.toThrow()
+    await expect(readLiveInventory(dealerId, destination, dependencies([page([row([packageItem({ availableQty })])])]))).rejects.toThrow()
   })
 
   it('rejects inconsistent totals and incomplete pagination', async () => {
     const full = Array.from({ length: 100 }, (_, index) => row([], index + 1))
-    await expect(readLiveInventory(dealerId, dependencies([page(full, 101), page([], 102)]))).rejects.toThrow('changed during pagination')
-    await expect(readLiveInventory(dealerId, dependencies([page([row()], 2)]))).rejects.toThrow('incomplete')
+    await expect(readLiveInventory(dealerId, destination, dependencies([page(full, 101), page([], 102)]))).rejects.toThrow('changed during pagination')
+    await expect(readLiveInventory(dealerId, destination, dependencies([page([row()], 2)]))).rejects.toThrow('incomplete')
   })
 
   it('rejects conflicting duplicate package IDs', async () => {
-    await expect(readLiveInventory(dealerId, dependencies([
+    await expect(readLiveInventory(dealerId, destination, dependencies([
       page([row([packageItem(), packageItem({ currentQty: 4, availableQty: 4 })])]),
     ]))).rejects.toThrow('Conflicting duplicate')
+  })
+
+  it('ignores incomplete non-sample metadata outside the dedicated destination', async () => {
+    const unrelated = packageItem({ externalTrackCode: null, id: 'unrelated', isTradeSample: false })
+    const preview = await previewTradeSampleZero(dealerId, dependencies([
+      location,
+      page([row([packageItem(), unrelated])]),
+    ]))
+
+    expect(preview.items).toEqual([expectedItem])
+  })
+
+  it.each([null, undefined])('rejects unknown trade-sample classification %j outside the destination', async (isTradeSample) => {
+    const unknown = packageItem({ externalTrackCode: null, id: 'unknown', isTradeSample })
+    await expect(previewTradeSampleZero(dealerId, dependencies([
+      location,
+      page([row([packageItem(), unknown])]),
+    ]))).rejects.toThrow('unknown trade-sample classification')
+  })
+
+  it('does not treat missing quantity as zero for a package in the destination', async () => {
+    const occupant = packageItem({
+      currentQty: undefined,
+      id: 'occupant',
+      isTradeSample: false,
+      stockLocation: { id: 88, name: 'NOT FOR SALE - Samples' },
+      stockType: { id: 7 },
+    })
+    await expect(previewTradeSampleZero(dealerId, dependencies([
+      location,
+      page([row([packageItem(), occupant])]),
+    ]))).rejects.toThrow('invalid package quantity metadata')
   })
 
   it('treats every positive package in the destination as occupied, including non-samples', async () => {
@@ -119,5 +152,18 @@ describe('trade sample preview', () => {
     await expect(previewTradeSampleZero(dealerId, dependencies([
       { data: [{ id: 88, name: 'not for sale - samples', enabled: true, stockType: { id: 7 } }] },
     ]))).rejects.toThrow('exactly one')
+  })
+
+  it('accepts insignificant whitespace around the live Sweed location name', async () => {
+    const preview = await previewTradeSampleZero(dealerId, dependencies([
+      { data: [{ id: 5708, name: ' NOT FOR SALE - Samples', enabled: true, stockType: { id: 1 } }] },
+      page([row([packageItem()])]),
+    ]))
+
+    expect(preview.destination).toEqual({
+      id: 5708,
+      name: 'NOT FOR SALE - Samples',
+      stockTypeId: 1,
+    })
   })
 })

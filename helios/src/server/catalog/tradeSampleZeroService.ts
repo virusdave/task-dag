@@ -44,14 +44,14 @@ export async function resolveTradeSampleDestination(dealerId: number, d: TradeSa
   const matches = list.filter((location) =>
     location.enabled === true
     && !/^\s*(dead|deleted|retired)\b/i.test(location.name)
-    && location.name === TRADE_SAMPLE_LOCATION_NAME
+    && location.name.trim() === TRADE_SAMPLE_LOCATION_NAME
     && location.stockType?.id,
   )
   if (matches.length !== 1) throw new TradeSampleTargetError(`Expected exactly one enabled location named "${TRADE_SAMPLE_LOCATION_NAME}"; found ${matches.length}.`)
   return { id: matches[0]!.id, name: TRADE_SAMPLE_LOCATION_NAME, stockTypeId: matches[0]!.stockType!.id }
 }
 
-export async function readLiveInventory(dealerId: number, d: TradeSampleZeroDeps = deps()): Promise<Array<TradeSampleZeroItem & { isTradeSample: boolean }>> {
+export async function readLiveInventory(dealerId: number, destination: Location, d: TradeSampleZeroDeps = deps()): Promise<Array<TradeSampleZeroItem & { isTradeSample: boolean }>> {
   const byId = new Map<string, TradeSampleZeroItem & { isTradeSample: boolean }>()
   let total: number | null = null
   let read = 0
@@ -59,10 +59,15 @@ export async function readLiveInventory(dealerId: number, d: TradeSampleZeroDeps
     const p = GroupedSchema.parse(unwrap(await d.rpc(dealerId, 'store.inventory.item.list.grouped', { page, pageSize: PAGE_SIZE, isOnStock: true })))
     total ??= p.totalCount; if (p.totalCount !== total) throw new TradeSampleZeroStaleError('Inventory changed during pagination.'); read += p.data.length
     for (const row of p.data) for (const x of row.items) {
-      if ((x.currentQty ?? 0) <= 0) continue
+      if (x.currentQty == null) throw new TradeSampleZeroStaleError('Live inventory has invalid package quantity metadata.')
+      if (x.currentQty <= 0) continue
+      if (!x.stockLocation?.id || !x.stockLocation.name) throw new TradeSampleZeroStaleError('Live inventory has invalid package location metadata.')
+      if (x.isTradeSample == null) throw new TradeSampleZeroStaleError('Live inventory has unknown trade-sample classification.')
+      const isTradeSample = x.isTradeSample
+      if (!isTradeSample && x.stockLocation.id !== destination.id) continue
       const id = String(x.inventoryItemId ?? x.id ?? '').trim(), tag = x.externalTrackCode?.trim() ?? '', productId = row.product?.id
-      if (!id || !tag || !productId || x.currentQty == null || x.availableQty == null || !x.stockLocation?.id || !x.stockLocation.name || !x.stockType?.id) throw new TradeSampleZeroStaleError('Live inventory has invalid package/source metadata.')
-      const item = { inventoryItemId: id, externalTrackCode: tag, currentQty: x.currentQty, availableQty: x.availableQty, isTradeSample: x.isTradeSample === true,
+      if (!id || !tag || !productId || x.currentQty == null || x.availableQty == null || !x.stockType?.id) throw new TradeSampleZeroStaleError('Live inventory has invalid package/source metadata.')
+      const item = { inventoryItemId: id, externalTrackCode: tag, currentQty: x.currentQty, availableQty: x.availableQty, isTradeSample,
         sourceLocationId: x.stockLocation.id, sourceLocationName: x.stockLocation.name, sourceStockTypeId: x.stockType.id,
         packageLabel: null, productId, productName: row.product?.name ?? null, productSku: row.product?.sku ?? null }
       const previous = byId.get(id)
@@ -89,7 +94,7 @@ export function assertTargetContents(all: Array<TradeSampleZeroItem & { isTradeS
       || actualItem.externalTrackCode !== expectedItem.externalTrackCode
       || actualItem.currentQty !== expectedItem.currentQty
       || actualItem.availableQty !== expectedItem.currentQty
-      || actualItem.sourceLocationName !== TRADE_SAMPLE_LOCATION_NAME
+      || actualItem.sourceLocationName.trim() !== TRADE_SAMPLE_LOCATION_NAME
       || actualItem.sourceStockTypeId !== destination.stockTypeId
     ) {
       throw new TradeSampleTargetError('Dedicated location contents do not exactly match the staged trade samples.')
@@ -125,7 +130,7 @@ export function tradeSampleZeroDigest(
     .digest('hex')
 }
 export async function previewTradeSampleZero(dealerId: number, d: TradeSampleZeroDeps = deps()): Promise<TradeSampleZeroPreviewResponse> {
-  requireSite(dealerId); const destination = await resolveTradeSampleDestination(dealerId, d); const all = await readLiveInventory(dealerId, d); assertTargetContents(all, destination)
+  requireSite(dealerId); const destination = await resolveTradeSampleDestination(dealerId, d); const all = await readLiveInventory(dealerId, destination, d); assertTargetContents(all, destination)
   const items = all.filter(x => x.isTradeSample).map(({ isTradeSample: _, ...x }) => x)
   if (items.some(x => x.availableQty !== x.currentQty)) throw new TradeSampleZeroStaleError('A trade sample has reservations; available quantity must equal current quantity.')
   if (items.length > 500) throw new TradeSampleZeroCandidateLimitError('More than 500 trade samples require staging.')

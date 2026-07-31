@@ -138,7 +138,7 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
       await withSweedSession(async () => {
         const destination = await resolveTradeSampleDestination(stage.data.siteDealerId)
         if (JSON.stringify(destination) !== JSON.stringify(stage.data.destination)) throw new Error('Destination changed.')
-        assertTargetContents(await readLiveInventory(stage.data.siteDealerId), destination, stage.data.items)
+        assertTargetContents(await readLiveInventory(stage.data.siteDealerId, destination), destination, stage.data.items)
       })
     } catch {
       return reply.status(409).send({

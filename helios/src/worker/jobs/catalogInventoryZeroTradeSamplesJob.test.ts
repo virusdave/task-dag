@@ -70,6 +70,24 @@ describe('zero trade sample worker', () => {
     expect(deps.audit.mock.calls[2]?.[1].payload.counts.completed).toBe(1)
   })
 
+  it('accepts Sweed padding around the destination name before zeroing', async () => {
+    const padded = ` ${destination.name}`
+    const paddedLocations = { data: [{ id: 88, name: padded, enabled: true, stockType: { id: 7 } }] }
+    const paddedGrouped = grouped()
+    paddedGrouped.data[0]!.items[0]!.stockLocation.name = padded
+    const deps = dependencies([
+      paddedLocations,
+      paddedGrouped,
+      detail({ stockLocation: { id: 88, name: padded } }),
+      {},
+      detail({ currentQty: 0, availableQty: 0, stockLocation: { id: 88, name: padded } }),
+    ])
+
+    await runCatalogInventoryZeroTradeSamplesJob(context, payload, deps)
+
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.item.adjust')).toHaveLength(1)
+  })
+
   it('aborts before mutation for an extra target package or a non-sample', async () => {
     const extra = { ...detail(), id: '45', externalTrackCode: 'EXTRA' }
     for (const live of [grouped(false), grouped(true, [extra])]) {

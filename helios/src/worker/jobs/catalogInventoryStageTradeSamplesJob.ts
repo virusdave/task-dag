@@ -32,7 +32,7 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
     await assertLease()
     const destination = await resolveTradeSampleDestination(payload.siteDealerId, d)
     if (JSON.stringify(destination) !== JSON.stringify(payload.destination)) throw new Error('Dedicated destination changed.')
-    const live = await readLiveInventory(payload.siteDealerId, d)
+    const live = await readLiveInventory(payload.siteDealerId, destination, d)
     assertTargetContents(live, destination)
     const samples = live.filter(x => x.isTradeSample).map(({ isTradeSample: _, ...x }) => x)
     if (tradeSampleZeroDigest(payload.siteDealerId, samples, destination) !== payload.digest) throw new Error('Preview inventory changed.')
@@ -70,7 +70,7 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
         items: [{ id: item.inventoryItemId, qty: item.currentQty, externalTrackCode: item.externalTrackCode }],
       })
       const after = await readExactItem(payload.siteDealerId, item, d)
-      if (!after.isTradeSample || after.currentQty !== item.currentQty || after.stockLocation?.id !== payload.destination.id || after.stockLocation?.name !== payload.destination.name || after.stockType?.id !== payload.destination.stockTypeId) throw new Error('Transfer outcome could not be verified.')
+      if (!after.isTradeSample || after.currentQty !== item.currentQty || after.stockLocation?.id !== payload.destination.id || after.stockLocation?.name?.trim() !== payload.destination.name || after.stockType?.id !== payload.destination.stockTypeId) throw new Error('Transfer outcome could not be verified.')
     } catch (error) {
       appendTerminalOutcomes(payload, outcomes, index, 'failed_unknown')
       await persistStageResult(context, payload, outcomes, false, audit, db)
@@ -87,7 +87,7 @@ export async function runCatalogInventoryStageTradeSamplesJob(context: JobHandle
   }
 
   try {
-    assertTargetContents(await readLiveInventory(payload.siteDealerId, d), payload.destination, payload.items)
+    assertTargetContents(await readLiveInventory(payload.siteDealerId, payload.destination, d), payload.destination, payload.items)
   } catch (error) {
     await persistStageResult(context, payload, outcomes, false, audit, db)
     throw error

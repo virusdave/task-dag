@@ -40,7 +40,7 @@ export async function runCatalogInventoryZeroTradeSamplesJob(
       throw new Error('Dedicated destination changed.')
     }
     assertTargetContents(
-      await readLiveInventory(payload.siteDealerId, serviceDependencies),
+      await readLiveInventory(payload.siteDealerId, destination, serviceDependencies),
       destination,
       payload.items,
     )
@@ -60,7 +60,7 @@ export async function runCatalogInventoryZeroTradeSamplesJob(
         || late.currentQty !== item.currentQty
         || late.availableQty !== item.currentQty
         || late.stockLocation?.id !== payload.destination.id
-        || late.stockLocation?.name !== payload.destination.name
+        || late.stockLocation?.name?.trim() !== payload.destination.name
         || late.stockType?.id !== payload.destination.stockTypeId
       ) {
         throw new Error('Package is not the exact staged trade sample.')
