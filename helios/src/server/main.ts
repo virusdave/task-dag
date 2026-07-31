@@ -2,7 +2,7 @@ import { buildServer } from './app/buildServer.js'
 import { getServerEnv } from './config/env.js'
 import { bootstrapParserRegistry } from '../lib/parsekit/node/index.js'
 import { getTaskDagSources, initTaskDagMirror, publicTaskDagError } from './taskDagMirror.js'
-import { loadTaskIndex } from './taskDagRepo.js'
+import { probeTaskDagReader } from './taskDagRepo.js'
 import { initAgentPainPointsMirror } from './agentPainPointsMirror.js'
 import { initAgentWasteBacklogReader } from './agentWasteBacklogReader.js'
 
@@ -46,8 +46,8 @@ try {
   await server.listen({ host: '0.0.0.0', port: env.port })
   for (const source of getTaskDagSources().filter((candidate) => candidate.gitDir != null)) {
     try {
-      const index = await loadTaskIndex(source.repository)
-      gitFetchLog.info('task-dag v2 reader ready', { repository: source.repository, taskCount: index.nodes.size })
+      const probe = await probeTaskDagReader(source.repository)
+      gitFetchLog.info('task-dag v2 reader ready', { repository: source.repository, taskCount: probe.taskCount })
     } catch (error) {
       gitFetchLog.error('task-dag v2 reader unavailable', {
         repository: source.repository,

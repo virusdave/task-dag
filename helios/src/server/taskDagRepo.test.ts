@@ -12,6 +12,7 @@ import {
   getFrontierView,
   getTaskDetail,
   loadTaskIndex,
+  probeTaskDagReader,
 } from './taskDagRepo.js'
 import {
   __resetTaskDagMirrorForTests,
@@ -179,6 +180,16 @@ describe('bounded task-dag v2 adapter', () => {
       return command === 'activation' ? { ...(response as object), journalOid: 'a'.repeat(40) } : response
     })
     await expect(loadTaskIndex('automation')).rejects.toThrow(/activation disagrees/)
+  })
+
+  it('probes activation and bounded lifecycle refs without reading task records', async () => {
+    const commands: string[] = []
+    __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
+      commands.push(command)
+      return fakeRunner()(gitDir, originUrl, command, taskId)
+    })
+    await expect(probeTaskDagReader('automation')).resolves.toEqual({ taskCount: states.size })
+    expect(commands).toEqual(['activation'])
   })
 
   it('rejects identity inconsistencies in canonical reader output', async () => {

@@ -335,6 +335,15 @@ function validateActivation(capture: RefCapture, raw: unknown): void {
   }
 }
 
+export async function probeTaskDagReader(repository: string): Promise<{ taskCount: number }> {
+  const source = requireSource(repository)
+  const originUrl = await git(source.gitDir, ['remote', 'get-url', 'origin'])
+  if (!originUrl) throw new Error(`Task repository ${repository} has no origin URL to isolate`)
+  const capture = await captureRefs(source.gitDir)
+  validateActivation(capture, await runCanonical(source.gitDir, originUrl, 'activation'))
+  return { taskCount: capture.lifecycle.length }
+}
+
 async function loadTaskIndexAttempt(repository: string, signal: AbortSignal): Promise<TaskIndex> {
   const source = requireSource(repository)
   const originUrl = await git(source.gitDir, ['remote', 'get-url', 'origin'])
