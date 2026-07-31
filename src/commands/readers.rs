@@ -25,6 +25,21 @@ fn frontier_map(snapshot: &repository::Snapshot) -> Result<BTreeMap<String, Stri
         .collect()
 }
 
+fn materialize_frontier_tasks(frontier: &BTreeMap<String, String>) -> Result<()> {
+    let tasks = frontier
+        .values()
+        .map(|oid| {
+            let task = crate::git::object_json(oid)?["taskOid"]
+                .as_str()
+                .ok_or("frontier record has no Task OID")?
+                .to_owned();
+            model::oid(&task)?;
+            Ok(task)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    repository::materialize(&tasks)
+}
+
 pub(crate) fn show(id: &str) -> Result<()> {
     model::valid_id(id)?;
     let snap = repository::advertise(&repository::lifecycle_patterns(id))?;
@@ -68,6 +83,7 @@ pub(crate) fn frontier() -> Result<()> {
     let first_frontier = frontier_map(&first)?;
     let frontier_oids: Vec<_> = first_frontier.values().cloned().collect();
     repository::materialize(&frontier_oids)?;
+    materialize_frontier_tasks(&first_frontier)?;
     let mut patterns = vec![FRONTIER_V2_SCOPE.into()];
     for (reference, oid) in &first_frontier {
         let id = frontier_id(reference)?;
@@ -91,6 +107,7 @@ pub(crate) fn frontier() -> Result<()> {
     }
     let frontier_oids: Vec<_> = second_frontier.values().cloned().collect();
     repository::materialize(&frontier_oids)?;
+    materialize_frontier_tasks(&second_frontier)?;
     let mut rows = Vec::new();
     for (reference, oid) in &second_frontier {
         let id = frontier_id(reference)?;

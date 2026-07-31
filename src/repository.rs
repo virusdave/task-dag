@@ -144,31 +144,43 @@ pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
     for oid in &unique {
         model::oid(oid)?;
     }
-    let mut fetch = Command::new("git");
-    fetch.args([
-        "fetch",
-        "--no-tags",
-        "--quiet",
-        "--no-write-fetch-head",
-        "--",
-        remote,
-    ]);
-    fetch.args(&unique);
-    let out = fetch
-        .output()
-        .map_err(|e| format!("run bounded fetch: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "bounded object fetch failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let verified = unique
-        .iter()
-        .all(|oid| git::output(["cat-file", "-e", &format!("{oid}^{{commit}}")]).is_ok());
-    if !verified {
+    let objects: Vec<_> = unique.into_iter().collect();
+    let initial = git::batch_object_types(&objects)?;
+    if initial.values().flatten().any(|kind| kind != "commit") {
         return Err("fetched object did not equal captured advertisement OID".into());
     }
+    let missing: Vec<_> = initial
+        .into_iter()
+        .filter_map(|(oid, kind)| kind.is_none().then_some(oid))
+        .collect();
+    if !missing.is_empty() {
+        let mut fetch = Command::new("git");
+        fetch.args([
+            "fetch",
+            "--no-tags",
+            "--quiet",
+            "--no-write-fetch-head",
+            "--",
+            remote,
+        ]);
+        fetch.args(&missing);
+        let out = fetch
+            .output()
+            .map_err(|e| format!("run bounded fetch: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "bounded object fetch failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        if git::batch_object_types(&missing)?
+            .values()
+            .any(|kind| kind.as_deref() != Some("commit"))
+        {
+            return Err("fetched object did not equal captured advertisement OID".into());
+        }
+    }
+    git::cache_commit_objects(&objects)?;
     Ok(())
 }
 pub(crate) fn materialize_lifecycle(snap: &Snapshot, ids: &[String]) -> Result<()> {
