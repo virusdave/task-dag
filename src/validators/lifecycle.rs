@@ -357,13 +357,31 @@ pub(crate) fn waiting(oid: &str, id: &str) -> Result<Value> {
             .ok_or("waiting child state OID malformed")?;
         model::oid(task_oid)?;
         model::oid(state_oid)?;
-        let state = if has_claim { "active" } else { "frontier" };
+        let state = if child["ref"] == model::state_ref("waiting", child_id) {
+            if has_claim {
+                return Err("delegated waiting child cannot carry an active claim".into());
+            }
+            "waiting"
+        } else if has_claim {
+            "active"
+        } else {
+            "frontier"
+        };
         if parents[index + 2] != task_oid || child["ref"] != model::state_ref(state, child_id) {
             return Err("waiting child identity or immediate order is malformed".into());
         }
         task(task_oid, child_id)?;
-        lifecycle(state, state_oid, child_id)?;
-        if git::object_json(state_oid)?["taskOid"] != task_oid {
+        if state == "waiting" {
+            waiting(state_oid, child_id)?;
+        } else {
+            lifecycle(state, state_oid, child_id)?;
+        }
+        let state_task_key = if state == "waiting" {
+            "parentTaskOid"
+        } else {
+            "taskOid"
+        };
+        if git::object_json(state_oid)?[state_task_key] != task_oid {
             return Err("waiting child state names wrong Task object".into());
         }
     }

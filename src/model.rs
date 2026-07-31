@@ -66,6 +66,19 @@ pub(crate) fn repository_id(value: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn repository_id_for_path(value: &str) -> Result<String> {
+    let path = value.to_ascii_lowercase();
+    let Some((owner, repository)) = path.split_once('/') else {
+        return Err("repository path must have owner/repository shape".into());
+    };
+    if owner.is_empty() || repository.is_empty() || repository.contains('/') {
+        return Err("repository path must have owner/repository shape".into());
+    }
+    let mut digest = Sha256::new();
+    digest.update(path.as_bytes());
+    Ok(format!("repo-v2-{:x}", digest.finalize()))
+}
+
 pub(crate) fn state_ref(state: &str, id: &str) -> String {
     format!("refs/heads/tasks/{state}/{id}")
 }
@@ -302,6 +315,15 @@ pub(crate) fn validate_reap_claim(value: Value, id: &str, now: u64) -> Result<Cl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_paths_have_case_insensitive_canonical_ids() {
+        assert_eq!(
+            repository_id_for_path("Owner/Repo").unwrap(),
+            repository_id_for_path("owner/repo").unwrap()
+        );
+        assert!(repository_id_for_path("owner").is_err());
+    }
     use proptest::prelude::*;
     proptest! {
         #[test] fn ids_are_deterministic_grammatical_and_domain_separated(a in "[a-zA-Z0-9_-]{1,40}", b in "[a-zA-Z0-9_-]{1,40}") { let root=task_id("root",&[&a]); let again=task_id("root",&[&a]); let child=task_id("child",&[&a,&b]); prop_assert_eq!(&root,&again); prop_assert!(valid_id(&root).is_ok()); prop_assert!(valid_id(&child).is_ok()); prop_assert_ne!(root,child); }

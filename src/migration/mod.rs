@@ -75,7 +75,7 @@ pub(crate) fn run(
         return Err("v1 discovery changed between frozen scan and activation capture".into());
     }
     let mut ids = BTreeMap::new();
-    for legacy in &frozen.tasks {
+    for legacy in frozen.planned_tasks.values() {
         ids.insert(
             legacy.task.clone(),
             model::task_id("legacy-v1-sha", &[&legacy.task]),
@@ -83,29 +83,55 @@ pub(crate) fn run(
     }
     let root_id = ids[root].clone();
     let mut task_oids: BTreeMap<String, String> = BTreeMap::new();
-    for legacy in &frozen.tasks {
+    let mut remaining: BTreeMap<_, _> = frozen.planned_tasks.clone();
+    while !remaining.is_empty() {
+        let key = remaining
+            .iter()
+            .find(|(_, task)| {
+                let is_root = frozen.refs.iter().any(|(reference, oid)| {
+                    reference.starts_with("refs/heads/tasks/pending/") && oid == &task.task
+                });
+                let structural_ready =
+                    is_root || task_oids.contains_key(&frozen.planned_roots[&task.task]);
+                structural_ready
+                    && task
+                        .requires
+                        .iter()
+                        .all(|requirement| task_oids.contains_key(requirement))
+            })
+            .map(|(key, _)| key.clone())
+            .ok_or("legacy pending roots contain a global requirement cycle")?;
+        let legacy = remaining.remove(&key).unwrap();
         let requirements: Vec<Value> = legacy
             .requires
             .iter()
             .map(|sha| json!({"taskId":ids[sha],"taskOid":task_oids[sha]}))
             .collect();
-        let structural = if legacy.task == root {
+        let structural = if frozen.refs.iter().any(|(reference, oid)| {
+            reference.starts_with("refs/heads/tasks/pending/") && oid == &legacy.task
+        }) {
             Value::Null
         } else {
-            json!({"taskId":root_id,"taskOid":task_oids[root]})
+            let parent = frozen.planned_roots[&legacy.task].clone();
+            json!({"taskId":ids[&parent],"taskOid":task_oids[&parent]})
         };
-        let value = json!({"description":legacy.description,"formatVersion":2,"operationId":operation,"requirements":requirements,"structuralParent":structural,"taskId":ids[&legacy.task],"title":legacy.title});
+        let task_operation = model::framed_digest("migrate-v1-task-operation", &[&legacy.task]);
+        let value = json!({"description":legacy.description,"formatVersion":2,"operationId":task_operation,"requirements":requirements,"structuralParent":structural,"taskId":ids[&legacy.task],"title":legacy.title});
         let mut parents = Vec::new();
-        if legacy.task != root {
-            parents.push(task_oids[root].clone());
+        if !structural.is_null() {
+            parents.push(structural["taskOid"].as_str().unwrap().to_owned());
         }
         parents.extend(legacy.requires.iter().map(|r| task_oids[r].clone()));
-        task_oids.insert(legacy.task.clone(), git::commit(&value, &parents)?);
+        task_oids.insert(
+            legacy.task.clone(),
+            git::migration_task_commit(&value, &parents)?,
+        );
     }
     let now = crate::commands::timestamp()?;
     let mut updates = Vec::new();
     let mut outputs = Vec::new();
     let mut children = Vec::new();
+    let mut delegation_provenance = Vec::new();
     let mut tokens = BTreeMap::new();
     let mut block_leases = BTreeMap::new();
     for legacy in frozen.tasks.iter().filter(|t| t.task != root) {
@@ -178,6 +204,87 @@ pub(crate) fn run(
         children.push(json!({"claimToken":child_token,"owner":child_owner,"ref":child_ref,"stateOid":child_oid,"taskId":id,"taskOid":task}));
     }
     let root_task = &task_oids[root];
+    for delegation in &frozen.delegations {
+        let delegated_operation = model::framed_digest(
+            "migrate-v1-delegation-operation",
+            &[
+                root,
+                &delegation.reference,
+                &delegation.oid,
+                &delegation.edge_oid,
+            ],
+        );
+        let synthetic_source_id = model::task_id(
+            "legacy-v1-delegation-source",
+            &[
+                root,
+                &delegation.reference,
+                &delegation.oid,
+                &delegation.edge_oid,
+            ],
+        );
+        let target_id = model::task_id(
+            "delegated-task",
+            &[
+                &delegation.source_repository_id,
+                &delegation.target_repository_id,
+                &delegated_operation,
+            ],
+        );
+        let task_value = json!({"description":format!("Imported legacy delegation {} at {} for {}#{}",delegation.oid,delegation.reference,delegation.peer_repository,delegation.peer_issue),"formatVersion":2,"operationId":delegated_operation,"requirements":[],"structuralParent":{"taskId":root_id,"taskOid":root_task},"taskId":synthetic_source_id,"title":format!("Delegated issue {}#{}",delegation.peer_repository,delegation.peer_issue)});
+        let synthetic_source_task =
+            git::migration_task_commit(&task_value, std::slice::from_ref(root_task))?;
+        crate::validators::task(&synthetic_source_task, &synthetic_source_id)?;
+        let semantic_id = model::framed_digest(
+            "migrate-v1-delegation-semantic",
+            &[
+                root,
+                &delegation.reference,
+                &delegation.oid,
+                &delegation.edge_oid,
+            ],
+        );
+        let intent_ref = model::delegation_intent_ref(&delegated_operation);
+        let intent = git::migration_task_commit(
+            &json!({"description":task_value["description"],"fleetDigest":delegation.fleet_digest,"formatVersion":2,"operationId":delegated_operation,"repositoryPath":[delegation.source_repository_id,delegation.target_repository_id],"semanticId":semantic_id,"sourceRepositoryId":delegation.source_repository_id,"sourceTaskId":synthetic_source_id,"sourceTaskOid":synthetic_source_task,"targetRepositoryId":delegation.target_repository_id,"targetTaskId":target_id,"title":task_value["title"]}),
+            &[],
+        )?;
+        crate::validators::intent(&intent)?;
+        let active = git::migration_task_commit(
+            &json!({"attemptId":model::framed_digest("migration-delegation-active", &[&delegated_operation]),"claimToken":model::framed_digest("migration-delegation-token", &[&delegated_operation]),"claimedAt":1,"expiresAt":2,"formatVersion":2,"host":"migration","logicalId":semantic_id,"operationId":delegated_operation,"owner":"migration:v1-delegation","sessionId":"migration","taskId":synthetic_source_id,"taskOid":synthetic_source_task}),
+            std::slice::from_ref(&synthetic_source_task),
+        )?;
+        crate::validators::lifecycle("active", &active, &synthetic_source_id)?;
+        let waiting = git::migration_task_commit(
+            &json!({"formatVersion":2,"intentOid":intent,"intentRef":intent_ref,"operationId":delegated_operation,"parentTaskId":synthetic_source_id,"parentTaskOid":synthetic_source_task,"semanticId":semantic_id,"targetTaskId":target_id}),
+            &[active, synthetic_source_task.clone(), intent.clone()],
+        )?;
+        crate::validators::waiting(&waiting, &synthetic_source_id)?;
+        let waiting_ref = model::state_ref("waiting", &synthetic_source_id);
+        updates.extend([
+            Update {
+                semantic_ref: intent_ref.clone(),
+                old: None,
+                new: Some(intent.clone()),
+            },
+            Update {
+                semantic_ref: waiting_ref.clone(),
+                old: None,
+                new: Some(waiting.clone()),
+            },
+            Update {
+                semantic_ref: delegation.reference.clone(),
+                old: Some(delegation.oid.clone()),
+                new: None,
+            },
+        ]);
+        outputs.extend([
+            (intent_ref.clone(), intent.clone()),
+            (waiting_ref.clone(), waiting.clone()),
+        ]);
+        children.push(json!({"claimToken":null,"owner":null,"ref":waiting_ref,"stateOid":waiting,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}));
+        delegation_provenance.push(json!({"declarationTrailers":delegation.trailers,"disposition":"native-delegation","fleetDigest":delegation.fleet_digest,"intentOid":intent,"intentRef":intent_ref,"legacyDelegatedOid":delegation.oid,"legacyDelegatedRef":delegation.reference,"operationId":delegated_operation,"pairedEdgeBlobOid":delegation.edge_oid,"peerIssue":delegation.peer_issue,"peerRepository":delegation.peer_repository,"sourceIssue":delegation.source_issue,"sourceRepositoryId":delegation.source_repository_id,"syntheticTaskId":synthetic_source_id,"syntheticTaskOid":synthetic_source_task,"targetRepositoryId":delegation.target_repository_id,"targetTaskId":target_id,"waitingOid":waiting}));
+    }
     if children.is_empty() {
         let legacy_root = &frozen.tasks[0];
         if legacy_root.state == "blocked" {
@@ -215,11 +322,9 @@ pub(crate) fn run(
             &json!({"children":children,"formatVersion":2,"operationId":operation,"semanticId":semantic,"parentTaskId":root_id,"parentTaskOid":root_task}),
             &[
                 vec![root.to_owned(), root_task.clone()],
-                frozen
-                    .tasks
+                children
                     .iter()
-                    .filter(|t| t.task != root)
-                    .map(|t| task_oids[&t.task].clone())
+                    .map(|child| child["taskOid"].as_str().unwrap().to_owned())
                     .collect(),
             ]
             .concat(),
@@ -248,9 +353,15 @@ pub(crate) fn run(
         }
         if legacy.task == root {
             mapping_parents.extend(frozen.graph.iter().cloned());
+            mapping_parents.extend(
+                frozen
+                    .delegations
+                    .iter()
+                    .map(|delegation| delegation.oid.clone()),
+            );
         }
         let mapping = git::commit(
-            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"completedParentRequirements":legacy.completed_parent_requirements.iter().map(|(task,witness)|json!({"taskOid":task,"completionWitnessOid":witness})).collect::<Vec<_>>(),"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
+            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"completedParentRequirements":legacy.completed_parent_requirements.iter().map(|(task,witness)|json!({"taskOid":task,"completionWitnessOid":witness})).collect::<Vec<_>>(),"delegations":if legacy.task == root {json!(delegation_provenance)} else {json!([])},"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
             &mapping_parents,
         )?;
         updates.push(Update {
@@ -267,7 +378,7 @@ pub(crate) fn run(
             });
         }
     }
-    let result = json!({"blockLeases":block_leases,"claimTokens":tokens,"mapping":ids,"reclaimRequired":true,"rootTaskId":root_id,"terminalExternalEdges":frozen.terminal_edges});
+    let result = json!({"blockLeases":block_leases,"claimTokens":tokens,"delegations":delegation_provenance,"mapping":ids,"plannedTaskOids":task_oids,"reclaimRequired":true,"rootTaskId":root_id,"terminalExternalEdges":frozen.terminal_edges});
     let receipt = git::commit(
         &json!({"domain":DOMAIN,"formatVersion":2,"operationId":operation,"outputs":result,"semanticDigest":semantic}),
         &outputs.iter().map(|(_, o)| o.clone()).collect::<Vec<_>>(),

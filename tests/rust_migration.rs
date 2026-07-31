@@ -50,6 +50,11 @@ fn commit(cwd: &Path, message: &str, parents: &[&str]) -> String {
 fn body(cwd: &Path, oid: &str) -> Value {
     serde_json::from_str(&ok(cwd, &["show", "-s", "--format=%B", oid])).unwrap()
 }
+fn repository_id(path: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(path.to_ascii_lowercase().as_bytes());
+    format!("repo-v2-{:x}", digest.finalize())
+}
 
 struct Fixture {
     root_dir: PathBuf,
@@ -69,6 +74,16 @@ impl Drop for Fixture {
 
 impl Fixture {
     fn new(blocked_in_closure: bool, singleton: bool) -> Self {
+        Self::new_with_activation_identity(blocked_in_closure, singleton, true)
+    }
+    fn new_legacy_activation(blocked_in_closure: bool, singleton: bool) -> Self {
+        Self::new_with_activation_identity(blocked_in_closure, singleton, false)
+    }
+    fn new_with_activation_identity(
+        blocked_in_closure: bool,
+        singleton: bool,
+        activation_identity: bool,
+    ) -> Self {
         let root_dir = std::env::temp_dir().join(format!(
             "taskdag-migration-{}-{}",
             std::process::id(),
@@ -107,7 +122,35 @@ impl Fixture {
             None,
             None,
         );
-        Self::run_raw(&work, &["init", "--trusted-floor", &floor], None, None);
+        if activation_identity {
+            let source_id = repository_id("owner/repo");
+            let peer_id = repository_id("peer/repo");
+            let mut fleet = [source_id.as_str(), peer_id.as_str()];
+            fleet.sort();
+            Self::run_raw(
+                &work,
+                &[
+                    "init",
+                    "--trusted-floor",
+                    &floor,
+                    "--repository-id",
+                    &source_id,
+                    "--fleet-repository-id",
+                    fleet[0],
+                    "--fleet-repository-id",
+                    fleet[1],
+                ],
+                None,
+                None,
+            );
+        } else {
+            Self::run_raw(
+                &work,
+                &["init", "--trusted-floor", &floor],
+                Some(("TASKDAG_TEST_LEGACY_ACTIVATION", "1")),
+                None,
+            );
+        }
         let root = commit(&work, "Root\n\nLegacy project context", &[]);
         let active = commit(&work, "Active child", &[&root]);
         let a = commit(&work, "Frontier A", &[&root, &active]);
@@ -297,7 +340,6 @@ impl Fixture {
         cmd.current_dir(work)
             .args(args)
             .env("TASKDAG_TEST_TIME", "1785196800")
-            .env("TASKDAG_TEST_LEGACY_ACTIVATION", "1")
             .env("TASKDAG_TEST_CURRENT_REPOSITORY", "owner/repo")
             .env("TASKDAG_SESSION_ID", "migration-integration")
             .env(
@@ -313,15 +355,12 @@ impl Fixture {
         cmd.output().unwrap()
     }
     fn migrate(&self, operation: &str, extra: Option<(&str, &str)>) -> Output {
+        self.migrate_root(&self.root, operation, extra)
+    }
+    fn migrate_root(&self, root: &str, operation: &str, extra: Option<(&str, &str)>) -> Output {
         Self::run_raw(
             &self.work,
-            &[
-                "migrate-v1",
-                "--root",
-                &self.root,
-                "--operation-id",
-                operation,
-            ],
+            &["migrate-v1", "--root", root, "--operation-id", operation],
             extra,
             Some("migration-token-0001"),
         )
@@ -426,6 +465,41 @@ impl Fixture {
             ],
         );
     }
+    fn add_delegation(
+        &self,
+        peer_repository: &str,
+        peer_issue: u64,
+        edge_peer_repository: Option<&str>,
+        edge_peer_issue: u64,
+        trailers: &[(&str, &str)],
+    ) -> (String, String) {
+        let mut message = format!(
+            "kind: delegated\nrole: system\nintent: delegated-child\n\nissue:\n  repo: owner/repo\n  number: 1\n\ndelegated:\n  repo: {peer_repository}\n  number: {peer_issue}\n"
+        );
+        for (name, value) in trailers {
+            message.push_str(&format!("\n{name}: {value}"));
+        }
+        let delegation = commit(&self.work, &message, &[&self.root]);
+        let reference = format!("refs/heads/tasks/delegated/1/{peer_repository}/{peer_issue}");
+        ok(
+            &self.work,
+            &["push", "origin", &format!("{delegation}:{reference}")],
+        );
+        if let Some(edge_repository) = edge_peer_repository {
+            let edge = json!({"from":format!("task:owner/repo@{}",self.root),"mode":"all","origin":{"repo-id":1,"witness":"delegation fixture"},"relation":"requires","schema":1,"to":format!("issue:{edge_repository}#{edge_peer_issue}")});
+            let graph = Self::graph_commit_edge(&self.work, &edge, None);
+            ok(
+                &self.work,
+                &[
+                    "push",
+                    "--force",
+                    "origin",
+                    &format!("{graph}:refs/heads/tasks/v1/graph"),
+                ],
+            );
+        }
+        (reference, delegation)
+    }
     fn migrate_with_terminal_edge(&self, operation: &str, edge: &str) -> Output {
         Self::run_raw(
             &self.work,
@@ -466,7 +540,7 @@ impl Fixture {
 
 #[test]
 fn census_reports_exact_bounded_roots_without_writes() {
-    let f = Fixture::new(false, false);
+    let f = Fixture::new_legacy_activation(false, false);
     f.remove_other_root();
     f.add_v2_blocked_state();
     let second = commit(&f.work, "Second root", &[]);
@@ -500,6 +574,121 @@ fn census_reports_exact_bounded_roots_without_writes() {
     assert_eq!(root["v1ActivationOid"], f.activation);
     assert_eq!(root["v1GraphOid"], f.graph);
     assert_eq!(ok(&f.work, &["ls-remote", "--refs", "origin"]), refs_before);
+}
+
+#[test]
+fn paired_legacy_delegation_becomes_native_waiting_child_and_replays_exactly() {
+    let f = Fixture::new(false, true);
+    f.remove_other_root();
+    let trailers = [
+        ("Parent-Repo-Node-Id", "PR_parent"),
+        ("Parent-Issue-Node-Id", "PI_1"),
+        ("Peer-Repo-Node-Id", "PR_peer"),
+        ("Peer-Issue-Node-Id", "PI_2"),
+        ("Materialisation-Operation-Id", "legacy-operation"),
+        (
+            "Declaration-Digest",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+    ];
+    let (legacy_ref, _) = f.add_delegation("peer/repo", 2, Some("peer/repo"), 2, &trailers);
+    let first = f.migrate("delegation-import", None);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let result: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let delegation = &result["delegations"][0];
+    assert_ne!(delegation["syntheticTaskId"], delegation["targetTaskId"]);
+    assert_eq!(delegation["disposition"], "native-delegation");
+    assert!(f.remote(&legacy_ref).is_none());
+    assert_eq!(
+        f.remote(delegation["intentRef"].as_str().unwrap())
+            .as_deref(),
+        delegation["intentOid"].as_str()
+    );
+    let intent = body(&f.work, delegation["intentOid"].as_str().unwrap());
+    assert_eq!(intent["sourceTaskId"], delegation["syntheticTaskId"]);
+    assert_eq!(intent["targetTaskId"], delegation["targetTaskId"]);
+    let root_waiting = f
+        .remote(&format!(
+            "refs/heads/tasks/waiting/{}",
+            result["rootTaskId"].as_str().unwrap()
+        ))
+        .unwrap();
+    crate_manifest_valid(
+        &f.work,
+        &root_waiting,
+        result["rootTaskId"].as_str().unwrap(),
+    );
+    assert!(
+        body(&f.work, &root_waiting)["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|child| child["taskId"] == delegation["syntheticTaskId"])
+    );
+    let replay = f.migrate("delegation-import", None);
+    assert!(replay.status.success());
+    assert_eq!(first.stdout, replay.stdout);
+}
+
+fn crate_manifest_valid(work: &Path, oid: &str, task_id: &str) {
+    let out = Fixture::run_raw(work, &["show", task_id], None, None);
+    assert!(
+        out.status.success(),
+        "manifest {oid}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn malformed_or_unpaired_legacy_delegation_fails_before_writes() {
+    for (peer, edge_peer, edge_issue, trailers) in [
+        (
+            "peer/repo",
+            Some("peer/repo"),
+            2,
+            vec![("Parent-Repo-Node-Id", "partial")],
+        ),
+        ("peer/repo", Some("peer/repo"), 3, Vec::new()),
+        ("peer/repo", None, 2, Vec::new()),
+        ("outside/repo", Some("outside/repo"), 2, Vec::new()),
+    ] {
+        let f = Fixture::new(false, true);
+        f.remove_other_root();
+        let (legacy_ref, legacy_oid) = f.add_delegation(peer, 2, edge_peer, edge_issue, &trailers);
+        let out = f.migrate("invalid-delegation", None);
+        assert!(!out.status.success());
+        assert_eq!(f.remote(&legacy_ref).as_deref(), Some(legacy_oid.as_str()));
+        assert!(
+            ok(
+                &f.work,
+                &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+            )
+            .is_empty()
+        );
+    }
+
+    let blocked = Fixture::new(false, true);
+    blocked.remove_other_root();
+    ok(
+        &blocked.work,
+        &[
+            "push",
+            "origin",
+            &format!("{}:refs/heads/tasks/blocked/{}", blocked.root, blocked.root),
+        ],
+    );
+    let (legacy_ref, legacy_oid) =
+        blocked.add_delegation("peer/repo", 2, Some("peer/repo"), 2, &[]);
+    let out = blocked.migrate("blocked-root-delegation", None);
+    assert!(!out.status.success());
+    assert_eq!(
+        blocked.remote(&legacy_ref).as_deref(),
+        Some(legacy_oid.as_str())
+    );
 }
 
 #[test]
@@ -675,7 +864,7 @@ fn absent_graph_is_frozen_as_empty_and_concurrent_creation_aborts() {
 
 #[test]
 fn singleton_pending_root_becomes_open_frontier_with_preserved_context() {
-    let f = Fixture::new(false, true);
+    let f = Fixture::new_legacy_activation(false, true);
     let out = f.migrate("migration-singleton", None);
     assert!(
         out.status.success(),
@@ -1114,6 +1303,63 @@ fn local_graph_requirement_is_immutable_and_structural_root_cycle_is_rejected() 
         )
     );
 
+    let cross_root = Fixture::new(false, false);
+    ok(
+        &cross_root.work,
+        &[
+            "push",
+            "origin",
+            &format!(":refs/heads/tasks/blocked/other-blocked"),
+            &format!(":refs/heads/tasks/blocked-meta/other-blocked"),
+        ],
+    );
+    let edge = json!({
+        "from":format!("task:owner/repo@{}", cross_root.tasks["b"]),
+        "mode":"all",
+        "origin":{"repo-id":1,"witness":"cross-root-graph-requirement"},
+        "relation":"requires",
+        "schema":1,
+        "to":format!("task:owner/repo@{}", cross_root.tasks["other_frontier"])
+    });
+    let graph = Fixture::graph_commit_edge(&cross_root.work, &edge, Some(&cross_root.graph));
+    ok(
+        &cross_root.work,
+        &[
+            "push",
+            &format!(
+                "--force-with-lease=refs/heads/tasks/v1/graph:{}",
+                cross_root.graph
+            ),
+            "origin",
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = cross_root.migrate("cross-root-graph-requirement", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let b_mapping = cross_root
+        .remote(&format!(
+            "refs/heads/tasks/v2/imports/v1/by-sha/{}",
+            cross_root.tasks["b"]
+        ))
+        .unwrap();
+    let b_task = body(&cross_root.work, &b_mapping)["taskOid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        body(&cross_root.work, &b_task)["requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|requirement| requirement["taskId"]
+                == result["mapping"][&cross_root.tasks["other_frontier"]])
+    );
+
     let rejected = Fixture::new(false, false);
     let edge = json!({
         "from":format!("task:owner/repo@{}", rejected.tasks["c"]),
@@ -1176,28 +1422,88 @@ fn unsupported_structural_census_and_metadata_fail_before_writes() {
     );
 
     let cross = Fixture::new(false, false);
+    cross.remove_graph();
+    ok(
+        &cross.work,
+        &[
+            "push",
+            "origin",
+            &format!(":refs/heads/tasks/blocked/other-blocked"),
+            &format!(":refs/heads/tasks/blocked-meta/other-blocked"),
+        ],
+    );
     let crossing = commit(
         &cross.work,
         "Cross-boundary child",
         &[&cross.root, &cross.tasks["other_frontier"]],
+    );
+    let crossing_claim = commit(
+        &cross.work,
+        "Claim\n\nClaimer: cross-boundary-worker",
+        &[&crossing],
     );
     ok(
         &cross.work,
         &[
             "push",
             "origin",
-            &format!("{crossing}:refs/heads/tasks/frontier/crossing"),
+            &format!("{crossing_claim}:refs/heads/tasks/active/crossing"),
         ],
     );
     let out = cross.migrate("cross-boundary-parent", None);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("crosses migration closure"));
     assert!(
-        ok(
-            &cross.work,
-            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
-        )
-        .is_empty()
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let crossing_id = result["mapping"][&crossing].as_str().unwrap();
+    let crossing_oid = cross
+        .remote(&format!("refs/heads/tasks/blocked/{crossing_id}"))
+        .unwrap();
+    let crossing_task = body(&cross.work, &crossing_oid)["taskOid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        body(&cross.work, &crossing_task)["requirements"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let expected_target_oid = result["plannedTaskOids"][&cross.tasks["other_frontier"]]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let claim = Fixture::run_raw(
+        &cross.work,
+        &[
+            "claim",
+            crossing_id,
+            "--owner",
+            "not-ready-worker",
+            "--operation-id",
+            "claim-before-cross-root-target",
+        ],
+        None,
+        None,
+    );
+    assert!(!claim.status.success());
+    let target = cross.migrate_root(
+        &cross.tasks["other_root"],
+        "cross-boundary-target-different-operation",
+        None,
+    );
+    assert!(
+        target.status.success(),
+        "{}",
+        String::from_utf8_lossy(&target.stderr)
+    );
+    let target: Value = serde_json::from_slice(&target.stdout).unwrap();
+    assert_eq!(
+        target["plannedTaskOids"][&cross.tasks["other_frontier"]],
+        expected_target_oid
     );
 
     let completed = Fixture::new(false, false);

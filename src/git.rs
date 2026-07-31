@@ -11,7 +11,29 @@ pub(crate) fn commit(value: &Value, parents: &[String]) -> Result<String> {
     commit_with_tree(EMPTY_TREE, &message, parents)
 }
 
+/// Migration Tasks are content-addressed legacy identities, not invocation
+/// records.  Pin their Git identity so a later root migration computes the
+/// exact same object for a cross-root requirement.
+pub(crate) fn migration_task_commit(value: &Value, parents: &[String]) -> Result<String> {
+    let message = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    commit_tree(
+        EMPTY_TREE,
+        &message,
+        parents,
+        Some("Thu, 01 Jan 1970 00:00:00 +0000"),
+    )
+}
+
 pub(crate) fn commit_with_tree(tree: &str, message: &str, parents: &[String]) -> Result<String> {
+    commit_tree(tree, message, parents, None)
+}
+
+fn commit_tree(
+    tree: &str,
+    message: &str,
+    parents: &[String],
+    fixed_date: Option<&str>,
+) -> Result<String> {
     oid(tree)?;
     let mut cmd = Command::new("git");
     cmd.args(["commit-tree", tree]);
@@ -26,6 +48,14 @@ pub(crate) fn commit_with_tree(tree: &str, message: &str, parents: &[String]) ->
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(date) = fixed_date {
+        cmd.env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_AUTHOR_NAME", "task-dag v1 migration")
+            .env("GIT_AUTHOR_EMAIL", "task-dag-v1-migration@localhost")
+            .env("GIT_COMMITTER_NAME", "task-dag v1 migration")
+            .env("GIT_COMMITTER_EMAIL", "task-dag-v1-migration@localhost");
+    }
     let mut child = cmd.spawn().map_err(|e| format!("run commit-tree: {e}"))?;
     child
         .stdin
