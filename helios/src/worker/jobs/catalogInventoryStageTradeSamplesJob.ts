@@ -192,8 +192,15 @@ async function verifyTransferredLot(
   for (let attempt = 1; attempt <= POST_TRANSFER_VERIFICATION_ATTEMPTS; attempt += 1) {
     const matchingLots = (await listLiveLotsForProduct(payload.siteDealerId, item.productId, rpc))
       .filter((lot) => lot.externalTrackCode?.trim() === item.externalTrackCode)
-    const after = matchingLots.length === 1 ? matchingLots[0] : undefined
-    if (after && after.isTradeSample && after.currentQty === item.currentQty && after.availableQty === item.currentQty && after.stockLocationId === payload.destination.id && after.stockLocationName?.trim() === payload.destination.name && after.stockTypeId === payload.destination.stockTypeId) return after
+    const destinationMatches = matchingLots.filter((lot) =>
+      lot.isTradeSample
+      && lot.currentQty === item.currentQty
+      && lot.availableQty === item.currentQty
+      && lot.stockLocationId === payload.destination.id
+      && lot.stockLocationName?.trim() === payload.destination.name
+      && lot.stockTypeId === payload.destination.stockTypeId,
+    )
+    if (destinationMatches.length === 1) return destinationMatches[0]!
     lastObservation = describeMatchingLots(matchingLots)
     if (attempt < POST_TRANSFER_VERIFICATION_ATTEMPTS) await delay(POST_TRANSFER_VERIFICATION_RETRY_MS)
   }

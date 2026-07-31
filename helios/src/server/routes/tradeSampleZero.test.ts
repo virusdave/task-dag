@@ -206,6 +206,38 @@ describe('trade sample routes', () => {
     await server.close()
   })
 
+  it('accepts distinct reviewed rows that share a product and package tag', async () => {
+    const sibling = { ...item, inventoryItemId: '45', currentQty: 4, availableQty: 4 }
+    const siblingStaged = { ...stagedItem, inventoryItemId: '100', currentQty: 4, availableQty: 4 }
+    const sameTagPayload = { ...stagePayload, items: [item, sibling] }
+    const sameTagStage = {
+      ...stage,
+      items: [stagedItem, siblingStaged],
+      counts: { ...stage.counts, completed: 2 },
+      outcomes: [
+        { inventoryItemId: '44', status: 'completed' },
+        { inventoryItemId: '45', status: 'completed' },
+      ],
+    }
+    mocks.poolQuery.mockResolvedValueOnce({ rows: [{ status: 'succeeded', job_payload_json: sameTagPayload, result_payload_json: sameTagStage }] })
+      .mockResolvedValueOnce({ rows: [] })
+    mocks.enqueue.mockResolvedValue({ inserted: true, jobId: 43 })
+    const server = Fastify()
+    await registerTradeSampleZeroRoutes(server)
+
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/catalog/inventory/trade-samples/stage-jobs/8/approve-zero',
+      payload: { confirmation: 'I VERIFIED ONLY TRADE SAMPLES' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(mocks.enqueue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      payload: expect.objectContaining({ items: [stagedItem, siblingStaged] }),
+    }))
+    await server.close()
+  })
+
   it('reconciles an exact prior approval before re-reading inventory', async () => {
     mocks.poolQuery.mockResolvedValueOnce({ rows: [{ status: 'succeeded', job_payload_json: stagePayload, result_payload_json: stage }] })
       .mockResolvedValueOnce({ rows: [{ id: 43, exact_payload: true }] })

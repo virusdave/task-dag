@@ -25,8 +25,8 @@ const productLots = (atTarget = true, sample = true, targetName = destination.na
   stockLocation: atTarget ? { id: 88, name: targetName } : { id: 12, name: 'Back Stock' },
   stockType: { id: atTarget ? 7 : 3 },
 }], totalCount: 1 })
-const exactDetail = (value: typeof item) => ({ ...detail(), id: value.inventoryItemId, externalTrackCode: value.externalTrackCode })
-const transferredLot = (value: typeof item) => ({ data: [{ ...productLots().data[0], id: `new-${value.inventoryItemId}`, externalTrackCode: value.externalTrackCode }], totalCount: 1 })
+const exactDetail = (value: typeof item) => ({ ...detail(), id: value.inventoryItemId, currentQty: value.currentQty, availableQty: value.availableQty, externalTrackCode: value.externalTrackCode })
+const transferredLot = (value: typeof item) => ({ data: [{ ...productLots().data[0], id: `new-${value.inventoryItemId}`, currentQty: value.currentQty, availableQty: value.availableQty, externalTrackCode: value.externalTrackCode }], totalCount: 1 })
 const groupedItems = (values: Array<typeof item>, atTarget = false) => ({
   data: values.map((value) => ({ product: { id: value.productId, name: value.productName, sku: null }, items: [{
     ...exactDetail(value), id: atTarget ? `new-${value.inventoryItemId}` : value.inventoryItemId,
@@ -96,6 +96,30 @@ describe('stage trade sample worker', () => {
     })
   })
 
+  it('allows an unprocessed same-tag source sibling while verifying each destination lot', async () => {
+    const first = { ...item, currentQty: 1, availableQty: 1 }
+    const sibling = { ...item, currentQty: 4, availableQty: 4, inventoryItemId: '45' }
+    const items = [first, sibling]
+    const sameTagPayload = { ...payload, items, digest: tradeSampleZeroDigest(210249, items, destination) }
+    const firstDestination = transferredLot(first).data[0]
+    const siblingSource = { ...transferredLot(sibling).data[0], id: sibling.inventoryItemId, stockLocation: { id: 12, name: 'Back Stock' }, stockType: { id: 3 } }
+    const siblingDestination = transferredLot(sibling).data[0]
+    const deps = dependencies([
+      locations, groupedItems(items),
+      exactDetail(first), {}, { data: [firstDestination, siblingSource], totalCount: 2 },
+      exactDetail(sibling), {}, { data: [firstDestination, siblingDestination], totalCount: 2 },
+      groupedItems(items, true),
+    ])
+
+    await runCatalogInventoryStageTradeSamplesJob(context, sameTagPayload, deps)
+
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.item.transfer')).toEqual([
+      [210249, 'store.inventory.item.transfer', expect.objectContaining({ items: [expect.objectContaining({ id: '44', qty: 1 })] })],
+      [210249, 'store.inventory.item.transfer', expect.objectContaining({ items: [expect.objectContaining({ id: '45', qty: 4 })] })],
+    ])
+    expect(deps.audit.mock.calls.at(-1)?.[1].payload).toMatchObject({ complete: true, counts: { completed: 2 } })
+  })
+
   it('waits one second and retries read-only verification without replaying the transfer', async () => {
     const deps = dependencies([
       locations, grouped(), detail(), {},
@@ -151,7 +175,7 @@ describe('stage trade sample worker', () => {
     log.mockRestore()
   })
 
-  it('fails closed when paginated verification finds the package tag twice', async () => {
+  it('fails closed when paginated verification finds two exact destination lots for the package tag', async () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => ({
       ...productLots().data[0],
       id: String(1000 + index),

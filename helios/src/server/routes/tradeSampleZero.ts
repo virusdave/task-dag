@@ -221,24 +221,36 @@ function isTrustedStagedItemSet(
   destination: TradeSampleStageResult['destination'],
 ): boolean {
   if (reviewed.length !== staged.length) return false
-  const reviewedByTag = new Map(reviewed.map((item) => [`${item.productId}:${item.externalTrackCode}`, item]))
+  const reviewedCounts = new Map<string, number>()
+  for (const item of reviewed) {
+    const key = trustedItemIdentity(item)
+    reviewedCounts.set(key, (reviewedCounts.get(key) ?? 0) + 1)
+  }
   const stagedIds = new Set(staged.map((item) => item.inventoryItemId))
-  if (reviewedByTag.size !== reviewed.length || stagedIds.size !== staged.length) return false
+  if (stagedIds.size !== staged.length) return false
   for (const item of staged) {
-    const key = `${item.productId}:${item.externalTrackCode}`
-    const original = reviewedByTag.get(key)
+    const key = trustedItemIdentity(item)
+    const remaining = reviewedCounts.get(key) ?? 0
     if (
-      original === undefined
-      || item.currentQty !== original.currentQty
-      || item.availableQty !== original.availableQty
-      || item.packageLabel !== original.packageLabel
-      || item.productName !== original.productName
-      || item.productSku !== original.productSku
+      remaining === 0
       || item.sourceLocationId !== destination.id
       || item.sourceLocationName !== destination.name
       || item.sourceStockTypeId !== destination.stockTypeId
     ) return false
-    reviewedByTag.delete(key)
+    if (remaining === 1) reviewedCounts.delete(key)
+    else reviewedCounts.set(key, remaining - 1)
   }
-  return reviewedByTag.size === 0
+  return reviewedCounts.size === 0
+}
+
+function trustedItemIdentity(item: TradeSampleZeroItem): string {
+  return JSON.stringify([
+    item.productId,
+    item.externalTrackCode,
+    item.currentQty,
+    item.availableQty,
+    item.packageLabel,
+    item.productName,
+    item.productSku,
+  ])
 }
