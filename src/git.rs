@@ -332,8 +332,13 @@ mod tests {
         assert_eq!(types[&blob].as_deref(), Some("blob"));
         assert_eq!(types[&absent], None);
 
+        let expected_parents: Vec<_> = output(["show", "-s", "--format=%P", &head])
+            .unwrap()
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect();
         cache_commit_objects(&[head.clone()]).unwrap();
-        assert_eq!(parents(&head).unwrap(), parents(&head).unwrap());
+        assert_eq!(parents(&head).unwrap(), expected_parents);
         assert!(cache_commit_objects(&[blob]).is_err());
         assert!(cache_commit_objects(&[absent]).is_err());
     }
