@@ -134,7 +134,7 @@ describe('LocalFsHintDocumentStore', () => {
         attempts += 1
         if (attempts < 3) {
           const error = new Error('transient sshfs directory race') as NodeJS.ErrnoException
-          error.code = attempts === 1 ? 'ENOENT' : 'EACCES'
+          error.code = attempts === 1 ? 'EROFS' : 'EACCES'
           throw error
         }
         const { mkdir } = await import('node:fs/promises')
@@ -158,8 +158,8 @@ describe('LocalFsHintDocumentStore', () => {
     const failing = createLocalFsHintDocumentStore(root, {
       mkdir: async () => {
         attempts += 1
-        const error = new Error('persistent sshfs directory race') as NodeJS.ErrnoException
-        error.code = 'ENOENT'
+        const error = new Error('persistent read-only storage') as NodeJS.ErrnoException
+        error.code = 'EROFS'
         throw error
       },
       sleep: async (delayMs) => {
@@ -167,7 +167,7 @@ describe('LocalFsHintDocumentStore', () => {
       },
     })
 
-    await expect(failing.put('still unavailable')).rejects.toThrow(/persistent sshfs directory race/)
+    await expect(failing.put('still unavailable')).rejects.toThrow(/persistent read-only storage/)
     expect(attempts).toBe(3)
     expect(delays).toEqual([500, 1_500])
   })
@@ -195,8 +195,8 @@ describe('LocalFsHintDocumentStore', () => {
     const failing = createLocalFsHintDocumentStore(root, {
       mkdir: async () => {
         attempts += 1
-        const error = new Error('read-only storage') as NodeJS.ErrnoException
-        error.code = 'EROFS'
+        const error = new Error('invalid storage operation') as NodeJS.ErrnoException
+        error.code = 'EINVAL'
         throw error
       },
       sleep: async () => {
@@ -204,7 +204,7 @@ describe('LocalFsHintDocumentStore', () => {
       },
     })
 
-    await expect(failing.put('cannot store')).rejects.toThrow(/read-only storage/)
+    await expect(failing.put('cannot store')).rejects.toThrow(/invalid storage operation/)
     expect(attempts).toBe(1)
   })
 

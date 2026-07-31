@@ -317,5 +317,8 @@ export function _setHintDocumentStoreForTests(store: HintDocumentStore | null): 
 export const HINT_BLOB_CONTENT_TYPE = CONTENT_TYPE
 
 function isTransientDirectoryError(code: string | undefined): boolean {
-  return code === 'ENOENT' || code === 'EACCES' || code === 'EPERM'
+  // During an SSHFS/autofs remount, the existing /cloud tree can briefly
+  // answer mkdir with EROFS before the writable remote mount is visible.
+  // The bounded retry still fails closed if storage is genuinely read-only.
+  return code === 'ENOENT' || code === 'EACCES' || code === 'EPERM' || code === 'EROFS'
 }
