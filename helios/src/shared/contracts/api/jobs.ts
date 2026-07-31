@@ -101,6 +101,14 @@ export const JobStatusResponseSchema = z.object({
 })
 export type JobStatusResponse = z.infer<typeof JobStatusResponseSchema>
 
+export const TradeSampleRecentStageJobQuerySchema = z.object({
+  siteDealerId: z.coerce.number().int().positive(),
+})
+export const TradeSampleRecentStageJobResponseSchema = z.object({
+  stageJob: JobStatusResponseSchema.nullable(),
+})
+export type TradeSampleRecentStageJobResponse = z.infer<typeof TradeSampleRecentStageJobResponseSchema>
+
 /**
  * Live queue dashboard snapshot. Backs `/api/jobs/queue-metrics`,
  * polled by the Jobs page every ~10s.

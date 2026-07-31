@@ -4,7 +4,10 @@ import type { TradeSampleStageResult, TradeSampleZeroItem } from '../../shared/c
 import {
   CatalogInventoryStageTradeSamplesJobPayloadSchema,
   CatalogInventoryZeroTradeSamplesJobPayloadSchema,
+  HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   TradeSampleStageResultSchema,
+  TradeSampleRecentStageJobQuerySchema,
+  TradeSampleRecentStageJobResponseSchema,
   TradeSampleZeroApplyRequestSchema,
   TradeSampleZeroApprovalRequestSchema,
   TradeSampleZeroEnqueueResponseSchema,
@@ -23,10 +26,35 @@ import {
   verifyTradeSampleZeroPreview,
 } from '../catalog/tradeSampleZeroService.js'
 import { getPool } from '../db/pool.js'
+import { getJobStatus } from '../db/queries/jobQueries.js'
 import { withTransaction } from '../db/tx.js'
 import { enqueueJobExactOnce, JOB_PRIORITY_LIVE_REQUESTED } from '../jobs/enqueueJob.js'
 
 export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Promise<void> {
+  server.get('/api/catalog/inventory/trade-samples/recent-stage-job', async (request, reply) => {
+    if (!await requireSessionUser(request, reply, 'viewer')) return
+    const parsed = TradeSampleRecentStageJobQuerySchema.safeParse(request.query)
+    if (
+      !parsed.success
+      || !HELIOS_PENDING_PURCHASE_SITE_DEALERS.some((site) => site.dealerId === parsed.data.siteDealerId)
+    ) {
+      return reply.status(400).send({ error: 'A configured site is required.' })
+    }
+    const scopeEntityId = String(parsed.data.siteDealerId)
+    const recent = await getPool().query<{ id: number }>(
+      `select id
+         from job_queue
+        where job_type = 'catalog.inventory.stage_trade_samples'
+          and scope_entity_type = 'trade_sample_site'
+          and scope_entity_id = $1
+        order by created_at desc, id desc
+        limit 1`,
+      [scopeEntityId],
+    )
+    const stageJob = recent.rows[0] ? await getJobStatus(getPool(), recent.rows[0].id) : null
+    return reply.send(TradeSampleRecentStageJobResponseSchema.parse({ stageJob }))
+  })
+
   server.post('/api/catalog/inventory/trade-samples/preview-zero', async (request, reply) => {
     if (!await requireSessionUser(request, reply, 'editor')) return
     const parsed = TradeSampleZeroPreviewRequestSchema.safeParse(request.body ?? {})
@@ -60,7 +88,7 @@ export async function registerTradeSampleZeroRoutes(server: FastifyInstance): Pr
     const result = await withTransaction((db) => enqueueJobExactOnce(db, {
       jobType: 'catalog.inventory.stage_trade_samples',
       module: 'catalog',
-      scope: null,
+      scope: { entityType: 'trade_sample_site', entityId: String(parsed.data.siteDealerId) },
       payload,
       priority: JOB_PRIORITY_LIVE_REQUESTED,
       concurrencyKey: `catalog.inventory.trade_samples:${parsed.data.siteDealerId}`,

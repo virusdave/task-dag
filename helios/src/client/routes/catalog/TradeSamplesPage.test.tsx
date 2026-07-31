@@ -5,11 +5,18 @@ import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ mutateJson: vi.fn() }))
+import type { JobStatusResponse } from '../../../shared/contracts/index.js'
+
+const mocks = vi.hoisted(() => ({ loadJobStatus: vi.fn(), loadJson: vi.fn(), mutateJson: vi.fn() }))
 
 vi.mock('../../app/fetchJson.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../app/fetchJson.js')>(),
+  loadJson: mocks.loadJson,
   mutateJson: mocks.mutateJson,
+}))
+vi.mock('../../app/jobPolling.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../app/jobPolling.js')>(),
+  loadJobStatus: mocks.loadJobStatus,
 }))
 vi.mock('./catalogSidebarSubtree.js', () => ({
   useRegisterCatalogSidebarSubtree: () => undefined,
@@ -25,11 +32,59 @@ function change(element: HTMLInputElement, value: string): void {
   element.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
+function changeSelect(element: HTMLSelectElement, value: string): void {
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(element, value)
+  element.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
+function jobStatus(
+  jobId: number,
+  status: JobStatusResponse['job']['status'],
+  lastError: string | null = null,
+): JobStatusResponse {
+  const terminal = status === 'succeeded' || status === 'failed' || status === 'dead_letter'
+  return {
+    job: {
+      attemptCount: 1,
+      createdAt: '2026-07-31T06:00:00.000Z',
+      executionPool: 'sweed',
+      finishedAt: terminal ? '2026-07-31T06:01:00.000Z' : null,
+      jobId,
+      jobType: 'catalog.inventory.stage_trade_samples',
+      lastError,
+      module: 'catalog',
+      priority: 500,
+      priorityBand: 'live_requested',
+      requestedByLabel: 'Operator',
+      requestedByUserId: 17,
+      runAt: '2026-07-31T06:00:00.000Z',
+      scope: { entityType: 'trade_sample_site', entityId: '210249' },
+      startedAt: '2026-07-31T06:00:01.000Z',
+      status,
+    },
+    linkedRecords: {
+      llmRunId: null,
+      pendingPurchaseApplyRequestId: null,
+      pendingPurchasePacketId: null,
+      proposalBatchId: null,
+      undoEventId: null,
+      writeOperationId: null,
+    },
+    progressLog: [],
+    progress: null,
+    sweedAuthEvents: [],
+    tradeSampleZeroResult: null,
+    tradeSampleStageResult: null,
+  }
+}
+
 describe('TradeSamplesPage', () => {
   let host: HTMLDivElement
   let root: Root
 
   beforeEach(async () => {
+    mocks.loadJson.mockResolvedValue({ stageJob: null })
+    mocks.loadJobStatus.mockRejectedValue(new Error('status unavailable'))
     host = document.createElement('div')
     document.body.append(host)
     root = createRoot(host)
@@ -37,6 +92,7 @@ describe('TradeSamplesPage', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     act(() => root.unmount())
     host.remove()
     vi.clearAllMocks()
@@ -98,7 +154,8 @@ describe('TradeSamplesPage', () => {
         confirmation: 'STAGE TRADE SAMPLES',
       }) }),
     )
-    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/77"]')?.textContent).toBe('Queued job #77')
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/77"]')?.textContent).toBe('Open staging job #77')
+    expect(mocks.loadJobStatus).not.toHaveBeenCalled()
     expect(host.textContent).not.toContain('Reviewed preview')
   })
 
@@ -126,6 +183,46 @@ describe('TradeSamplesPage', () => {
     expect(host.textContent).not.toContain('network detail')
     expect(host.textContent).toContain('queue request outcome is unknown')
     expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs"]')?.textContent).toBe('Check recent jobs')
+  })
+
+  it('pauses preview when recent status cannot load and offers status recovery', async () => {
+    mocks.loadJson.mockRejectedValueOnce(new Error('offline'))
+
+    await act(async () => changeSelect(host.querySelector<HTMLSelectElement>('#trade-sample-site')!, '210705'))
+
+    const previewButton = [...host.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === 'Preview trade samples',
+    )!
+    expect(previewButton.disabled).toBe(true)
+    expect(host.textContent).toContain('Preview is paused until job status is known')
+    expect([...host.querySelectorAll('button')].some((button) => button.textContent === 'Retry status')).toBe(true)
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs?jobType=catalog.inventory.stage_trade_samples"]')).not.toBeNull()
+  })
+
+  it('keeps the job link through a poll error, then reflects terminal failure and allows a fresh preview', async () => {
+    vi.useFakeTimers()
+    mocks.loadJson.mockResolvedValueOnce({ stageJob: jobStatus(88, 'running') })
+    mocks.loadJobStatus.mockRejectedValueOnce(new Error('temporary')).mockResolvedValueOnce(
+      jobStatus(88, 'failed', 'Package 44 was not visible after 10 reads.'),
+    )
+
+    await act(async () => changeSelect(host.querySelector<HTMLSelectElement>('#trade-sample-site')!, '210705'))
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/88"]')).not.toBeNull()
+    expect([...host.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === 'Preview trade samples',
+    )?.disabled).toBe(true)
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_500))
+    expect(host.textContent).toContain('Status unavailable; retrying automatically')
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/88"]')).not.toBeNull()
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_500))
+    expect(host.textContent).toContain('Package 44 was not visible after 10 reads.')
+    expect(host.querySelector<HTMLAnchorElement>('a[href="/jobs/88"]')?.textContent).toBe('Open staging job #88')
+    expect([...host.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === 'Create fresh preview',
+    )?.disabled).toBe(false)
+    vi.useRealTimers()
   })
 
   it('shows the exact staged scope and reconciles an ambiguous approval without a new action', async () => {

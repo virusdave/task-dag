@@ -4,18 +4,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   appendAudit: vi.fn(),
   enqueue: vi.fn(),
+  getJobStatus: vi.fn(),
   poolQuery: vi.fn(),
   preview: vi.fn(),
   readInventory: vi.fn(),
+  requireSessionUser: vi.fn().mockResolvedValue({ id: 17, role: 'editor' }),
   resolveDestination: vi.fn(),
   verify: vi.fn(() => true),
   withSession: vi.fn(async (run: () => Promise<unknown>) => run()),
 }))
-vi.mock('../auth/requireSession.js', () => ({ requireSessionUser: vi.fn().mockResolvedValue({ id: 17, role: 'editor' }) }))
+vi.mock('../auth/requireSession.js', () => ({ requireSessionUser: mocks.requireSessionUser }))
 vi.mock('../../worker/sweed/session.js', () => ({ withSweedSession: mocks.withSession }))
 vi.mock('../db/pool.js', () => ({ getPool: () => ({ query: mocks.poolQuery }) }))
 vi.mock('../db/tx.js', () => ({ withTransaction: vi.fn(async (run: (db: object) => Promise<unknown>) => run({})) }))
 vi.mock('../jobs/enqueueJob.js', () => ({ enqueueJobExactOnce: mocks.enqueue, JOB_PRIORITY_LIVE_REQUESTED: 500 }))
+vi.mock('../db/queries/jobQueries.js', () => ({ getJobStatus: mocks.getJobStatus }))
 vi.mock('../audit/appendAuditEvent.js', () => ({ appendAuditEvent: mocks.appendAudit }))
 vi.mock('../catalog/tradeSampleZeroService.js', () => ({
   assertTargetContents: vi.fn(),
@@ -39,10 +42,23 @@ const stagedItem = { ...item, inventoryItemId: '99', sourceLocationId: destinati
 const stage = { operationId: stageRequestId, siteDealerId: 210249, destination, items: [stagedItem], complete: true,
   counts: { completed: 1, failedUnknown: 0, notAppliedStale: 0, notAppliedAuditFailure: 0 },
   outcomes: [{ inventoryItemId: '44', status: 'completed' }], message: 'Staged.' }
+const jobStatus = {
+  job: {
+    attemptCount: 0, createdAt: '2026-07-31T06:00:00.000Z', executionPool: 'sweed', finishedAt: null,
+    jobId: 91, jobType: 'catalog.inventory.stage_trade_samples', lastError: null, module: 'catalog', priority: 500,
+    priorityBand: 'live_requested', requestedByLabel: 'Operator', requestedByUserId: 17,
+    runAt: '2026-07-31T06:00:00.000Z', scope: { entityType: 'trade_sample_site', entityId: '210249' },
+    startedAt: null, status: 'queued',
+  },
+  linkedRecords: { llmRunId: null, pendingPurchaseApplyRequestId: null, pendingPurchasePacketId: null,
+    proposalBatchId: null, undoEventId: null, writeOperationId: null },
+  progressLog: [], progress: null, sweedAuthEvents: [], tradeSampleZeroResult: null, tradeSampleStageResult: null,
+}
 
 describe('trade sample routes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.requireSessionUser.mockResolvedValue({ id: 17, role: 'editor' })
     mocks.verify.mockReturnValue(true)
     mocks.resolveDestination.mockResolvedValue(destination)
     mocks.readInventory.mockResolvedValue([])
@@ -61,8 +77,50 @@ describe('trade sample routes', () => {
       jobType: 'catalog.inventory.stage_trade_samples',
       dedupeKey: `catalog.inventory.stage_trade_samples:210249:${preview.previewId}`,
       payload: expect.objectContaining({ confirmation: 'STAGE TRADE SAMPLES', digest: preview.digest }),
+      scope: { entityType: 'trade_sample_site', entityId: '210249' },
     }))
     expect(mocks.enqueue.mock.calls[0]?.[1].payload).not.toHaveProperty('previewToken')
+    await server.close()
+  })
+
+  it('returns the latest indexed site-scoped staging job and validates the site', async () => {
+    mocks.poolQuery.mockResolvedValueOnce({ rows: [{ id: 91 }] })
+    mocks.getJobStatus.mockResolvedValueOnce(jobStatus)
+    const server = Fastify()
+    await registerTradeSampleZeroRoutes(server)
+
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/catalog/inventory/trade-samples/recent-stage-job?siteDealerId=210249',
+    })
+
+    expect(response.json()).toEqual({ stageJob: jobStatus })
+    expect(mocks.poolQuery).toHaveBeenCalledWith(expect.stringContaining("scope_entity_type = 'trade_sample_site'"), ['210249'])
+    expect(String(mocks.poolQuery.mock.calls[0]?.[0])).toContain('order by created_at desc, id desc')
+    expect(mocks.getJobStatus).toHaveBeenCalledWith(expect.anything(), 91)
+    expect((await server.inject({
+      method: 'GET',
+      url: '/api/catalog/inventory/trade-samples/recent-stage-job?siteDealerId=999',
+    })).statusCode).toBe(400)
+    await server.close()
+  })
+
+  it('returns no recent staging job and requires a viewer session', async () => {
+    mocks.poolQuery.mockResolvedValueOnce({ rows: [] })
+    const server = Fastify()
+    await registerTradeSampleZeroRoutes(server)
+    expect((await server.inject({
+      method: 'GET',
+      url: '/api/catalog/inventory/trade-samples/recent-stage-job?siteDealerId=210249',
+    })).json()).toEqual({ stageJob: null })
+    expect(mocks.getJobStatus).not.toHaveBeenCalled()
+
+    mocks.requireSessionUser.mockResolvedValueOnce(null)
+    expect((await server.inject({
+      method: 'GET',
+      url: '/api/catalog/inventory/trade-samples/recent-stage-job?siteDealerId=210249',
+    })).statusCode).toBe(200)
+    expect(mocks.requireSessionUser).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), 'viewer')
     await server.close()
   })
 
