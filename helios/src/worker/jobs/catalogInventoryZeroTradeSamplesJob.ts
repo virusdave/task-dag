@@ -12,14 +12,19 @@ import {
 } from '../../server/catalog/tradeSampleZeroService.js'
 import { getPool, type Queryable } from '../../server/db/pool.js'
 import { callSweedRpc } from '../sweed/rpc.js'
+import { isSafeTerminalWorkerError, SafeTerminalWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { assertTradeSampleJobLease } from './catalogInventoryStageTradeSamplesJob.js'
+
+const POST_ZERO_VERIFICATION_ATTEMPTS = 10
+const POST_ZERO_VERIFICATION_RETRY_MS = 1_000
 
 export interface ZeroTradeSampleDependencies {
   rpc?: typeof callSweedRpc
   audit?: typeof appendAuditEvent
   db?: Queryable
   assertLease?: () => Promise<void>
+  delay?: (milliseconds: number) => Promise<void>
 }
 
 export async function runCatalogInventoryZeroTradeSamplesJob(
@@ -31,6 +36,7 @@ export async function runCatalogInventoryZeroTradeSamplesJob(
   const audit = injected.audit ?? appendAuditEvent
   const db = injected.db ?? getPool()
   const assertLease = injected.assertLease ?? (() => assertTradeSampleJobLease(context))
+  const delay = injected.delay ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)))
   const serviceDependencies = { rpc }
   const outcomes: TradeSampleZeroResult['outcomes'] = []
 
@@ -88,11 +94,15 @@ export async function runCatalogInventoryZeroTradeSamplesJob(
         items: [{ qty: -item.currentQty, id: item.inventoryItemId, externalTrackCode: item.externalTrackCode }],
         isInternal: false,
       })
-      const after = await readExactItem(payload.siteDealerId, item, serviceDependencies)
-      if (after.currentQty !== 0) throw new Error('Post-adjustment quantity was not exactly zero.')
+      await verifyZeroQuantity(payload.siteDealerId, item, serviceDependencies, delay)
     } catch (error) {
       appendTerminalOutcomes(payload, outcomes, index, 'failed_unknown')
-      await persistBatchResult(context, payload, outcomes, audit, db)
+      const failure = zeroFailure('post-adjustment verification', error, item.inventoryItemId)
+      console.error(`[trade-sample-zero][job ${context.id}] ${failure}`)
+      await persistBatchResult(context, payload, outcomes, audit, db, failure)
+      if (isSafeTerminalWorkerError(error)) {
+        throw new SafeTerminalWorkerError(failure, { cause: error })
+      }
       throw error
     }
     outcomes.push({ inventoryItemId: item.inventoryItemId, status: 'completed' })
@@ -117,6 +127,7 @@ async function persistBatchResult(
   outcomes: TradeSampleZeroResult['outcomes'],
   audit: typeof appendAuditEvent,
   db: Queryable,
+  failure?: string,
 ): Promise<void> {
   const result = TradeSampleZeroResultSchema.parse({
     operationId: payload.requestId,
@@ -133,7 +144,7 @@ async function persistBatchResult(
     outcomes,
     message: outcomes.every((outcome) => outcome.status === 'completed')
       ? 'All staged trade samples were verified and zeroed.'
-      : 'The operation stopped; inspect Sweed before taking further action.',
+      : `${failure ?? 'The operation stopped for an unknown reason.'} Inspect Sweed before taking further action.`,
   })
   await audit(db, {
     actorType: 'user',
@@ -147,6 +158,35 @@ async function persistBatchResult(
     payload: result,
     undoPayload: null,
   })
+}
+
+async function verifyZeroQuantity(
+  dealerId: number,
+  item: CatalogInventoryZeroTradeSamplesJobPayload['items'][number],
+  serviceDependencies: { rpc: typeof callSweedRpc },
+  delay: (milliseconds: number) => Promise<void>,
+): Promise<void> {
+  let lastObservation = 'package detail was not readable'
+  for (let attempt = 1; attempt <= POST_ZERO_VERIFICATION_ATTEMPTS; attempt += 1) {
+    try {
+      const after = await readExactItem(dealerId, item, serviceDependencies)
+      if (after.currentQty === 0) return
+      lastObservation = `quantity=${after.currentQty}, available=${after.availableQty}`
+    } catch {
+      lastObservation = 'package detail read failed'
+    }
+    if (attempt < POST_ZERO_VERIFICATION_ATTEMPTS) {
+      await delay(POST_ZERO_VERIFICATION_RETRY_MS)
+    }
+  }
+  throw new SafeTerminalWorkerError(
+    `Zero quantity was not visible after read ${POST_ZERO_VERIFICATION_ATTEMPTS} of ${POST_ZERO_VERIFICATION_ATTEMPTS}; last observation: ${lastObservation}.`,
+  )
+}
+
+function zeroFailure(phase: string, error: unknown, inventoryItemId: string): string {
+  const detail = isSafeTerminalWorkerError(error) ? error.message : 'An unexpected internal error occurred.'
+  return `Zeroing stopped during ${phase} for package ${inventoryItemId}: ${detail}`
 }
 
 function appendTerminalOutcomes(

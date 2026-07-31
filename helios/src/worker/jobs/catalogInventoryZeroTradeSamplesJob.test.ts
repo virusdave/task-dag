@@ -47,6 +47,7 @@ function dependencies(responses: unknown[], audit = vi.fn().mockResolvedValue(1)
     audit,
     db: { query: vi.fn() },
     assertLease: vi.fn().mockResolvedValue(undefined),
+    delay: vi.fn().mockResolvedValue(undefined),
   }
 }
 
@@ -98,11 +99,40 @@ describe('zero trade sample worker', () => {
   })
 
   it('stops after an unknown adjustment/post-read result and persists terminal batch state', async () => {
-    const deps = dependencies([locationList, grouped(), detail(), {}, detail({ currentQty: 1 })])
-    await expect(runCatalogInventoryZeroTradeSamplesJob(context, payload, deps)).rejects.toThrow()
+    const deps = dependencies([
+      locationList,
+      grouped(),
+      detail(),
+      {},
+      ...Array.from({ length: 10 }, () => detail({ currentQty: 1 })),
+    ])
+    await expect(runCatalogInventoryZeroTradeSamplesJob(context, payload, deps)).rejects.toThrow(
+      'Zeroing stopped during post-adjustment verification for package 44: Zero quantity was not visible after read 10 of 10; last observation: quantity=1, available=3.5.',
+    )
     expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.item.adjust')).toHaveLength(1)
+    expect(deps.delay).toHaveBeenCalledTimes(9)
     expect(deps.audit.mock.calls.at(-1)?.[1].eventType).toBe('trade_sample.zero.batch_result')
     expect(deps.audit.mock.calls.at(-1)?.[1].payload.outcomes).toEqual([{ inventoryItemId: '44', status: 'failed_unknown' }])
+    expect(deps.audit.mock.calls.at(-1)?.[1].payload.message).toContain(
+      'Zeroing stopped during post-adjustment verification for package 44',
+    )
+  })
+
+  it('waits for Sweed propagation without replaying the zero adjustment', async () => {
+    const deps = dependencies([
+      locationList,
+      grouped(),
+      detail(),
+      {},
+      ...Array.from({ length: 9 }, () => detail()),
+      detail({ currentQty: 0, availableQty: 0 }),
+    ])
+
+    await runCatalogInventoryZeroTradeSamplesJob(context, payload, deps)
+
+    expect(deps.rpc.mock.calls.filter((call) => call[1] === 'store.inventory.item.adjust')).toHaveLength(1)
+    expect(deps.delay).toHaveBeenCalledTimes(9)
+    expect(deps.audit.mock.calls.at(-1)?.[1].payload.counts.completed).toBe(1)
   })
 
   it('does not mutate when the attempted audit fails', async () => {
