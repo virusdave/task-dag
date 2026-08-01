@@ -210,7 +210,7 @@ function AdminPendingMigrationsBanner({
         }
       } catch {
         // Network/parse failures shouldn't take down the page —
-        // leave the banner hidden and try again next interval.
+        // preserve the last known state and try again next interval.
       }
     }
 
