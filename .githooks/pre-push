@@ -26,17 +26,15 @@ set -euo pipefail
 
 # Locate the canonical CLI without re-encoding any of its logic:
 #   1. explicit override (TASK_DAG_BIN)
-#   2. task-dag on PATH
-#   3. scripts/task-dag inside this repo (the task-dag repo itself)
+#   2. scripts/task-dag inside this repo (the task-dag repo itself)
+#   3. task-dag on PATH
 td="${TASK_DAG_BIN:-}"
 if [ -z "$td" ]; then
-  if command -v task-dag >/dev/null 2>&1; then
+  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$root" ] && [ -x "$root/scripts/task-dag" ]; then
+    td="$root/scripts/task-dag"
+  elif command -v task-dag >/dev/null 2>&1; then
     td="$(command -v task-dag)"
-  else
-    root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-    if [ -n "$root" ] && [ -x "$root/scripts/task-dag" ]; then
-      td="$root/scripts/task-dag"
-    fi
   fi
 fi
 

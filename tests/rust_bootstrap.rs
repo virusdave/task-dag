@@ -1,5 +1,6 @@
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output},
 };
@@ -118,7 +119,11 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     for checkout in [&a, &b] {
         ok(checkout, &["config", "user.name", "test"]);
         ok(checkout, &["config", "user.email", "test@localhost"]);
+        let hooks = checkout.join(".githooks");
+        fs::create_dir(&hooks).unwrap();
+        fs::copy(source.join(".githooks/pre-push"), hooks.join("pre-push")).unwrap();
     }
+    ok(&b, &["config", "core.hooksPath", "custom-hooks"]);
     ok(&a, &["fetch", source.to_str().unwrap(), runtime]);
     success(
         &a,
@@ -554,6 +559,12 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     );
     ok(&target, &["config", "user.name", "test"]);
     ok(&target, &["config", "user.email", "test@localhost"]);
+    fs::create_dir(target.join(".githooks")).unwrap();
+    fs::copy(
+        source.join(".githooks/pre-push"),
+        target.join(".githooks/pre-push"),
+    )
+    .unwrap();
     ok(&target, &["fetch", source.to_str().unwrap(), runtime]);
     success(
         &target,
@@ -1255,6 +1266,32 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     );
     let done = success(&a, &["show", child], "unused-token-000", 106);
     assert_eq!(done["state"], "done");
+    let registry = a.join(".git/task-dag/native-claims");
+    let entries: Vec<_> = fs::read_dir(&registry).unwrap().collect();
+    assert!(
+        !entries.is_empty(),
+        "claiming commands must use the central registry"
+    );
+    for entry in entries {
+        let metadata = entry.unwrap().metadata().unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+    assert_eq!(
+        fs::metadata(&registry).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        ok(&b, &["config", "--get", "core.hooksPath"]),
+        "custom-hooks",
+        "an existing hooksPath must be preserved"
+    );
+    let staging = a.join(".git/task-dag/native-claim-staging");
+    assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+    assert_eq!(
+        fs::metadata(staging).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
     for _ in 0..20 {
         if fs::remove_dir_all(&root).is_ok() {
             return;

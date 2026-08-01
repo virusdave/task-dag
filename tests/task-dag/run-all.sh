@@ -133,6 +133,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$here/wrappers.sh" "$here/caller-workflow-preflight.sh" \
         "$here/install-completion-order-hook.sh" "$here/reconcile-comments.sh" \
         "$here/consumer-cutover.sh" "$here/loader-inventory.sh" \
+        "$here/native-claim-guard.sh" \
         "$here/epic-id-protocol.sh" "$here/epic-root-minter.sh" || exit 1
 }
 echo "== bash -n =="
@@ -185,11 +186,13 @@ bash -n "$TD" \
     && bash -n "$here/reconcile-comments.sh" \
     && bash -n "$here/consumer-cutover.sh" \
     && bash -n "$here/loader-inventory.sh" \
+    && bash -n "$here/native-claim-guard.sh" \
     && bash -n "$here/epic-id-protocol.sh" \
     && bash -n "$here/epic-root-minter.sh" \
     && bash -n "$here/retire-owned.sh" || exit 1
 
 parallel_tests=(
+    native-claim-guard.sh
     loader-inventory.sh
     epic-compose.sh
     epic-id-protocol.sh

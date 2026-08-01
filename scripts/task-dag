@@ -7739,6 +7739,135 @@ taskdag_publish_expected() { # exact automatic candidate, captured authority gen
     _taskdag_publish_loop "$tip" "$expected_generation"
 }
 
+native_claim_guard() {
+    export GIT_NO_LAZY_FETCH=1
+    local registry entry_count=0 total_bytes=0 entry base id digest token actual_digest ref identity size copied_size before after
+    registry=$(git rev-parse --git-path task-dag/native-claims 2>/dev/null) || {
+        echo "[pre-push] cannot resolve native claim registry; refusing (fail closed)." >&2
+        return 1
+    }
+    [ -e "$registry" ] || return 0
+    [ -d "$registry" ] || {
+        echo "[pre-push] native claim registry is not a directory; refusing (fail closed)." >&2
+        return 1
+    }
+    local tmp
+    tmp=$(mktemp -d) || return 1
+    local registry_snapshot="$tmp/registry" refs_file="$tmp/refs" advertisement="$tmp/advertisement"
+    local enumeration="$tmp/enumeration" identities="$tmp/identities" objects="$tmp/objects"
+    mkdir "$registry_snapshot" || { rm -rf "$tmp"; return 1; }
+    if ! find "$registry" -mindepth 1 -maxdepth 1 -print0 >"$enumeration"; then
+        echo "[pre-push] native claim registry enumeration failed; refusing (fail closed)." >&2; rm -rf "$tmp"; return 1
+    fi
+    while IFS= read -r -d '' entry; do
+        entry_count=$((entry_count+1))
+        [ "$entry_count" -le 128 ] || { echo "[pre-push] native claim registry exceeds entry limit; refusing." >&2; rm -rf "$tmp"; return 1; }
+        [ ! -L "$entry" ] && [ -f "$entry" ] || { echo "[pre-push] native claim registry contains a non-regular entry; refusing." >&2; rm -rf "$tmp"; return 1; }
+        base=${entry##*/}
+        [[ "$base" =~ ^(v2-[0-9a-f]{64})\.([0-9a-f]{64})$ ]] || { echo "[pre-push] malformed native claim registry filename; refusing." >&2; rm -rf "$tmp"; return 1; }
+        id=${BASH_REMATCH[1]}; digest=${BASH_REMATCH[2]}
+        before=$(stat -c '%d:%i:%s' -- "$entry") || { rm -rf "$tmp"; return 1; }
+        identity=${before%:*}; size=${before##*:}
+        total_bytes=$((total_bytes+size))
+        [ "$size" -le 4096 ] && [ "$total_bytes" -le 262144 ] || { echo "[pre-push] native claim registry exceeds byte limit; refusing." >&2; rm -rf "$tmp"; return 1; }
+        cp -- "$entry" "$registry_snapshot/$base" || { rm -rf "$tmp"; return 1; }
+        after=$(stat -c '%d:%i:%s' -- "$entry") || { rm -rf "$tmp"; return 1; }
+        copied_size=$(stat -c '%s' -- "$registry_snapshot/$base") || { rm -rf "$tmp"; return 1; }
+        [ "${after%:*}" = "$identity" ] && [ "$copied_size" = "$size" ] || {
+            echo "[pre-push] native claim changed while snapshotting; refusing (fail closed)." >&2; rm -rf "$tmp"; return 1;
+        }
+        printf '%s\t%s\n' "$base" "$identity" >>"$identities"
+        iconv -f UTF-8 -t UTF-8 "$registry_snapshot/$base" >/dev/null 2>&1 || {
+            echo "[pre-push] malformed native claim registry entry; refusing." >&2; rm -rf "$tmp"; return 1;
+        }
+        jq -e --arg id "$id" 'def bounded: type=="string" and utf8bytelength<=256 and (test("^\\s*$")|not) and (test("\\p{Cc}")|not);
+          type=="object" and (keys==["claimToken","host","owner","sessionId","taskId"]) and
+          .taskId==$id and ([.claimToken,.host,.owner,.sessionId,.taskId]|all(bounded))' \
+          "$registry_snapshot/$base" >/dev/null || { echo "[pre-push] malformed native claim registry entry; refusing." >&2; rm -rf "$tmp"; return 1; }
+        token=$(jq -r .claimToken "$registry_snapshot/$base") || { rm -rf "$tmp"; return 1; }
+        actual_digest=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
+        [ "$actual_digest" = "$digest" ] || { echo "[pre-push] native claim registry digest mismatch; refusing." >&2; rm -rf "$tmp"; return 1; }
+        printf '%s\n' "refs/heads/tasks/active/$id" >>"$refs_file"
+    done <"$enumeration"
+    [ "$entry_count" -gt 0 ] || { rm -rf "$tmp"; return 0; }
+    sort -u "$refs_file" -o "$refs_file"
+    mapfile -t native_refs <"$refs_file"
+    git ls-remote --refs -- origin "${native_refs[@]}" >"$advertisement" || {
+        echo "[pre-push] native claim advertisement failed; refusing (fail closed)." >&2; rm -rf "$tmp"; return 1;
+    }
+    [ "$(wc -c <"$advertisement")" -le 262144 ] && [ "$(wc -l <"$advertisement")" -le 128 ] || {
+        echo "[pre-push] native claim advertisement exceeds limits; refusing." >&2; rm -rf "$tmp"; return 1;
+    }
+    local oid advertised_ref
+    declare -A native_oids=()
+    while IFS=$'\t' read -r oid advertised_ref; do
+        [[ "$oid" =~ ^[0-9a-f]{40}$ ]] && grep -Fxq "$advertised_ref" "$refs_file" && [ -z "${native_oids[$advertised_ref]:-}" ] || {
+            echo "[pre-push] malformed native claim advertisement; refusing." >&2; rm -rf "$tmp"; return 1;
+        }
+        native_oids[$advertised_ref]=$oid
+    done <"$advertisement"
+    local advertised_oids=()
+    for oid in "${native_oids[@]}"; do advertised_oids+=("$oid"); done
+    if [ "${#advertised_oids[@]}" -gt 0 ] && ! git fetch --no-tags --quiet --no-write-fetch-head --filter=blob:limit=8192 -- origin "${advertised_oids[@]}"; then
+        echo "[pre-push] native claim object fetch failed; refusing (fail closed)." >&2; rm -rf "$tmp"; return 1
+    fi
+    if [ "${#advertised_oids[@]}" -eq 0 ]; then
+        : >"$objects"
+    elif ! printf '%s\n' "${advertised_oids[@]}" | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' >"$objects"; then
+        echo "[pre-push] native claim object inspection failed; refusing (fail closed)." >&2; rm -rf "$tmp"; return 1
+    fi
+    local checked_oid object_type object_size object_total=0 object_count=0
+    while read -r checked_oid object_type object_size; do
+        object_count=$((object_count+1))
+        [[ "$checked_oid" =~ ^[0-9a-f]{40}$ ]] && [ "$object_type" = commit ] && [[ "$object_size" =~ ^[0-9]+$ ]] || {
+            echo "[pre-push] advertised native claim is not a commit; refusing." >&2; rm -rf "$tmp"; return 1
+        }
+        object_total=$((object_total+object_size))
+        [ "$object_size" -le 8192 ] && [ "$object_total" -le 1048576 ] || {
+            echo "[pre-push] native claim objects exceed size limits; refusing." >&2; rm -rf "$tmp"; return 1
+        }
+    done <"$objects"
+    [ "$object_count" -eq "${#advertised_oids[@]}" ] || { echo "[pre-push] incomplete native claim object inspection; refusing." >&2; rm -rf "$tmp"; return 1; }
+    local matched=0 active_json="$tmp/active.json"
+    for entry in "$registry_snapshot"/*; do
+        base=${entry##*/}; id=${base%%.*}; ref="refs/heads/tasks/active/$id"; oid=${native_oids[$ref]:-}
+        identity=$(awk -F '\t' -v name="$base" '$1==name {print $2}' "$identities")
+        if [ -z "$oid" ]; then
+            [ "$(stat -c '%d:%i' -- "$registry/$base" 2>/dev/null || true)" = "$identity" ] && rm -f -- "$registry/$base"
+            continue
+        fi
+        git show -s --format=%B "$oid" >"$active_json" || { echo "[pre-push] cannot read matched native claim; refusing." >&2; rm -rf "$tmp"; return 1; }
+        iconv -f UTF-8 -t UTF-8 "$active_json" >/dev/null 2>&1 || {
+            echo "[pre-push] matched remote active claim is malformed; refusing (fail closed)." >&2; rm -rf "$tmp"; return 1;
+        }
+        jq -e --arg id "$id" 'def bounded: type=="string" and utf8bytelength<=256 and (test("^\\s*$")|not) and (test("\\p{Cc}")|not);
+          type=="object" and .formatVersion==2 and .taskId==$id and
+          (keys as $k | $k==["attemptId","claimToken","claimedAt","expiresAt","formatVersion","host","logicalId","owner","sessionId","taskId","taskOid"] or
+            $k==["attemptId","claimToken","claimedAt","expiresAt","formatVersion","host","logicalId","operationId","owner","sessionId","taskId","taskOid"] or
+            $k==["attemptId","claimToken","claimedAt","expiresAt","formatVersion","host","logicalId","owner","semanticId","sessionId","taskId","taskOid"] or
+            $k==["attemptId","claimToken","claimedAt","expiresAt","formatVersion","host","logicalId","operationId","owner","semanticId","sessionId","taskId","taskOid"] or
+            $k==["attemptId","claimToken","claimedAt","expiresAt","formatVersion","host","logicalId","operationId","owner","reclaimRequired","sessionId","taskId","taskOid"]) and
+          ([.attemptId,.claimToken,.host,.logicalId,.owner,.sessionId,.taskId]|all(bounded)) and
+          (.taskOid|type=="string" and test("^[0-9a-f]{40}$")) and
+          (.attemptId|test("^[0-9a-f]{64}$")) and (.logicalId|test("^[0-9a-f]{64}$")) and
+          (.claimedAt as $claimed | .expiresAt as $expires |
+            ($claimed|type=="number" and floor==. and .>=0) and
+            ($expires|type=="number" and floor==. and .>=$claimed)) and
+          ((has("operationId")|not) or (.operationId|bounded)) and
+          ((has("semanticId")|not) or (.semanticId|type=="string" and test("^[0-9a-f]{64}$"))) and
+          ((has("reclaimRequired")|not) or (.reclaimRequired|type=="boolean"))' "$active_json" >/dev/null || {
+            echo "[pre-push] matched remote active claim is malformed; refusing (fail closed)." >&2; rm -rf "$tmp"; return 1;
+        }
+        if jq -e --slurpfile registry "$entry" '.taskId==$registry[0].taskId and .claimToken==$registry[0].claimToken and .owner==$registry[0].owner and .host==$registry[0].host and .sessionId==$registry[0].sessionId' "$active_json" >/dev/null; then
+            matched=1
+        else
+            [ "$(stat -c '%d:%i' -- "$registry/$base" 2>/dev/null || true)" = "$identity" ] && rm -f -- "$registry/$base"
+        fi
+    done
+    rm -rf "$tmp"
+    [ "$matched" -eq 0 ] || { echo "[pre-push] refusing raw origin/master push while a matching native-v2 claim is active; use the canonical task-dag transition." >&2; return 1; }
+}
+
 cmd_publish() {
     local tip
     case "${1:-}" in
@@ -7770,6 +7899,7 @@ EOF
 }
 
 cmd_guard_pre_push() {
+    export GIT_NO_LAZY_FETCH=1
     if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
         cat <<EOF
 Usage: task-dag guard-pre-push [<remote-name> <remote-url>]
@@ -7798,6 +7928,34 @@ EOF
     if [ -n "$remote_name" ] && [ "$remote_name" != "origin" ]; then
         echo "[pre-push] remote '$remote_name' is not origin; skipping the task-dag complete-before-push guard." >&2
         return 0
+    fi
+
+    # Capture the protocol stream once with hard bounds. Native-v2 registry
+    # protection must inspect the same complete atomic update set as Git.
+    local push_input push_lines push_bytes
+    push_input=$(mktemp) || return 1
+    if ! head -c 262145 >"$push_input"; then
+        echo "[pre-push] cannot read push update stream; refusing (fail closed)." >&2
+        rm -f "$push_input"
+        return 1
+    fi
+    push_bytes=$(wc -c <"$push_input")
+    push_lines=$(wc -l <"$push_input")
+    if [ "$push_bytes" -gt 262144 ] || [ "$push_lines" -gt 256 ] || grep -qvE '^[^ ]+ [0-9a-f]{40} refs/[^ ]+ [0-9a-f]{40}$' "$push_input"; then
+        echo "[pre-push] malformed or oversized push update stream; refusing (fail closed)." >&2
+        rm -f "$push_input"
+        return 1
+    fi
+
+    local has_master=0 has_journal=0
+    grep -qE ' refs/heads/master ' "$push_input" && has_master=1
+    grep -qE ' refs/heads/tasks/system/transitions ' "$push_input" && has_journal=1
+    if [ "$has_master" -eq 1 ] && [ "$has_journal" -eq 1 ]; then
+        rm -f "$push_input"
+        return 0
+    fi
+    if [ "$has_master" -eq 1 ] && [ "$has_journal" -eq 0 ]; then
+        native_claim_guard || { rm -f "$push_input"; return 1; }
     fi
 
     # Identity applies only to the plain-work/owned-claim check. Semantic tips
@@ -7890,8 +8048,9 @@ EOF
             echo "════════════════════════════════════════════════════════════════════" >&2
             printf '%b' "${RESET}" >&2
         fi
-    done
+    done <"$push_input"
 
+    rm -f "$push_input"
     [ "$blocked" -eq 0 ]
 }
 

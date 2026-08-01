@@ -3,10 +3,16 @@ use crate::{
     model::{self, ACTIVATION, JOURNAL, Update},
     runtime,
 };
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    fs::{self, OpenOptions},
+    io::Write,
     io::{BufRead, BufReader},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::PathBuf,
     process::Command,
     process::Stdio,
 };
@@ -319,7 +325,170 @@ pub(crate) fn materialize_lifecycle(snap: &Snapshot, ids: &[String]) -> Result<(
     }
     materialize(&oids)
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeClaimRegistryEntry {
+    task_id: String,
+    owner: String,
+    host: String,
+    session_id: String,
+    claim_token: String,
+}
+
+fn git_path(path: &str) -> Result<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--git-path", path])
+        .output()
+        .map_err(|e| format!("resolve Git path {path}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "resolve Git path {path}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let value = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
+    Ok(PathBuf::from(value.trim_end()))
+}
+
+fn ensure_pre_push_hook() -> Result<()> {
+    let configured = Command::new("git")
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .map_err(|e| format!("read core.hooksPath: {e}"))?;
+    if configured.status.success() {
+        return Ok(());
+    }
+    if configured.status.code() != Some(1) {
+        return Err("could not determine effective core.hooksPath".into());
+    }
+    let root = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| format!("resolve worktree root: {e}"))?;
+    if !root.status.success() {
+        return Err("native claim requires a worktree root".into());
+    }
+    let root = PathBuf::from(
+        String::from_utf8(root.stdout)
+            .map_err(|e| e.to_string())?
+            .trim_end(),
+    );
+    let hooks = root.join(".githooks");
+    let hook = hooks.join("pre-push");
+    let metadata = fs::metadata(&hook)
+        .map_err(|e| format!("native claim requires executable .githooks/pre-push: {e}"))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err("native claim requires executable .githooks/pre-push".into());
+    }
+    let set = Command::new("git")
+        .args(["config", "--local", "core.hooksPath"])
+        .arg(&hooks)
+        .output()
+        .map_err(|e| format!("set core.hooksPath: {e}"))?;
+    if !set.status.success() {
+        return Err(format!(
+            "set core.hooksPath: {}",
+            String::from_utf8_lossy(&set.stderr).trim()
+        ));
+    }
+    let verify = Command::new("git")
+        .args(["config", "--local", "--get", "core.hooksPath"])
+        .output()
+        .map_err(|e| format!("verify core.hooksPath: {e}"))?;
+    if !verify.status.success()
+        || PathBuf::from(String::from_utf8_lossy(&verify.stdout).trim_end()) != hooks
+    {
+        return Err("core.hooksPath verification failed".into());
+    }
+    Ok(())
+}
+
+fn stage_native_claims(updates: &[Update]) -> Result<()> {
+    let mut active = Vec::new();
+    for update in updates {
+        if let Some(id) = model::parse_state_ref(&update.semantic_ref, "active")
+            && id.starts_with("v2-")
+            && let Some(new) = &update.new
+        {
+            model::valid_id(id)?;
+            active.push((id, new));
+        }
+    }
+    if active.is_empty() {
+        return Ok(());
+    }
+    ensure_pre_push_hook()?;
+    let directory = git_path("task-dag/native-claims")?;
+    let staging = git_path("task-dag/native-claim-staging")?;
+    fs::create_dir_all(&directory).map_err(|e| format!("create native claim registry: {e}"))?;
+    fs::create_dir_all(&staging).map_err(|e| format!("create native claim staging: {e}"))?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("secure native claim registry: {e}"))?;
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("secure native claim staging: {e}"))?;
+    for (id, oid) in active {
+        let value = crate::validators::lifecycle("active", oid, id)?;
+        let claim: model::ClaimRecord =
+            serde_json::from_value(value).map_err(|e| format!("active claim malformed: {e}"))?;
+        if claim.task_id != id {
+            return Err("active claim task identity disagrees with its ref".into());
+        }
+        model::bounded("claim token", &claim.claim_token, 256)?;
+        model::bounded("claim owner", &claim.owner, 256)?;
+        model::bounded("claim host", &claim.host, 256)?;
+        model::bounded("claim session", &claim.session_id, 256)?;
+        let digest = format!("{:x}", Sha256::digest(claim.claim_token.as_bytes()));
+        let path = directory.join(format!("{id}.{digest}"));
+        let temporary = staging.join(format!("{id}.{digest}.{}.tmp", std::process::id()));
+        let entry = NativeClaimRegistryEntry {
+            task_id: claim.task_id,
+            owner: claim.owner,
+            host: claim.host,
+            session_id: claim.session_id,
+            claim_token: claim.claim_token,
+        };
+        let bytes = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|e| format!("stage native claim registry: {e}"))?;
+            file.write_all(&bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|e| format!("write native claim registry: {e}"))?;
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("secure staged native claim: {e}"))?;
+            fs::rename(&temporary, &path)
+                .map_err(|e| format!("publish native claim registry: {e}"))?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("secure published native claim: {e}"))?;
+            let mode = fs::metadata(&path)
+                .map_err(|e| format!("verify published native claim: {e}"))?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode != 0o600 {
+                return Err(format!(
+                    "published native claim mode is {mode:o}, expected 600"
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+    }
+    Ok(())
+}
+
 pub(crate) fn mutate(snap: &Snapshot, mut updates: Vec<Update>, journal: &str) -> Result<()> {
+    // Stage protection before adding the journal or performing any remote operation.
+    // A rejected push may leave a harmless candidate that the hook reconciles.
+    stage_native_claims(&updates)?;
     updates.push(Update {
         semantic_ref: JOURNAL.into(),
         old: snap.refs.get(JOURNAL).cloned(),
