@@ -199,37 +199,53 @@ export function usePolledData<T>(
   const [dataState, setDataState] = useState<{ key: string; value: T } | null>(null)
   const [errorState, setErrorState] = useState<{ key: string; value: Error } | null>(null)
   const [refreshingKey, setRefreshingKey] = useState<string | null>(null)
-  const [tick, setTick] = useState(0)
   const loaderRef = useRef(loader)
+  const runRef = useRef<() => void>(() => undefined)
   loaderRef.current = loader
 
   useEffect(() => {
     let cancelled = false
-    let latestRun = 0
+    let running = false
+    let rerun = false
+    let timer: ReturnType<typeof setTimeout> | undefined
     async function run() {
-      const runId = ++latestRun
+      if (running) {
+        rerun = true
+        return
+      }
+      running = true
+      if (timer) clearTimeout(timer)
       if (!cancelled) setRefreshingKey(key)
       try {
         const result = await loaderRef.current()
-        if (!cancelled && runId === latestRun) {
+        if (!cancelled) {
           setDataState({ key, value: result })
           setErrorState(null)
         }
       } catch (err) {
-        if (!cancelled && runId === latestRun) {
+        if (!cancelled) {
           setErrorState({ key, value: err instanceof Error ? err : new Error('Unknown error') })
         }
       } finally {
-        if (!cancelled && runId === latestRun) setRefreshingKey(null)
+        running = false
+        if (!cancelled) {
+          setRefreshingKey(null)
+          if (rerun) {
+            rerun = false
+            void run()
+          } else {
+            timer = setTimeout(run, intervalMs)
+          }
+        }
       }
     }
-    run()
-    const id = setInterval(run, intervalMs)
+    runRef.current = () => { void run() }
+    void run()
     return () => {
       cancelled = true
-      clearInterval(id)
+      if (timer) clearTimeout(timer)
     }
-  }, [key, tick, intervalMs])
+  }, [key, intervalMs])
 
   const data = dataState?.key === key ? dataState.value : null
   const error = errorState?.key === key ? errorState.value : null
@@ -238,7 +254,7 @@ export function usePolledData<T>(
     error,
     loading: data === null && error === null,
     refreshing: refreshingKey === key,
-    refresh: () => setTick((t) => t + 1),
+    refresh: () => runRef.current(),
   }
 }
 

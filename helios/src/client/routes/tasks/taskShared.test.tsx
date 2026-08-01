@@ -29,9 +29,9 @@ const task: TaskNode = {
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
-function PollProbe({ id, load }: { id: string; load: () => Promise<string> }) {
+function PollProbe({ id, load, refreshable = false }: { id: string; load: () => Promise<string>; refreshable?: boolean }) {
   const query = usePolledData(load, [id], 60_000)
-  return <output>{query.data ?? (query.error ? 'error' : 'loading')}</output>
+  return <><output>{query.data ?? (query.error ? 'error' : 'loading')}</output>{refreshable && <button onClick={query.refresh}>refresh</button>}</>
 }
 
 const degradedSource: TaskDagSourceStatus = {
@@ -106,6 +106,7 @@ describe('TaskCard disclosures', () => {
     host = null
     root = null
     vi.unstubAllGlobals()
+    vi.useRealTimers()
   })
 
   it('discards prior identity data and stale responses when navigation changes', async () => {
@@ -125,6 +126,34 @@ describe('TaskCard disclosures', () => {
     expect(host.textContent).toBe('loading')
     await act(async () => resolveSecond('current second'))
     expect(host.textContent).toBe('current second')
+  })
+
+  it('never overlaps polling and coalesces refreshes requested while loading', async () => {
+    vi.useFakeTimers()
+    const resolvers: Array<(value: string) => void> = []
+    const load = vi.fn(() => new Promise<string>((resolve) => resolvers.push(resolve)))
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => root?.render(<PollProbe id="single-flight" load={load} refreshable />))
+    expect(load).toHaveBeenCalledTimes(1)
+
+    await act(async () => vi.advanceTimersByTime(120_000))
+    expect(load).toHaveBeenCalledTimes(1)
+    await act(async () => host?.querySelector('button')?.click())
+    await act(async () => host?.querySelector('button')?.click())
+    expect(load).toHaveBeenCalledTimes(1)
+
+    await act(async () => resolvers.shift()?.('first'))
+    expect(load).toHaveBeenCalledTimes(2)
+    await act(async () => vi.advanceTimersByTime(120_000))
+    expect(load).toHaveBeenCalledTimes(2)
+    await act(async () => resolvers.shift()?.('second'))
+    await act(async () => vi.advanceTimersByTime(59_999))
+    expect(load).toHaveBeenCalledTimes(2)
+    await act(async () => vi.advanceTimersByTime(1))
+    expect(load).toHaveBeenCalledTimes(3)
+    await act(async () => resolvers.shift()?.('third'))
   })
 
   it('uses one tray for status and relationships and restores focus on Escape', async () => {

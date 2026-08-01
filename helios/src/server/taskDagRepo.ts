@@ -14,6 +14,7 @@ const execFileAsync = promisify(execFile)
 const COMMAND_TIMEOUT_MS = 10_000
 const COMMAND_MAX_BUFFER = 2 * 1024 * 1024
 const CONCURRENCY = 8
+const MAX_CANONICAL_PROCESSES = 4
 const MAX_LIFECYCLE_TASKS = 500
 const GENERATION_DEADLINE_MS = 30_000
 const TASK_ID_PATTERN = /^v2-[0-9a-f]{64}$/
@@ -179,9 +180,13 @@ type CanonicalRunner = (
 ) => Promise<unknown>
 let testRunner: CanonicalRunner | undefined
 const cachedIndexes = new Map<string, TaskIndex>()
+const inFlightIndexes = new Map<string, Promise<TaskIndex>>()
+interface CanonicalWaiter { grant: () => void }
+const canonicalWaiters: CanonicalWaiter[] = []
+let canonicalProcesses = 0
 
 export function __setTaskDagRunnerForTests(runner?: CanonicalRunner): void { testRunner = runner }
-export function __resetTaskIndexCacheForTests(): void { cachedIndexes.clear(); testRunner = undefined }
+export function __resetTaskIndexCacheForTests(): void { cachedIndexes.clear(); inFlightIndexes.clear(); testRunner = undefined }
 
 function requireSource(repository: string) {
   const source = getTaskDagSources().find((candidate) => candidate.repository === repository)
@@ -223,6 +228,40 @@ function localOnlyGitEnvironment(gitDir: string, originUrl: string): NodeJS.Proc
   }
 }
 
+async function acquireCanonicalProcessSlot(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw signal.reason
+  if (canonicalProcesses >= MAX_CANONICAL_PROCESSES) {
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        const index = canonicalWaiters.indexOf(waiter)
+        if (index >= 0) canonicalWaiters.splice(index, 1)
+        reject(signal?.reason)
+      }
+      const waiter: CanonicalWaiter = {
+        grant: () => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve()
+        },
+      }
+      canonicalWaiters.push(waiter)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+    return
+  }
+  canonicalProcesses++
+}
+
+async function withCanonicalProcessSlot<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  await acquireCanonicalProcessSlot(signal)
+  try {
+    return await run()
+  } finally {
+    const next = canonicalWaiters.shift()
+    if (next) next.grant()
+    else canonicalProcesses--
+  }
+}
+
 async function runCanonical(
   gitDir: string,
   originUrl: string,
@@ -230,16 +269,19 @@ async function runCanonical(
   taskId?: string,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  if (testRunner) return testRunner(gitDir, originUrl, command, taskId)
-  const args = taskId === undefined ? [command] : [command, taskId]
-  const { stdout } = await execFileAsync(canonicalBinary(), args, {
-    cwd: gitDir,
-    timeout: COMMAND_TIMEOUT_MS,
-    maxBuffer: COMMAND_MAX_BUFFER,
-    signal,
-    env: localOnlyGitEnvironment(gitDir, originUrl),
+  return withCanonicalProcessSlot(signal, async () => {
+    if (signal?.aborted) throw signal.reason
+    if (testRunner) return testRunner(gitDir, originUrl, command, taskId)
+    const args = taskId === undefined ? [command] : [command, taskId]
+    const { stdout } = await execFileAsync(canonicalBinary(), args, {
+      cwd: gitDir,
+      timeout: COMMAND_TIMEOUT_MS,
+      maxBuffer: COMMAND_MAX_BUFFER,
+      signal,
+      env: localOnlyGitEnvironment(gitDir, originUrl),
+    })
+    return JSON.parse(stdout)
   })
-  return JSON.parse(stdout)
 }
 
 interface LifecycleRef { taskId: string; state: TaskState; ref: string; oid: string }
@@ -447,7 +489,7 @@ async function loadTaskIndexAttempt(repository: string, signal: AbortSignal): Pr
   return index
 }
 
-export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
+async function buildTaskIndex(repository: string): Promise<TaskIndex> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), GENERATION_DEADLINE_MS)
@@ -460,6 +502,17 @@ export async function loadTaskIndex(repository: string): Promise<TaskIndex> {
     }
   }
   throw new Error('Task-dag generation could not be captured')
+}
+
+export function loadTaskIndex(repository: string): Promise<TaskIndex> {
+  const existing = inFlightIndexes.get(repository)
+  if (existing) return existing
+  const loading = buildTaskIndex(repository)
+  inFlightIndexes.set(repository, loading)
+  void loading.finally(() => {
+    if (inFlightIndexes.get(repository) === loading) inFlightIndexes.delete(repository)
+  }).catch(() => undefined)
+  return loading
 }
 
 function findRoot(node: TaskNode, nodes: Map<string, TaskNode>): TaskNode {
@@ -491,8 +544,7 @@ function sourceStatusForQueryFailures(failures: ReadonlyMap<string, string>): Ta
   return { ...base, available: available > 0, coverage: available === 0 ? 'unavailable' : available === repositories.length ? 'complete' : 'partial', repositories, lastError: 'One or more repositories could not be read' }
 }
 async function loadConfiguredTaskIndexes(requested?: string) {
-  if (requested) configuredRepositories(requested)
-  const repositories = configuredRepositories()
+  const repositories = configuredRepositories(requested)
   const results = await Promise.allSettled(repositories.map(loadTaskIndex))
   const indexes = new Map<string, TaskIndex>()
   const failures = new Map<string, string>()
@@ -575,7 +627,7 @@ export async function getTaskDetail(taskId: string, repository: string): Promise
   return { source, task, parent: task.structuralParent ? lookup(task.structuralParent) : null, requirements: task.requirements.map(lookup).filter((node): node is TaskNode => node !== null), dependents: task.dependents.map(lookup).filter((node): node is TaskNode => node !== null), children: task.directChildren.map(lookup).filter((node): node is TaskNode => node !== null) }
 }
 export async function getActivity() {
-  const view = await getFrontierView(); const epics = await getEpics()
+  const [view, epics] = await Promise.all([getFrontierView(), getEpics()])
   return { source: view.source, totalEpics: epics.epics.length, totalFrontier: view.summary.totalFrontier, readyTasks: view.summary.ready, activeTasks: view.summary.active, blockedTasks: view.summary.blocked }
 }
 export async function validateDag(): Promise<{ source: TaskDagSourceStatus; errors: number; warnings: number; valid: boolean }> {
