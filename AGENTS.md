@@ -61,3 +61,26 @@ link to this section alone is insufficient.
 - Use `scripts/run-rust-tests.sh` for the canonical pinned Rust test suite.
 - Run focused Rust filters while iterating. The Rust-only `cli-tests` workflow
   runs the complete wrapper; no retired Bash aggregate is a release gate.
+
+## Runtime deployment means complete fleet activation
+
+Task-dag **deployment** definitionally means the system-installed coordinator
+has completed candidate staging and identity checks, fleet activation while the
+old stable runtime remains authorized, exact NixOS revision promotion, and
+authoritative final readback. Future runtime releases MUST use:
+
+```sh
+deploy-task-dag-runtime deploy <40-char-task-dag-commit>
+```
+
+Publishing a runtime object, building a package, or distributing it to hosts
+without activation is only **staging**, never deployment. Do not substitute
+direct `runtime publish`, `activate-runtime`, package installation, or a
+hand-built fleet loop for the coordinator; those are internal primitives or
+exceptional recovery operations.
+
+The coordinator must not promote stable until every canonical repository
+authorizes the staged candidate and the candidate can read each repository.
+A system-installed stable runtime rejected by activation fencing or minimum
+runtime requirements is a **production-critical incident**: stop unrelated
+work, repair immediately, and page the operator.

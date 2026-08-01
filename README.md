@@ -59,11 +59,26 @@ unavailable; it contains no task semantics.
 
 ## Fleet activation and rollback
 
-Roll forward by building and distributing one immutable runtime commit,
-publishing it with `runtime publish`, then activating it under the exact
-activation lease in each repository. Verify authoritative readback before
-advancing the fleet. Activation retains the current and candidate runtimes for
-the handoff epoch.
+Deploy an immutable runtime commit only through the fleet-installed
+coordinator:
+
+```sh
+deploy-task-dag-runtime deploy <40-char-task-dag-commit>
+```
+
+The coordinator stages and verifies the candidate, activates it fleet-wide
+while the old stable runtime remains authorized, promotes the exact NixOS
+revision, and performs authoritative final readback. It does not promote stable
+until every canonical repository authorizes the candidate and the candidate can
+read every repository.
+
+Building or distributing a package, or publishing its runtime object without
+activation, is **staging**, not deployment. `runtime publish`,
+`activate-runtime`, package installation, and hand-built activation loops are
+low-level primitives for the coordinator or exceptional recovery; they are not
+the normal release workflow. A system-installed stable runtime rejected by
+activation fencing or minimum-version requirements is a production-critical
+incident requiring immediate repair and an operator page.
 
 Rollback must move both control planes in safe order: first repin and deploy the
 immutable Nix package containing the last known-good Rust runtime, verify its
