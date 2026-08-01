@@ -3,6 +3,7 @@ pub(crate) mod bootstrap;
 pub(crate) mod breakdown;
 pub(crate) mod claim;
 pub(crate) mod claim_lifecycle;
+pub(crate) mod comment;
 pub(crate) mod completion;
 pub(crate) mod delegation;
 pub(crate) mod delegation_accept;

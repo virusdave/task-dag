@@ -1,4 +1,3 @@
-#[expect(dead_code, reason = "record contracts precede their writer commands")]
 pub(crate) mod comment;
 mod delegation;
 mod delegation_completion;

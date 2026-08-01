@@ -131,7 +131,10 @@ enum Commands {
         #[arg(long)]
         max_tasks: usize,
     },
-    Comment(Unsupported),
+    Comment {
+        #[command(subcommand)]
+        command: CommentCommands,
+    },
     Delegate {
         #[command(subcommand)]
         command: DelegateCommands,
@@ -180,6 +183,31 @@ enum RuntimeCommands {
 enum DepCommands {
     Add(Unsupported),
     Drop(Unsupported),
+}
+
+#[derive(Subcommand)]
+enum CommentCommands {
+    Post(CommentPost),
+    Reconcile(CommentReconcile),
+}
+
+#[derive(Args)]
+pub(crate) struct CommentPost {
+    pub(crate) task_id: String,
+    #[arg(long, value_parser = ["status", "operator-decision"])]
+    pub(crate) kind: String,
+    #[arg(long)]
+    pub(crate) body_file: PathBuf,
+    #[arg(long)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct CommentReconcile {
+    #[arg(long)]
+    pub(crate) max: usize,
+    #[arg(long)]
+    pub(crate) older_than: String,
 }
 
 #[derive(Subcommand)]
@@ -380,7 +408,12 @@ pub(crate) fn run() -> Result<()> {
         Commands::Context { task_id } => commands::readers::context(&task_id),
         Commands::Frontier => commands::readers::frontier(),
         Commands::CurrentState { max_tasks } => commands::readers::current_state(max_tasks),
-        Commands::Comment(_) => commands::unsupported::fail("comment"),
+        Commands::Comment {
+            command: CommentCommands::Post(args),
+        } => commands::comment::post(args),
+        Commands::Comment {
+            command: CommentCommands::Reconcile(args),
+        } => commands::comment::reconcile(args),
         Commands::Delegate {
             command: DelegateCommands::Create(args),
         } => commands::delegation::create(args),

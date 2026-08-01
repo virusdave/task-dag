@@ -208,44 +208,27 @@ pub(crate) fn delegation_accepted_ref(source_repository_id: &str, operation: &st
         )
     )
 }
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the next dependency task")
-)]
 pub(crate) fn github_binding_task_ref(task_id: &str) -> String {
     format!("refs/heads/tasks/comments/bindings/by-task/{task_id}")
 }
-#[expect(dead_code, reason = "consumed by the next dependency task")]
 pub(crate) fn github_binding_target_ref(repository_id: &str, issue_id: &str) -> String {
     format!(
         "refs/heads/tasks/comments/bindings/by-target/{}",
         framed_digest("github-issue-binding-key", &[repository_id, issue_id])
     )
 }
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the next dependency task")
-)]
 pub(crate) fn comment_intent_ref(operation: &str) -> String {
     format!(
         "refs/heads/tasks/comments/intents/{}",
         framed_digest("github-comment-operation-key", &[operation])
     )
 }
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the next dependency task")
-)]
 pub(crate) fn comment_delivery_claim_ref(intent_oid: &str) -> String {
     format!(
         "refs/heads/tasks/comments/delivery-claims/{}",
         framed_digest("github-comment-intent-key", &[intent_oid])
     )
 }
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the next dependency task")
-)]
 pub(crate) fn comment_receipt_ref(intent_oid: &str) -> String {
     format!(
         "refs/heads/tasks/comments/receipts/{}",

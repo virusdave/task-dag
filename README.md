@@ -36,14 +36,27 @@ The current surface is defined by `src/cli.rs`:
   `current-state`;
 - provider-free delegation: `delegate create`, `delegate admit`,
   `delegate export`, `delegate accept`, and `delegate status`;
+- GitHub comment projection: `comment post TASK-ID --kind status|operator-decision
+  --body-file PATH --operation-id ID`, plus explicit bounded recovery with
+  `comment reconcile --max N --older-than DURATION`;
 - compatibility aliases: `epic-create` is `create`, `epic-compose` is
   `breakdown`, and `dag TASK-ID` is a bounded task view;
 - exceptional migration: `migrate-v1-census` and `migrate-v1`.
 
 Use `task-dag <command> --help` for exact arguments. Immutable dependencies
 cannot be edited after task creation: `dep add` and `dep drop` are explicitly
-unsupported. `comment`, `project`, and `provider` are also unsupported. The
-runtime neither calls nor projects to an issue provider.
+unsupported. `project` and `provider` are also unsupported.
+
+`comment post` resolves the nearest structural-ancestor GitHub issue binding,
+records an immutable intent before calling authenticated `gh api`, and records
+a receipt only after exact authenticated readback. Delivery is bounded to six
+rounds over five minutes, with at least ten seconds between production rounds;
+every possible POST is preceded by a complete paginated marker search.
+Operation IDs replay only when their exact semantics agree. Failed or uncertain
+delivery leaves the intent pending. Reconciliation is never implicit: the
+operator selects at most 100 pending intents older than a duration such as
+`10m`, `2h`, or `1d`; selection is oldest-first and bounded by hard ref and byte
+limits.
 
 ## Claim safety
 

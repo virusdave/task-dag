@@ -15,6 +15,7 @@ use std::{
     path::PathBuf,
     process::Command,
     process::Stdio,
+    thread,
 };
 
 const CURRENT_ADVERTISEMENT_LINES: usize = 502;
@@ -163,21 +164,39 @@ fn in_scope(reference: &str, patterns: &[String]) -> bool {
 }
 
 pub(crate) fn advertise_remote(remote: &str, patterns: &[String]) -> Result<Snapshot> {
-    model::bounded("remote", remote, 4096)?;
-    if patterns.is_empty() || patterns.iter().any(|pattern| !valid_scope(pattern)) {
-        return Err("scoped advertisement requires non-global exact refs or prefixes".into());
-    }
-    let out = Command::new("git")
-        .args(["ls-remote", "--refs", "--", remote])
-        .args(patterns)
-        .output()
-        .map_err(|e| format!("run ls-remote: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().into());
-    }
-    let out = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
+    advertise_remote_bounded(remote, patterns, usize::MAX, usize::MAX)
+}
+
+pub(crate) fn advertise_bounded(
+    patterns: &[String],
+    line_limit: usize,
+    byte_limit: usize,
+) -> Result<Snapshot> {
+    advertise_remote_bounded("origin", patterns, line_limit, byte_limit)
+}
+
+fn parse_advertisement<R: BufRead>(
+    reader: R,
+    patterns: &[String],
+    line_limit: usize,
+    byte_limit: usize,
+) -> Result<BTreeMap<String, String>> {
     let mut refs = BTreeMap::new();
-    for line in out.lines() {
+    let mut bytes = 0usize;
+    let mut lines = 0usize;
+    for raw in reader.split(b'\n') {
+        let raw = raw.map_err(|e| format!("read ls-remote: {e}"))?;
+        if raw.is_empty() {
+            continue;
+        }
+        lines = lines.checked_add(1).ok_or("advertisement line overflow")?;
+        bytes = bytes
+            .checked_add(raw.len() + 1)
+            .ok_or("advertisement byte overflow")?;
+        if lines > line_limit || bytes > byte_limit {
+            return Err("scoped advertisement exceeds hard limit".into());
+        }
+        let line = std::str::from_utf8(&raw).map_err(|_| "ls-remote output is not UTF-8")?;
         let (o, r) = line
             .split_once('\t')
             .ok_or_else(|| format!("malformed ls-remote line: {line}"))?;
@@ -191,6 +210,54 @@ pub(crate) fn advertise_remote(remote: &str, patterns: &[String]) -> Result<Snap
         if refs.insert(r.into(), o.into()).is_some() {
             return Err(format!("remote advertised duplicate ref {r}"));
         }
+    }
+    Ok(refs)
+}
+
+fn advertise_remote_bounded(
+    remote: &str,
+    patterns: &[String],
+    line_limit: usize,
+    byte_limit: usize,
+) -> Result<Snapshot> {
+    model::bounded("remote", remote, 4096)?;
+    if patterns.is_empty() || patterns.iter().any(|pattern| !valid_scope(pattern)) {
+        return Err("scoped advertisement requires non-global exact refs or prefixes".into());
+    }
+    let mut child = Command::new("git")
+        .args(["ls-remote", "--refs", "--", remote])
+        .args(patterns)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run ls-remote: {e}"))?;
+    let stdout = child.stdout.take().ok_or("open ls-remote stdout")?;
+    let mut stderr = child.stderr.take().ok_or("open ls-remote stderr")?;
+    let stderr_reader = thread::spawn(move || {
+        let mut value = Vec::new();
+        stderr
+            .by_ref()
+            .take(64 * 1024 + 1)
+            .read_to_end(&mut value)
+            .map(|_| value)
+    });
+    let parsed = parse_advertisement(BufReader::new(stdout), patterns, line_limit, byte_limit);
+    if parsed.is_err() {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait for ls-remote: {e}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "ls-remote stderr reader panicked")?
+        .map_err(|e| format!("read ls-remote stderr: {e}"))?;
+    if stderr.len() > 64 * 1024 {
+        return Err("ls-remote stderr exceeds hard limit".into());
+    }
+    let refs = parsed?;
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr).trim().into());
     }
     Ok(Snapshot { refs })
 }
@@ -917,7 +984,8 @@ pub(crate) fn absent(s: &Snapshot, r: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_exact_ref, valid_scope};
+    use super::{parse_advertisement, valid_exact_ref, valid_scope};
+    use std::io::Cursor;
 
     #[test]
     fn remote_advertisement_scopes_are_bounded_and_well_formed() {
@@ -942,5 +1010,27 @@ mod tests {
         }
         assert!(!valid_exact_ref("refs/heads/tasks/frontier/a..b"));
         assert!(!valid_exact_ref("refs/heads/tasks/frontier/a\tb"));
+    }
+
+    #[test]
+    fn scoped_advertisement_enforces_streaming_line_and_byte_limits() {
+        let oid = "0".repeat(40);
+        let input = format!(
+            "{oid}\trefs/heads/tasks/comments/intents/a\n{oid}\trefs/heads/tasks/comments/intents/b\n"
+        );
+        let patterns = vec!["refs/heads/tasks/comments/intents/*".into()];
+        assert!(
+            parse_advertisement(Cursor::new(input.as_bytes()), &patterns, 1, usize::MAX).is_err()
+        );
+        assert!(
+            parse_advertisement(Cursor::new(input.as_bytes()), &patterns, 2, input.len() - 1)
+                .is_err()
+        );
+        assert_eq!(
+            parse_advertisement(Cursor::new(input), &patterns, 2, usize::MAX)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }
