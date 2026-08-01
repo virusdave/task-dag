@@ -31,6 +31,7 @@
                 ./Cargo.toml
                 ./Cargo.lock
                 ./src
+                ./assets
                 ./build.rs
                 ./.githooks/pre-push
               ];
