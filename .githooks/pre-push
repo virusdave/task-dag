@@ -18,21 +18,19 @@
 # Enable (per clone; git will not auto-activate a committed hooks dir):
 #     git config core.hooksPath .githooks
 #
-# It fails OPEN (allows the push, with a loud stderr note) whenever it cannot
-# evaluate confidently — no TASK_DAG_CLAIMER, no CLI, unreachable objects — so
-# it never bricks ordinary human/maintenance pushes. Do NOT bypass a real
-# rejection with 'git push --no-verify'.
+# The native CLI fails closed for malformed or uncertain native-v2 registry
+# state. The wrapper itself remains fail-open only when no native CLI exists.
+# Do NOT bypass a real rejection with 'git push --no-verify'.
 set -euo pipefail
 
 # Locate the canonical CLI without re-encoding any of its logic:
 #   1. explicit override (TASK_DAG_BIN)
-#   2. scripts/task-dag inside this repo (the task-dag repo itself)
+#   2. task-dag-v2 on PATH
 #   3. task-dag on PATH
 td="${TASK_DAG_BIN:-}"
 if [ -z "$td" ]; then
-  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  if [ -n "$root" ] && [ -x "$root/scripts/task-dag" ]; then
-    td="$root/scripts/task-dag"
+  if command -v task-dag-v2 >/dev/null 2>&1; then
+    td="$(command -v task-dag-v2)"
   elif command -v task-dag >/dev/null 2>&1; then
     td="$(command -v task-dag)"
   fi

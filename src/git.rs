@@ -1,6 +1,12 @@
 use serde_json::Value;
 use std::process::{Command, Stdio};
-use std::{cell::RefCell, collections::BTreeMap, io::Write};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    io::{self, Read, Write},
+    sync::mpsc,
+    thread,
+};
 
 use crate::{Result, model, model::oid};
 
@@ -19,6 +25,81 @@ pub(crate) struct ObjectInfo {
 
 pub(crate) fn set_cache_only(value: bool) {
     CACHE_ONLY.with(|flag| *flag.borrow_mut() = value);
+}
+
+/// Run Git while enforcing hard limits on both output pipes before either is
+/// collected into an allocation. Reading concurrently also prevents a full
+/// stderr pipe from deadlocking a command with bounded stdout.
+pub(crate) fn bounded_output(args: &[&str], max_stdout: usize) -> Result<String> {
+    const MAX_STDERR: usize = 16_384;
+    enum ReadResult {
+        Stdout(io::Result<(Vec<u8>, bool)>),
+        Stderr(io::Result<(Vec<u8>, bool)>),
+    }
+    fn read_limited(stream: impl Read, max: usize) -> io::Result<(Vec<u8>, bool)> {
+        let mut value = Vec::new();
+        stream.take((max + 1) as u64).read_to_end(&mut value)?;
+        let exceeded = value.len() > max;
+        value.truncate(max);
+        Ok((value, exceeded))
+    }
+
+    let mut child = Command::new("git")
+        .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run git {}: {e}", args.join(" ")))?;
+    let stdout = child.stdout.take().ok_or("open git stdout")?;
+    let stderr = child.stderr.take().ok_or("open git stderr")?;
+    let (send, receive) = mpsc::channel();
+    let stdout_send = send.clone();
+    let stdout_reader = thread::spawn(move || {
+        let _ = stdout_send.send(ReadResult::Stdout(read_limited(stdout, max_stdout)));
+    });
+    let stderr_reader = thread::spawn(move || {
+        let _ = send.send(ReadResult::Stderr(read_limited(stderr, MAX_STDERR)));
+    });
+    let mut out = None;
+    let mut err = None;
+    for _ in 0..2 {
+        let result = receive
+            .recv()
+            .map_err(|e| format!("read git {} output: {e}", args.join(" ")))?;
+        match result {
+            ReadResult::Stdout(Ok((value, false))) => out = Some(value),
+            ReadResult::Stderr(Ok((value, false))) => err = Some(value),
+            ReadResult::Stdout(Ok((_, true))) | ReadResult::Stderr(Ok((_, true))) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("git {} output exceeds byte limit", args.join(" ")));
+            }
+            ReadResult::Stdout(Err(error)) | ReadResult::Stderr(Err(error)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("read git {} output: {error}", args.join(" ")));
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    stdout_reader
+        .join()
+        .map_err(|_| "git stdout reader panicked")?;
+    stderr_reader
+        .join()
+        .map_err(|_| "git stderr reader panicked")?;
+    if !status.success() {
+        return Err(format!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&err.unwrap_or_default()).trim()
+        ));
+    }
+    Ok(String::from_utf8(out.unwrap_or_default())
+        .map_err(|_| "git output is not UTF-8")?
+        .trim_end()
+        .to_owned())
 }
 
 fn cache_only() -> bool {

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     io::{BufRead, BufReader},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -337,18 +337,35 @@ struct NativeClaimRegistryEntry {
 }
 
 fn git_path(path: &str) -> Result<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--git-path", path])
-        .output()
-        .map_err(|e| format!("resolve Git path {path}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "resolve Git path {path}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    Ok(PathBuf::from(git::bounded_output(
+        &["rev-parse", "--git-path", path],
+        4096,
+    )?))
+}
+
+/// Serialize ownership of the native-claim registry across mutation staging,
+/// push, readback, and guard reconciliation. File locks are released by the OS
+/// if a process exits or crashes.
+pub(crate) fn native_claim_registry_lock(nonblocking: bool) -> Result<File> {
+    let path = git_path("task-dag/native-claims.lock")?;
+    let parent = path.parent().ok_or("native claim lock has no parent")?;
+    fs::create_dir_all(parent).map_err(|e| format!("create native claim lock directory: {e}"))?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("open native claim registry lock: {e}"))?;
+    if nonblocking {
+        file.try_lock().map_err(|e| {
+            format!("native claim registry mutation is in flight (fail closed): {e}")
+        })?;
+    } else {
+        file.lock()
+            .map_err(|e| format!("lock native claim registry: {e}"))?;
     }
-    let value = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
-    Ok(PathBuf::from(value.trim_end()))
+    Ok(file)
 }
 
 fn ensure_pre_push_hook() -> Result<()> {
@@ -486,6 +503,7 @@ fn stage_native_claims(updates: &[Update]) -> Result<()> {
 }
 
 pub(crate) fn mutate(snap: &Snapshot, mut updates: Vec<Update>, journal: &str) -> Result<()> {
+    let _registry_lock = native_claim_registry_lock(false)?;
     // Stage protection before adding the journal or performing any remote operation.
     // A rejected push may leave a harmless candidate that the hook reconciles.
     stage_native_claims(&updates)?;

@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
 
 use crate::{Result, commands};
 
@@ -11,6 +12,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Reject hand-written task-dag control commits and non-canonical subjects.
+    GuardCommitMessage {
+        /// Read the proposed message from stdin instead of a file.
+        #[arg(long, conflicts_with = "message_file")]
+        stdin: bool,
+        message_file: Option<PathBuf>,
+    },
+    /// Pre-push protection for native-v2 claims.
+    GuardPrePush {
+        remote_name: Option<String>,
+        remote_url: Option<String>,
+    },
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommands,
@@ -267,6 +280,14 @@ struct Unsupported {
 
 pub(crate) fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::GuardCommitMessage {
+            stdin,
+            message_file,
+        } => commands::guards::commit_message(stdin, message_file.as_deref()),
+        Commands::GuardPrePush {
+            remote_name,
+            remote_url,
+        } => commands::guards::pre_push(remote_name.as_deref(), remote_url.as_deref()),
         Commands::Runtime {
             command: RuntimeCommands::Identity,
         } => crate::runtime_authority::identity(),

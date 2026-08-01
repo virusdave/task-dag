@@ -9,6 +9,7 @@ pub(crate) mod delegation_accept;
 pub(crate) mod delegation_admit;
 pub(crate) mod delegation_export;
 pub(crate) mod delegation_status;
+pub(crate) mod guards;
 pub(crate) mod readers;
 pub(crate) mod unsupported;
 
