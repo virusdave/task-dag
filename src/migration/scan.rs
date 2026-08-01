@@ -1,9 +1,7 @@
 use crate::{Result, git, model, repository};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::collections::VecDeque;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone)]
 pub(super) struct LegacyTask {
@@ -19,6 +17,13 @@ pub(super) struct LegacyTask {
     pub(super) graph_edges: Vec<String>,
     pub(super) completed_parent_requirements: Vec<(String, String)>,
     pub(super) graph_normalizations: Vec<String>,
+    pub(super) structural_parent: Option<String>,
+    pub(super) disposition: LegacyDisposition,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LegacyDisposition {
+    Native,
+    Decomposed,
 }
 #[derive(Clone)]
 pub(super) struct LegacyDelegation {
@@ -62,7 +67,8 @@ pub(super) struct Frozen {
     pub(super) digest: String,
     pub(super) terminal_edges: Vec<String>,
     pub(super) planned_tasks: BTreeMap<String, LegacyTask>,
-    pub(super) planned_roots: BTreeMap<String, String>,
+    pub(super) planned_parents: BTreeMap<String, Option<String>>,
+    pub(super) recursive_approximation: bool,
     pub(super) delegations: Vec<LegacyDelegation>,
 }
 
@@ -91,7 +97,7 @@ fn migration_patterns() -> Vec<String> {
     ]
 }
 
-pub(super) fn census() -> Result<Value> {
+pub(super) fn census(recursive_approximation: bool) -> Result<Value> {
     let patterns = migration_patterns();
     let snapshot = repository::advertise(&patterns)?;
     if snapshot.refs.len() > 500 {
@@ -124,6 +130,7 @@ pub(super) fn census() -> Result<Value> {
             patterns.clone(),
             snapshot.clone(),
             Some(&completion_facts),
+            recursive_approximation,
         )
         .map_err(|error| format!("migration root {root} at {pending_ref}: {error}"))?;
         roots.push(json!({
@@ -144,7 +151,7 @@ pub(super) fn census() -> Result<Value> {
     Ok(json!({"formatVersion":1,"roots":roots}))
 }
 
-pub(super) fn discover(root: &str) -> Result<Frozen> {
+pub(super) fn discover(root: &str, recursive_approximation: bool) -> Result<Frozen> {
     let patterns = migration_patterns();
     let snap = repository::advertise(&patterns)?;
     if snap.refs.len() > 500 {
@@ -168,6 +175,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         patterns.clone(),
         snap.clone(),
         Some(&completion),
+        recursive_approximation,
     )?];
     let mut planned_root_oids = BTreeSet::from([root.to_owned()]);
     loop {
@@ -199,8 +207,13 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
                 "incomplete external Task {requirement} belongs to a pending root but lacks a valid schedulable lifecycle"
             ));
         }
-        let plan =
-            discover_from_snapshot(owner, patterns.clone(), snap.clone(), Some(&completion))?;
+        let plan = discover_from_snapshot(
+            owner,
+            patterns.clone(),
+            snap.clone(),
+            Some(&completion),
+            recursive_approximation,
+        )?;
         if !plan.tasks.iter().any(|task| task.task == requirement) {
             return Err(format!(
                 "incomplete external Task {requirement} belongs to a pending root but lacks a valid schedulable lifecycle"
@@ -209,7 +222,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         plans.push(plan);
     }
     let mut planned_tasks = BTreeMap::new();
-    let mut planned_roots = BTreeMap::new();
+    let mut planned_parents = BTreeMap::new();
     for plan in &plans {
         let plan_root = plan.tasks[0].task.clone();
         for task in &plan.tasks {
@@ -219,7 +232,16 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
             {
                 return Err("legacy Task belongs to more than one pending root".into());
             }
-            planned_roots.insert(task.task.clone(), plan_root.clone());
+            planned_parents.insert(
+                task.task.clone(),
+                if recursive_approximation {
+                    task.structural_parent.clone()
+                } else if task.task == plan_root {
+                    None
+                } else {
+                    Some(plan_root.clone())
+                },
+            );
         }
     }
     let mut selected = plans
@@ -227,7 +249,7 @@ pub(super) fn discover(root: &str) -> Result<Frozen> {
         .find(|plan| plan.tasks.first().is_some_and(|task| task.task == root))
         .ok_or("root has no legacy pending closure")?;
     selected.planned_tasks = planned_tasks;
-    selected.planned_roots = planned_roots;
+    selected.planned_parents = planned_parents;
     Ok(selected)
 }
 
@@ -277,6 +299,7 @@ fn discover_from_snapshot(
     patterns: Vec<String>,
     snap: repository::Snapshot,
     precomputed_completion_facts: Option<&CompletionFacts>,
+    recursive_approximation: bool,
 ) -> Result<Frozen> {
     if snap.refs.len() > 500 {
         return Err("migration discovery exceeds 500 refs".into());
@@ -370,7 +393,7 @@ fn discover_from_snapshot(
     if metadata > 10 * 1024 * 1024 {
         return Err("migration metadata exceeds 10MiB".into());
     }
-    let task_parents: BTreeMap<_, _> = task_states
+    let mut task_parents: BTreeMap<_, _> = task_states
         .keys()
         .map(|task| Ok((task.clone(), git::parents(task)?)))
         .collect::<Result<_>>()?;
@@ -384,7 +407,51 @@ fn discover_from_snapshot(
     if root_parents.len() > 1 {
         return Err("legacy migration root has more than one provenance parent".into());
     }
-    let closure = scheduled_closure(root, &task_parents, 100)?;
+    let computed_completion_facts = if precomputed_completion_facts.is_none() {
+        Some(completion_facts(&master, &snap)?)
+    } else {
+        None
+    };
+    let completion_facts = precomputed_completion_facts
+        .or(computed_completion_facts.as_ref())
+        .ok_or("legacy completion facts unavailable")?;
+    let repository = current_repository()?;
+    let mut closure = scheduled_closure(root, &task_parents, 100)?;
+    if recursive_approximation {
+        let mut seeds: BTreeSet<_> = task_parents.keys().cloned().collect();
+        loop {
+            closure = recursive_closure(root, &seeds, &completion_facts.by_task, 100)?;
+            let Some(graph) = graph.as_deref() else {
+                break;
+            };
+            // Discovery parses and validates the graph without charging its objects to
+            // metadata repeatedly. The final classification below accounts for it once.
+            let mut provisional_metadata = metadata;
+            let provisional = inspect_graph(
+                graph,
+                &closure,
+                &repository,
+                completion_facts,
+                &mut provisional_metadata,
+            )?;
+            let before = seeds.len();
+            seeds.extend(provisional.requires.values().flatten().cloned());
+            if seeds.len() == before {
+                break;
+            }
+        }
+        for task in &closure {
+            task_parents
+                .entry(task.clone())
+                .or_insert(git::parents(task)?);
+            if !objects.contains(task) {
+                add_object_size(task, &mut metadata)?;
+            }
+        }
+        if metadata > 10 * 1024 * 1024 {
+            return Err("migration metadata exceeds 10MiB".into());
+        }
+    }
     for (reference, oid) in &snap.refs {
         if let Some(task) = reference.strip_prefix("refs/heads/tasks/blocked/") {
             if closure.contains(task) && oid != task {
@@ -423,7 +490,6 @@ fn discover_from_snapshot(
             expired_root_claims.push((reference.clone(), oid.clone()));
         }
     }
-    let repository = current_repository()?;
     let mut selected_delegations = Vec::new();
     for (reference, oid) in &delegated {
         let parents = git::parents(oid)?;
@@ -465,14 +531,6 @@ fn discover_from_snapshot(
             )?);
         }
     }
-    let computed_completion_facts = if precomputed_completion_facts.is_none() {
-        Some(completion_facts(&master, &snap)?)
-    } else {
-        None
-    };
-    let completion_facts = precomputed_completion_facts
-        .or(computed_completion_facts.as_ref())
-        .ok_or("legacy completion facts unavailable")?;
     let mut graph_inspection = match graph.as_deref() {
         Some(graph) => inspect_graph(
             graph,
@@ -643,6 +701,8 @@ fn discover_from_snapshot(
             .get(root)
             .cloned()
             .unwrap_or_default(),
+        structural_parent: None,
+        disposition: LegacyDisposition::Native,
     });
     let mut remaining: BTreeSet<_> = closure
         .iter()
@@ -663,13 +723,21 @@ fn discover_from_snapshot(
             .cloned()
             .ok_or("legacy dependency cycle")?;
         remaining.remove(&next);
-        let states = &task_states[&next];
-        let schedule: Vec<_> = states.iter().filter(|state| state.0 != "blocked").collect();
-        let blocked: Vec<_> = states.iter().filter(|state| state.0 == "blocked").collect();
-        if schedule.len() != 1 || blocked.len() > 1 {
+        let states = task_states.get(&next);
+        if states.is_none() && !recursive_approximation {
             return Err("legacy task has conflicting or missing lifecycle state".into());
         }
-        let mut lifecycle = vec![(schedule[0].1.clone(), schedule[0].2.clone())];
+        let empty_states = Vec::new();
+        let states = states.unwrap_or(&empty_states);
+        let schedule: Vec<_> = states.iter().filter(|state| state.0 != "blocked").collect();
+        let blocked: Vec<_> = states.iter().filter(|state| state.0 == "blocked").collect();
+        if (!states.is_empty() && schedule.len() != 1) || blocked.len() > 1 {
+            return Err("legacy task has conflicting or missing lifecycle state".into());
+        }
+        let mut lifecycle = schedule
+            .first()
+            .map(|state| vec![(state.1.clone(), state.2.clone())])
+            .unwrap_or_default();
         let mut blocked_reason = None;
         let mut blocked_at = None;
         if let Some(blocked) = blocked.first() {
@@ -757,7 +825,7 @@ fn discover_from_snapshot(
         if requires.contains(&next) {
             return Err("legacy local requirement self-cycle".into());
         }
-        let owner = if schedule[0].0 == "active" {
+        let owner = if schedule.first().is_some_and(|state| state.0 == "active") {
             owner(&schedule[0].2)?
         } else {
             String::new()
@@ -765,10 +833,37 @@ fn discover_from_snapshot(
         let has_cross_root_requirement = requires
             .iter()
             .any(|requirement| !closure.contains(requirement));
-        let block_for_cross_root = has_cross_root_requirement && schedule[0].0 == "active";
+        let block_for_cross_root =
+            has_cross_root_requirement && schedule.first().is_some_and(|state| state.0 == "active");
+        let has_structural_children = closure.iter().any(|candidate| {
+            task_parents
+                .get(candidate)
+                .and_then(|parents| parents.first())
+                == Some(&next)
+        });
+        let explicit_requirement = closure.iter().any(|candidate| {
+            task_parents.get(candidate).is_some_and(|parents| {
+                parents
+                    .iter()
+                    .skip(1)
+                    .any(|requirement| requirement == &next)
+            })
+        }) || graph_inspection
+            .requires
+            .values()
+            .any(|requirements| requirements.contains(&next));
+        if states.is_empty() && !has_structural_children && !explicit_requirement {
+            return Err(
+                "lifecycle-less legacy leaf was not reached as an explicit requirement".into(),
+            );
+        }
         tasks.push(LegacyTask {
             task: next.clone(),
-            state: if blocked.is_empty() && !block_for_cross_root {
+            state: if states.is_empty() && has_structural_children {
+                "waiting".into()
+            } else if states.is_empty() {
+                "blocked".into()
+            } else if blocked.is_empty() && !block_for_cross_root {
                 schedule[0].0.clone()
             } else {
                 "blocked".into()
@@ -778,10 +873,12 @@ fn discover_from_snapshot(
             description: description(&next)?,
             requires: requires.into_iter().collect(),
             lifecycle,
-            blocked_reason: blocked_reason.or_else(|| {
+            blocked_reason: if states.is_empty() && !has_structural_children {
+                Some("Preserves a legacy gated or dormant Task; explicit review and unblock are required".into())
+            } else { blocked_reason.or_else(|| {
                 block_for_cross_root
                     .then(|| "Migrated active Task has an incomplete cross-root requirement".into())
-            }),
+            }) },
             blocked_at,
             graph_edges: graph_inspection
                 .provenance
@@ -794,7 +891,24 @@ fn discover_from_snapshot(
                 .get(&next)
                 .cloned()
                 .unwrap_or_default(),
+            structural_parent: task_parents[&next].first().cloned(),
+            disposition: if states.is_empty() && has_structural_children { LegacyDisposition::Decomposed } else { LegacyDisposition::Native },
         });
+    }
+    if recursive_approximation {
+        for task in &tasks {
+            if task.disposition == LegacyDisposition::Decomposed && !task.requires.is_empty() {
+                return Err(
+                    "lifecycle-less decomposed Task has an incomplete requirement that waiting convergence cannot enforce"
+                        .into(),
+                );
+            }
+            for requirement in &task.requires {
+                if is_structural_ancestor(&task.task, requirement, 100)? {
+                    return Err("legacy Task cannot require one of its structural ancestors".into());
+                }
+            }
+        }
     }
     let root_was_blocked = tasks[0].state == "blocked";
     if root_was_blocked && !parsed_delegations.is_empty() {
@@ -808,7 +922,7 @@ fn discover_from_snapshot(
         let blocked_at = tasks[0].blocked_at;
         tasks[0].state = "pending".into();
         for task in tasks.iter_mut().skip(1) {
-            if task.state != "blocked" {
+            if task.disposition == LegacyDisposition::Native && task.state != "blocked" {
                 task.state = "blocked".into();
                 task.blocked_reason = Some(reason.clone());
                 task.blocked_at = blocked_at;
@@ -818,7 +932,7 @@ fn discover_from_snapshot(
     if blocked_meta.keys().any(|task| closure.contains(task)) {
         return Err("legacy blocked metadata has no matching blocked closure overlay".into());
     }
-    let digest = model::framed_digest(
+    let legacy_digest = model::framed_digest(
         "migrate-v1-snapshot",
         &[
             root,
@@ -828,6 +942,14 @@ fn discover_from_snapshot(
             &serde_json::to_string(&snap.refs).map_err(|e| e.to_string())?,
         ],
     );
+    let digest = if recursive_approximation {
+        model::framed_digest(
+            "migrate-v1-snapshot-recursive-approximation",
+            &[&legacy_digest, "legacy-v1-recursive-approximation-v1"],
+        )
+    } else {
+        legacy_digest
+    };
     Ok(Frozen {
         refs: snap.refs,
         patterns,
@@ -842,7 +964,8 @@ fn discover_from_snapshot(
         digest,
         terminal_edges: observed_terminal_edges,
         planned_tasks: BTreeMap::new(),
-        planned_roots: BTreeMap::new(),
+        planned_parents: BTreeMap::new(),
+        recursive_approximation,
         delegations: parsed_delegations,
     })
 }
@@ -920,6 +1043,44 @@ fn scheduled_closure(
     Ok(closure)
 }
 
+fn recursive_closure(
+    root: &str,
+    seeds: &BTreeSet<String>,
+    completed: &BTreeMap<String, String>,
+    limit: usize,
+) -> Result<BTreeSet<String>> {
+    let mut closure = BTreeSet::from([root.to_owned()]);
+    let mut queue: VecDeque<String> = seeds.iter().cloned().collect();
+    let mut inspected = BTreeSet::new();
+    while let Some(task) = queue.pop_front() {
+        if task == root || !inspected.insert(task.clone()) {
+            continue;
+        }
+        if !reaches_structural_root(&task, root, limit)? {
+            continue;
+        }
+        if git::output(["show", "-s", "--format=%T", &task])?.trim()
+            != "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        {
+            return Err("recursive approximation encountered a non-Task object".into());
+        }
+        let parents = git::parents(&task)?;
+        if let Some(parent) = parents.first() {
+            queue.push_back(parent.clone());
+        }
+        for requirement in parents.iter().skip(1) {
+            if !completed.contains_key(requirement) {
+                queue.push_back(requirement.clone());
+            }
+        }
+        closure.insert(task);
+        if closure.len() > limit {
+            return Err(format!("migration closure exceeds {limit} tasks"));
+        }
+    }
+    Ok(closure)
+}
+
 fn reaches_structural_root(task: &str, root: &str, limit: usize) -> Result<bool> {
     let mut current = task.to_owned();
     let mut seen = BTreeSet::new();
@@ -932,6 +1093,30 @@ fn reaches_structural_root(task: &str, root: &str, limit: usize) -> Result<bool>
             return Ok(false);
         };
         if parent == root {
+            return Ok(true);
+        }
+        if git::output(["show", "-s", "--format=%T", parent])?.trim()
+            != "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        {
+            return Ok(false);
+        }
+        current = parent.clone();
+    }
+    Err(format!("legacy structural ancestry exceeds {limit} tasks"))
+}
+
+fn is_structural_ancestor(task: &str, candidate: &str, limit: usize) -> Result<bool> {
+    let mut current = task.to_owned();
+    let mut seen = BTreeSet::new();
+    for _ in 0..limit {
+        if !seen.insert(current.clone()) {
+            return Err("legacy structural ancestry contains a cycle".into());
+        }
+        let parents = git::parents(&current)?;
+        let Some(parent) = parents.first() else {
+            return Ok(false);
+        };
+        if parent == candidate {
             return Ok(true);
         }
         if git::output(["show", "-s", "--format=%T", parent])?.trim()

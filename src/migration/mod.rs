@@ -9,9 +9,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 const DOMAIN: &str = "migrate-v1";
+const RECURSIVE_APPROXIMATION_POLICY: &str = "legacy-v1-recursive-approximation-v1";
 
-pub(crate) fn census() -> Result<()> {
-    crate::commands::print_json(&scan::census()?)
+pub(crate) fn census(recursive_approximation: bool) -> Result<()> {
+    crate::commands::print_json(&scan::census(recursive_approximation)?)
 }
 
 pub(crate) fn run(
@@ -20,6 +21,7 @@ pub(crate) fn run(
     terminal_edges: &[String],
     resolution_authorization: Option<&str>,
     resolution_evidence: &[String],
+    recursive_approximation: bool,
 ) -> Result<()> {
     model::oid(root)?;
     model::bounded("operation-id", operation, 256)?;
@@ -49,7 +51,7 @@ pub(crate) fn run(
             model::bounded("terminal edge resolution evidence", evidence, 4096)?;
         }
     }
-    let semantic = if terminal_edges.is_empty() {
+    let legacy_semantic = if terminal_edges.is_empty() {
         model::framed_digest("migrate-v1-semantics", &[root])
     } else {
         let semantic_inputs = [
@@ -61,6 +63,14 @@ pub(crate) fn run(
         let semantic_parts: Vec<_> = semantic_inputs.iter().map(String::as_str).collect();
         model::framed_digest("migrate-v1-semantics-terminal-edges", &semantic_parts)
     };
+    let semantic = if recursive_approximation {
+        model::framed_digest(
+            "migrate-v1-semantics-recursive-approximation",
+            &[&legacy_semantic, RECURSIVE_APPROXIMATION_POLICY],
+        )
+    } else {
+        legacy_semantic
+    };
     let receipt_ref = format!(
         "refs/heads/tasks/v2/imports/v1/operations/{}",
         model::framed_digest("migrate-v1-operation", &[operation])
@@ -68,7 +78,7 @@ pub(crate) fn run(
     if let Some(value) = replay(&receipt_ref, operation, &semantic)? {
         return crate::commands::print_json(&value);
     }
-    let frozen = scan::discover(root)?;
+    let frozen = scan::discover(root, recursive_approximation)?;
     scan::validate_terminal_edges(&frozen.terminal_edges, &terminal_edges)?;
     let snap = repository::checked_snapshot(frozen.patterns.clone())?;
     if snap.refs != frozen.refs {
@@ -91,8 +101,10 @@ pub(crate) fn run(
                 let is_root = frozen.refs.iter().any(|(reference, oid)| {
                     reference.starts_with("refs/heads/tasks/pending/") && oid == &task.task
                 });
-                let structural_ready =
-                    is_root || task_oids.contains_key(&frozen.planned_roots[&task.task]);
+                let structural_ready = is_root
+                    || frozen.planned_parents[&task.task]
+                        .as_ref()
+                        .is_some_and(|parent| task_oids.contains_key(parent));
                 structural_ready
                     && task
                         .requires
@@ -112,7 +124,9 @@ pub(crate) fn run(
         }) {
             Value::Null
         } else {
-            let parent = frozen.planned_roots[&legacy.task].clone();
+            let parent = frozen.planned_parents[&legacy.task]
+                .clone()
+                .ok_or("non-root legacy Task lacks a structural parent")?;
             json!({"taskId":ids[&parent],"taskOid":task_oids[&parent]})
         };
         let task_operation = model::framed_digest("migrate-v1-task-operation", &[&legacy.task]);
@@ -131,10 +145,14 @@ pub(crate) fn run(
     let mut updates = Vec::new();
     let mut outputs = Vec::new();
     let mut children = Vec::new();
+    let mut nested_children: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut delegation_provenance = Vec::new();
     let mut tokens = BTreeMap::new();
     let mut block_leases = BTreeMap::new();
     for legacy in frozen.tasks.iter().filter(|t| t.task != root) {
+        if legacy.disposition == scan::LegacyDisposition::Decomposed {
+            continue;
+        }
         let id = &ids[&legacy.task];
         let task = &task_oids[&legacy.task];
         let (state, record, waiting_state) = if legacy.state == "active" {
@@ -201,7 +219,18 @@ pub(crate) fn run(
                     },
                 )
             };
-        children.push(json!({"claimToken":child_token,"owner":child_owner,"ref":child_ref,"stateOid":child_oid,"taskId":id,"taskOid":task}));
+        let descriptor = json!({"claimToken":child_token,"owner":child_owner,"ref":child_ref,"stateOid":child_oid,"taskId":id,"taskOid":task});
+        let parent = frozen.planned_parents[&legacy.task]
+            .as_ref()
+            .ok_or("native migration child lacks its immediate structural parent")?;
+        if parent == root {
+            children.push(descriptor);
+        } else {
+            nested_children
+                .entry(parent.clone())
+                .or_default()
+                .push(descriptor);
+        }
     }
     let root_task = &task_oids[root];
     for delegation in &frozen.delegations {
@@ -447,6 +476,71 @@ pub(crate) fn run(
         children.push(json!({"claimToken":null,"owner":null,"ref":waiting_ref,"stateOid":waiting,"taskId":synthetic_source_id,"taskOid":synthetic_source_task}));
         delegation_provenance.push(json!({"declarationTrailers":delegation.trailers,"disposition":"native-delegation","fleetDigest":delegation.fleet_digest,"intentOid":intent,"intentRef":intent_ref,"legacyDelegatedOid":delegation.oid,"legacyDelegatedRef":delegation.reference,"operationId":delegated_operation,"pairedEdgeBlobOid":delegation.edge_oid,"peerIssue":delegation.peer_issue,"peerRepository":delegation.peer_repository,"sourceIssue":delegation.source_issue,"sourceRepositoryId":delegation.source_repository_id,"syntheticTaskId":synthetic_source_id,"syntheticTaskOid":synthetic_source_task,"targetRepositoryId":delegation.target_repository_id,"targetTaskId":target_id,"waitingOid":waiting}));
     }
+    let mut decomposed: BTreeMap<_, _> = frozen
+        .tasks
+        .iter()
+        .filter(|task| task.disposition == scan::LegacyDisposition::Decomposed)
+        .map(|task| (task.task.clone(), task))
+        .collect();
+    while !decomposed.is_empty() {
+        let legacy_oid = decomposed
+            .keys()
+            .find(|oid| {
+                frozen.tasks.iter().all(|candidate| {
+                    frozen.planned_parents[&candidate.task].as_ref() != Some(*oid)
+                        || !decomposed.contains_key(&candidate.task)
+                })
+            })
+            .cloned()
+            .ok_or("recursive approximation structural cycle")?;
+        decomposed
+            .remove(&legacy_oid)
+            .ok_or("recursive approximation node disappeared")?;
+        let direct = nested_children
+            .remove(&legacy_oid)
+            .ok_or("decomposed legacy Task has no direct included children")?;
+        let id = &ids[&legacy_oid];
+        let task = &task_oids[&legacy_oid];
+        let manifest = git::commit(
+            &json!({"children":direct,"formatVersion":2,"operationId":operation,"semanticId":semantic,"parentTaskId":id,"parentTaskOid":task}),
+            &[
+                vec![legacy_oid.clone(), task.clone()],
+                direct
+                    .iter()
+                    .map(|child| {
+                        child["taskOid"]
+                            .as_str()
+                            .ok_or_else(|| "waiting child lacks taskOid".to_owned())
+                            .map(str::to_owned)
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ]
+            .concat(),
+        )?;
+        crate::validators::waiting(&manifest, id)?;
+        let waiting_ref = model::state_ref("waiting", id);
+        updates.push(Update {
+            semantic_ref: waiting_ref.clone(),
+            old: None,
+            new: Some(manifest.clone()),
+        });
+        outputs.push((waiting_ref.clone(), manifest.clone()));
+        let descriptor = json!({"claimToken":null,"owner":null,"ref":waiting_ref,"stateOid":manifest,"taskId":id,"taskOid":task});
+        let parent = frozen.planned_parents[&legacy_oid]
+            .as_ref()
+            .ok_or("decomposed migration child lacks its immediate structural parent")?;
+        if parent == root {
+            children.push(descriptor);
+        } else {
+            nested_children
+                .entry(parent.clone())
+                .or_default()
+                .push(descriptor);
+        }
+    }
+    if !nested_children.is_empty() {
+        return Err("recursive approximation left children without an included parent".into());
+    }
     if children.is_empty() {
         let legacy_root = &frozen.tasks[0];
         if legacy_root.state == "blocked" {
@@ -538,10 +632,12 @@ pub(crate) fn run(
                 }),
             );
         }
-        let mapping = git::commit(
-            &json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"completedParentRequirements":legacy.completed_parent_requirements.iter().map(|(task,witness)|json!({"taskOid":task,"completionWitnessOid":witness})).collect::<Vec<_>>(),"delegations":if legacy.task == root {json!(delegation_provenance)} else {json!([])},"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"graphNormalizations":legacy.graph_normalizations,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]}),
-            &mapping_parents,
-        )?;
+        let mut mapping_value = json!({"formatVersion":2,"legacyTaskOid":legacy.task,"migrationDigest":frozen.digest,"operationId":operation,"provenance":{"activation":frozen.activation,"completedParentRequirements":legacy.completed_parent_requirements.iter().map(|(task,witness)|json!({"taskOid":task,"completionWitnessOid":witness})).collect::<Vec<_>>(),"delegations":if legacy.task == root {json!(delegation_provenance)} else {json!([])},"graph":frozen.graph,"graphEdgeBlobOids":legacy.graph_edges,"graphNormalizations":legacy.graph_normalizations,"legacyLifecycleRefs":legacy.lifecycle.iter().map(|(r,o)|json!({"ref":r,"oid":o})).collect::<Vec<_>>(),"master":frozen.master,"terminalExternalEdges":terminal_resolution},"taskId":ids[&legacy.task],"taskOid":task_oids[&legacy.task]});
+        if frozen.recursive_approximation {
+            mapping_value["legacyStructuralParent"] = json!(legacy.structural_parent);
+            mapping_value["recursiveApproximationPolicy"] = json!(RECURSIVE_APPROXIMATION_POLICY);
+        }
+        let mapping = git::commit(&mapping_value, &mapping_parents)?;
         updates.push(Update {
             semantic_ref: mapping_ref.clone(),
             old: None,
@@ -556,7 +652,10 @@ pub(crate) fn run(
             });
         }
     }
-    let result = json!({"blockLeases":block_leases,"claimTokens":tokens,"delegations":delegation_provenance,"mapping":ids,"plannedTaskOids":task_oids,"reclaimRequired":true,"rootTaskId":root_id,"terminalExternalEdges":frozen.terminal_edges});
+    let mut result = json!({"blockLeases":block_leases,"claimTokens":tokens,"delegations":delegation_provenance,"mapping":ids,"plannedTaskOids":task_oids,"reclaimRequired":true,"rootTaskId":root_id,"terminalExternalEdges":frozen.terminal_edges});
+    if frozen.recursive_approximation {
+        result["recursiveApproximationPolicy"] = json!(RECURSIVE_APPROXIMATION_POLICY);
+    }
     let receipt = git::commit(
         &json!({"domain":DOMAIN,"formatVersion":2,"operationId":operation,"outputs":result,"semanticDigest":semantic}),
         &outputs.iter().map(|(_, o)| o.clone()).collect::<Vec<_>>(),

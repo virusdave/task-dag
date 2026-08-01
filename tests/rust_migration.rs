@@ -47,6 +47,28 @@ fn commit(cwd: &Path, message: &str, parents: &[&str]) -> String {
     );
     String::from_utf8(out.stdout).unwrap().trim().into()
 }
+fn non_task_commit(cwd: &Path, message: &str, parent: &str) -> String {
+    let blob = ok(cwd, &["hash-object", "-w", "--stdin"]);
+    let tree_input = format!("100644 blob {blob}\tdata\n");
+    let mut tree = Command::new("git")
+        .current_dir(cwd)
+        .args(["mktree"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    tree.stdin
+        .take()
+        .unwrap()
+        .write_all(tree_input.as_bytes())
+        .unwrap();
+    let tree = String::from_utf8(tree.wait_with_output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    ok(cwd, &["commit-tree", &tree, "-p", parent, "-m", message])
+}
 fn body(cwd: &Path, oid: &str) -> Value {
     serde_json::from_str(&ok(cwd, &["show", "-s", "--format=%B", oid])).unwrap()
 }
@@ -1611,6 +1633,375 @@ fn blocked_root_and_nested_scheduled_leaf_preserve_actionable_state() {
     assert_eq!(result["mapping"].as_object().unwrap().len(), 2);
     assert!(result["mapping"].get(&leaf).is_some());
     assert!(result["mapping"].get(&intermediate).is_none());
+}
+
+#[test]
+fn recursive_approximation_preserves_nested_hierarchy_and_required_leaf() {
+    let f = Fixture::new(false, true);
+    f.remove_other_root();
+    let schema = commit(&f.work, "Lifecycle-less schema parent", &[&f.root]);
+    let implementation = commit(&f.work, "Scheduled implementation", &[&schema]);
+    let gated = commit(&f.work, "Lifecycle-less gated leaf", &[&f.root]);
+    let rollout = commit(&f.work, "Scheduled rollout", &[&f.root, &gated]);
+    let edge = json!({
+        "from":format!("task:owner/repo@{gated}"),
+        "mode":"all",
+        "origin":{"repo-id":1,"witness":"automation-79-schema-gate"},
+        "relation":"requires",
+        "schema":1,
+        "to":format!("task:owner/repo@{schema}")
+    });
+    let graph = Fixture::graph_commit_edge(&f.work, &edge, Some(&f.graph));
+    ok(
+        &f.work,
+        &[
+            "push",
+            "origin",
+            &format!("{implementation}:refs/heads/tasks/frontier/recursive-implementation"),
+            &format!("{rollout}:refs/heads/tasks/frontier/recursive-rollout"),
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = Fixture::run_raw(
+        &f.work,
+        &[
+            "migrate-v1",
+            "--root",
+            &f.root,
+            "--operation-id",
+            "recursive-nested",
+            "--recursive-approximation",
+        ],
+        None,
+        Some("migration-token-0001"),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["mapping"].as_object().unwrap().len(), 5);
+    assert_eq!(
+        result["recursiveApproximationPolicy"],
+        "legacy-v1-recursive-approximation-v1"
+    );
+    let root_id = result["rootTaskId"].as_str().unwrap();
+    let schema_id = result["mapping"][&schema].as_str().unwrap();
+    let gated_id = result["mapping"][&gated].as_str().unwrap();
+    let root_waiting = body(
+        &f.work,
+        &f.remote(&format!("refs/heads/tasks/waiting/{root_id}"))
+            .unwrap(),
+    );
+    let schema_waiting = body(
+        &f.work,
+        &f.remote(&format!("refs/heads/tasks/waiting/{schema_id}"))
+            .unwrap(),
+    );
+    assert_eq!(root_waiting["children"].as_array().unwrap().len(), 3);
+    assert_eq!(schema_waiting["children"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        schema_waiting["children"][0]["taskId"],
+        result["mapping"][&implementation]
+    );
+    assert!(
+        root_waiting["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|child| child["taskId"] != result["mapping"][&implementation])
+    );
+    assert!(
+        f.remote(&format!("refs/heads/tasks/blocked/{gated_id}"))
+            .is_some()
+    );
+    let implementation_value = body(
+        &f.work,
+        result["plannedTaskOids"][&implementation].as_str().unwrap(),
+    );
+    assert_eq!(
+        implementation_value["structuralParent"]["taskOid"],
+        result["plannedTaskOids"][&schema]
+    );
+    let gated_value = body(&f.work, result["plannedTaskOids"][&gated].as_str().unwrap());
+    assert!(
+        gated_value["requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|requirement| requirement["taskOid"] == result["plannedTaskOids"][&schema])
+    );
+    let gated_mapping = body(
+        &f.work,
+        &f.remote(&format!("refs/heads/tasks/v2/imports/v1/by-sha/{gated}"))
+            .unwrap(),
+    );
+    assert_eq!(
+        gated_mapping["provenance"]["graphNormalizations"],
+        json!([])
+    );
+    let replay = Fixture::run_raw(
+        &f.work,
+        &[
+            "migrate-v1",
+            "--root",
+            &f.root,
+            "--operation-id",
+            "recursive-nested",
+            "--recursive-approximation",
+        ],
+        None,
+        Some("migration-token-0002"),
+    );
+    assert!(replay.status.success());
+    assert_eq!(out.stdout, replay.stdout);
+}
+
+#[test]
+fn recursive_graph_only_lifecycle_less_requirement_is_included_and_non_task_fails_closed() {
+    let valid = Fixture::new(false, true);
+    valid.remove_other_root();
+    let source = commit(&valid.work, "Scheduled graph source", &[&valid.root]);
+    let requirement = commit(
+        &valid.work,
+        "Graph-only dormant requirement",
+        &[&valid.root],
+    );
+    let edge = json!({"from":format!("task:owner/repo@{source}"),"mode":"all","origin":{"repo-id":1,"witness":"graph-only"},"relation":"requires","schema":1,"to":format!("task:owner/repo@{requirement}")});
+    let graph = Fixture::graph_commit_edge(&valid.work, &edge, Some(&valid.graph));
+    ok(
+        &valid.work,
+        &[
+            "push",
+            "origin",
+            &format!("{source}:refs/heads/tasks/frontier/graph-source"),
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = Fixture::run_raw(
+        &valid.work,
+        &[
+            "migrate-v1",
+            "--root",
+            &valid.root,
+            "--operation-id",
+            "graph-only-recursive",
+            "--recursive-approximation",
+        ],
+        None,
+        Some("migration-token-0001"),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(result["mapping"].get(&requirement).is_some());
+    let source_task = body(
+        &valid.work,
+        result["plannedTaskOids"][&source].as_str().unwrap(),
+    );
+    assert!(
+        source_task["requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["taskOid"] == result["plannedTaskOids"][&requirement])
+    );
+
+    let malformed = Fixture::new(false, true);
+    malformed.remove_other_root();
+    let source = commit(
+        &malformed.work,
+        "Scheduled graph source",
+        &[&malformed.root],
+    );
+    let target = non_task_commit(&malformed.work, "Not a Task", &malformed.root);
+    let edge = json!({"from":format!("task:owner/repo@{source}"),"mode":"all","origin":{"repo-id":1,"witness":"non-task"},"relation":"requires","schema":1,"to":format!("task:owner/repo@{target}")});
+    let graph = Fixture::graph_commit_edge(&malformed.work, &edge, Some(&malformed.graph));
+    ok(
+        &malformed.work,
+        &[
+            "push",
+            "origin",
+            &format!("{source}:refs/heads/tasks/frontier/graph-source"),
+            &format!("{graph}:refs/heads/tasks/v1/graph"),
+        ],
+    );
+    let out = Fixture::run_raw(
+        &malformed.work,
+        &[
+            "migrate-v1",
+            "--root",
+            &malformed.root,
+            "--operation-id",
+            "graph-non-task",
+            "--recursive-approximation",
+        ],
+        None,
+        Some("migration-token-0001"),
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("non-Task object"));
+    assert!(
+        ok(
+            &malformed.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn recursive_blocked_root_keeps_decomposed_nodes_waiting_and_blocks_runnable_leaves() {
+    let f = Fixture::new(false, true);
+    f.remove_other_root();
+    let schema = commit(&f.work, "Lifecycle-less schema", &[&f.root]);
+    let implementation = commit(&f.work, "Scheduled implementation", &[&schema]);
+    ok(
+        &f.work,
+        &[
+            "push",
+            "origin",
+            &format!("{implementation}:refs/heads/tasks/frontier/implementation"),
+            &format!("{}:refs/heads/tasks/blocked/{}", f.root, f.root),
+        ],
+    );
+    let out = Fixture::run_raw(
+        &f.work,
+        &[
+            "migrate-v1",
+            "--root",
+            &f.root,
+            "--operation-id",
+            "recursive-blocked-root",
+            "--recursive-approximation",
+        ],
+        None,
+        Some("migration-token-0001"),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let schema_id = result["mapping"][&schema].as_str().unwrap();
+    let implementation_id = result["mapping"][&implementation].as_str().unwrap();
+    assert!(
+        f.remote(&format!("refs/heads/tasks/waiting/{schema_id}"))
+            .is_some()
+    );
+    assert!(
+        f.remote(&format!("refs/heads/tasks/blocked/{schema_id}"))
+            .is_none()
+    );
+    assert!(
+        f.remote(&format!("refs/heads/tasks/blocked/{implementation_id}"))
+            .is_some()
+    );
+}
+
+#[test]
+fn recursive_approximation_rejects_unenforceable_structural_requirements_before_writes() {
+    let decomposed_requirement = Fixture::new(false, true);
+    decomposed_requirement.remove_other_root();
+    let prerequisite = commit(
+        &decomposed_requirement.work,
+        "Lifecycle-less prerequisite",
+        &[&decomposed_requirement.root],
+    );
+    let parent = commit(
+        &decomposed_requirement.work,
+        "Lifecycle-less decomposed parent",
+        &[&decomposed_requirement.root, &prerequisite],
+    );
+    let child = commit(&decomposed_requirement.work, "Scheduled child", &[&parent]);
+    ok(
+        &decomposed_requirement.work,
+        &[
+            "push",
+            "origin",
+            &format!("{child}:refs/heads/tasks/frontier/decomposed-requirement"),
+        ],
+    );
+    let out = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "migrate-v1",
+            "--root",
+            &decomposed_requirement.root,
+            "--operation-id",
+            "reject-decomposed-requirement",
+            "--recursive-approximation",
+        ],
+        None,
+        Some("migration-token-0001"),
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(
+        "decomposed Task has an incomplete requirement that waiting convergence cannot enforce"
+    ));
+    assert!(
+        ok(
+            &decomposed_requirement.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
+
+    let ancestor_requirement = Fixture::new(false, true);
+    ancestor_requirement.remove_other_root();
+    let ancestor = commit(
+        &ancestor_requirement.work,
+        "Lifecycle-less ancestor",
+        &[&ancestor_requirement.root],
+    );
+    let parent = commit(
+        &ancestor_requirement.work,
+        "Lifecycle-less parent",
+        &[&ancestor],
+    );
+    let child = commit(
+        &ancestor_requirement.work,
+        "Scheduled child requiring ancestor",
+        &[&parent, &ancestor],
+    );
+    ok(
+        &ancestor_requirement.work,
+        &[
+            "push",
+            "origin",
+            &format!("{child}:refs/heads/tasks/frontier/ancestor-requirement"),
+        ],
+    );
+    let out = Fixture::run_raw(
+        &ancestor_requirement.work,
+        &[
+            "migrate-v1",
+            "--root",
+            &ancestor_requirement.root,
+            "--operation-id",
+            "reject-ancestor-requirement",
+            "--recursive-approximation",
+        ],
+        None,
+        Some("migration-token-0001"),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("cannot require one of its structural ancestors")
+    );
+    assert!(
+        ok(
+            &ancestor_requirement.work,
+            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
+        )
+        .is_empty()
+    );
 }
 
 #[test]

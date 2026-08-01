@@ -128,7 +128,10 @@ enum Commands {
     EpicCompose(BreakdownArgs),
     Project(Unsupported),
     Provider(Unsupported),
-    MigrateV1Census,
+    MigrateV1Census {
+        #[arg(long)]
+        recursive_approximation: bool,
+    },
     MigrateV1 {
         #[arg(long)]
         root: String,
@@ -140,6 +143,8 @@ enum Commands {
         resolution_authorization: Option<String>,
         #[arg(long, requires = "terminal_external_edge")]
         resolution_evidence: Vec<String>,
+        #[arg(long)]
+        recursive_approximation: bool,
     },
 }
 
@@ -379,19 +384,23 @@ pub(crate) fn run() -> Result<()> {
         }
         Commands::Project(_) => commands::unsupported::fail("project"),
         Commands::Provider(_) => commands::unsupported::fail("provider"),
-        Commands::MigrateV1Census => crate::migration::census(),
+        Commands::MigrateV1Census {
+            recursive_approximation,
+        } => crate::migration::census(recursive_approximation),
         Commands::MigrateV1 {
             root,
             operation_id,
             terminal_external_edge,
             resolution_authorization,
             resolution_evidence,
+            recursive_approximation,
         } => crate::migration::run(
             &root,
             &operation_id,
             &terminal_external_edge,
             resolution_authorization.as_deref(),
             &resolution_evidence,
+            recursive_approximation,
         ),
     }
 }

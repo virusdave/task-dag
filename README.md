@@ -156,6 +156,9 @@ task-dag deps <TASK-ID>
 task-dag context <TASK-ID>
 task-dag migrate-v1-census
 task-dag migrate-v1 --root <LEGACY-OID> --operation-id <KEY>
+# Explicitly authorize bounded recursive recovery of lifecycle-less hierarchy:
+task-dag migrate-v1-census --recursive-approximation
+task-dag migrate-v1 --root <LEGACY-OID> --operation-id <KEY> --recursive-approximation
 ```
 
 `block` consumes the exact live claim and publishes a manual blocked record;
@@ -247,3 +250,7 @@ and pointwise source `dep add` operations from one strict JSON spec bound to an
 exact live source claim. Replaying the same spec repairs a crash at any
 boundary; it neither mints children itself nor calls a provider. See
 `task-dag epic-compose --help` for the schema.
+`--recursive-approximation` is an operator-authorized exceptional policy. It
+preserves lifecycle-less structural intermediates as waiting Tasks and explicit
+legacy requirement leaves as blocked Tasks requiring review. Without this flag,
+the importer retains its original flattened discovery and receipt semantics.
