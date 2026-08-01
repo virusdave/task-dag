@@ -46,6 +46,16 @@ fn current_fingerprint(refs: &BTreeMap<String, String>) -> String {
     format!("{:x}", hash.finalize())
 }
 
+fn charge_current_relations(current: usize, count: usize) -> Result<usize> {
+    let total = current
+        .checked_add(count)
+        .ok_or("current-state relation count overflow")?;
+    if total > CURRENT_MAX_RELATIONS {
+        return Err("current-state structural relations exceed hard limit".into());
+    }
+    Ok(total)
+}
+
 pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
     if !(1..=CURRENT_MAX_TASKS).contains(&max_tasks) {
         return Err("--max-tasks must be between 1 and 500".into());
@@ -80,12 +90,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
     crate::validators::current_system(&activation, &journal)?;
     let mut relation_count = 0usize;
     let mut charge_relations = |count: usize| -> Result<()> {
-        relation_count = relation_count
-            .checked_add(count)
-            .ok_or("current-state relation count overflow")?;
-        if relation_count > CURRENT_MAX_RELATIONS {
-            return Err("current-state structural relations exceed hard limit".into());
-        }
+        relation_count = charge_current_relations(relation_count, count)?;
         Ok(())
     };
     for (_, state, _, state_oid) in &captured {
@@ -192,6 +197,21 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
     }
     println!("{}", String::from_utf8(encoded).map_err(|e| e.to_string())?);
     Ok(())
+}
+
+#[cfg(test)]
+mod current_state_tests {
+    use super::{CURRENT_MAX_RELATIONS, charge_current_relations};
+
+    #[test]
+    fn relationship_budget_rejects_before_exceeding_the_hard_limit() {
+        assert_eq!(
+            charge_current_relations(CURRENT_MAX_RELATIONS - 1, 1).unwrap(),
+            CURRENT_MAX_RELATIONS
+        );
+        assert!(charge_current_relations(CURRENT_MAX_RELATIONS, 1).is_err());
+        assert!(charge_current_relations(usize::MAX, 1).is_err());
+    }
 }
 
 fn frontier_id(reference: &str) -> Result<&str> {
