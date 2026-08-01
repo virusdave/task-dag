@@ -340,7 +340,15 @@ mod tests {
 
     #[test]
     fn batch_object_protocol_distinguishes_commit_blob_and_missing() {
-        let head = output(["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+        let head = match output(["rev-parse", "HEAD"]) {
+            Ok(head) => head.trim().to_owned(),
+            Err(_) => {
+                output(["init", "--quiet"]).unwrap();
+                let head = commit_with_tree(EMPTY_TREE, "batch test", &[]).unwrap();
+                output(["update-ref", "HEAD", &head]).unwrap();
+                head
+            }
+        };
         let blob = {
             let mut child = Command::new("git")
                 .args(["hash-object", "-w", "--stdin"])
