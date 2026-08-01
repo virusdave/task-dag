@@ -348,11 +348,21 @@ fn pre_push_only_inspects_raw_origin_master_protocol() {
         .status
         .success()
     );
+    assert!(
+        run(
+            &root,
+            &["guard-pre-push", "origin", "unused"],
+            &format!("HEAD {oid} refs/heads/master {zero}\n")
+        )
+        .status
+        .success()
+    );
     for malformed in [
         format!("(unknown) {zero} refs/heads/topic {oid}\n"),
         format!("(unknown) {oid} refs/heads/topic {zero}\n"),
         format!("{} {oid} refs/heads/topic {zero}\n", "b".repeat(40)),
         format!("(other) {oid} refs/heads/topic {zero}\n"),
+        format!("head {oid} refs/heads/master {zero}\n"),
         format!("(delete) {oid} refs/heads/topic {zero}\n"),
     ] {
         assert!(
@@ -378,6 +388,57 @@ fn pre_push_only_inspects_raw_origin_master_protocol() {
         )
         .status
         .success()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn canonical_hook_accepts_actual_symbolic_head_master_push() {
+    let root =
+        std::env::temp_dir().join(format!("taskdag-symbolic-head-push-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let work = root.join("work");
+    let remote = root.join("remote.git");
+    fs::create_dir_all(&work).unwrap();
+    git(
+        &root,
+        &["init", "--bare", "--quiet", remote.to_str().unwrap()],
+        "",
+    );
+    git(&work, &["init", "--quiet"], "");
+    git(
+        &work,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+        "",
+    );
+    git(&work, &["config", "user.name", "test"], "");
+    git(&work, &["config", "user.email", "test@localhost"], "");
+    git(
+        &work,
+        &["commit", "--allow-empty", "--quiet", "-m", "fixture"],
+        "",
+    );
+    let hooks = work.join(".githooks");
+    fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("pre-push");
+    fs::write(&hook, include_bytes!("../.githooks/pre-push")).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(&work, &["config", "core.hooksPath", ".githooks"], "");
+
+    let output = Command::new("git")
+        .current_dir(&work)
+        .env("TASK_DAG_BIN", env!("CARGO_BIN_EXE_task-dag"))
+        .args(["push", "origin", "HEAD:master"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/master"], ""),
+        git(&work, &["rev-parse", "HEAD"], "")
     );
     fs::remove_dir_all(root).unwrap();
 }

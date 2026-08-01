@@ -122,7 +122,10 @@ pub(crate) fn pre_push(remote_name: Option<&str>, _remote_url: Option<&str>) -> 
         if fields.len() != 4
             || !oid(fields[1])
             || (local_is_zero != (fields[0] == "(delete)"))
-            || (!local_is_zero && fields[0] != fields[1] && !fields[0].starts_with("refs/"))
+            || (!local_is_zero
+                && fields[0] != fields[1]
+                && fields[0] != "HEAD"
+                && !fields[0].starts_with("refs/"))
             || !fields[2].starts_with("refs/")
             || !oid(fields[3])
         {
