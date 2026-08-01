@@ -146,6 +146,9 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
     }
     for (reference, state, id, state_oid, record, task_oid) in records {
         let task = crate::validators::task(&task_oid, id)?;
+        if state == "done" {
+            crate::validators::current_convergence_evidence(&state_oid, id, &record, &task)?;
+        }
         if !task["structuralParent"].is_null() {
             resolve(&task["structuralParent"], "structural parent")?;
         }

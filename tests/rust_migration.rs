@@ -1905,7 +1905,7 @@ fn recursive_blocked_root_keeps_decomposed_nodes_waiting_and_blocks_runnable_lea
 }
 
 #[test]
-fn recursive_approximation_rejects_unenforceable_structural_requirements_before_writes() {
+fn recursive_approximation_preserves_decomposed_requirements_and_rejects_ancestor_cycles() {
     let decomposed_requirement = Fixture::new(false, true);
     decomposed_requirement.remove_other_root();
     let prerequisite = commit(
@@ -1934,22 +1934,164 @@ fn recursive_approximation_rejects_unenforceable_structural_requirements_before_
             "--root",
             &decomposed_requirement.root,
             "--operation-id",
-            "reject-decomposed-requirement",
+            "preserve-decomposed-requirement",
             "--recursive-approximation",
         ],
         None,
         Some("migration-token-0001"),
     );
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains(
-        "decomposed Task has an incomplete requirement that waiting convergence cannot enforce"
-    ));
     assert!(
-        ok(
-            &decomposed_requirement.work,
-            &["ls-remote", "origin", "refs/heads/tasks/v2/imports/v1/*"]
-        )
-        .is_empty()
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let parent_id = result["mapping"][&parent].as_str().unwrap();
+    let prerequisite_id = result["mapping"][&prerequisite].as_str().unwrap();
+    let parent_task = body(
+        &decomposed_requirement.work,
+        result["plannedTaskOids"][&parent].as_str().unwrap(),
+    );
+    assert_eq!(parent_task["requirements"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        parent_task["requirements"][0]["taskOid"],
+        result["plannedTaskOids"][&prerequisite]
+    );
+    assert!(
+        decomposed_requirement
+            .remote(&format!("refs/heads/tasks/waiting/{parent_id}"))
+            .is_some()
+    );
+    assert!(
+        decomposed_requirement
+            .remote(&format!("refs/heads/tasks/blocked/{prerequisite_id}"))
+            .is_some()
+    );
+    let child_id = result["mapping"][&child].as_str().unwrap();
+    let claim_child = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "claim",
+            child_id,
+            "--owner",
+            "fixture",
+            "--operation-id",
+            "claim-decomposed-child",
+        ],
+        None,
+        Some("decomposed-child-token"),
+    );
+    assert!(claim_child.status.success());
+    let claim_child: Value = serde_json::from_slice(&claim_child.stdout).unwrap();
+    let complete_child = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "complete-ops",
+            child_id,
+            "--description",
+            "fixture child completion",
+            "--authorization",
+            "fixture",
+            "--claim-token",
+            claim_child["claimToken"].as_str().unwrap(),
+        ],
+        None,
+        Some("unused-token"),
+    );
+    assert!(complete_child.status.success());
+    let journal_before = decomposed_requirement
+        .remote("refs/heads/tasks/system/transitions")
+        .unwrap();
+    let premature = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "converge",
+            parent_id,
+            "--operation-id",
+            "converge-decomposed-parent",
+        ],
+        None,
+        Some("unused-token"),
+    );
+    assert!(!premature.status.success());
+    assert!(String::from_utf8_lossy(&premature.stderr).contains("requirement"));
+    assert_eq!(
+        decomposed_requirement
+            .remote("refs/heads/tasks/system/transitions")
+            .unwrap(),
+        journal_before
+    );
+    let unblock = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "unblock",
+            prerequisite_id,
+            "--block-lease",
+            result["blockLeases"][prerequisite_id].as_str().unwrap(),
+            "--authorization",
+            "fixture",
+            "--operation-id",
+            "unblock-decomposed-requirement",
+        ],
+        None,
+        Some("unused-token"),
+    );
+    assert!(unblock.status.success());
+    let claim_requirement = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "claim",
+            prerequisite_id,
+            "--owner",
+            "fixture",
+            "--operation-id",
+            "claim-decomposed-requirement",
+        ],
+        None,
+        Some("decomposed-requirement-token"),
+    );
+    assert!(claim_requirement.status.success());
+    let claim_requirement: Value = serde_json::from_slice(&claim_requirement.stdout).unwrap();
+    let complete_requirement = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "complete-ops",
+            prerequisite_id,
+            "--description",
+            "fixture requirement completion",
+            "--authorization",
+            "fixture",
+            "--claim-token",
+            claim_requirement["claimToken"].as_str().unwrap(),
+        ],
+        None,
+        Some("unused-token"),
+    );
+    assert!(complete_requirement.status.success());
+    let converge = Fixture::run_raw(
+        &decomposed_requirement.work,
+        &[
+            "converge",
+            parent_id,
+            "--operation-id",
+            "converge-decomposed-parent",
+        ],
+        None,
+        Some("unused-token"),
+    );
+    assert!(
+        converge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&converge.stderr)
+    );
+    let done_oid = decomposed_requirement
+        .remote(&format!("refs/heads/tasks/done/{parent_id}"))
+        .unwrap();
+    let done = body(&decomposed_requirement.work, &done_oid);
+    assert_eq!(done["requirements"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        done["requirements"][0][0],
+        format!("refs/heads/tasks/done/{prerequisite_id}")
     );
 
     let ancestor_requirement = Fixture::new(false, true);

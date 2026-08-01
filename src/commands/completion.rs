@@ -256,11 +256,19 @@ pub(crate) fn converge(id: &str, operation: &str) -> Result<()> {
         let task_oid = manifest["parentTaskOid"]
             .as_str()
             .ok_or("manifest parent Task OID malformed")?;
-        if let Some(parent) =
-            crate::validators::task(task_oid, id)?["structuralParent"]["taskId"].as_str()
-        {
+        let task = crate::validators::task(task_oid, id)?;
+        if let Some(parent) = task["structuralParent"]["taskId"].as_str() {
             patterns.extend(repository::lifecycle_patterns(parent));
             patterns.push(format!("refs/heads/tasks/reconcile/{parent}"));
+        }
+        for requirement in task["requirements"]
+            .as_array()
+            .ok_or("Task requirements malformed")?
+        {
+            let requirement_id = requirement["taskId"]
+                .as_str()
+                .ok_or("Task requirement Task-ID malformed")?;
+            patterns.extend(repository::lifecycle_patterns(requirement_id));
         }
     }
     for child in &children {
@@ -287,14 +295,12 @@ pub(crate) fn converge(id: &str, operation: &str) -> Result<()> {
     }
     repository::materialize(std::slice::from_ref(&manifest))?;
     let value = git::object_json(&manifest)?;
-    if let Some(parent) = crate::validators::task(
-        value["parentTaskOid"]
-            .as_str()
-            .ok_or("manifest parent Task OID malformed")?,
-        id,
-    )?["structuralParent"]["taskId"]
+    let task = value["parentTaskOid"]
         .as_str()
-    {
+        .ok_or("manifest parent Task OID malformed")?
+        .to_owned();
+    let task_value = crate::validators::task(&task, id)?;
+    if let Some(parent) = task_value["structuralParent"]["taskId"].as_str() {
         repository::exclusive(&snap, parent, "waiting")?;
     }
     let children = value["children"]
@@ -319,25 +325,57 @@ pub(crate) fn converge(id: &str, operation: &str) -> Result<()> {
         child_done.push((done_ref, done));
     }
     child_done.sort();
-    let task = value["parentTaskOid"]
-        .as_str()
-        .ok_or("manifest parent Task OID malformed")?
-        .to_owned();
-    let logical = model::framed_digest(
-        "converge-logical",
-        &[
-            id,
-            operation,
-            &manifest,
-            &serde_json::to_string(&child_done).map_err(|e| e.to_string())?,
-        ],
-    );
+    let mut requirement_done = Vec::new();
+    for requirement in task_value["requirements"]
+        .as_array()
+        .ok_or("Task requirements malformed")?
+    {
+        let requirement_id = requirement["taskId"]
+            .as_str()
+            .ok_or("Task requirement Task-ID malformed")?;
+        let requirement_task = requirement["taskOid"]
+            .as_str()
+            .ok_or("Task requirement OID malformed")?;
+        let done_ref = model::state_ref("done", requirement_id);
+        let done = snap
+            .refs
+            .get(&done_ref)
+            .ok_or_else(|| format!("requirement {requirement_id} is not done"))?
+            .clone();
+        let done_value = repository::exclusive_done(&snap, requirement_id)?;
+        if done_value["taskOid"] != requirement_task {
+            return Err("requirement done evidence names wrong Task object".into());
+        }
+        requirement_done.push((done_ref, done));
+    }
+    requirement_done.sort();
+    let children_json = serde_json::to_string(&child_done).map_err(|e| e.to_string())?;
+    let logical = if requirement_done.is_empty() {
+        model::framed_digest(
+            "converge-logical",
+            &[id, operation, &manifest, &children_json],
+        )
+    } else {
+        model::framed_digest(
+            "converge-requirements-logical",
+            &[
+                id,
+                operation,
+                &manifest,
+                &children_json,
+                &serde_json::to_string(&requirement_done).map_err(|e| e.to_string())?,
+            ],
+        )
+    };
     let mut parents = vec![manifest.clone(), task.clone()];
     parents.extend(child_done.iter().map(|(_, o)| o.clone()));
-    let evidence = git::commit(
-        &json!({"children":child_done,"formatVersion":2,"logicalId":logical,"operationId":operation,"manifestOid":manifest,"taskId":id,"taskOid":task}),
-        &parents,
-    )?;
+    parents.extend(requirement_done.iter().map(|(_, o)| o.clone()));
+    let mut evidence_value = json!({"children":child_done,"formatVersion":2,"logicalId":logical,"operationId":operation,"manifestOid":manifest,"taskId":id,"taskOid":task});
+    if !requirement_done.is_empty() {
+        evidence_value["requirements"] = json!(requirement_done);
+    }
+    let evidence = git::commit(&evidence_value, &parents)?;
+    crate::validators::lifecycle("done", &evidence, id)?;
     let done = model::state_ref("done", id);
     let mut updates = vec![
         Update {

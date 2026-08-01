@@ -897,12 +897,6 @@ fn discover_from_snapshot(
     }
     if recursive_approximation {
         for task in &tasks {
-            if task.disposition == LegacyDisposition::Decomposed && !task.requires.is_empty() {
-                return Err(
-                    "lifecycle-less decomposed Task has an incomplete requirement that waiting convergence cannot enforce"
-                        .into(),
-                );
-            }
             for requirement in &task.requires {
                 if is_structural_ancestor(&task.task, requirement, 100)? {
                     return Err("legacy Task cannot require one of its structural ancestors".into());

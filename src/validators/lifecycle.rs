@@ -3,6 +3,165 @@ use crate::{Result, git, model};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+// These exact records predate persisted requirement evidence. They were
+// inventoried with the canonical current-state reader before activating the
+// proof-bearing convergence format. No future proofless record is accepted.
+const LEGACY_REQUIREMENT_CONVERGENCE: &[(&str, &str, &str, &str)] = &[
+    (
+        "c3bb5c99945caa951dce78ced8b7122b9623fba0",
+        "v2-388b3e81a91fe8606537812be10e919e3dd8f8ac1a10a08119f7b780f7836091",
+        "7fa3de9d85097c89737ff70b9385057cdb724695",
+        "a8d44653516f38f0c4169a40fef54d307c1aad8f",
+    ),
+    (
+        "0e9a605baf53580768de2e9d26efb755dee2766b",
+        "v2-ae6e685ae6c020f7ba1689c691443cabd7ac1f7c373384247079ee12f4a2abdc",
+        "10a6e9b34532f24e5272fea86a329f01cc432f1e",
+        "44c67b2dcb6dfa71f350082bb987681b6e9949b0",
+    ),
+    (
+        "5c01ceaf7ddc60af03272db8f7a84befbf506718",
+        "v2-cb47be6f4390c1be6e01592d4fa24f5cc25cfe54f109d9db5d68464ddb29467a",
+        "7dbc11f00a634838e67bb39cf8e43d97ca234edf",
+        "0903bff4981ef122e965a8ba2016623a619e2fd5",
+    ),
+    (
+        "22641a6ed4b0829ee2566582415f51af9f536796",
+        "v2-eeee7db0b96253894ad9da2df30eb5b52d92c538316f8546c47274342c637717",
+        "9846a237139716e7b622ba2f1d796a2f8986f9e0",
+        "2624f4af9cf92286942da944fe886e10ff440766",
+    ),
+    (
+        "63ca120799baca8f2e7824153f6c085771ad35ef",
+        "v2-477e5c7edbd8101a3e975b8031f18b2dc2dbf0550282d0ee5ee05a8ed15230eb",
+        "a1bd367b9f40844d5487118529e8a80ecf8eb2c8",
+        "45c25defaaadc5ca7a767016856a3fc5140e25b7",
+    ),
+    (
+        "4920a5fdb030e57839289fe3af164436feb8a0de",
+        "v2-787e8b2354d255bb70d9f1b2dbc2957d3af49d8747b5fd24b2067ce844b21f2e",
+        "255d3e98dd58eb9e3b142929582b22f67c19ece7",
+        "1255382ff8869d034838b64e60dcf6591041e813",
+    ),
+    (
+        "d926ab68b18d7eab6335158ab609df01d225f0d1",
+        "v2-c2bb81e7c870d2305f4b618781dbbe47ac6f644c501e08c04ccd7aaec3a9b014",
+        "3a397092adccdd5f0ccefa7b843cd51d9a049e84",
+        "b37c820852f6d6b3f66d23f1d46b5035dd7fb8e6",
+    ),
+    (
+        "a88d3e3716c73434752ae88f94a1382742efaf5e",
+        "v2-c51cd4d4ed31d9f07e3a823791dd1f234bbc5151366784dcb02f12c92edf005f",
+        "7c7af2af69f6621abe3a60955b99df4ebaed94be",
+        "7271d7a5e5aebdd4ef1746d8b46a3b1c06c65467",
+    ),
+    (
+        "7b187f5e019dd47e2405e65375d9c49bee443786",
+        "v2-ec7304f9121b6343e5a2e5c980bb2c5b8cb9568139190a0416cc51c2357a8c9a",
+        "ef39f7a7c36b988096324aecee4f1afa2fd7c50b",
+        "cd53e223a5ac89254df83393e6001fb83a2eb5ce",
+    ),
+];
+
+fn legacy_requirement_convergence(oid: &str, id: &str, task_oid: &str, manifest: &str) -> bool {
+    LEGACY_REQUIREMENT_CONVERGENCE.contains(&(oid, id, task_oid, manifest))
+}
+
+pub(crate) fn current_convergence_evidence(
+    oid: &str,
+    id: &str,
+    value: &Value,
+    task: &Value,
+) -> Result<()> {
+    let Some(manifest) = value.get("manifestOid").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let task_oid = value["taskOid"].as_str().ok_or("done Task OID malformed")?;
+    let task_requirements = task["requirements"]
+        .as_array()
+        .ok_or("Task requirements malformed")?;
+    let Some(requirements) = value.get("requirements") else {
+        if task_requirements.is_empty()
+            || legacy_requirement_convergence(oid, id, task_oid, manifest)
+        {
+            return Ok(());
+        }
+        return Err(
+            "requirement-bearing converged done lacks persisted requirement evidence".into(),
+        );
+    };
+    let requirements = requirements
+        .as_array()
+        .filter(|requirements| !requirements.is_empty())
+        .ok_or("converged requirements must be absent or non-empty")?;
+    if task_requirements.is_empty() {
+        return Err("requirement-free convergence must use the legacy shape".into());
+    }
+    if requirements.len() != task_requirements.len() {
+        return Err("converged requirements do not exactly match parent Task".into());
+    }
+    let children = value["children"]
+        .as_array()
+        .ok_or("converged children malformed")?;
+    let mut previous_ref = None;
+    for child in children {
+        let child_ref = child
+            .as_array()
+            .filter(|pair| pair.len() == 2)
+            .and_then(|pair| pair[0].as_str())
+            .ok_or("converged child done ref malformed")?;
+        if previous_ref.is_some_and(|previous| previous >= child_ref) {
+            return Err("converged children are not canonically sorted".into());
+        }
+        previous_ref = Some(child_ref);
+    }
+    let mut expected_ids = task_requirements
+        .iter()
+        .map(|requirement| {
+            requirement["taskId"]
+                .as_str()
+                .ok_or_else(|| "Task requirement Task-ID malformed".to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    expected_ids.sort();
+    let mut previous_ref = None;
+    for (requirement, expected_id) in requirements.iter().zip(expected_ids) {
+        let pair = requirement
+            .as_array()
+            .filter(|pair| pair.len() == 2)
+            .ok_or("converged requirement pair malformed")?;
+        let done_ref = pair[0]
+            .as_str()
+            .ok_or("converged requirement done ref malformed")?;
+        if previous_ref.is_some_and(|previous| previous >= done_ref) {
+            return Err("converged requirements are not canonically sorted".into());
+        }
+        previous_ref = Some(done_ref);
+        let requirement_id = model::parse_state_ref(done_ref, "done")
+            .ok_or("converged requirement ref is not a done ref")?;
+        if expected_id != requirement_id {
+            return Err("converged requirements do not exactly match parent Task".into());
+        }
+    }
+    let operation = value["operationId"]
+        .as_str()
+        .ok_or("converged operationId malformed")?;
+    let expected_logical = model::framed_digest(
+        "converge-requirements-logical",
+        &[
+            id,
+            operation,
+            manifest,
+            &serde_json::to_string(children).map_err(|e| e.to_string())?,
+            &serde_json::to_string(requirements).map_err(|e| e.to_string())?,
+        ],
+    );
+    if value["logicalId"] != expected_logical {
+        return Err("converged requirement logical identity mismatch".into());
+    }
+    Ok(())
+}
+
 fn delegated_task_matches(waiting: &Value, task_oid: &str) -> bool {
     waiting["parentTaskOid"].as_str() == Some(task_oid)
 }
@@ -78,6 +237,7 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
                 &["attemptId", "oldMaster", "publicationCommit"],
                 &["attemptId", "authorization", "description", "evidence"],
                 &["children", "manifestOid", "operationId"],
+                &["children", "manifestOid", "operationId", "requirements"],
                 &["acceptedOid", "intentOid", "operationId"],
                 &[
                     "closeOid",
@@ -258,6 +418,29 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
                         return Err("converged done has duplicate child lifecycle".into());
                     }
                 }
+                let mut requirement_ids = BTreeSet::new();
+                for requirement in value
+                    .get("requirements")
+                    .map(|requirements| {
+                        requirements
+                            .as_array()
+                            .ok_or("converged requirements malformed")
+                    })
+                    .transpose()?
+                    .into_iter()
+                    .flatten()
+                {
+                    let requirement_id = requirement
+                        .as_array()
+                        .filter(|pair| pair.len() == 2)
+                        .and_then(|pair| pair[0].as_str())
+                        .and_then(|done_ref| model::parse_state_ref(done_ref, "done"))
+                        .ok_or("converged requirement ref is not a done ref")?;
+                    model::valid_id(requirement_id)?;
+                    if !requirement_ids.insert(requirement_id) {
+                        return Err("converged done has duplicate requirement lifecycle".into());
+                    }
+                }
             }
             let valid_parents = if let Some(publication) = value["publicationCommit"].as_str() {
                 parents.len() == 3 && parents[2] == publication
@@ -270,8 +453,18 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
                 let children = value["children"]
                     .as_array()
                     .ok_or("converged children malformed")?;
+                let requirements = value
+                    .get("requirements")
+                    .map(|requirements| {
+                        requirements
+                            .as_array()
+                            .ok_or("converged requirements malformed")
+                    })
+                    .transpose()?
+                    .map_or(&[][..], Vec::as_slice);
                 children.len() <= 500
-                    && parents.len() == children.len() + 2
+                    && requirements.len() <= 500
+                    && parents.len() == children.len() + requirements.len() + 2
                     && parents[0] == manifest
                     && children.iter().enumerate().all(|(index, child)| {
                         child
@@ -285,6 +478,23 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
                                     && pair[1].as_str().is_some_and(|child_oid| {
                                         model::oid(child_oid).is_ok()
                                             && parents[index + 2] == child_oid
+                                    })
+                            })
+                    })
+                    && requirements.iter().enumerate().all(|(index, requirement)| {
+                        requirement
+                            .as_array()
+                            .filter(|pair| pair.len() == 2)
+                            .is_some_and(|pair| {
+                                pair[0]
+                                    .as_str()
+                                    .and_then(|done_ref| model::parse_state_ref(done_ref, "done"))
+                                    .is_some_and(|requirement_id| {
+                                        model::valid_id(requirement_id).is_ok()
+                                    })
+                                    && pair[1].as_str().is_some_and(|done_oid| {
+                                        model::oid(done_oid).is_ok()
+                                            && parents[children.len() + index + 2] == done_oid
                                     })
                             })
                     })
@@ -520,6 +730,7 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 &["attemptId", "oldMaster", "publicationCommit"],
                 &["attemptId", "authorization", "description", "evidence"],
                 &["children", "manifestOid", "operationId"],
+                &["children", "manifestOid", "operationId", "requirements"],
                 &["acceptedOid", "intentOid", "operationId"],
                 &[
                     "closeOid",
@@ -781,12 +992,43 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
             let children = value["children"]
                 .as_array()
                 .ok_or("converged children malformed")?;
-            if parents.len() != children.len() + 2 || parents[0] != manifest {
+            let requirements = value
+                .get("requirements")
+                .map(|requirements| {
+                    requirements
+                        .as_array()
+                        .ok_or("converged requirements malformed")
+                })
+                .transpose()?;
+            if parents.len() != children.len() + requirements.map_or(0, Vec::len) + 2
+                || parents[0] != manifest
+            {
                 return Err("converged done immediate parent ordering is malformed".into());
             }
             let waiting = waiting(manifest, id)?;
             if waiting["parentTaskOid"] != task_oid {
                 return Err("converged manifest names wrong parent Task object".into());
+            }
+            let task_value = task(&task_oid, id)?;
+            let task_requirements = task_value["requirements"]
+                .as_array()
+                .ok_or("Task requirements malformed")?;
+            match requirements {
+                None if task_requirements.is_empty() => {}
+                None if legacy_requirement_convergence(oid, id, &task_oid, manifest) => {}
+                None => {
+                    return Err(
+                        "requirement-bearing converged done lacks persisted requirement evidence"
+                            .into(),
+                    );
+                }
+                Some(requirements) if requirements.is_empty() => {
+                    return Err("converged requirements must be absent or non-empty".into());
+                }
+                Some(_) if task_requirements.is_empty() => {
+                    return Err("requirement-free convergence must use the legacy shape".into());
+                }
+                Some(_) => {}
             }
             let manifest_children = waiting["children"]
                 .as_array()
@@ -795,6 +1037,7 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 return Err("converged children do not exactly match waiting manifest".into());
             }
             let mut ids = BTreeSet::new();
+            let mut previous_ref = None;
             for (index, child) in children.iter().enumerate() {
                 let pair = child
                     .as_array()
@@ -803,6 +1046,12 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 let child_ref = pair[0]
                     .as_str()
                     .ok_or("converged child done ref malformed")?;
+                if requirements.is_some()
+                    && previous_ref.is_some_and(|previous| previous >= child_ref)
+                {
+                    return Err("converged children are not canonically sorted".into());
+                }
+                previous_ref = Some(child_ref);
                 let child_id = model::parse_state_ref(child_ref, "done")
                     .ok_or("converged child ref is not a done ref")?;
                 model::valid_id(child_id)?;
@@ -825,6 +1074,65 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                     return Err("converged child done names wrong Task object".into());
                 }
             }
+            if let Some(requirements) = requirements {
+                if requirements.len() != task_requirements.len() {
+                    return Err("converged requirements do not exactly match parent Task".into());
+                }
+                let operation = value["operationId"]
+                    .as_str()
+                    .ok_or("converged operationId malformed")?;
+                let expected_logical = model::framed_digest(
+                    "converge-requirements-logical",
+                    &[
+                        id,
+                        operation,
+                        manifest,
+                        &serde_json::to_string(children).map_err(|e| e.to_string())?,
+                        &serde_json::to_string(requirements).map_err(|e| e.to_string())?,
+                    ],
+                );
+                if value["logicalId"] != expected_logical {
+                    return Err("converged requirement logical identity mismatch".into());
+                }
+                let mut ids = BTreeSet::new();
+                let mut previous_ref = None;
+                for (index, requirement) in requirements.iter().enumerate() {
+                    let pair = requirement
+                        .as_array()
+                        .filter(|pair| pair.len() == 2)
+                        .ok_or("converged requirement pair malformed")?;
+                    let done_ref = pair[0]
+                        .as_str()
+                        .ok_or("converged requirement done ref malformed")?;
+                    if previous_ref.is_some_and(|previous| previous >= done_ref) {
+                        return Err("converged requirements are not canonically sorted".into());
+                    }
+                    previous_ref = Some(done_ref);
+                    let requirement_id = model::parse_state_ref(done_ref, "done")
+                        .ok_or("converged requirement ref is not a done ref")?;
+                    model::valid_id(requirement_id)?;
+                    if !ids.insert(requirement_id) {
+                        return Err("converged done has duplicate requirement lifecycle".into());
+                    }
+                    let done_oid = pair[1]
+                        .as_str()
+                        .ok_or("converged requirement done OID malformed")?;
+                    model::oid(done_oid)?;
+                    if parents[children.len() + index + 2] != done_oid {
+                        return Err(
+                            "converged requirement done parent ordering is malformed".into()
+                        );
+                    }
+                    let expected = task_requirements
+                        .iter()
+                        .find(|candidate| candidate["taskId"] == requirement_id)
+                        .ok_or("converged requirement is absent from parent Task")?;
+                    let requirement_done = lifecycle("done", done_oid, requirement_id)?;
+                    if requirement_done["taskOid"] != expected["taskOid"] {
+                        return Err("converged requirement names wrong Task object".into());
+                    }
+                }
+            }
         }
         _ => unreachable!(),
     }
@@ -833,7 +1141,11 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::delegated_task_matches;
+    use super::{
+        LEGACY_REQUIREMENT_CONVERGENCE, current_convergence_evidence, delegated_task_matches,
+        legacy_requirement_convergence,
+    };
+    use crate::model;
 
     #[test]
     fn delegated_done_rejects_a_different_task_object_with_the_same_id() {
@@ -845,6 +1157,116 @@ mod tests {
             &waiting,
             "2222222222222222222222222222222222222222",
         ));
+    }
+
+    #[test]
+    fn legacy_requirement_convergence_allowlist_is_exact() {
+        for &(done_oid, task_id, task_oid, manifest_oid) in LEGACY_REQUIREMENT_CONVERGENCE {
+            assert!(legacy_requirement_convergence(
+                done_oid,
+                task_id,
+                task_oid,
+                manifest_oid,
+            ));
+        }
+
+        let &(done_oid, task_id, task_oid, manifest_oid) = &LEGACY_REQUIREMENT_CONVERGENCE[0];
+        assert!(!legacy_requirement_convergence(
+            "0000000000000000000000000000000000000000",
+            task_id,
+            task_oid,
+            manifest_oid,
+        ));
+        assert!(!legacy_requirement_convergence(
+            done_oid,
+            &format!("v2-{}", "0".repeat(64)),
+            task_oid,
+            manifest_oid,
+        ));
+        assert!(!legacy_requirement_convergence(
+            done_oid,
+            task_id,
+            "0000000000000000000000000000000000000000",
+            manifest_oid,
+        ));
+        assert!(!legacy_requirement_convergence(
+            done_oid,
+            task_id,
+            task_oid,
+            "0000000000000000000000000000000000000000",
+        ));
+    }
+
+    #[test]
+    fn current_convergence_rejects_future_proofless_and_noncanonical_evidence() {
+        let id = format!("v2-{}", "a".repeat(64));
+        let first = format!("v2-{}", "b".repeat(64));
+        let second = format!("v2-{}", "c".repeat(64));
+        let task_oid = "1111111111111111111111111111111111111111";
+        let manifest = "2222222222222222222222222222222222222222";
+        let task = serde_json::json!({
+            "requirements": [
+                {"taskId": second, "taskOid": "3333333333333333333333333333333333333333"},
+                {"taskId": first, "taskOid": "4444444444444444444444444444444444444444"},
+            ],
+        });
+        let mut value = serde_json::json!({
+            "children": [],
+            "logicalId": "0".repeat(64),
+            "manifestOid": manifest,
+            "operationId": "test-operation",
+            "taskOid": task_oid,
+        });
+        assert!(
+            current_convergence_evidence(
+                "5555555555555555555555555555555555555555",
+                &id,
+                &value,
+                &task,
+            )
+            .is_err()
+        );
+
+        value["requirements"] = serde_json::json!([
+            [
+                model::state_ref("done", &first),
+                "6666666666666666666666666666666666666666"
+            ],
+            [
+                model::state_ref("done", &second),
+                "7777777777777777777777777777777777777777"
+            ],
+        ]);
+        value["logicalId"] = serde_json::json!(model::framed_digest(
+            "converge-requirements-logical",
+            &[
+                &id,
+                "test-operation",
+                manifest,
+                "[]",
+                &serde_json::to_string(&value["requirements"]).unwrap(),
+            ],
+        ));
+        assert!(
+            current_convergence_evidence(
+                "5555555555555555555555555555555555555555",
+                &id,
+                &value,
+                &task,
+            )
+            .is_ok()
+        );
+
+        value["requirements"].as_array_mut().unwrap().swap(0, 1);
+        assert!(
+            current_convergence_evidence(
+                "5555555555555555555555555555555555555555",
+                &id,
+                &value,
+                &task,
+            )
+            .is_err()
+        );
     }
 }
 
