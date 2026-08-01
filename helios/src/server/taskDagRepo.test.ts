@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import {
   __resetTaskIndexCacheForTests,
+  __setTaskDagGenerationDeadlineForTests,
   __setTaskDagRunnerForTests,
   getEpicDag,
   getFrontierView,
@@ -238,7 +239,7 @@ describe('bounded task-dag v2 adapter', () => {
     let staleRead = true
     __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
       const result = await fakeRunner()(gitDir, originUrl, command, taskId)
-      if (staleRead && command === 'show' && taskId === ids.frontier) {
+      if (staleRead && command === 'show' && taskId === ids.active) {
         staleRead = false
         return { ...(result as object), stateOid: movedOid }
       }
@@ -247,28 +248,26 @@ describe('bounded task-dag v2 adapter', () => {
     await expect(loadTaskIndex('automation')).resolves.toMatchObject({ nodes: expect.any(Map) })
   })
 
-  it('settles the failed generation before starting its retry', async () => {
-    let activationCalls = 0
-    let driftObserved = false
-    let releaseSibling!: () => void
-    const blockedSibling = new Promise<void>((resolve) => { releaseSibling = resolve })
+  it('reuses unchanged canonical records when one lifecycle ref changes', async () => {
+    let calls = 0
     __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
-      if (command === 'activation') activationCalls++
-      if (activationCalls === 1 && command === 'context' && taskId === ids.active) await blockedSibling
+      calls++
       const result = await fakeRunner()(gitDir, originUrl, command, taskId)
-      if (activationCalls === 1 && command === 'show' && taskId === ids.frontier) {
-        driftObserved = true
-        return { ...(result as object), stateOid: movedOid }
+      if (command === 'context' && taskId === ids.frontier) {
+        return { ...(result as object), stateOid: git(['rev-parse', `refs/heads/tasks/frontier/${ids.frontier}`]) }
       }
       return result
     })
-    const loading = loadTaskIndex('automation')
-    await vi.waitFor(() => expect(driftObserved).toBe(true))
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(activationCalls).toBe(1)
-    releaseSibling()
-    await expect(loading).resolves.toMatchObject({ nodes: expect.any(Map) })
-    expect(activationCalls).toBeGreaterThan(1)
+    await loadTaskIndex('automation')
+    const initialCalls = calls
+    git(['update-ref', `refs/heads/tasks/frontier/${ids.frontier}`, movedOid])
+    try {
+      const moved = await loadTaskIndex('automation')
+      expect(moved.nodes.get(ids.frontier)?.stateOid).toBe(movedOid)
+      expect(calls - initialCalls).toBe(3)
+    } finally {
+      git(['update-ref', `refs/heads/tasks/frontier/${ids.frontier}`, headOid])
+    }
   })
 
   it('shares concurrent cold builds and enforces the service-wide canonical process bound', async () => {
@@ -298,11 +297,12 @@ describe('bounded task-dag v2 adapter', () => {
     expect(third).toBe(first)
     try {
       await expect(Promise.all([first, second, third, peer])).resolves.toHaveLength(4)
-      expect(peak).toBe(4)
+      expect(peak).toBe(1)
       expect(calls.get('activation:')).toBe(4)
       for (const id of states.keys()) {
         expect(calls.get(`context:${id}`)).toBe(2)
-        expect(calls.get(`show:${id}`)).toBe(2)
+        const state = states.get(id)
+        expect(calls.get(`show:${id}`) ?? 0).toBe(['active', 'blocked', 'waiting'].includes(state ?? '') ? 2 : 0)
       }
     } finally {
       fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\n')
@@ -311,37 +311,33 @@ describe('bounded task-dag v2 adapter', () => {
     }
   })
 
-  it('abandons a queued canonical read when its generation deadline expires', async () => {
-    const realSetImmediate = setImmediate
-    vi.useFakeTimers()
-    const repositories = ['one', 'two', 'three', 'four', 'five']
+  it('does not start a queued repository deadline until its build begins', async () => {
+    __setTaskDagGenerationDeadlineForTests(1_000)
+    const repositories = ['one', 'two']
     fs.writeFileSync(configFile, repositories.map((name) => `${name} https://github.com/Example/${name}.git`).join('\n') + '\n')
     fs.writeFileSync(pathsFile, repositories.map((name) => `${name} ${repoDir}`).join('\n') + '\n')
     __resetTaskDagMirrorForTests()
-    const releases: Array<() => void> = []
+    let releaseFirst!: () => void
     let calls = 0
     __setTaskDagRunnerForTests(async (gitDir, originUrl, command, taskId) => {
       calls++
-      await new Promise<void>((resolve) => releases.push(resolve))
+      if (calls === 1) await new Promise<void>((resolve) => { releaseFirst = resolve })
       return fakeRunner()(gitDir, originUrl, command, taskId)
     })
     const loads = repositories.map((repository) => loadTaskIndex(repository))
-    const firstOutcome = Promise.race(loads.map((load, index) => load.then(
-      () => ({ index, state: 'resolved' as const }),
-      () => ({ index, state: 'rejected' as const }),
-    )))
+    let secondSettled = false
+    void loads[1].finally(() => { secondSettled = true }).catch(() => undefined)
     try {
-      for (let attempt = 0; calls < 4 && attempt < 100; attempt++) {
-        await new Promise<void>((resolve) => realSetImmediate(resolve))
-      }
-      expect(calls).toBe(4)
-      await vi.advanceTimersByTimeAsync(30_000)
-      await expect(firstOutcome).resolves.toMatchObject({ state: 'rejected' })
-      expect(calls).toBe(4)
+      await vi.waitFor(() => expect(calls).toBe(1))
+      await new Promise((resolve) => setTimeout(resolve, 1_050))
+      expect(secondSettled).toBe(false)
+      expect(calls).toBe(1)
+      releaseFirst()
+      await expect(loads[0]).rejects.toBeDefined()
+      await expect(loads[1]).resolves.toMatchObject({ nodes: expect.any(Map) })
     } finally {
-      releases.splice(0).forEach((release) => release())
+      releaseFirst?.()
       await Promise.allSettled(loads)
-      vi.useRealTimers()
       fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\n')
       fs.writeFileSync(pathsFile, `automation ${repoDir}\n`)
       __resetTaskDagMirrorForTests()
@@ -361,7 +357,7 @@ describe('bounded task-dag v2 adapter', () => {
       await expect(getTaskDetail(ids.frontier, 'automation')).resolves.toMatchObject({
         task: { repository: 'automation', taskId: ids.frontier },
       })
-      expect(calls).toBe(2 + (states.size * 2))
+      expect(calls).toBe(2 + states.size + 3)
     } finally {
       fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\n')
       fs.writeFileSync(pathsFile, `automation ${repoDir}\n`)

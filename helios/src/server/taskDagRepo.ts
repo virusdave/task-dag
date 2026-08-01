@@ -14,9 +14,10 @@ const execFileAsync = promisify(execFile)
 const COMMAND_TIMEOUT_MS = 10_000
 const COMMAND_MAX_BUFFER = 2 * 1024 * 1024
 const CONCURRENCY = 8
-const MAX_CANONICAL_PROCESSES = 4
+const MAX_CANONICAL_PROCESSES = 1
 const MAX_LIFECYCLE_TASKS = 500
-const GENERATION_DEADLINE_MS = 30_000
+const GENERATION_DEADLINE_MS = 300_000
+let generationDeadlineMs = GENERATION_DEADLINE_MS
 const TASK_ID_PATTERN = /^v2-[0-9a-f]{64}$/
 const OID_PATTERN = /^[0-9a-f]{40}$/
 const STATES = ['frontier', 'active', 'blocked', 'waiting', 'done'] as const
@@ -181,12 +182,17 @@ type CanonicalRunner = (
 let testRunner: CanonicalRunner | undefined
 const cachedIndexes = new Map<string, TaskIndex>()
 const inFlightIndexes = new Map<string, Promise<TaskIndex>>()
+let buildQueue = Promise.resolve()
+type ParsedContext = z.infer<typeof contextSchema>
+interface CachedRecord { context: ParsedContext; record: JsonValue }
+const cachedRecords = new Map<string, CachedRecord>()
 interface CanonicalWaiter { grant: () => void }
 const canonicalWaiters: CanonicalWaiter[] = []
 let canonicalProcesses = 0
 
 export function __setTaskDagRunnerForTests(runner?: CanonicalRunner): void { testRunner = runner }
-export function __resetTaskIndexCacheForTests(): void { cachedIndexes.clear(); inFlightIndexes.clear(); testRunner = undefined }
+export function __setTaskDagGenerationDeadlineForTests(value: number): void { generationDeadlineMs = value }
+export function __resetTaskIndexCacheForTests(): void { cachedIndexes.clear(); inFlightIndexes.clear(); cachedRecords.clear(); buildQueue = Promise.resolve(); generationDeadlineMs = GENERATION_DEADLINE_MS; testRunner = undefined }
 
 function requireSource(repository: string) {
   const source = getTaskDagSources().find((candidate) => candidate.repository === repository)
@@ -395,31 +401,39 @@ async function loadTaskIndexAttempt(repository: string, signal: AbortSignal): Pr
   if (cached?.fingerprint === start.fingerprint) return cached
 
   const records = await mapBounded(start.lifecycle, async (lifecycle) => {
-    const [contextRaw, showRaw] = await Promise.all([
-      runCanonical(source.gitDir, originUrl, 'context', lifecycle.taskId, signal),
-      runCanonical(source.gitDir, originUrl, 'show', lifecycle.taskId, signal),
-    ])
+    const cacheKey = `${repository}:${lifecycle.taskId}:${lifecycle.oid}`
+    const prior = cachedRecords.get(cacheKey)
+    if (prior) return { ...prior, lifecycle }
+    const contextRaw = await runCanonical(source.gitDir, originUrl, 'context', lifecycle.taskId, signal)
     const context = contextSchema.parse(contextRaw)
-    const show = showSchema.parse(showRaw)
-    if (context.taskId !== lifecycle.taskId || context.task.taskId !== lifecycle.taskId || show.taskId !== lifecycle.taskId) {
+    if (context.taskId !== lifecycle.taskId || context.task.taskId !== lifecycle.taskId) {
       throw new Error(`Canonical task-dag output disagrees with lifecycle ref for ${lifecycle.taskId}`)
     }
-    if (context.state !== lifecycle.state || show.state !== lifecycle.state ||
-      context.stateOid !== lifecycle.oid || show.stateOid !== lifecycle.oid || show.ref !== lifecycle.ref) {
+    if (context.state !== lifecycle.state || context.stateOid !== lifecycle.oid) {
       throw new GenerationChangedError(`Task-dag lifecycle generation changed while reading ${lifecycle.taskId}`)
     }
     if (JSON.stringify(context.structuralParent) !== JSON.stringify(context.task.structuralParent) ||
       JSON.stringify(context.directRequirements) !== JSON.stringify(context.task.requirements)) {
       throw new Error(`Canonical task-dag context disagrees with immutable task relationships for ${lifecycle.taskId}`)
     }
-    return { context, show, lifecycle }
+    let record: JsonValue = null
+    if (lifecycle.state === 'active' || lifecycle.state === 'blocked' || lifecycle.state === 'waiting') {
+      const show = showSchema.parse(await runCanonical(source.gitDir, originUrl, 'show', lifecycle.taskId, signal))
+      if (show.taskId !== lifecycle.taskId || show.state !== lifecycle.state ||
+        show.stateOid !== lifecycle.oid || show.ref !== lifecycle.ref) {
+        throw new GenerationChangedError(`Task-dag lifecycle generation changed while reading ${lifecycle.taskId}`)
+      }
+      record = show.record
+    }
+    cachedRecords.set(cacheKey, { context, record })
+    return { context, record, lifecycle }
   })
   const end = await captureRefs(source.gitDir)
   validateActivation(end, await runCanonical(source.gitDir, originUrl, 'activation', undefined, signal))
   if (end.fingerprint !== start.fingerprint) throw new GenerationChangedError('Task-dag lifecycle generation changed during read')
 
   const nodes = new Map<string, TaskNode>()
-  for (const { context, show, lifecycle } of records) {
+  for (const { context, record, lifecycle } of records) {
     const structuralParent = context.structuralParent?.taskId
     nodes.set(context.taskId, {
       repository, githubRepository: source.githubRepository,
@@ -427,7 +441,7 @@ async function loadTaskIndexAttempt(repository: string, signal: AbortSignal): Pr
       title: context.task.title, description: context.task.description, structuralParent,
       requirements: context.directRequirements.map((requirement) => requirement.taskId),
       directChildren: [],
-      lifecycleEvidence: lifecycleEvidence(context.state, show.record),
+      lifecycleEvidence: lifecycleEvidence(context.state, record),
       status: legacyStatus(context.state),
       type: structuralParent ? 'leaf' : 'epic',
       dependents: [],
@@ -492,7 +506,7 @@ async function loadTaskIndexAttempt(repository: string, signal: AbortSignal): Pr
 async function buildTaskIndex(repository: string): Promise<TaskIndex> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), GENERATION_DEADLINE_MS)
+    const timeout = setTimeout(() => controller.abort(), generationDeadlineMs)
     try {
       return await loadTaskIndexAttempt(repository, controller.signal)
     } catch (error) {
@@ -507,7 +521,10 @@ async function buildTaskIndex(repository: string): Promise<TaskIndex> {
 export function loadTaskIndex(repository: string): Promise<TaskIndex> {
   const existing = inFlightIndexes.get(repository)
   if (existing) return existing
-  const loading = buildTaskIndex(repository)
+  const predecessor = buildQueue
+  let release!: () => void
+  buildQueue = new Promise<void>((resolve) => { release = resolve })
+  const loading = predecessor.then(() => buildTaskIndex(repository)).finally(release)
   inFlightIndexes.set(repository, loading)
   void loading.finally(() => {
     if (inFlightIndexes.get(repository) === loading) inFlightIndexes.delete(repository)
@@ -545,7 +562,11 @@ function sourceStatusForQueryFailures(failures: ReadonlyMap<string, string>): Ta
 }
 async function loadConfiguredTaskIndexes(requested?: string) {
   const repositories = configuredRepositories(requested)
-  const results = await Promise.allSettled(repositories.map(loadTaskIndex))
+  const results: PromiseSettledResult<TaskIndex>[] = []
+  for (const repository of repositories) {
+    try { results.push({ status: 'fulfilled', value: await loadTaskIndex(repository) }) }
+    catch (reason) { results.push({ status: 'rejected', reason }) }
+  }
   const indexes = new Map<string, TaskIndex>()
   const failures = new Map<string, string>()
   results.forEach((result, index) => {
