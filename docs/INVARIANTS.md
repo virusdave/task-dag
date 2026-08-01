@@ -948,6 +948,43 @@ The remaining, genuinely-operator-facing question — whether *operator* prose
 CLI) should get an `ingest-comment` acknowledgement reply or opt-in markers —
 still changes operator workflow semantics and remains an **operator
 decision**, not an agent's to make unilaterally.
+
+### Native-v2 outbound GitHub comment records
+
+Native v2 treats GitHub comments as projections of task-dag state. The
+canonical command records an immutable intent before any provider write and an
+immutable receipt only after authenticated readback. GitHub is never task
+state, and no Helios process is required for delivery or recovery.
+
+- `tasks/comments/bindings/by-task/<Task-ID>` and the paired
+  `tasks/comments/bindings/by-target/<digest>` point to the same parentless,
+  absent-to-present binding. The task-keyed ref makes nearest-structural-parent
+  resolution bounded; the provider-keyed ref prevents two tasks from directly
+  claiming the same stable GitHub issue identity.
+- `tasks/comments/intents/<digest>` identifies one operation. It snapshots the
+  source task, exact binding or forced-target authorization, stable provider
+  identities, normalized input bytes, exact rendered bytes and digest, comment
+  kind, and two tooling-owned leading markers. Exact operation replay is
+  idempotent; conflicting replay fails closed.
+- `tasks/comments/delivery-claims/<digest>` is a replaceable, at-most-six-minute
+  concurrency lease parented by its intent. It reduces duplicate delivery but
+  is never evidence that GitHub accepted a write.
+- `tasks/comments/receipts/<digest>` is an immutable intent child containing
+  the stable GitHub comment identity, canonical URL, body digest, and
+  authenticated observation time. Intent without receipt is pending.
+- `tasks/comments/forced-target/requests/<digest>` records an exact proposed
+  target and source body without authorizing delivery. Its paired
+  `decisions/<digest>` child records either normal association or one-comment
+  force authorization plus durable evidence. A forced intent must reference a
+  `force` decision matching its source, target, and kind.
+
+All provider numeric identities are canonical positive decimal strings to
+avoid JSON precision loss. Repository names are normalized lowercase
+`owner/repository` display paths while stable provider IDs own identity.
+User-supplied bodies may not contain the reserved `task-dag` marker namespace.
+These records are constant-work per requested comment; normal commands never
+scan repository history.
+
 ### Durable GitHub comment receipts (v1)
 
 `refs/heads/gh/comments/<issue>/<comment-id>` is origin-authoritative. New

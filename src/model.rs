@@ -7,6 +7,7 @@ use crate::{Result, git, repository::Snapshot};
 
 pub(crate) const ACTIVATION: &str = "refs/heads/tasks/v2/activation";
 pub(crate) const JOURNAL: &str = "refs/heads/tasks/system/transitions";
+pub(crate) const FORCED_COMMENT_TARGET_WARNING: &str = "> **Forced comment target:** Tooling sent this comment under one-comment operator authorization. The source task may not be canonically associated with this issue; assess their relationship before acting on it.";
 const STATES: [&str; 5] = ["frontier", "active", "blocked", "waiting", "done"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,98 @@ pub(crate) fn repository_id_for_path(value: &str) -> Result<String> {
     Ok(format!("repo-v2-{:x}", digest.finalize()))
 }
 
+pub(crate) fn github_repository(value: &str) -> Result<String> {
+    bounded("GitHub repository", value, 256)?;
+    if value != value.trim() {
+        return Err("GitHub repository must not have surrounding whitespace".into());
+    }
+    let normalized = value.to_ascii_lowercase();
+    let Some((owner, repository)) = normalized.split_once('/') else {
+        return Err("GitHub repository must have owner/repository shape".into());
+    };
+    let valid_component = |component: &str| {
+        !component.is_empty()
+            && component
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if normalized.matches('/').count() != 1
+        || !valid_component(owner)
+        || !valid_component(repository)
+    {
+        return Err("GitHub repository has invalid owner/repository shape".into());
+    }
+    Ok(normalized)
+}
+
+pub(crate) fn positive_decimal_id(name: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value == "0"
+        || value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.parse::<u64>().is_err()
+    {
+        return Err(format!(
+            "{name} must be a positive canonical decimal string"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_comment_input(value: &str) -> Result<String> {
+    let normalized = value.replace("\r\n", "\n");
+    if normalized.contains('\r') {
+        return Err("GitHub comment body contains a noncanonical carriage return".into());
+    }
+    let normalized = normalized.trim_matches('\n').to_owned();
+    if normalized.trim().is_empty() {
+        return Err("GitHub comment body must not be empty".into());
+    }
+    if normalized
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err("GitHub comment body contains an unsupported control character".into());
+    }
+    if normalized.contains("<!-- task-dag:") {
+        return Err("GitHub comment body contains a reserved task-dag marker".into());
+    }
+    if normalized.len() > 60_000 {
+        return Err("GitHub comment input exceeds 60000 bytes".into());
+    }
+    Ok(normalized)
+}
+
+pub(crate) fn render_comment(
+    kind: &str,
+    input: &str,
+    intent_id: &str,
+    forced: bool,
+) -> Result<String> {
+    if !matches!(kind, "status" | "operator-decision") {
+        return Err("GitHub comment kind is unsupported".into());
+    }
+    let input = normalize_comment_input(input)?;
+    if intent_id.len() != 64
+        || !intent_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("GitHub comment intent ID is not 64 lowercase hex".into());
+    }
+    let mut rendered =
+        format!("<!-- task-dag:{kind} -->\n<!-- task-dag:projection:{intent_id} -->\n\n{input}");
+    if forced {
+        rendered.push_str("\n\n");
+        rendered.push_str(FORCED_COMMENT_TARGET_WARNING);
+    }
+    rendered.push('\n');
+    if rendered.len() > 65_536 {
+        return Err("rendered GitHub comment exceeds 65536 bytes".into());
+    }
+    Ok(rendered)
+}
+
 pub(crate) fn state_ref(state: &str, id: &str) -> String {
     format!("refs/heads/tasks/{state}/{id}")
 }
@@ -113,6 +206,64 @@ pub(crate) fn delegation_accepted_ref(source_repository_id: &str, operation: &st
             "delegation-admission-key",
             &[source_repository_id, operation]
         )
+    )
+}
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the next dependency task")
+)]
+pub(crate) fn github_binding_task_ref(task_id: &str) -> String {
+    format!("refs/heads/tasks/comments/bindings/by-task/{task_id}")
+}
+#[expect(dead_code, reason = "consumed by the next dependency task")]
+pub(crate) fn github_binding_target_ref(repository_id: &str, issue_id: &str) -> String {
+    format!(
+        "refs/heads/tasks/comments/bindings/by-target/{}",
+        framed_digest("github-issue-binding-key", &[repository_id, issue_id])
+    )
+}
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the next dependency task")
+)]
+pub(crate) fn comment_intent_ref(operation: &str) -> String {
+    format!(
+        "refs/heads/tasks/comments/intents/{}",
+        framed_digest("github-comment-operation-key", &[operation])
+    )
+}
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the next dependency task")
+)]
+pub(crate) fn comment_delivery_claim_ref(intent_oid: &str) -> String {
+    format!(
+        "refs/heads/tasks/comments/delivery-claims/{}",
+        framed_digest("github-comment-intent-key", &[intent_oid])
+    )
+}
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the next dependency task")
+)]
+pub(crate) fn comment_receipt_ref(intent_oid: &str) -> String {
+    format!(
+        "refs/heads/tasks/comments/receipts/{}",
+        framed_digest("github-comment-intent-key", &[intent_oid])
+    )
+}
+#[cfg_attr(not(test), expect(dead_code, reason = "consumed by a dependent task"))]
+pub(crate) fn forced_comment_request_ref(operation: &str) -> String {
+    format!(
+        "refs/heads/tasks/comments/forced-target/requests/{}",
+        framed_digest("forced-comment-operation-key", &[operation])
+    )
+}
+#[expect(dead_code, reason = "consumed by a dependent task")]
+pub(crate) fn forced_comment_decision_ref(request_oid: &str) -> String {
+    format!(
+        "refs/heads/tasks/comments/forced-target/decisions/{}",
+        framed_digest("forced-comment-request-key", &[request_oid])
     )
 }
 pub(crate) fn parse_state_ref<'a>(r: &'a str, state: &str) -> Option<&'a str> {
@@ -323,6 +474,51 @@ mod tests {
             repository_id_for_path("owner/repo").unwrap()
         );
         assert!(repository_id_for_path("owner").is_err());
+    }
+
+    #[test]
+    fn github_repository_and_provider_ids_are_canonical() {
+        assert_eq!(
+            github_repository("Owner/Repo.Name").unwrap(),
+            "owner/repo.name"
+        );
+        assert!(github_repository("owner/repo/extra").is_err());
+        assert!(github_repository(" owner/repo").is_err());
+        assert!(positive_decimal_id("issue ID", "123").is_ok());
+        assert!(positive_decimal_id("issue ID", "0").is_err());
+        assert!(positive_decimal_id("issue ID", "0123").is_err());
+    }
+
+    #[test]
+    fn comment_rendering_is_canonical_and_reserves_markers() {
+        let intent = "a".repeat(64);
+        assert_eq!(normalize_comment_input("hello\r\n").unwrap(), "hello");
+        assert_eq!(
+            render_comment("status", "hello\r\n", &intent, false).unwrap(),
+            format!("<!-- task-dag:status -->\n<!-- task-dag:projection:{intent} -->\n\nhello\n")
+        );
+        let forced = render_comment("operator-decision", "yes", &intent, true).unwrap();
+        assert!(forced.contains(FORCED_COMMENT_TARGET_WARNING));
+        assert!(normalize_comment_input("<!-- task-dag:status -->").is_err());
+        assert!(render_comment("completion", "done", &intent, false).is_err());
+    }
+
+    #[test]
+    fn comment_projection_refs_are_deterministic_and_separated() {
+        let oid = "0123456789012345678901234567890123456789";
+        assert_eq!(
+            comment_intent_ref("operation"),
+            comment_intent_ref("operation")
+        );
+        assert_ne!(comment_delivery_claim_ref(oid), comment_receipt_ref(oid));
+        assert_ne!(
+            forced_comment_request_ref("operation"),
+            comment_intent_ref("operation")
+        );
+        assert!(
+            github_binding_task_ref(&task_id("test", &["task"]))
+                .starts_with("refs/heads/tasks/comments/bindings/by-task/v2-")
+        );
     }
     use proptest::prelude::*;
     proptest! {
