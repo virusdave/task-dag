@@ -80,12 +80,18 @@ the normal release workflow. A system-installed stable runtime rejected by
 activation fencing or minimum-version requirements is a production-critical
 incident requiring immediate repair and an operator page.
 
-Rollback must move both control planes in safe order: first repin and deploy the
-immutable Nix package containing the last known-good Rust runtime, verify its
-compiled identity and publication, and then perform a lease-fenced activation
-that authorizes that runtime across the fleet. Read back package identity and
-activation in every repository. Rollback is never a semantic-ref rewrite or a
-history edit.
+Rollback uses the same coordinator after staging an exact reviewed NixOS
+revision that pins the last known-good runtime:
+
+```sh
+deploy-task-dag-runtime deploy <last-known-good-40-char-commit>
+```
+
+Do not manually install or repin the system runtime first, and do not hand-loop
+over `activate-runtime`. If the installed stable runtime is already fenced and
+the coordinator cannot proceed, stop and page the operator; low-level commands
+are incident-recovery primitives only. Rollback is never a semantic-ref rewrite
+or a history edit.
 
 ## Historical v1 evidence
 
