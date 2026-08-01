@@ -639,10 +639,10 @@ then removes their legacy scheduling refs; v2 never dual-writes them.
 7. With that published v2 runtime, create an **implement the remaining v2
    command set** Task and a dependent **roll out v2 and make it the only usable
    task-dag runtime** Task.
-8. Implement and complete those Tasks in order. Rename the old shell CLI to
-   `scripts/deprecated-task-dag`; production entry points use the Rust binary.
-9. After full fleet rollout/readback, create and execute the existing-v1-task
-   migration to v2.
+8. **Completed:** those Tasks were implemented in order and production entry
+   points now use the Rust binary exclusively.
+9. **Completed:** full fleet rollout/readback and existing-v1-task migration
+   finished, after which the Bash runtime was retired.
 
 After self-bootstrap:
 
@@ -655,12 +655,12 @@ After self-bootstrap:
 4. With writers paused, activate its exact allowed writer commit and trusted
    floor in each participating repository using per-repository leased updates
    from the exceptional fleet plan.
-5. Require the Rust runtime everywhere and rename the shell implementation to
-   `deprecated-task-dag`. No legacy writer remains usable.
-6. Only after full rollout/readback, migrate current v1 Tasks into unified Task
-   objects, direct bindings, decomposition manifests, lifecycle transitions,
-   and directly addressable completion evidence. Preserve old datastore objects
-   as read-only historical evidence.
+5. **Completed:** the Rust runtime is required everywhere and no legacy writer
+   remains usable; the Bash runtime has been removed.
+6. **Completed:** after full rollout/readback, current v1 Tasks were migrated
+   into unified Task objects, direct bindings, decomposition manifests,
+   lifecycle transitions, and directly addressable completion evidence. Old
+   datastore objects remain read-only historical evidence.
 7. Verify the migrated ref set against the frozen source snapshot, publish a
    new rebaseline attestation, and remove migrated legacy scheduling refs.
 8. Finish the performance epic using activated fast commands and measure real

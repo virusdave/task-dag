@@ -1,5 +1,7 @@
 name: Graph Converge
 
+# Temporary caller-compatibility shim. v1 automation is retired; Rust v2 is
+# provider-free. This workflow intentionally performs no checkout or write.
 on:
   workflow_call:
     inputs:
@@ -19,57 +21,12 @@ on:
         type: string
         default: master
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  converge:
+  retired:
+    name: v1 automation retired
     runs-on: ubuntu-latest
-    concurrency:
-      group: task-dag-semantic-projectors-${{ github.repository }}-${{ github.run_id }}
-      cancel-in-progress: false
-
     steps:
-      - name: Checkout caller repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Checkout coherent task-dag runtime
-        uses: actions/checkout@v4
-        with:
-          repository: virusdave/task-dag
-          ref: ${{ inputs.ref }}
-          path: .task-dag-runtime
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Converge dependency graph
-        env:
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GIT_AUTHOR_NAME: task-dag[bot]
-          GIT_AUTHOR_EMAIL: task-dag[bot]@users.noreply.github.com
-          GIT_COMMITTER_NAME: task-dag[bot]
-          GIT_COMMITTER_EMAIL: task-dag[bot]@users.noreply.github.com
-        run: |
-          set -euo pipefail
-          args=()
-          zero=0000000000000000000000000000000000000000
-          if [[ -n "${HEAD_SHA}" ]]; then
-            if [[ -z "${BASE_SHA}" || "${BASE_SHA}" == "${zero}" ]]; then
-              args+=(--range "${HEAD_SHA}")
-            else
-              args+=(--range "${BASE_SHA}..${HEAD_SHA}")
-            fi
-          fi
-          set +e
-          .task-dag-runtime/scripts/task-dag graph-converge "${args[@]}"
-          rc=$?
-          set -e
-          if [ "$rc" -eq 75 ]; then
-            echo "Graph convergence deferred successfully during semantic migration drain."
-            exit 0
-          fi
-          exit "$rc"
+      - name: Explain retirement
+        run: echo "task-dag v1 automation is retired; Rust v2 is provider-free."

@@ -1,3 +1,8 @@
+> **Historical canonical-v1 document.** This lifecycle describes retired v1
+> refs and automation and remains read-only evidence. Rust v2 is the current
+> authority; see [`README.md`](../README.md) and
+> [`ref-native-minimal-task-dag.md`](designs/ref-native-minimal-task-dag.md).
+
 # Task ref lifecycle (`pending` / `root-active` / `frontier` / `active` / `blocked`)
 
 How the CLI and the issue-to-task workflows move a unit of work through

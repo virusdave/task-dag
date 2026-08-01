@@ -134,6 +134,16 @@ impl Fixture {
             &root_dir,
             &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
         );
+        let hooks = work.join(".githooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::copy(source.join(".githooks/pre-push"), hooks.join("pre-push")).unwrap();
+        let mut permissions = fs::metadata(hooks.join("pre-push")).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+        }
+        fs::set_permissions(hooks.join("pre-push"), permissions).unwrap();
         ok(&work, &["config", "user.name", "migration test"]);
         ok(&work, &["config", "user.email", "migration@test.invalid"]);
         let runtime = env!("TASKDAG_BUILD_COMMIT");

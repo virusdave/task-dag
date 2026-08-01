@@ -21,13 +21,10 @@ msg_file="$1"
 # Locate the canonical CLI without re-encoding any of its logic:
 #   1. explicit override (TASK_DAG_BIN)
 #   2. task-dag-v2 on PATH
-#   3. task-dag on PATH
 td="${TASK_DAG_BIN:-}"
 if [ -z "$td" ]; then
   if command -v task-dag-v2 >/dev/null 2>&1; then
     td="$(command -v task-dag-v2)"
-  elif command -v task-dag >/dev/null 2>&1; then
-    td="$(command -v task-dag)"
   fi
 fi
 

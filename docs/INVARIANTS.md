@@ -1,3 +1,8 @@
+> **Historical canonical-v1 document.** These invariants describe the retired
+> v1 runtime and remain read-only evidence. Rust v2 is the current authority;
+> see [`README.md`](../README.md) and
+> [`ref-native-minimal-task-dag.md`](designs/ref-native-minimal-task-dag.md).
+
 # task-dag commit & ref invariants — READ BEFORE TOUCHING ANY TASK REF
 
 ## Canonical semantic activation authority

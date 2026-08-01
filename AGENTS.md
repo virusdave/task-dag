@@ -58,12 +58,6 @@ link to this section alone is insufficient.
 
 ## Test resource policy on Helios
 
-- On the production Helios host, do **not** run
-  `tests/task-dag/run-all.sh` before publishing while its wall clock is two
-  minutes or more. Run the smallest relevant fixture(s), syntax checks, and
-  static checks locally; rely on the `cli-tests` GitHub Actions job for the
-  heavyweight aggregate gate.
-- This exception ends only after the complete aggregate suite is measured on
-  Helios at under two minutes. At that point, running it locally before every
-  publish becomes required again.
-- Never weaken, skip, or remove the CI aggregate gate to make this policy pass.
+- Use `scripts/run-rust-tests.sh` for the canonical pinned Rust test suite.
+- Run focused Rust filters while iterating. The Rust-only `cli-tests` workflow
+  runs the complete wrapper; no retired Bash aggregate is a release gate.

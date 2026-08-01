@@ -1,5 +1,7 @@
 name: Aggregate Cross-Repo Completions
 
+# Temporary caller-compatibility shim. v1 automation is retired; Rust v2 is
+# provider-free. This workflow intentionally performs no checkout or write.
 on:
   workflow_call:
     inputs:
@@ -34,69 +36,12 @@ on:
           Typically stored as repo/org secret TASK_DAG_APP_PRIVATE_KEY.
         required: true
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  aggregate:
+  retired:
+    name: v1 automation retired
     runs-on: ubuntu-latest
-    concurrency:
-      group: aggregate-cross-repo-${{ github.repository }}-${{ inputs.base_sha }}-${{ inputs.head_sha }}
-      cancel-in-progress: false
-
     steps:
-      - name: Split top_level_repo into owner / repo
-        id: split
-        env:
-          TOP_LEVEL_REPO: ${{ inputs.top_level_repo }}
-        run: |
-          owner="${TOP_LEVEL_REPO%%/*}"
-          repo="${TOP_LEVEL_REPO#*/}"
-          if [[ -z "${owner}" || -z "${repo}" || "${owner}" == "${TOP_LEVEL_REPO}" ]]; then
-            echo "::error::top_level_repo must be owner/repo, got: ${TOP_LEVEL_REPO}"
-            exit 1
-          fi
-          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
-          echo "repo=${repo}"   >> "$GITHUB_OUTPUT"
-
-      - name: Mint installation token for top-level repo
-        id: mint
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.app_id }}
-          private-key: ${{ secrets.app_private_key }}
-          owner: ${{ steps.split.outputs.owner }}
-          repositories: ${{ steps.split.outputs.repo }}
-
-      - name: Checkout caller repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Checkout coherent task-dag runtime
-        uses: actions/checkout@v4
-        with:
-          repository: virusdave/task-dag
-          ref: ${{ inputs.ref }}
-          path: .task-dag-runtime
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Aggregate cross-repo completions
-        env:
-          GH_TOKEN: ${{ steps.mint.outputs.token }}
-          TOP_LEVEL_REPO: ${{ inputs.top_level_repo }}
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          PEER_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          set +e
-          .task-dag-runtime/scripts/aggregate-cross-repo-completions.sh
-          rc=$?
-          set -e
-          if [ "$rc" -eq 75 ]; then
-            echo "Completion aggregation deferred successfully during semantic migration drain."
-            exit 0
-          fi
-          exit "$rc"
+      - name: Explain retirement
+        run: echo "task-dag v1 automation is retired; Rust v2 is provider-free."

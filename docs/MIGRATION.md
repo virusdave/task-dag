@@ -1,3 +1,8 @@
+> **Historical canonical-v1 document.** This records the retired Bash/GitHub
+> automation model and is retained as migration evidence only. Rust v2 is the
+> current authority; see [`README.md`](../README.md) and
+> [`ref-native-minimal-task-dag.md`](designs/ref-native-minimal-task-dag.md).
+
 # task-dag consolidation — migration plan
 
 This repo is the single consolidated home for task-dag infrastructure

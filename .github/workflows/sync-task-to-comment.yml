@@ -1,5 +1,7 @@
 name: Sync Task to Comment (Reusable)
 
+# Temporary caller-compatibility shim. v1 automation is retired; Rust v2 is
+# provider-free. This workflow intentionally performs no checkout or write.
 on:
   workflow_call:
     inputs:
@@ -20,30 +22,12 @@ on:
         description: 'GitHub token for API access'
         required: true
 
-permissions:
-  contents: write
-  issues: write
+permissions: {}
 
 jobs:
-  sync-task-to-comment:
+  retired:
+    name: v1 automation retired
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.token }}
-
-      - name: Download task-dag scripts
-        run: |
-          curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-tasks-to-github.sh" \
-            -o /tmp/sync-tasks-to-github.sh
-          chmod +x /tmp/sync-tasks-to-github.sh
-
-      - name: Sync agent messages to GitHub
-        env:
-          GITHUB_TOKEN: ${{ secrets.token }}
-          MAX_BATCH_SIZE: ${{ inputs.max_batch_size }}
-        run: |
-          /tmp/sync-tasks-to-github.sh
+      - name: Explain retirement
+        run: echo "task-dag v1 automation is retired; Rust v2 is provider-free."

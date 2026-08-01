@@ -1,3 +1,8 @@
+> **Historical canonical-v1 document.** These principles governed the retired
+> v1 runtime and remain read-only evidence. Rust v2 is the current authority;
+> see [`README.md`](../README.md) and
+> [`ref-native-minimal-task-dag.md`](designs/ref-native-minimal-task-dag.md).
+
 # task-dag design principles — READ BEFORE ADDING/CHANGING FUNCTIONALITY
 
 Audience: implementers of future task-dag functionality or design changes,
