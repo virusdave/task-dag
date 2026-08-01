@@ -562,6 +562,12 @@ function sourceStatusForQueryFailures(failures: ReadonlyMap<string, string>): Ta
 }
 async function loadConfiguredTaskIndexes(requested?: string) {
   const repositories = configuredRepositories(requested)
+  if (process.env.HELIOS_TASK_DAG_INDEX_READS_ENABLED !== '1') {
+    const reason = 'Task index refresh is temporarily disabled while the bounded canonical reader is repaired'
+    throw new TaskDagUnavailableError(sourceStatusForQueryFailures(
+      new Map(configuredRepositories().map((repository) => [repository, reason])),
+    ))
+  }
   const results: PromiseSettledResult<TaskIndex>[] = []
   for (const repository of repositories) {
     try { results.push({ status: 'fulfilled', value: await loadTaskIndex(repository) }) }

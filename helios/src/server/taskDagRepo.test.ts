@@ -14,6 +14,7 @@ import {
   getTaskDetail,
   loadTaskIndex,
   probeTaskDagReader,
+  TaskDagUnavailableError,
 } from './taskDagRepo.js'
 import {
   __resetTaskDagMirrorForTests,
@@ -116,6 +117,7 @@ beforeAll(() => {
   fs.writeFileSync(pathsFile, `automation ${repoDir}\n`)
   process.env.HELIOS_TASK_DAG_REPOS_FILE = configFile
   process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE = pathsFile
+  process.env.HELIOS_TASK_DAG_INDEX_READS_ENABLED = '1'
 })
 beforeEach(() => {
   __resetTaskDagMirrorForTests()
@@ -126,6 +128,7 @@ afterEach(() => { vi.useRealTimers() })
 afterAll(() => {
   delete process.env.HELIOS_TASK_DAG_REPOS_FILE
   delete process.env.HELIOS_TASK_DAG_LOCAL_PATHS_FILE
+  delete process.env.HELIOS_TASK_DAG_INDEX_READS_ENABLED
   __resetTaskDagMirrorForTests()
   __resetTaskIndexCacheForTests()
   fs.rmSync(repoDir, { recursive: true, force: true })
@@ -362,6 +365,21 @@ describe('bounded task-dag v2 adapter', () => {
       fs.writeFileSync(configFile, 'automation https://github.com/Example/automation.git\n')
       fs.writeFileSync(pathsFile, `automation ${repoDir}\n`)
       __resetTaskDagMirrorForTests()
+    }
+  })
+
+  it('returns unavailable without spawning readers when production index reads are disabled', async () => {
+    delete process.env.HELIOS_TASK_DAG_INDEX_READS_ENABLED
+    let calls = 0
+    __setTaskDagRunnerForTests(async (...args) => {
+      calls++
+      return fakeRunner()(...args)
+    })
+    try {
+      await expect(getFrontierView()).rejects.toBeInstanceOf(TaskDagUnavailableError)
+      expect(calls).toBe(0)
+    } finally {
+      process.env.HELIOS_TASK_DAG_INDEX_READS_ENABLED = '1'
     }
   })
 
