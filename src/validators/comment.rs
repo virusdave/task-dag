@@ -317,12 +317,14 @@ pub(crate) fn forced_request(oid: &str) -> Result<Value> {
         oid,
         "forced GitHub comment target request",
         &[
+            "ampThreadUrl",
             "body",
             "bodyDigest",
             "createdAt",
             "formatVersion",
             "issueId",
             "issueNumber",
+            "issueTitle",
             "kind",
             "operationId",
             "provider",
@@ -332,6 +334,7 @@ pub(crate) fn forced_request(oid: &str) -> Result<Value> {
             "semanticId",
             "sourceTaskId",
             "sourceTaskOid",
+            "sourceTaskTitle",
             "tokenDigest",
         ],
         &[&[]],
@@ -340,6 +343,17 @@ pub(crate) fn forced_request(oid: &str) -> Result<Value> {
         return Err("forced GitHub comment target request must be parentless".into());
     }
     github_target(&value, "forced GitHub comment target request")?;
+    model::amp_thread_url(string(
+        &value,
+        "ampThreadUrl",
+        "forced GitHub comment target request",
+    )?)?;
+    optional_text(
+        &value,
+        "issueTitle",
+        "forced GitHub comment target request",
+        4_096,
+    )?;
     let source_task_id = string(
         &value,
         "sourceTaskId",
@@ -351,7 +365,16 @@ pub(crate) fn forced_request(oid: &str) -> Result<Value> {
         "forced GitHub comment target request",
     )?;
     model::oid(source_task_oid)?;
-    super::task(source_task_oid, source_task_id)?;
+    let source_task = super::task(source_task_oid, source_task_id)?;
+    optional_text(
+        &value,
+        "sourceTaskTitle",
+        "forced GitHub comment target request",
+        4_096,
+    )?;
+    if value["sourceTaskTitle"] != source_task["title"] {
+        return Err("forced GitHub comment target request sourceTaskTitle is stale".into());
+    }
     let kind = string(&value, "kind", "forced GitHub comment target request")?;
     if !matches!(kind, "status" | "operator-decision") {
         return Err("forced GitHub comment target request kind is unsupported".into());
@@ -416,6 +439,13 @@ pub(crate) fn forced_decision(oid: &str, expected_request_oid: &str) -> Result<V
     )?;
     if !matches!(evidence_kind, "amp-thread" | "one-offs-submission") {
         return Err("forced GitHub comment target decision evidenceKind is unsupported".into());
+    }
+    if evidence_kind == "amp-thread" {
+        model::amp_thread_url(string(
+            &value,
+            "evidence",
+            "forced GitHub comment target decision",
+        )?)?;
     }
     optional_text(
         &value,

@@ -38,7 +38,10 @@ The current surface is defined by `src/cli.rs`:
   `delegate export`, `delegate accept`, and `delegate status`;
 - GitHub comment projection: `comment post TASK-ID --kind status|operator-decision
   --body-file PATH --operation-id ID`, plus explicit bounded recovery with
-  `comment reconcile --max N --older-than DURATION`;
+  `comment reconcile --max N --older-than DURATION`; canonical issue bindings
+  use `comment associate`, while exceptional unbound targets use the explicit
+  `comment force-request`, `comment force-decide`, and `comment force-send`
+  authorization sequence;
 - compatibility aliases: `epic-create` is `create`, `epic-compose` is
   `breakdown`, and `dag TASK-ID` is a bounded task view;
 - exceptional migration: `migrate-v1-census` and `migrate-v1`.
@@ -57,6 +60,17 @@ delivery leaves the intent pending. Reconciliation is never implicit: the
 operator selects at most 100 pending intents older than a duration such as
 `10m`, `2h`, or `1d`; selection is oldest-first and bounded by hard ref and byte
 limits.
+
+`comment associate` authenticates and verifies the canonical GitHub repository
+and issue paths and records both stable-ID binding aliases atomically. Forced
+requests publish only the canonical authorization request: they do not mutate
+GitHub or publish the returned, fully rendered
+`task-dag-forced-comment-target-v1` decision packet. The packet includes a
+one-time token whose plaintext is never stored. An `associate` decision directs
+the caller back to association and normal posting. A `force` decision authorizes
+only the exact request body, kind, and target; `force-send` uses the normal
+stable-ID-verified, reconcilable delivery engine and appends a tooling-owned
+forced-target warning.
 
 ## Claim safety
 

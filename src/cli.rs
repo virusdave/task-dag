@@ -187,8 +187,64 @@ enum DepCommands {
 
 #[derive(Subcommand)]
 enum CommentCommands {
+    Associate(CommentAssociate),
+    ForceRequest(CommentForceRequest),
+    ForceDecide(CommentForceDecide),
+    ForceSend(CommentForceSend),
     Post(CommentPost),
     Reconcile(CommentReconcile),
+}
+
+#[derive(Args)]
+pub(crate) struct CommentAssociate {
+    pub(crate) task_id: String,
+    #[arg(long)]
+    pub(crate) repository: String,
+    #[arg(long)]
+    pub(crate) issue_number: String,
+    #[arg(long)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct CommentForceRequest {
+    pub(crate) task_id: String,
+    #[arg(long)]
+    pub(crate) repository: String,
+    #[arg(long)]
+    pub(crate) issue_number: String,
+    #[arg(long, value_parser = ["status", "operator-decision"])]
+    pub(crate) kind: String,
+    #[arg(long)]
+    pub(crate) body_file: PathBuf,
+    #[arg(long)]
+    pub(crate) operation_id: String,
+    #[arg(long)]
+    pub(crate) amp_thread_url: String,
+}
+
+#[derive(Args)]
+pub(crate) struct CommentForceDecide {
+    pub(crate) request_oid: String,
+    #[arg(long, value_parser = ["associate", "force"])]
+    pub(crate) choice: String,
+    #[arg(long)]
+    pub(crate) decision_token: String,
+    #[arg(long, value_parser = ["amp-thread", "one-offs-submission"])]
+    pub(crate) evidence_kind: String,
+    #[arg(long)]
+    pub(crate) evidence: String,
+    #[arg(long)]
+    pub(crate) context_file: PathBuf,
+    #[arg(long)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct CommentForceSend {
+    pub(crate) request_oid: String,
+    #[arg(long)]
+    pub(crate) operation_id: String,
 }
 
 #[derive(Args)]
@@ -408,6 +464,18 @@ pub(crate) fn run() -> Result<()> {
         Commands::Context { task_id } => commands::readers::context(&task_id),
         Commands::Frontier => commands::readers::frontier(),
         Commands::CurrentState { max_tasks } => commands::readers::current_state(max_tasks),
+        Commands::Comment {
+            command: CommentCommands::Associate(args),
+        } => commands::comment::associate(args),
+        Commands::Comment {
+            command: CommentCommands::ForceRequest(args),
+        } => commands::comment::force_request(args),
+        Commands::Comment {
+            command: CommentCommands::ForceDecide(args),
+        } => commands::comment::force_decide(args),
+        Commands::Comment {
+            command: CommentCommands::ForceSend(args),
+        } => commands::comment::force_send(args),
         Commands::Comment {
             command: CommentCommands::Post(args),
         } => commands::comment::post(args),

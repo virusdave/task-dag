@@ -104,6 +104,23 @@ pub(crate) fn github_repository(value: &str) -> Result<String> {
     Ok(normalized)
 }
 
+pub(crate) fn amp_thread_url(value: &str) -> Result<&str> {
+    let Some(id) = value.strip_prefix("https://ampcode.com/threads/T-") else {
+        return Err(
+            "Amp thread URL must use canonical https://ampcode.com/threads/T-... form".into(),
+        );
+    };
+    if id.len() != 36
+        || id.bytes().enumerate().any(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte != b'-',
+            _ => !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte),
+        })
+    {
+        return Err("Amp thread URL has a malformed thread ID".into());
+    }
+    Ok(value)
+}
+
 pub(crate) fn positive_decimal_id(name: &str, value: &str) -> Result<()> {
     if value.is_empty()
         || value == "0"
@@ -235,14 +252,12 @@ pub(crate) fn comment_receipt_ref(intent_oid: &str) -> String {
         framed_digest("github-comment-intent-key", &[intent_oid])
     )
 }
-#[cfg_attr(not(test), expect(dead_code, reason = "consumed by a dependent task"))]
 pub(crate) fn forced_comment_request_ref(operation: &str) -> String {
     format!(
         "refs/heads/tasks/comments/forced-target/requests/{}",
         framed_digest("forced-comment-operation-key", &[operation])
     )
 }
-#[expect(dead_code, reason = "consumed by a dependent task")]
 pub(crate) fn forced_comment_decision_ref(request_oid: &str) -> String {
     format!(
         "refs/heads/tasks/comments/forced-target/decisions/{}",
@@ -470,6 +485,21 @@ mod tests {
         assert!(positive_decimal_id("issue ID", "123").is_ok());
         assert!(positive_decimal_id("issue ID", "0").is_err());
         assert!(positive_decimal_id("issue ID", "0123").is_err());
+    }
+
+    #[test]
+    fn amp_thread_urls_are_exact_and_canonical() {
+        let valid = "https://ampcode.com/threads/T-019fba32-3836-77be-8a8b-f411627bcb67";
+        assert_eq!(amp_thread_url(valid).unwrap(), valid);
+        for invalid in [
+            "http://ampcode.com/threads/T-019fba32-3836-77be-8a8b-f411627bcb67",
+            "https://example.com/threads/T-019fba32-3836-77be-8a8b-f411627bcb67",
+            "https://ampcode.com/threads/T-019FBA32-3836-77BE-8A8B-F411627BCB67",
+            "https://ampcode.com/threads/T-019fba32-3836-77be-8a8b-f411627bcb67?view=1",
+            "https://ampcode.com/threads/comment-test",
+        ] {
+            assert!(amp_thread_url(invalid).is_err(), "accepted {invalid}");
+        }
     }
 
     #[test]

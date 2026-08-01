@@ -230,6 +230,92 @@ impl Fixture {
         )
     }
 
+    fn associate(&self, task_id: &str, operation: &str) -> Output {
+        self.command(
+            &[
+                "comment",
+                "associate",
+                task_id,
+                "--repository",
+                "owner/repository",
+                "--issue-number",
+                "7",
+                "--operation-id",
+                operation,
+            ],
+            "normal",
+        )
+    }
+
+    fn force_request(&self, operation: &str, body: &str) -> Output {
+        let file = self.root.join(format!("{operation}-force.txt"));
+        fs::write(&file, body).unwrap();
+        self.command(
+            &[
+                "comment",
+                "force-request",
+                &self.task_id,
+                "--repository",
+                "owner/repository",
+                "--issue-number",
+                "7",
+                "--kind",
+                "status",
+                "--body-file",
+                file.to_str().unwrap(),
+                "--operation-id",
+                operation,
+                "--amp-thread-url",
+                "https://ampcode.com/threads/T-019fba32-3836-77be-8a8b-f411627bcb67",
+            ],
+            "normal",
+        )
+    }
+
+    fn force_decide(
+        &self,
+        request_oid: &str,
+        token: &str,
+        choice: &str,
+        operation: &str,
+    ) -> Output {
+        let context = self.root.join(format!("{operation}-context.txt"));
+        fs::write(&context, "operator approved exact target\n").unwrap();
+        self.command(
+            &[
+                "comment",
+                "force-decide",
+                request_oid,
+                "--choice",
+                choice,
+                "--decision-token",
+                token,
+                "--evidence-kind",
+                "amp-thread",
+                "--evidence",
+                "https://ampcode.com/threads/T-019fba32-3836-77be-8a8b-f411627bcb67",
+                "--context-file",
+                context.to_str().unwrap(),
+                "--operation-id",
+                operation,
+            ],
+            "normal",
+        )
+    }
+
+    fn force_send(&self, request_oid: &str, operation: &str, mode: &str) -> Output {
+        self.command(
+            &[
+                "comment",
+                "force-send",
+                request_oid,
+                "--operation-id",
+                operation,
+            ],
+            mode,
+        )
+    }
+
     fn calls(&self, kind: &str) -> usize {
         fs::read_to_string(self.state.join("calls"))
             .unwrap_or_default()
@@ -311,7 +397,7 @@ if [[ "$endpoint" == repos/owner/repository ]]; then
   jq -n --arg id "$id" '{id:$id,full_name:"owner/repository"}'
 elif [[ "$endpoint" == repos/owner/repository/issues/7 ]]; then
   echo TARGET_ISSUE >>"$state/calls"
-  jq -n '{id:"456",number:"7",repository_url:"https://api.github.com/repos/owner/repository"}'
+  jq -n '{id:"456",number:"7",title:"Comment projection issue",repository_url:"https://api.github.com/repos/owner/repository"}'
 elif [[ "$endpoint" == */issues/comments/* ]]; then
   echo GET >>"$state/calls"
   id=$(cat "$state/id")
@@ -338,6 +424,241 @@ else
   else printf '[[],[]]\n'; fi
 fi
 "##;
+
+#[test]
+fn associate_creates_paired_aliases_and_conflicting_target_fails_closed() {
+    let fixture = Fixture::new("associate", false);
+    let first = fixture.associate(&fixture.task_id, "associate-first");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let result: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(fixture.refs(result["taskRef"].as_str().unwrap()).len(), 1);
+    assert_eq!(fixture.refs(result["targetRef"].as_str().unwrap()).len(), 1);
+    let task_alias = fixture.refs(result["taskRef"].as_str().unwrap());
+    let target_alias = fixture.refs(result["targetRef"].as_str().unwrap());
+    assert_eq!(
+        task_alias[0].split_once('\t').unwrap().0,
+        target_alias[0].split_once('\t').unwrap().0
+    );
+
+    let conflict_fixture = Fixture::new("associate-conflict", true);
+    let created = conflict_fixture.run_ok(
+        &[
+            "create",
+            "--operation-id",
+            "create-conflicting-association",
+            "--title",
+            "Conflicting association",
+            "--description",
+            "Must not claim an occupied target",
+        ],
+        "normal",
+    );
+    let conflicting =
+        conflict_fixture.associate(created["taskId"].as_str().unwrap(), "associate-conflict");
+    assert!(!conflicting.status.success());
+    assert!(
+        String::from_utf8_lossy(&conflicting.stderr).contains("associated differently"),
+        "{}",
+        String::from_utf8_lossy(&conflicting.stderr)
+    );
+    assert!(
+        conflict_fixture
+            .refs(&format!(
+                "refs/heads/tasks/comments/bindings/by-task/{}",
+                created["taskId"].as_str().unwrap()
+            ))
+            .is_empty()
+    );
+}
+
+#[test]
+fn force_request_and_decision_are_canonical_replay_safe_and_token_bound() {
+    let fixture = Fixture::new("force-decision", false);
+    let requested = fixture.force_request("force-request", "exact forced body");
+    assert!(
+        requested.status.success(),
+        "{}",
+        String::from_utf8_lossy(&requested.stderr)
+    );
+    let packet: Value = serde_json::from_slice(&requested.stdout).unwrap();
+    let request_oid = packet["requestOid"].as_str().unwrap();
+    let token = packet["decisionToken"].as_str().unwrap();
+    let markdown = packet["markdown"].as_str().unwrap();
+    assert!(
+        markdown.starts_with(
+            "# Choose how to post this GitHub comment\n\n**Nothing has been posted.**"
+        )
+    );
+    assert!(markdown.contains("Comment projection issue"));
+    assert!(markdown.contains("**Comment fixture**"));
+    assert!(markdown.contains("\n    exact forced body\n"));
+    assert!(markdown.contains("[Open the current Amp work thread](https://ampcode.com/threads/T-019fba32-3836-77be-8a8b-f411627bcb67)"));
+    assert!(!markdown.contains(request_oid));
+    assert!(!markdown.contains(token));
+    assert!(!markdown.contains(packet["requestId"].as_str().unwrap()));
+    let canonical: Value = serde_json::from_str(&ok(
+        &fixture.work,
+        &["show", "-s", "--format=%B", request_oid],
+    ))
+    .unwrap();
+    assert_eq!(canonical["body"], "exact forced body");
+    assert_eq!(canonical["repositoryId"], "123");
+    assert_eq!(canonical["issueId"], "456");
+    assert!(canonical.get("decisionToken").is_none());
+
+    let replay = fixture.force_request("force-request", "exact forced body");
+    assert!(replay.status.success());
+    let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["requestOid"], packet["requestOid"]);
+    assert_eq!(replay["decisionTokenAvailable"], false);
+    assert!(replay["decisionToken"].is_null());
+
+    let wrong = fixture.force_decide(request_oid, "wrong-token", "force", "force-decision");
+    assert!(!wrong.status.success());
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("does not authorize"));
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/forced-target/decisions/*")
+            .is_empty()
+    );
+
+    let decided = fixture.force_decide(request_oid, token, "force", "force-decision");
+    assert!(
+        decided.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decided.stderr)
+    );
+    let decision: Value = serde_json::from_slice(&decided.stdout).unwrap();
+    let exact_replay = fixture.force_decide(request_oid, token, "force", "force-decision");
+    assert!(exact_replay.status.success());
+    assert_eq!(
+        decision,
+        serde_json::from_slice::<Value>(&exact_replay.stdout).unwrap()
+    );
+    let conflict = fixture.force_decide(request_oid, token, "associate", "force-decision");
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("different semantics"));
+}
+
+#[test]
+fn force_request_rejects_a_target_already_authorized_normally() {
+    let fixture = Fixture::new("force-already-bound", true);
+    let requested = fixture.force_request("must-use-normal", "normal target body");
+    assert!(!requested.status.success());
+    assert!(
+        String::from_utf8_lossy(&requested.stderr).contains("use comment post"),
+        "{}",
+        String::from_utf8_lossy(&requested.stderr)
+    );
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/forced-target/requests/*")
+            .is_empty()
+    );
+    assert_eq!(fixture.calls("POST"), 0);
+}
+
+#[test]
+fn force_send_requires_force_decision_and_posts_warning_once() {
+    let fixture = Fixture::new("force-send", false);
+    let requested = fixture.force_request("send-request", "forced payload");
+    assert!(requested.status.success());
+    let packet: Value = serde_json::from_slice(&requested.stdout).unwrap();
+    let request_oid = packet["requestOid"].as_str().unwrap();
+    let token = packet["decisionToken"].as_str().unwrap();
+
+    let missing = fixture.force_send(request_oid, "missing-decision-send", "normal");
+    assert!(!missing.status.success());
+    assert_eq!(fixture.calls("POST"), 0);
+
+    let associate = fixture.force_decide(request_oid, token, "associate", "associate-decision");
+    assert!(associate.status.success());
+    let rejected = fixture.force_send(request_oid, "associate-send", "normal");
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("decision chose associate"));
+    assert_eq!(fixture.calls("POST"), 0);
+
+    let force_fixture = Fixture::new("force-send-approved", false);
+    let requested = force_fixture.force_request("approved-request", "forced payload");
+    let packet: Value = serde_json::from_slice(&requested.stdout).unwrap();
+    let request_oid = packet["requestOid"].as_str().unwrap();
+    let decided = force_fixture.force_decide(
+        request_oid,
+        packet["decisionToken"].as_str().unwrap(),
+        "force",
+        "approved-decision",
+    );
+    assert!(decided.status.success());
+    let sent = force_fixture.force_send(request_oid, "approved-send", "uncertain");
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    assert_eq!(force_fixture.calls("POST"), 1);
+    let posted = fs::read_to_string(force_fixture.state.join("body")).unwrap();
+    let warning = "> **Forced comment target:** Tooling sent this comment under one-comment operator authorization. The source task may not be canonically associated with this issue; assess their relationship before acting on it.";
+    assert_eq!(posted.matches(warning).count(), 1);
+    assert!(posted.ends_with(&format!("\n\nforced payload\n\n{warning}\n")));
+    assert_eq!(
+        force_fixture
+            .refs("refs/heads/tasks/comments/receipts/*")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn reconciliation_rejects_forced_intent_without_canonical_authorization() {
+    let fixture = Fixture::new("forced-authorization-lost", false);
+    let requested = fixture.force_request("authorization-request", "pending forced body");
+    let packet: Value = serde_json::from_slice(&requested.stdout).unwrap();
+    let request_oid = packet["requestOid"].as_str().unwrap();
+    let decided = fixture.force_decide(
+        request_oid,
+        packet["decisionToken"].as_str().unwrap(),
+        "force",
+        "authorization-decision",
+    );
+    assert!(decided.status.success());
+    let decision: Value = serde_json::from_slice(&decided.stdout).unwrap();
+    let failed = fixture.force_send(request_oid, "authorization-send", "permanent-list");
+    assert!(!failed.status.success());
+    assert_eq!(fixture.calls("POST"), 0);
+    let prior_calls = fs::read_to_string(fixture.state.join("calls")).unwrap();
+
+    let decision_oid = decision["decisionOid"].as_str().unwrap();
+    let decision_ref = fixture
+        .refs("refs/heads/tasks/comments/forced-target/decisions/*")
+        .into_iter()
+        .find(|line| line.starts_with(decision_oid))
+        .unwrap()
+        .split_once('\t')
+        .unwrap()
+        .1
+        .to_owned();
+    fixture.remote_update_ref(&decision_ref, None);
+    let reconciled = fixture.command_with(
+        &["comment", "reconcile", "--max", "1", "--older-than", "1s"],
+        "normal",
+        "500",
+        "30000",
+    );
+    assert!(!reconciled.status.success());
+    assert!(
+        String::from_utf8_lossy(&reconciled.stderr).contains("canonical authorization"),
+        "{}",
+        String::from_utf8_lossy(&reconciled.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.state.join("calls")).unwrap(),
+        prior_calls
+    );
+}
 
 #[test]
 fn paginated_search_posts_exact_bytes_and_records_receipt() {

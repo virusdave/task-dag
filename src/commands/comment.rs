@@ -1,7 +1,10 @@
 use super::{claim_token, default_owner, print_json, timestamp};
 use crate::{
     Result,
-    cli::{CommentPost, CommentReconcile},
+    cli::{
+        CommentAssociate, CommentForceDecide, CommentForceRequest, CommentForceSend, CommentPost,
+        CommentReconcile,
+    },
     git, journal,
     model::{self, ACTIVATION, JOURNAL, Update},
     repository,
@@ -24,6 +27,7 @@ const ANCESTOR_LIMIT: usize = 128;
 const RECONCILE_REF_LIMIT: usize = 1_000;
 const RECONCILE_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 const PROVIDER_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+type BindingResolution = (repository::Snapshot, String, Option<(String, Value)>);
 
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
     value[name]
@@ -73,10 +77,7 @@ fn structural_chain(task_id: &str, task_oid: &str) -> Result<Vec<(String, String
     Err("structural ancestor chain exceeds hard limit".into())
 }
 
-fn resolve(
-    task_id: &str,
-    intent_ref: &str,
-) -> Result<(repository::Snapshot, String, String, Value)> {
+fn find_binding(task_id: &str, intent_ref: &str) -> Result<BindingResolution> {
     model::valid_id(task_id)?;
     let first = repository::advertise(&repository::lifecycle_patterns(task_id))?;
     let lifecycle = model::lifecycle(&first, task_id);
@@ -142,14 +143,45 @@ fn resolve(
                         .into(),
                 );
             }
-            return Ok((paired, source_oid, oid, binding));
+            return Ok((paired, source_oid, Some((oid, binding))));
         }
     }
-    Err("no GitHub issue binding exists on the source task or a structural ancestor".into())
+    Ok((snap, source_oid, None))
+}
+
+fn resolve(
+    task_id: &str,
+    intent_ref: &str,
+) -> Result<(repository::Snapshot, String, String, Value)> {
+    let (snap, source_oid, binding) = find_binding(task_id, intent_ref)?;
+    let (binding_oid, binding) = binding.ok_or_else(|| {
+        "no GitHub issue binding exists on the source task or a structural ancestor".to_owned()
+    })?;
+    Ok((snap, source_oid, binding_oid, binding))
 }
 
 fn validate_intent_binding(intent: &Value) -> Result<()> {
     let Some(binding_oid) = intent.get("bindingOid").and_then(Value::as_str) else {
+        let decision_oid = field(intent, "forcedDecisionOid")?;
+        let decision = git::object_json(decision_oid)?;
+        let request_oid = field(&decision, "requestOid")?;
+        repository::materialize(std::slice::from_ref(&request_oid.to_owned()))?;
+        let request = crate::validators::comment::forced_request(request_oid)?;
+        let request_ref = model::forced_comment_request_ref(field(&request, "operationId")?);
+        let decision_ref = model::forced_comment_decision_ref(request_oid);
+        let snap = repository::checked_snapshot(vec![
+            request_ref.clone(),
+            decision_ref.clone(),
+            ACTIVATION.into(),
+            JOURNAL.into(),
+        ])?;
+        if snap.refs.get(&request_ref).map(String::as_str) != Some(request_oid)
+            || snap.refs.get(&decision_ref).map(String::as_str) != Some(decision_oid)
+        {
+            return Err(
+                "forced comment intent no longer has its exact canonical authorization".into(),
+            );
+        }
         return Ok(());
     };
     let task_id = field(intent, "bindingTaskId")?;
@@ -432,6 +464,99 @@ fn provider_error(started: bool, stderr: String) -> ProviderOutput {
         stdout: String::new(),
         stderr,
     }
+}
+
+fn source_task(task_id: &str) -> Result<(repository::Snapshot, String)> {
+    model::valid_id(task_id)?;
+    let mut patterns = repository::lifecycle_patterns(task_id);
+    patterns.extend([ACTIVATION.into(), JOURNAL.into()]);
+    let snap = repository::advertise(&patterns)?;
+    repository::validate_snapshot(&snap)?;
+    let lifecycle = model::lifecycle(&snap, task_id);
+    if lifecycle.len() != 1 {
+        return Err("comment source must have exactly one advertised lifecycle ref".into());
+    }
+    repository::materialize(std::slice::from_ref(&lifecycle[0].2))?;
+    let value = if lifecycle[0].0 == "waiting" {
+        crate::validators::waiting(&lifecycle[0].2, task_id)?
+    } else {
+        crate::validators::lifecycle(&lifecycle[0].0, &lifecycle[0].2, task_id)?
+    };
+    Ok((snap, field(&value, "taskOid")?.to_owned()))
+}
+
+fn read_target(repository: &str, issue_number: &str) -> Result<Value> {
+    let repository = model::github_repository(repository)?;
+    model::positive_decimal_id("issue number", issue_number)?;
+    let began = Instant::now();
+    let repo_out = provider(
+        &[
+            "api".into(),
+            format!("repos/{repository}"),
+            "--hostname".into(),
+            "github.com".into(),
+        ],
+        Duration::from_secs(30),
+    );
+    if !repo_out.success {
+        return Err(format!(
+            "GitHub repository identity read failed: {}",
+            repo_out.stderr
+        ));
+    }
+    let repo: Value = serde_json::from_str(&repo_out.stdout)
+        .map_err(|e| format!("parse GitHub repository identity: {e}"))?;
+    let repository_id = decimal(&repo["id"], "repository ID")?;
+    if repo["full_name"]
+        .as_str()
+        .is_none_or(|v| v.to_ascii_lowercase() != repository)
+    {
+        return Err(
+            "GitHub repository response does not match the canonical requested path".into(),
+        );
+    }
+    let remaining = Duration::from_secs(30).saturating_sub(began.elapsed());
+    if remaining.is_zero() {
+        return Err("GitHub target identity read exceeded overall deadline".into());
+    }
+    let issue_out = provider(
+        &[
+            "api".into(),
+            format!("repos/{repository}/issues/{issue_number}"),
+            "--hostname".into(),
+            "github.com".into(),
+        ],
+        remaining,
+    );
+    if !issue_out.success {
+        return Err(format!(
+            "GitHub issue identity read failed: {}",
+            issue_out.stderr
+        ));
+    }
+    let issue: Value = serde_json::from_str(&issue_out.stdout)
+        .map_err(|e| format!("parse GitHub issue identity: {e}"))?;
+    let issue_id = decimal(&issue["id"], "issue ID")?;
+    let canonical_number = decimal(&issue["number"], "issue number")?;
+    let issue_title = issue["title"]
+        .as_str()
+        .ok_or("GitHub issue title is malformed")?;
+    model::bounded("GitHub issue title", issue_title, 4_096)?;
+    if issue_title.contains('\r')
+        || issue_title
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err("GitHub issue title contains unsupported control characters".into());
+    }
+    if canonical_number != issue_number
+        || issue["repository_url"] != format!("https://api.github.com/repos/{repository}")
+    {
+        return Err("GitHub issue response does not match the canonical requested target".into());
+    }
+    Ok(
+        json!({"provider":"github","repository":repository,"repositoryId":repository_id,"issueId":issue_id,"issueNumber":canonical_number,"issueTitle":issue_title}),
+    )
 }
 
 fn decimal(value: &Value, name: &str) -> Result<String> {
@@ -844,6 +969,318 @@ fn deliver(intent_oid: &str, intent: &Value) -> Result<Value> {
     Err(format!(
         "comment intent {intent_oid} remains pending after bounded delivery: {last}"
     ))
+}
+
+pub(crate) fn associate(args: CommentAssociate) -> Result<()> {
+    model::bounded("operation-id", &args.operation_id, 256)?;
+    let target = read_target(&args.repository, &args.issue_number)?;
+    for _ in 0..3 {
+        let (base, task_oid) = source_task(&args.task_id)?;
+        let task_ref = model::github_binding_task_ref(&args.task_id);
+        let target_ref = model::github_binding_target_ref(
+            field(&target, "repositoryId")?,
+            field(&target, "issueId")?,
+        );
+        let mut patterns = repository::lifecycle_patterns(&args.task_id);
+        patterns.extend([
+            task_ref.clone(),
+            target_ref.clone(),
+            ACTIVATION.into(),
+            JOURNAL.into(),
+        ]);
+        let snap = repository::advertise(&patterns)?;
+        repository::validate_snapshot(&snap)?;
+        if model::lifecycle(&snap, &args.task_id) != model::lifecycle(&base, &args.task_id) {
+            continue;
+        }
+        let semantic = model::framed_digest(
+            "github-issue-binding-semantics",
+            &[
+                &args.task_id,
+                &task_oid,
+                field(&target, "repository")?,
+                field(&target, "repositoryId")?,
+                field(&target, "issueId")?,
+                field(&target, "issueNumber")?,
+                &args.operation_id,
+            ],
+        );
+        if let Some(oid) = snap
+            .refs
+            .get(&task_ref)
+            .or_else(|| snap.refs.get(&target_ref))
+        {
+            if snap.refs.get(&task_ref) != Some(oid) || snap.refs.get(&target_ref) != Some(oid) {
+                return Err(
+                    "GitHub issue binding task or target is already associated differently".into(),
+                );
+            }
+            repository::materialize(std::slice::from_ref(oid))?;
+            let value = crate::validators::comment::issue_binding(oid, &args.task_id)?;
+            if value["semanticId"] != semantic {
+                return Err("GitHub issue binding conflicts with requested semantics".into());
+            }
+            return print_json(
+                &json!({"bindingOid":oid,"taskRef":task_ref,"targetRef":target_ref}),
+            );
+        }
+        let value = json!({"formatVersion":2,"issueId":target["issueId"],"issueNumber":target["issueNumber"],"operationId":args.operation_id,"provider":"github","repository":target["repository"],"repositoryId":target["repositoryId"],"semanticId":semantic,"taskId":args.task_id,"taskOid":task_oid});
+        let oid = git::commit(&value, &[])?;
+        crate::validators::comment::issue_binding(&oid, &args.task_id)?;
+        let updates = [task_ref.clone(), target_ref.clone()]
+            .into_iter()
+            .map(|semantic_ref| Update {
+                semantic_ref,
+                old: None,
+                new: Some(oid.clone()),
+            })
+            .collect();
+        match commit_mutation(
+            &snap,
+            &args.operation_id,
+            updates,
+            vec![
+                (task_ref.clone(), oid.clone()),
+                (target_ref.clone(), oid.clone()),
+            ],
+        ) {
+            Ok(()) => {
+                return print_json(
+                    &json!({"bindingOid":oid,"taskRef":task_ref,"targetRef":target_ref}),
+                );
+            }
+            Err(e) if e.contains("atomic push rejected; semantic refs remain") => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err("GitHub issue association lost bounded contention retries".into())
+}
+
+fn request_packet(oid: &str, request: &Value, token: Option<&str>) -> Value {
+    let markdown_inline = |value: &str| {
+        value
+            .chars()
+            .flat_map(|character| {
+                if matches!(character, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>') {
+                    vec!['\\', character]
+                } else {
+                    vec![character]
+                }
+            })
+            .collect::<String>()
+    };
+    let literal_body = request["body"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let markdown = format!(
+        "# Choose how to post this GitHub comment\n\n**Nothing has been posted.** Decide whether [{} issue #{}: {}](https://github.com/{}/issues/{}) should become the lasting GitHub issue for **{}**, or permit only the exact comment shown below.\n\n## Exact proposed comment\n\nType: **{}**\n\n{}\n\n## Choose one\n\n1. **Associate normally (preferred if this issue is the task’s ongoing home):** Create a lasting association with this issue, then allow the fleet to post the exact comment above normally.\n2. **Authorize only this exact comment:** Allow the fleet to post only the displayed comment to this issue, without creating an ongoing association. The comment will include a warning that the task may not be associated with the issue.\n\nBoth choices permit a GitHub-visible comment. The recorded choice cannot be changed; the second choice applies only to this one comment. Optional context may explain the choice but cannot alter the target, type, or body.\n\n[Open the current Amp work thread]({}).",
+        request["repository"].as_str().unwrap_or(""),
+        request["issueNumber"].as_str().unwrap_or(""),
+        markdown_inline(request["issueTitle"].as_str().unwrap_or("")),
+        request["repository"].as_str().unwrap_or(""),
+        request["issueNumber"].as_str().unwrap_or(""),
+        markdown_inline(request["sourceTaskTitle"].as_str().unwrap_or("")),
+        request["kind"].as_str().unwrap_or(""),
+        literal_body,
+        request["ampThreadUrl"].as_str().unwrap_or(""),
+    );
+    json!({"profile":"task-dag-forced-comment-target-v1","markdown":markdown,"requestOid":oid,"requestRef":model::forced_comment_request_ref(field(request,"operationId").unwrap_or("")),"requestId":request["requestId"],"sourceTaskId":request["sourceTaskId"],"sourceTaskOid":request["sourceTaskOid"],"sourceTaskTitle":request["sourceTaskTitle"],"target":{"repository":request["repository"],"repositoryId":request["repositoryId"],"issueId":request["issueId"],"issueNumber":request["issueNumber"],"issueTitle":request["issueTitle"]},"kind":request["kind"],"body":request["body"],"ampThreadUrl":request["ampThreadUrl"],"decisionToken":token,"decisionTokenAvailable":token.is_some(),"decisionTokenInstruction":if token.is_some(){"Pass decisionToken separately to comment force-decide."}else{"The one-time token is not recoverable; create a fresh force-request operation if the first packet was lost."}})
+}
+
+pub(crate) fn force_request(args: CommentForceRequest) -> Result<()> {
+    model::bounded("operation-id", &args.operation_id, 256)?;
+    model::amp_thread_url(&args.amp_thread_url)?;
+    let input = model::normalize_comment_input(
+        std::str::from_utf8(
+            &fs::read(&args.body_file).map_err(|e| format!("read comment body file: {e}"))?,
+        )
+        .map_err(|_| "comment body file is not UTF-8")?,
+    )?;
+    let target = read_target(&args.repository, &args.issue_number)?;
+    let reference = model::forced_comment_request_ref(&args.operation_id);
+    let (snap, task_oid, binding) = find_binding(&args.task_id, &reference)?;
+    if binding.as_ref().is_some_and(|(_, binding)| {
+        binding["repositoryId"] == target["repositoryId"] && binding["issueId"] == target["issueId"]
+    }) {
+        return Err("requested target is already authorized by a normal GitHub issue binding; use comment post".into());
+    }
+    repository::materialize(std::slice::from_ref(&task_oid))?;
+    let source_task = crate::validators::task(&task_oid, &args.task_id)?;
+    let source_task_title = field(&source_task, "title")?;
+    let semantic = model::framed_digest(
+        "forced-comment-request-semantics",
+        &[
+            &args.task_id,
+            &task_oid,
+            field(&target, "repository")?,
+            field(&target, "repositoryId")?,
+            field(&target, "issueId")?,
+            field(&target, "issueNumber")?,
+            &args.kind,
+            &input,
+            &args.operation_id,
+            &args.amp_thread_url,
+        ],
+    );
+    if let Some(oid) = snap.refs.get(&reference) {
+        repository::materialize(std::slice::from_ref(oid))?;
+        let value = crate::validators::comment::forced_request(oid)?;
+        if value["semanticId"] != semantic {
+            return Err(
+                "forced comment operation was already used with different semantics".into(),
+            );
+        }
+        return print_json(&request_packet(oid, &value, None));
+    }
+    let token = claim_token()?;
+    let request_id = model::framed_digest("forced-comment-request-id", &[&semantic]);
+    let value = json!({"ampThreadUrl":args.amp_thread_url,"body":input,"bodyDigest":model::digest(&input),"createdAt":timestamp()?,"formatVersion":2,"issueId":target["issueId"],"issueNumber":target["issueNumber"],"issueTitle":target["issueTitle"],"kind":args.kind,"operationId":args.operation_id,"provider":"github","repository":target["repository"],"repositoryId":target["repositoryId"],"requestId":request_id,"semanticId":semantic,"sourceTaskId":args.task_id,"sourceTaskOid":task_oid,"sourceTaskTitle":source_task_title,"tokenDigest":model::digest(&token)});
+    let oid = git::commit(&value, &[])?;
+    crate::validators::comment::forced_request(&oid)?;
+    commit_mutation(
+        &snap,
+        &args.operation_id,
+        vec![Update {
+            semantic_ref: reference.clone(),
+            old: None,
+            new: Some(oid.clone()),
+        }],
+        vec![(reference, oid.clone())],
+    )?;
+    print_json(&request_packet(&oid, &value, Some(&token)))
+}
+
+pub(crate) fn force_decide(args: CommentForceDecide) -> Result<()> {
+    model::oid(&args.request_oid)?;
+    model::bounded("operation-id", &args.operation_id, 256)?;
+    model::bounded("evidence", &args.evidence, 4096)?;
+    repository::materialize(std::slice::from_ref(&args.request_oid))?;
+    let request = crate::validators::comment::forced_request(&args.request_oid)?;
+    let request_ref = model::forced_comment_request_ref(field(&request, "operationId")?);
+    let advertised = repository::advertise(std::slice::from_ref(&request_ref))?;
+    if advertised.refs.get(&request_ref) != Some(&args.request_oid) {
+        return Err("forced comment request is not the canonical published request".into());
+    }
+    if request["tokenDigest"] != model::digest(&args.decision_token) {
+        return Err("decision token does not authorize this forced comment request".into());
+    }
+    let raw =
+        fs::read(&args.context_file).map_err(|e| format!("read decision context file: {e}"))?;
+    let context = std::str::from_utf8(&raw)
+        .map_err(|_| "decision context file is not UTF-8")?
+        .replace("\r\n", "\n");
+    if context.contains('\r')
+        || context.len() > 4096
+        || context
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        return Err("decision context is invalid or exceeds 4096 bytes".into());
+    }
+    let context = context.trim_matches('\n').to_owned();
+    let reference = model::forced_comment_decision_ref(&args.request_oid);
+    let semantic = model::framed_digest(
+        "forced-comment-decision-semantics",
+        &[
+            &args.request_oid,
+            &args.choice,
+            &args.evidence_kind,
+            &args.evidence,
+            &context,
+            &args.operation_id,
+        ],
+    );
+    let snap =
+        repository::checked_snapshot(vec![reference.clone(), ACTIVATION.into(), JOURNAL.into()])?;
+    if let Some(oid) = snap.refs.get(&reference) {
+        repository::materialize(std::slice::from_ref(oid))?;
+        let value = crate::validators::comment::forced_decision(oid, &args.request_oid)?;
+        if value["semanticId"] != semantic {
+            return Err("forced comment decision already exists with different semantics".into());
+        }
+        return print_json(&json!({"decisionOid":oid,"decisionRef":reference,"decision":value}));
+    }
+    let value = json!({"choice":args.choice,"context":context,"decidedAt":timestamp()?,"evidence":args.evidence,"evidenceKind":args.evidence_kind,"formatVersion":2,"operationId":args.operation_id,"requestOid":args.request_oid,"semanticId":semantic});
+    let oid = git::commit(&value, std::slice::from_ref(&args.request_oid))?;
+    crate::validators::comment::forced_decision(&oid, &args.request_oid)?;
+    commit_mutation(
+        &snap,
+        &args.operation_id,
+        vec![Update {
+            semantic_ref: reference.clone(),
+            old: None,
+            new: Some(oid.clone()),
+        }],
+        vec![(reference.clone(), oid.clone())],
+    )?;
+    print_json(&json!({"decisionOid":oid,"decisionRef":reference,"decision":value}))
+}
+
+pub(crate) fn force_send(args: CommentForceSend) -> Result<()> {
+    model::oid(&args.request_oid)?;
+    model::bounded("operation-id", &args.operation_id, 256)?;
+    repository::materialize(std::slice::from_ref(&args.request_oid))?;
+    let request = crate::validators::comment::forced_request(&args.request_oid)?;
+    let request_ref = model::forced_comment_request_ref(field(&request, "operationId")?);
+    let decision_ref = model::forced_comment_decision_ref(&args.request_oid);
+    let intent_ref = model::comment_intent_ref(&args.operation_id);
+    let snap = repository::checked_snapshot(vec![
+        request_ref.clone(),
+        decision_ref.clone(),
+        intent_ref.clone(),
+        ACTIVATION.into(),
+        JOURNAL.into(),
+    ])?;
+    if snap.refs.get(&request_ref) != Some(&args.request_oid) {
+        return Err("forced comment request is not the canonical published request".into());
+    }
+    let decision_oid = snap
+        .refs
+        .get(&decision_ref)
+        .ok_or("forced comment request has no canonical decision")?;
+    repository::materialize(std::slice::from_ref(decision_oid))?;
+    let decision = crate::validators::comment::forced_decision(decision_oid, &args.request_oid)?;
+    if decision["choice"] == "associate" {
+        return Err("decision chose associate: run comment associate, then normal comment post; force-send will not post".into());
+    }
+    let semantic = model::framed_digest(
+        "forced-comment-intent-semantics",
+        &[&args.request_oid, decision_oid, &args.operation_id],
+    );
+    let (oid, intent) = if let Some(oid) = snap.refs.get(&intent_ref) {
+        repository::materialize(std::slice::from_ref(oid))?;
+        let v = crate::validators::comment::intent(oid)?;
+        if v["semanticId"] != semantic {
+            return Err("forced send operation was already used with different semantics".into());
+        }
+        (oid.clone(), v)
+    } else {
+        let intent_id = model::framed_digest("github-comment-intent-id", &[&semantic]);
+        let input = field(&request, "body")?;
+        let body = model::render_comment(field(&request, "kind")?, input, &intent_id, true)?;
+        let v = json!({"body":body,"bodyDigest":model::digest(&body),"createdAt":timestamp()?,"forcedDecisionOid":decision_oid,"formatVersion":2,"inputBody":input,"inputBodyDigest":model::digest(input),"intentId":intent_id,"issueId":request["issueId"],"issueNumber":request["issueNumber"],"kind":request["kind"],"marker":format!("<!-- task-dag:projection:{intent_id} -->"),"operationId":args.operation_id,"provider":"github","repository":request["repository"],"repositoryId":request["repositoryId"],"semanticId":semantic,"sourceTaskId":request["sourceTaskId"],"sourceTaskOid":request["sourceTaskOid"]});
+        let oid = git::commit(&v, &[])?;
+        crate::validators::comment::intent(&oid)?;
+        commit_mutation(
+            &snap,
+            &args.operation_id,
+            vec![Update {
+                semantic_ref: intent_ref.clone(),
+                old: None,
+                new: Some(oid.clone()),
+            }],
+            vec![(intent_ref.clone(), oid.clone())],
+        )?;
+        (oid, v)
+    };
+    let receipt = deliver(&oid, &intent)?;
+    print_json(
+        &json!({"commentId":receipt["commentId"],"commentUrl":receipt["commentUrl"],"intentOid":oid,"intentRef":intent_ref}),
+    )
 }
 
 pub(crate) fn post(args: CommentPost) -> Result<()> {
