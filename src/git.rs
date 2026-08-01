@@ -8,11 +8,27 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 thread_local! {
     static OBJECTS: RefCell<BTreeMap<String, Vec<u8>>> = const { RefCell::new(BTreeMap::new()) };
+    static CACHE_ONLY: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjectInfo {
+    pub(crate) kind: Option<String>,
+    pub(crate) size: Option<usize>,
+}
+
+pub(crate) fn set_cache_only(value: bool) {
+    CACHE_ONLY.with(|flag| *flag.borrow_mut() = value);
+}
+
+fn cache_only() -> bool {
+    CACHE_ONLY.with(|flag| *flag.borrow())
 }
 
 fn batch(args: &[&str], objects: &[String]) -> Result<Vec<u8>> {
     let mut child = Command::new("git")
         .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -36,7 +52,7 @@ fn batch(args: &[&str], objects: &[String]) -> Result<Vec<u8>> {
 
 /// Return the exact object type for each requested OID, or `None` when it is
 /// absent. Git's batch protocol keeps this bounded operation to one process.
-pub(crate) fn batch_object_types(objects: &[String]) -> Result<BTreeMap<String, Option<String>>> {
+pub(crate) fn batch_object_info(objects: &[String]) -> Result<BTreeMap<String, ObjectInfo>> {
     let output = batch(&["cat-file", "--batch-check"], objects)?;
     let text = String::from_utf8(output).map_err(|e| e.to_string())?;
     let lines: Vec<_> = text.lines().collect();
@@ -56,10 +72,13 @@ pub(crate) fn batch_object_types(objects: &[String]) -> Result<BTreeMap<String, 
                 if fields.next().is_some() {
                     return Err("git batch-check missing response malformed".into());
                 }
-                None
+                ObjectInfo {
+                    kind: None,
+                    size: None,
+                }
             } else {
                 model::bounded("Git object type", kind, 64)?;
-                fields
+                let size = fields
                     .next()
                     .ok_or("git batch-check object size absent")?
                     .parse::<usize>()
@@ -67,11 +86,21 @@ pub(crate) fn batch_object_types(objects: &[String]) -> Result<BTreeMap<String, 
                 if fields.next().is_some() {
                     return Err("git batch-check response has extra fields".into());
                 }
-                Some(kind.to_owned())
+                ObjectInfo {
+                    kind: Some(kind.to_owned()),
+                    size: Some(size),
+                }
             };
             Ok((requested.clone(), value))
         })
         .collect()
+}
+
+pub(crate) fn batch_object_types(objects: &[String]) -> Result<BTreeMap<String, Option<String>>> {
+    Ok(batch_object_info(objects)?
+        .into_iter()
+        .map(|(oid, info)| (oid, info.kind))
+        .collect())
 }
 
 /// Read and cache commit bytes using Git's length-delimited batch protocol.
@@ -205,6 +234,8 @@ pub(crate) fn object_json(object: &str) -> Result<Value> {
         raw.split_once("\n\n")
             .map(|(_, message)| message.to_owned())
             .ok_or_else(|| format!("commit object {object} has no message"))?
+    } else if cache_only() {
+        return Err(format!("cache-only inspection missed object {object}"));
     } else {
         output(["show", "-s", "--format=%B", object])?
     };
@@ -222,6 +253,9 @@ pub(crate) fn parents(object: &str) -> Result<Vec<String>> {
     let cached = OBJECTS.with(|cache| cache.borrow().get(object).cloned());
     let raw = match cached {
         Some(raw) => String::from_utf8(raw).map_err(|e| e.to_string())?,
+        None if cache_only() => {
+            return Err(format!("cache-only inspection missed object {object}"));
+        }
         None => output(["cat-file", "-p", object])?,
     };
     raw.lines()
@@ -235,6 +269,7 @@ pub(crate) fn parents(object: &str) -> Result<Vec<String>> {
         })
         .collect()
 }
+
 pub(crate) fn lifecycle_task(state: &str) -> Result<String> {
     object_json(state)?["taskOid"]
         .as_str()

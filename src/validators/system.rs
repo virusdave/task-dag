@@ -3,7 +3,7 @@ use crate::{Result, git, model};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-fn activation_record(oid: &str) -> Result<(Value, Vec<String>)> {
+fn activation_record(oid: &str, inspect_floor_parent: bool) -> Result<(Value, Vec<String>)> {
     model::oid(oid)?;
     let value = git::object_json(oid)?;
     let map = value
@@ -85,7 +85,9 @@ fn activation_record(oid: &str) -> Result<(Value, Vec<String>)> {
             }
             let floor = value["trustedFloor"].as_str().unwrap();
             if (parents.len() == 2 && parents[1] != floor)
-                || (parents.len() == 1 && git::first_parent(&parents[0])? != floor)
+                || (inspect_floor_parent
+                    && parents.len() == 1
+                    && git::first_parent(&parents[0])? != floor)
             {
                 return Err("activation genesis trusted-floor relation is malformed".into());
             }
@@ -120,12 +122,12 @@ fn activation_record(oid: &str) -> Result<(Value, Vec<String>)> {
 }
 
 pub(crate) fn activation(oid: &str) -> Result<Value> {
-    let (value, parents) = activation_record(oid)?;
+    let (value, parents) = activation_record(oid, true)?;
     if value.get("logicalId").is_some() {
         // The prior published activation is assumed valid. Validate only this
         // transition and its immediate predecessor; never replay activation
         // history on a normal command.
-        let (prior, _) = activation_record(&parents[0])?;
+        let (prior, _) = activation_record(&parents[0], true)?;
         let runtimes = value["allowedRuntimeCommits"]
             .as_array()
             .ok_or("activation runtimes malformed")?;
@@ -367,4 +369,60 @@ pub(crate) fn journal(oid: &str, activation_oid: &str) -> Result<Value> {
         }
     }
     Ok(record.value)
+}
+
+/// Validate the two current system records without opening predecessors,
+/// runtime commits, trusted floors, or journal outputs.
+pub(crate) fn current_system(activation_oid: &str, journal_oid: &str) -> Result<()> {
+    let (activation, _) = activation_record(activation_oid, false)?;
+    let runtime = crate::runtime()?;
+    if !activation["allowedRuntimeCommits"]
+        .as_array()
+        .ok_or("activation runtimes malformed")?
+        .iter()
+        .any(|v| v.as_str() == Some(&runtime))
+    {
+        return Err(format!("runtime {runtime} is not authorized by activation"));
+    }
+    let journal = shallow_journal(journal_oid)?;
+    model::bounded(
+        "journal operationId",
+        journal.value["operationId"]
+            .as_str()
+            .ok_or("journal operationId malformed")?,
+        256,
+    )?;
+    let updates = journal.value["updates"]
+        .as_array()
+        .ok_or("journal updates malformed")?;
+    let outputs = journal.value["outputs"]
+        .as_array()
+        .ok_or("journal outputs malformed")?;
+    if updates.len() > 1_000 || outputs.len() > 1_000 {
+        return Err("current journal list exceeds hard limit".into());
+    }
+    for output in outputs {
+        model::bounded(
+            "journal output semanticRef",
+            output["semanticRef"]
+                .as_str()
+                .ok_or("journal output ref malformed")?,
+            512,
+        )?;
+    }
+    if journal.value["activation"] != activation_oid {
+        return Err("journal activation does not equal advertised activation".into());
+    }
+    let journal_runtime = journal.value["runtimeCommit"]
+        .as_str()
+        .ok_or("journal runtime malformed")?;
+    if !activation["allowedRuntimeCommits"]
+        .as_array()
+        .ok_or("activation runtimes malformed")?
+        .iter()
+        .any(|value| value.as_str() == Some(journal_runtime))
+    {
+        return Err("journal runtime is not authorized by activation".into());
+    }
+    Ok(())
 }

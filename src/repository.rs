@@ -4,9 +4,25 @@ use crate::{
     runtime,
 };
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    io::{BufRead, BufReader},
     process::Command,
+    process::Stdio,
 };
+
+const CURRENT_ADVERTISEMENT_LINES: usize = 502;
+const CURRENT_ADVERTISEMENT_BYTES: usize = 512 * 1024;
+const MAX_INSPECTION_OBJECT_BYTES: usize = 256 * 1024;
+const MAX_INSPECTION_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+thread_local! {
+    static INSPECTION: RefCell<(BTreeSet<String>, usize)> = const { RefCell::new((BTreeSet::new(), 0)) };
+}
+
+pub(crate) fn start_local_inspection() {
+    INSPECTION.with(|inspection| *inspection.borrow_mut() = (BTreeSet::new(), 0));
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Snapshot {
@@ -26,6 +42,76 @@ pub(crate) fn task_snapshot(id: &str, mut extras: Vec<String>) -> Result<Snapsho
 
 pub(crate) fn advertise(patterns: &[String]) -> Result<Snapshot> {
     advertise_remote("origin", patterns)
+}
+
+/// Advertise only the five native-v2 lifecycle namespaces and the two system
+/// refs. This parser deliberately does not call `git check-ref-format`: the
+/// accepted grammar below is finite and stricter.
+pub(crate) fn advertise_current_state() -> Result<Snapshot> {
+    let patterns = [
+        "refs/heads/tasks/frontier/v2-*",
+        "refs/heads/tasks/active/v2-*",
+        "refs/heads/tasks/blocked/v2-*",
+        "refs/heads/tasks/waiting/v2-*",
+        "refs/heads/tasks/done/v2-*",
+        ACTIVATION,
+        JOURNAL,
+    ];
+    let mut child = Command::new("git")
+        .args(["ls-remote", "--refs", "--", "origin"])
+        .args(patterns)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("run bounded current-state advertisement: {e}"))?;
+    let stdout = child.stdout.take().ok_or("open advertisement stdout")?;
+    let mut refs = BTreeMap::new();
+    let mut bytes = 0usize;
+    let mut lines = 0usize;
+    for line in BufReader::new(stdout).split(b'\n') {
+        let line = line.map_err(|e| format!("read advertisement: {e}"))?;
+        if line.is_empty() {
+            continue;
+        }
+        lines += 1;
+        bytes = bytes
+            .checked_add(line.len() + 1)
+            .ok_or("advertisement byte overflow")?;
+        if lines > CURRENT_ADVERTISEMENT_LINES || bytes > CURRENT_ADVERTISEMENT_BYTES {
+            return Err("current-state advertisement exceeds hard limit".into());
+        }
+        let text = std::str::from_utf8(&line).map_err(|_| "advertisement is not UTF-8")?;
+        let (oid, reference) = text
+            .split_once('\t')
+            .ok_or_else(|| format!("malformed current-state advertisement line: {text}"))?;
+        model::oid(oid)?;
+        let valid = reference == ACTIVATION
+            || reference == JOURNAL
+            || ["frontier", "active", "blocked", "waiting", "done"]
+                .iter()
+                .any(|state| {
+                    model::parse_state_ref(reference, state)
+                        .is_some_and(|id| model::valid_id(id).is_ok())
+                });
+        if !valid {
+            return Err(format!(
+                "current-state advertisement returned malformed or out-of-scope ref {reference}"
+            ));
+        }
+        if refs.insert(reference.into(), oid.into()).is_some() {
+            return Err(format!(
+                "current-state advertisement returned duplicate ref {reference}"
+            ));
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait for advertisement: {e}"))?;
+    if !status.success() {
+        return Err(format!("current-state advertisement exited with {status}"));
+    }
+    Ok(Snapshot { refs })
 }
 
 fn valid_exact_ref(reference: &str) -> bool {
@@ -135,6 +221,45 @@ pub(crate) fn materialize(oids: &[String]) -> Result<()> {
     materialize_remote("origin", oids)
 }
 
+pub(crate) fn materialize_local(oids: &[String]) -> Result<()> {
+    let unique: BTreeSet<_> = oids.iter().cloned().collect();
+    let objects: Vec<_> = unique.into_iter().collect();
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let info = git::batch_object_info(&objects)?;
+    let mut charge = Vec::new();
+    for oid in &objects {
+        let item = info.get(oid).ok_or("git batch-check omitted object")?;
+        if item.kind.as_deref() != Some("commit") {
+            return Err(format!(
+                "validator closure object {oid} is missing or is not a commit"
+            ));
+        }
+        let size = item.size.ok_or("git batch-check object size absent")?;
+        if size > MAX_INSPECTION_OBJECT_BYTES {
+            return Err(format!("object {oid} exceeds per-object byte limit"));
+        }
+        charge.push((oid.clone(), size));
+    }
+    INSPECTION.with(|inspection| -> Result<()> {
+        let mut inspection = inspection.borrow_mut();
+        for (oid, size) in charge {
+            if inspection.0.insert(oid) {
+                inspection.1 = inspection
+                    .1
+                    .checked_add(size)
+                    .ok_or("object byte total overflow")?;
+                if inspection.1 > MAX_INSPECTION_TOTAL_BYTES {
+                    return Err("objects exceed cumulative byte limit".into());
+                }
+            }
+        }
+        Ok(())
+    })?;
+    git::cache_commit_objects(&objects)
+}
+
 pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
     model::bounded("remote", remote, 4096)?;
     let unique: BTreeSet<_> = oids.iter().cloned().collect();
@@ -164,6 +289,7 @@ pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
             remote,
         ]);
         fetch.args(&missing);
+        fetch.env("GIT_NO_LAZY_FETCH", "1");
         let out = fetch
             .output()
             .map_err(|e| format!("run bounded fetch: {e}"))?;

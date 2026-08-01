@@ -1,9 +1,198 @@
 use super::print_json;
 use crate::{Result, model, repository};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 const FRONTIER_V2_SCOPE: &str = "refs/heads/tasks/frontier/v2-*";
+const CURRENT_MAX_TASKS: usize = 500;
+const CURRENT_MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+const CURRENT_MAX_RELATIONS: usize = 50_000;
+
+struct CacheOnlyGuard;
+
+impl Drop for CacheOnlyGuard {
+    fn drop(&mut self) {
+        crate::git::set_cache_only(false);
+    }
+}
+
+fn current_rows(snapshot: &repository::Snapshot) -> Result<Vec<(String, String, String, String)>> {
+    let mut seen = BTreeSet::new();
+    let mut rows = Vec::new();
+    for (reference, oid) in &snapshot.refs {
+        for state in ["frontier", "active", "blocked", "waiting", "done"] {
+            if let Some(id) = model::parse_state_ref(reference, state) {
+                model::valid_id(id)?;
+                if !seen.insert(id.to_owned()) {
+                    return Err(format!("Task-ID {id} appears in multiple lifecycle states"));
+                }
+                rows.push((reference.clone(), state.into(), id.into(), oid.clone()));
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn current_fingerprint(refs: &BTreeMap<String, String>) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"task-dag-current-state-v1\0");
+    for (reference, oid) in refs {
+        hash.update((reference.len() as u64).to_be_bytes());
+        hash.update(reference.as_bytes());
+        hash.update((oid.len() as u64).to_be_bytes());
+        hash.update(oid.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
+    if !(1..=CURRENT_MAX_TASKS).contains(&max_tasks) {
+        return Err("--max-tasks must be between 1 and 500".into());
+    }
+    repository::start_local_inspection();
+    let first = repository::advertise_current_state()?;
+    let captured = current_rows(&first)?;
+    if captured.len() > max_tasks {
+        return Err(format!(
+            "current-state has {} tasks, exceeding --max-tasks {max_tasks}",
+            captured.len()
+        ));
+    }
+    let activation = first
+        .refs
+        .get(model::ACTIVATION)
+        .ok_or("v2 activation is absent")?
+        .clone();
+    let journal = first
+        .refs
+        .get(model::JOURNAL)
+        .ok_or("transition journal is absent")?
+        .clone();
+    let lifecycle_objects: Vec<_> = captured
+        .iter()
+        .map(|row| row.3.clone())
+        .chain([activation.clone(), journal.clone()])
+        .collect();
+    repository::materialize_local(&lifecycle_objects)?;
+    crate::git::set_cache_only(true);
+    let _guard = CacheOnlyGuard;
+    crate::validators::current_system(&activation, &journal)?;
+    let mut relation_count = 0usize;
+    let mut charge_relations = |count: usize| -> Result<()> {
+        relation_count = relation_count
+            .checked_add(count)
+            .ok_or("current-state relation count overflow")?;
+        if relation_count > CURRENT_MAX_RELATIONS {
+            return Err("current-state structural relations exceed hard limit".into());
+        }
+        Ok(())
+    };
+    for (_, state, _, state_oid) in &captured {
+        if state == "waiting" {
+            let raw = crate::git::object_json(state_oid)?;
+            if let Some(children) = raw.get("children") {
+                charge_relations(
+                    children
+                        .as_array()
+                        .ok_or("waiting children malformed")?
+                        .len(),
+                )?;
+            }
+        }
+    }
+    let mut records = Vec::with_capacity(captured.len());
+    let mut tasks = BTreeSet::new();
+    for (reference, state, id, state_oid) in &captured {
+        let record = crate::validators::current_lifecycle(state, state_oid, id)?;
+        let task_oid = record_task(&record, &state)?;
+        tasks.insert(task_oid.clone());
+        records.push((reference, state, id, state_oid, record, task_oid));
+    }
+    repository::materialize_local(&tasks.into_iter().collect::<Vec<_>>())?;
+    let identity: BTreeMap<_, _> = records
+        .iter()
+        .map(|(_, _, id, _, _, oid)| ((*id).clone(), oid.clone()))
+        .collect();
+    let resolve = |edge: &Value, kind: &str| -> Result<()> {
+        let id = edge["taskId"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task-ID malformed"))?;
+        let oid = edge["taskOid"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task OID malformed"))?;
+        if identity.get(id).map(String::as_str) != Some(oid) {
+            return Err(format!(
+                "{kind} {id} is absent from current-state closure or names a different Task OID"
+            ));
+        }
+        Ok(())
+    };
+    let mut rows = Vec::with_capacity(records.len());
+    for (_, _, id, _, _, task_oid) in &records {
+        let raw = crate::git::object_json(task_oid)?;
+        if raw["taskId"].as_str() != Some(id) {
+            return Err("Task object's own taskId is wrong".into());
+        }
+        let requirements = raw["requirements"]
+            .as_array()
+            .ok_or("Task requirements malformed")?;
+        charge_relations(requirements.len() + usize::from(!raw["structuralParent"].is_null()))?;
+    }
+    for (reference, state, id, state_oid, record, task_oid) in records {
+        let task = crate::validators::task(&task_oid, id)?;
+        if !task["structuralParent"].is_null() {
+            resolve(&task["structuralParent"], "structural parent")?;
+        }
+        for requirement in task["requirements"]
+            .as_array()
+            .ok_or("Task requirements malformed")?
+        {
+            resolve(requirement, "requirement")?;
+        }
+        let direct_children = if state == "waiting" && record.get("intentOid").is_none() {
+            let children = record["children"]
+                .as_array()
+                .ok_or("waiting children malformed")?;
+            for child in children {
+                resolve(child, "waiting child")?;
+            }
+            Value::Array(
+                children
+                    .iter()
+                    .map(|child| json!({"taskId":child["taskId"],"taskOid":child["taskOid"]}))
+                    .collect(),
+            )
+        } else {
+            json!([])
+        };
+        let context = json!({
+            "directChildren": direct_children,
+            "directRequirements": task["requirements"],
+            "state": state,
+            "stateOid": state_oid,
+            "structuralParent": task["structuralParent"],
+            "task": task,
+            "taskId": id,
+            "taskOid": task_oid,
+        });
+        rows.push(json!({"context":context,"record":record,"ref":reference,"state":state,"stateOid":state_oid,"taskId":id,"taskOid":task_oid}));
+    }
+    let second = repository::advertise_current_state()?;
+    if first.refs != second.refs {
+        return Err(
+            "retryable current-state drift: authoritative refs changed between advertisements"
+                .into(),
+        );
+    }
+    let output = json!({"activationOid":activation,"fingerprint":current_fingerprint(&first.refs),"formatVersion":1,"journalOid":journal,"rows":rows});
+    let encoded = serde_json::to_vec(&output).map_err(|e| e.to_string())?;
+    if encoded.len() > CURRENT_MAX_OUTPUT_BYTES {
+        return Err("current-state JSON output exceeds hard limit".into());
+    }
+    println!("{}", String::from_utf8(encoded).map_err(|e| e.to_string())?);
+    Ok(())
+}
 
 fn frontier_id(reference: &str) -> Result<&str> {
     let id = model::parse_state_ref(reference, "frontier")

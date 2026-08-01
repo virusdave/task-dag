@@ -112,6 +112,10 @@ enum Commands {
         task_id: String,
     },
     Frontier,
+    CurrentState {
+        #[arg(long)]
+        max_tasks: usize,
+    },
     Comment(Unsupported),
     Delegate {
         #[command(subcommand)]
@@ -351,6 +355,7 @@ pub(crate) fn run() -> Result<()> {
         Commands::Deps { task_id } => commands::readers::deps(&task_id),
         Commands::Context { task_id } => commands::readers::context(&task_id),
         Commands::Frontier => commands::readers::frontier(),
+        Commands::CurrentState { max_tasks } => commands::readers::current_state(max_tasks),
         Commands::Comment(_) => commands::unsupported::fail("comment"),
         Commands::Delegate {
             command: DelegateCommands::Create(args),

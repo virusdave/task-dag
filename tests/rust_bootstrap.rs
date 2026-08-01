@@ -143,6 +143,39 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         .as_str()
         .unwrap()
         .to_owned();
+    let current = success(
+        &a,
+        &["current-state", "--max-tasks", "500"],
+        "unused-token-000",
+        100,
+    );
+    assert_eq!(current["formatVersion"], 1);
+    assert_eq!(current["activationOid"], activation_lease);
+    assert!(current["journalOid"].as_str().is_some());
+    assert!(current.get("activation").is_none());
+    assert!(current.get("journal").is_none());
+    assert_eq!(current["rows"], serde_json::json!([]));
+    assert_eq!(current["fingerprint"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        current,
+        success(
+            &a,
+            &["current-state", "--max-tasks", "500"],
+            "unused-token-000",
+            100,
+        ),
+        "unchanged current-state output must be deterministic"
+    );
+    for invalid in ["0", "501"] {
+        let rejected = cli(
+            &a,
+            &["current-state", "--max-tasks", invalid],
+            "unused-token-000",
+            100,
+        );
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("between 1 and 500"));
+    }
     let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     let legacy_frontier = ok(
         &a,

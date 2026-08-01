@@ -7,6 +7,453 @@ fn delegated_task_matches(waiting: &Value, task_oid: &str) -> bool {
     waiting["parentTaskOid"].as_str() == Some(task_oid)
 }
 
+/// Validate only the current lifecycle record and its immediate parent
+/// header. Historical lifecycle parents and child state objects are opaque.
+pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
+    if state == "waiting" {
+        return current_waiting(oid, id);
+    }
+    let value = match state {
+        "frontier" => object(
+            oid,
+            "frontier",
+            &["formatVersion", "operationId", "taskId", "taskOid"],
+            &[
+                &[],
+                &["semanticId"],
+                &["logicalId", "releasedClaim"],
+                &["logicalId", "releasedBlock"],
+            ],
+        )?,
+        "active" => object(
+            oid,
+            "active",
+            &[
+                "attemptId",
+                "claimToken",
+                "claimedAt",
+                "expiresAt",
+                "formatVersion",
+                "host",
+                "logicalId",
+                "owner",
+                "sessionId",
+                "taskId",
+                "taskOid",
+            ],
+            &[
+                &[],
+                &["operationId"],
+                &["semanticId"],
+                &["operationId", "semanticId"],
+                &["operationId", "reclaimRequired"],
+            ],
+        )?,
+        "blocked" => object(
+            oid,
+            "blocked",
+            &[
+                "formatVersion",
+                "operationId",
+                "reason",
+                "taskId",
+                "taskOid",
+            ],
+            &[
+                &["authorization", "blockedAt", "claimTokenDigest"],
+                &[
+                    "authorizationRequired",
+                    "condition",
+                    "evidence",
+                    "logicalId",
+                    "question",
+                ],
+            ],
+        )?,
+        "done" => object(
+            oid,
+            "done",
+            &["formatVersion", "logicalId", "taskId", "taskOid"],
+            &[
+                &["attemptId", "oldMaster", "publicationCommit"],
+                &["attemptId", "authorization", "description", "evidence"],
+                &["children", "manifestOid", "operationId"],
+                &["acceptedOid", "intentOid", "operationId"],
+                &[
+                    "closeOid",
+                    "closeRef",
+                    "declarationOid",
+                    "declarationRef",
+                    "operationId",
+                ],
+            ],
+        )?,
+        _ => return Err(format!("unsupported lifecycle validator {state}")),
+    };
+    let task_oid = id_oid(&value, "taskId", "taskOid", id)?;
+    let parents = git::parents(oid)?;
+    let task_position = if (state == "frontier"
+        && value.get("releasedClaim").is_none()
+        && value.get("releasedBlock").is_none())
+        || (state == "active" && parents.len() == 1)
+    {
+        0
+    } else {
+        1
+    };
+    if parents.get(task_position) != Some(&task_oid) {
+        return Err(format!(
+            "{state} record has wrong immediate Task parent ordering"
+        ));
+    }
+    if let Some(v) = value.get("semanticId") {
+        digest("semanticId", v)?;
+    }
+    if let Some(v) = value.get("logicalId") {
+        digest("logicalId", v)?;
+    }
+    match state {
+        "frontier" if parents.len() != if task_position == 0 { 1 } else { 2 } => {
+            return Err("frontier record has wrong parent count".into());
+        }
+        "active" => {
+            if !matches!(parents.len(), 1 | 2) {
+                return Err("active record has wrong immediate parent count".into());
+            }
+            model::validate_reap_claim(
+                value.clone(),
+                id,
+                value["expiresAt"]
+                    .as_u64()
+                    .ok_or("active expiresAt malformed")?,
+            )?;
+        }
+        "blocked" => {
+            if parents.len() != 2 {
+                return Err("blocked record must have exact parents [active, Task]".into());
+            }
+            model::bounded(
+                "block reason",
+                value["reason"].as_str().ok_or("block reason malformed")?,
+                16_384,
+            )?;
+            model::bounded(
+                "blocked operationId",
+                value["operationId"]
+                    .as_str()
+                    .ok_or("blocked operationId malformed")?,
+                256,
+            )?;
+            if value.get("authorizationRequired").is_some() {
+                if value["authorizationRequired"] != true
+                    || value["condition"] != serde_json::json!({"kind":"manual"})
+                {
+                    return Err("legacy blocked manual authorization is malformed".into());
+                }
+                digest("logicalId", &value["logicalId"])?;
+                model::bounded(
+                    "block question",
+                    value["question"]
+                        .as_str()
+                        .ok_or("block question malformed")?,
+                    4_096,
+                )?;
+                let evidence = value["evidence"]
+                    .as_array()
+                    .ok_or("block evidence malformed")?;
+                if evidence.len() > 64 {
+                    return Err("block evidence has too many entries".into());
+                }
+                for item in evidence {
+                    model::bounded(
+                        "block evidence",
+                        item.as_str().ok_or("block evidence malformed")?,
+                        4_096,
+                    )?;
+                }
+            } else {
+                model::bounded(
+                    "block authorization",
+                    value["authorization"]
+                        .as_str()
+                        .ok_or("block authorization malformed")?,
+                    4_096,
+                )?;
+                digest("claimTokenDigest", &value["claimTokenDigest"])?;
+                value["blockedAt"].as_u64().ok_or("blockedAt malformed")?;
+            }
+        }
+        "done" => {
+            for key in [
+                "publicationCommit",
+                "oldMaster",
+                "manifestOid",
+                "acceptedOid",
+                "intentOid",
+                "closeOid",
+                "declarationOid",
+            ] {
+                if let Some(v) = value.get(key) {
+                    model::oid(v.as_str().ok_or_else(|| format!("done {key} malformed"))?)?;
+                }
+            }
+            if let Some(attempt) = value.get("attemptId") {
+                digest("done attemptId", attempt)?;
+            }
+            if let Some(operation) = value.get("operationId") {
+                model::bounded(
+                    "done operationId",
+                    operation.as_str().ok_or("done operationId malformed")?,
+                    256,
+                )?;
+            }
+            if value.get("evidence").is_some() {
+                model::bounded(
+                    "done authorization",
+                    value["authorization"]
+                        .as_str()
+                        .ok_or("done authorization malformed")?,
+                    4_096,
+                )?;
+                model::bounded(
+                    "done description",
+                    value["description"]
+                        .as_str()
+                        .ok_or("done description malformed")?,
+                    16_384,
+                )?;
+                let evidence = value["evidence"]
+                    .as_array()
+                    .ok_or("operations done evidence list malformed")?;
+                if evidence.len() > 64 {
+                    return Err("operations done evidence has too many entries".into());
+                }
+                for item in evidence {
+                    if item.as_object().map(|map| map.len()) != Some(2) {
+                        return Err("operations evidence fields malformed".into());
+                    }
+                    let captured = item["value"]
+                        .as_str()
+                        .ok_or("operations evidence value malformed")?;
+                    model::bounded("operations evidence value", captured, 16_384)?;
+                    if item["digest"] != model::digest(captured) {
+                        return Err("operations evidence digest mismatch".into());
+                    }
+                }
+            }
+            if value.get("manifestOid").is_some() {
+                let mut child_ids = BTreeSet::new();
+                for child in value["children"]
+                    .as_array()
+                    .ok_or("converged children malformed")?
+                {
+                    let child_id = child
+                        .as_array()
+                        .filter(|pair| pair.len() == 2)
+                        .and_then(|pair| pair[0].as_str())
+                        .and_then(|child_ref| model::parse_state_ref(child_ref, "done"))
+                        .ok_or("converged child ref is not a done ref")?;
+                    model::valid_id(child_id)?;
+                    if !child_ids.insert(child_id) {
+                        return Err("converged done has duplicate child lifecycle".into());
+                    }
+                }
+            }
+            let valid_parents = if let Some(publication) = value["publicationCommit"].as_str() {
+                parents.len() == 3 && parents[2] == publication
+            } else if value.get("evidence").is_some() {
+                value["evidence"]
+                    .as_array()
+                    .is_some_and(|items| items.len() <= 64)
+                    && parents.len() == 2
+            } else if let Some(manifest) = value["manifestOid"].as_str() {
+                let children = value["children"]
+                    .as_array()
+                    .ok_or("converged children malformed")?;
+                children.len() <= 500
+                    && parents.len() == children.len() + 2
+                    && parents[0] == manifest
+                    && children.iter().enumerate().all(|(index, child)| {
+                        child
+                            .as_array()
+                            .filter(|pair| pair.len() == 2)
+                            .is_some_and(|pair| {
+                                pair[0]
+                                    .as_str()
+                                    .and_then(|child_ref| model::parse_state_ref(child_ref, "done"))
+                                    .is_some_and(|child_id| model::valid_id(child_id).is_ok())
+                                    && pair[1].as_str().is_some_and(|child_oid| {
+                                        model::oid(child_oid).is_ok()
+                                            && parents[index + 2] == child_oid
+                                    })
+                            })
+                    })
+            } else if let Some(accepted) = value["acceptedOid"].as_str() {
+                parents.len() == 3 && parents[2] == accepted
+            } else if let Some(close) = value["closeOid"].as_str() {
+                parents.len() == 3 && parents[2] == close
+            } else {
+                false
+            };
+            if !valid_parents {
+                return Err("done record immediate parent ordering is malformed".into());
+            }
+            for key in ["closeRef", "declarationRef"] {
+                if let Some(reference) = value.get(key) {
+                    model::bounded(
+                        key,
+                        reference
+                            .as_str()
+                            .ok_or_else(|| format!("done {key} malformed"))?,
+                        512,
+                    )?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(value)
+}
+
+fn current_waiting(oid: &str, id: &str) -> Result<Value> {
+    let delegated = git::object_json(oid)?.get("intentOid").is_some();
+    let value = if delegated {
+        object(
+            oid,
+            "delegated waiting",
+            &[
+                "formatVersion",
+                "intentOid",
+                "intentRef",
+                "operationId",
+                "parentTaskId",
+                "parentTaskOid",
+                "semanticId",
+                "targetTaskId",
+            ],
+            &[&[]],
+        )?
+    } else {
+        object(
+            oid,
+            "waiting",
+            &[
+                "children",
+                "formatVersion",
+                "operationId",
+                "semanticId",
+                "parentTaskId",
+                "parentTaskOid",
+            ],
+            &[&[]],
+        )?
+    };
+    let task_oid = id_oid(&value, "parentTaskId", "parentTaskOid", id)?;
+    digest("waiting semanticId", &value["semanticId"])?;
+    model::bounded(
+        "waiting operationId",
+        value["operationId"]
+            .as_str()
+            .ok_or("waiting operationId malformed")?,
+        256,
+    )?;
+    let parents = git::parents(oid)?;
+    if delegated {
+        model::valid_id(
+            value["targetTaskId"]
+                .as_str()
+                .ok_or("delegated waiting target Task-ID malformed")?,
+        )?;
+        let intent = value["intentOid"]
+            .as_str()
+            .ok_or("delegated waiting intent OID malformed")?;
+        model::oid(intent)?;
+        model::bounded(
+            "delegated waiting intent ref",
+            value["intentRef"]
+                .as_str()
+                .ok_or("delegated waiting intent ref malformed")?,
+            512,
+        )?;
+        if value["intentRef"]
+            != model::delegation_intent_ref(
+                value["operationId"]
+                    .as_str()
+                    .ok_or("delegated waiting operationId malformed")?,
+            )
+            || parents.len() != 3
+            || parents[1] != task_oid
+            || parents[2] != intent
+        {
+            return Err("delegated waiting immediate shape is malformed".into());
+        }
+    } else {
+        let children = value["children"]
+            .as_array()
+            .ok_or("waiting children malformed")?;
+        if children.is_empty()
+            || children.len() > 500
+            || parents.len() != children.len() + 2
+            || parents[1] != task_oid
+        {
+            return Err("waiting manifest immediate parent ordering is malformed".into());
+        }
+        let mut ids = BTreeSet::new();
+        for (index, child) in children.iter().enumerate() {
+            if child.as_object().map(|m| m.len()) != Some(6) {
+                return Err("waiting child has missing or unknown fields".into());
+            }
+            let child_id = child["taskId"]
+                .as_str()
+                .ok_or("waiting child Task-ID malformed")?;
+            model::valid_id(child_id)?;
+            if !ids.insert(child_id) {
+                return Err("waiting manifest has duplicate child".into());
+            }
+            let child_task = child["taskOid"]
+                .as_str()
+                .ok_or("waiting child Task OID malformed")?;
+            model::oid(child_task)?;
+            model::oid(
+                child["stateOid"]
+                    .as_str()
+                    .ok_or("waiting child state OID malformed")?,
+            )?;
+            let claimed = !child["claimToken"].is_null();
+            if claimed == child["owner"].is_null() || parents[index + 2] != child_task {
+                return Err("waiting child identity or immediate order is malformed".into());
+            }
+            if claimed {
+                model::bounded(
+                    "waiting child claim token",
+                    child["claimToken"]
+                        .as_str()
+                        .ok_or("waiting child claim token malformed")?,
+                    256,
+                )?;
+                model::bounded(
+                    "waiting child owner",
+                    child["owner"]
+                        .as_str()
+                        .ok_or("waiting child owner malformed")?,
+                    256,
+                )?;
+            }
+            let expected = if child["ref"] == model::state_ref("waiting", child_id) && !claimed {
+                model::state_ref("waiting", child_id)
+            } else if claimed {
+                model::state_ref("active", child_id)
+            } else {
+                model::state_ref("frontier", child_id)
+            };
+            if child["ref"] != expected {
+                return Err("waiting child ref shape is malformed".into());
+            }
+        }
+    }
+    Ok(value)
+}
+
 pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
     let value = match state {
         "frontier" => object(
