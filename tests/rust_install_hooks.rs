@@ -49,6 +49,22 @@ fn canonical() -> &'static [u8] {
     include_bytes!("../.githooks/pre-push")
 }
 
+fn legacy() -> &'static [u8] {
+    include_bytes!("../assets/pre-push-v1-legacy")
+}
+
+fn assert_no_migration_temps(hooks: &Path) {
+    assert!(
+        fs::read_dir(hooks)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pre-push.migrate."))
+    );
+}
+
 #[test]
 fn install_hooks_is_idempotent_and_repairs_mode() {
     let root = fixture();
@@ -265,6 +281,161 @@ fn install_hooks_refuses_conflicts_without_replacing_them() {
         if kind == "custom-config" {
             assert!(!root.join(".githooks").exists());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn explicit_migration_preserves_custom_hook_and_is_idempotent() {
+    let root = fixture();
+    let hooks = root.join(".githooks");
+    fs::create_dir(&hooks).unwrap();
+    let custom = b"#!/bin/sh\ncat > repository-input\ntest \"$1\" = origin && test \"$2\" = url\n";
+    fs::write(hooks.join("pre-push"), custom).unwrap();
+    fs::set_permissions(hooks.join("pre-push"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let default = run(&root, &["install-hooks"]);
+    assert!(!default.status.success());
+    let migrated = run(&root, &["install-hooks", "--migrate-existing-pre-push"]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert_eq!(fs::read(hooks.join("pre-push")).unwrap(), canonical());
+    assert_eq!(fs::read(hooks.join("pre-push.repository")).unwrap(), custom);
+    assert!(
+        run(&root, &["install-hooks", "--migrate-existing-pre-push"])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read(hooks.join("pre-push.repository")).unwrap(), custom);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn migration_rejects_bad_mode_and_legacy_primary() {
+    for (contents, mode) in [
+        (b"#!/bin/sh\nexit 0\n".as_slice(), 0o744),
+        (
+            include_bytes!("../assets/pre-push-v1-legacy").as_slice(),
+            0o755,
+        ),
+    ] {
+        let root = fixture();
+        fs::create_dir(root.join(".githooks")).unwrap();
+        fs::write(root.join(".githooks/pre-push"), contents).unwrap();
+        fs::set_permissions(
+            root.join(".githooks/pre-push"),
+            fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+        assert!(
+            !run(&root, &["install-hooks", "--migrate-existing-pre-push"])
+                .status
+                .success()
+        );
+        assert!(!root.join(".githooks/pre-push.repository").exists());
+        assert_no_migration_temps(&root.join(".githooks"));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn verification_accepts_only_pinned_legacy_without_secondary() {
+    for (primary, secondary, accepted) in [
+        (legacy(), None, true),
+        (legacy(), Some(b"#!/bin/sh\nexit 0\n".as_slice()), false),
+        (b"#!/bin/sh\nexit 0\n".as_slice(), None, false),
+    ] {
+        let root = fixture();
+        let hooks = root.join(".githooks");
+        fs::create_dir(&hooks).unwrap();
+        fs::write(hooks.join("pre-push"), primary).unwrap();
+        fs::set_permissions(hooks.join("pre-push"), fs::Permissions::from_mode(0o755)).unwrap();
+        if let Some(contents) = secondary {
+            fs::write(hooks.join("pre-push.repository"), contents).unwrap();
+            fs::set_permissions(
+                hooks.join("pre-push.repository"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let output = run(&root, &["install-hooks"]);
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(hooks.join("pre-push")).unwrap(), primary);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn migration_refuses_different_secondary_but_completes_same_inode_retry() {
+    for same_inode in [false, true] {
+        let root = fixture();
+        let hooks = root.join(".githooks");
+        fs::create_dir(&hooks).unwrap();
+        let primary = hooks.join("pre-push");
+        let secondary = hooks.join("pre-push.repository");
+        let custom = b"#!/bin/sh\nexit 0\n";
+        fs::write(&primary, custom).unwrap();
+        fs::set_permissions(&primary, fs::Permissions::from_mode(0o755)).unwrap();
+        if same_inode {
+            fs::hard_link(&primary, &secondary).unwrap();
+        } else {
+            fs::write(&secondary, b"#!/bin/sh\nexit 3\n").unwrap();
+            fs::set_permissions(&secondary, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let secondary_before = fs::read(&secondary).unwrap();
+        let output = run(&root, &["install-hooks", "--migrate-existing-pre-push"]);
+        assert_eq!(
+            output.status.success(),
+            same_inode,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(&secondary).unwrap(), secondary_before);
+        assert_eq!(
+            fs::read(&primary).unwrap(),
+            if same_inode { canonical() } else { custom }
+        );
+        assert_no_migration_temps(&hooks);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn migration_fails_closed_for_unsafe_secondary_types_and_modes() {
+    for kind in ["mode", "symlink", "directory"] {
+        let root = fixture();
+        let hooks = root.join(".githooks");
+        fs::create_dir(&hooks).unwrap();
+        fs::write(hooks.join("pre-push"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(hooks.join("pre-push"), fs::Permissions::from_mode(0o755)).unwrap();
+        let secondary = hooks.join("pre-push.repository");
+        match kind {
+            "mode" => {
+                fs::write(&secondary, b"#!/bin/sh\nexit 0\n").unwrap();
+                fs::set_permissions(&secondary, fs::Permissions::from_mode(0o775)).unwrap();
+            }
+            "symlink" => symlink("pre-push", &secondary).unwrap(),
+            "directory" => fs::create_dir(&secondary).unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(
+            !run(&root, &["install-hooks", "--migrate-existing-pre-push"])
+                .status
+                .success()
+        );
+        assert_eq!(
+            fs::read(hooks.join("pre-push")).unwrap(),
+            b"#!/bin/sh\nexit 0\n"
+        );
+        assert_no_migration_temps(&hooks);
         fs::remove_dir_all(root).unwrap();
     }
 }

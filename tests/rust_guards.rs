@@ -444,6 +444,161 @@ fn canonical_hook_accepts_actual_symbolic_head_master_push() {
 }
 
 #[test]
+fn guard_chains_repository_hook_with_identical_arguments_and_input() {
+    let root = std::env::temp_dir().join(format!("taskdag-guard-chain-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).unwrap();
+    fs::create_dir_all(root.join(".githooks")).unwrap();
+    fs::write(
+        root.join(".githooks/pre-push.repository"),
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$1\" \"$2\" > chained-args\ncat > chained-input\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.join(".githooks/pre-push.repository"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let oid = "a".repeat(40);
+    let zero = "0".repeat(40);
+    let input = format!("HEAD {oid} refs/heads/topic {zero}\n");
+    let output = run(&root, &["guard-pre-push", "upstream", "remote-url"], &input);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("chained-args")).unwrap(),
+        "upstream\nremote-url\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("chained-input")).unwrap(),
+        input
+    );
+    fs::write(
+        root.join(".githooks/pre-push.repository"),
+        "#!/bin/sh\nexit 9\n",
+    )
+    .unwrap();
+    assert!(
+        !run(&root, &["guard-pre-push", "upstream", "remote-url"], &input)
+            .status
+            .success()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guard_accepts_successful_repository_hook_that_closes_stdin() {
+    let root =
+        std::env::temp_dir().join(format!("taskdag-guard-closed-stdin-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join(".githooks")).unwrap();
+    let hook = root.join(".githooks/pre-push.repository");
+    fs::write(&hook, "#!/bin/sh\nexec 0<&-\nexit 0\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let input = "x".repeat(262_144);
+    let output = run(&root, &["guard-pre-push", "upstream", "unused"], &input);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn canonical_wrapper_fallback_chains_and_validates_repository_hook() {
+    let root =
+        std::env::temp_dir().join(format!("taskdag-wrapper-fallback-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join(".githooks")).unwrap();
+    fs::write(
+        root.join(".githooks/pre-push"),
+        include_bytes!("../.githooks/pre-push"),
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.join(".githooks/pre-push"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let repository_hook = root.join(".githooks/pre-push.repository");
+    fs::write(
+        &repository_hook,
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$1\" \"$2\" > wrapper-args\ncat > wrapper-input\n",
+    )
+    .unwrap();
+    fs::set_permissions(&repository_hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let input = b"refs/heads/topic deadbeef refs/heads/topic 00000000\n\xff";
+    let fallback_path = root.join("fallback-bin");
+    fs::create_dir(&fallback_path).unwrap();
+    for tool in ["bash", "cat", "dirname", "stat"] {
+        std::os::unix::fs::symlink(
+            Path::new("/run/current-system/sw/bin").join(tool),
+            fallback_path.join(tool),
+        )
+        .unwrap();
+    }
+
+    for old_cli in [false, true] {
+        let mut command = Command::new(root.join(".githooks/pre-push"));
+        command
+            .current_dir(&root)
+            .args(["remote name", "ssh://example/repo with space"])
+            .env("PATH", &fallback_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let old = root.join("old-task-dag");
+        if old_cli {
+            fs::write(&old, "#!/bin/sh\nexit 2\n").unwrap();
+            fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
+            command.env("TASK_DAG_BIN", &old);
+        } else {
+            command.env_remove("TASK_DAG_BIN");
+        }
+        let mut child = command.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read(root.join("wrapper-args")).unwrap(),
+            b"remote name\nssh://example/repo with space\n"
+        );
+        assert_eq!(fs::read(root.join("wrapper-input")).unwrap(), input);
+    }
+
+    for kind in ["mode", "symlink", "directory"] {
+        let _ = fs::remove_file(&repository_hook);
+        let _ = fs::remove_dir_all(&repository_hook);
+        match kind {
+            "mode" => {
+                fs::write(&repository_hook, "#!/bin/sh\nexit 0\n").unwrap();
+                fs::set_permissions(&repository_hook, fs::Permissions::from_mode(0o775)).unwrap();
+            }
+            "symlink" => std::os::unix::fs::symlink("pre-push", &repository_hook).unwrap(),
+            "directory" => fs::create_dir(&repository_hook).unwrap(),
+            _ => unreachable!(),
+        }
+        let output = Command::new(root.join(".githooks/pre-push"))
+            .current_dir(&root)
+            .env_remove("TASK_DAG_BIN")
+            .env("PATH", &fallback_path)
+            .args(["origin", "url"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{kind} unexpectedly succeeded");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guard_git_subprocess_output_is_bounded() {
     let root = std::env::temp_dir().join(format!("taskdag-fake-git-{}", std::process::id()));
     let bin = root.join("bin");

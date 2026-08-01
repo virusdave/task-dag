@@ -14,6 +14,7 @@ fn main() {
         "build.rs",
         "src",
         ".githooks/pre-push",
+        "assets/pre-push-v1-legacy",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -33,6 +34,7 @@ fn main() {
             "build.rs",
             "src",
             ".githooks/pre-push",
+            "assets/pre-push-v1-legacy",
         ]);
         assert!(
             status.trim().is_empty(),

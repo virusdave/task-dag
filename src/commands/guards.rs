@@ -4,9 +4,11 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
+    io::Write,
     io::{self, Read},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use crate::{Result, git, model};
@@ -95,10 +97,7 @@ pub(crate) fn commit_message(stdin: bool, path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn pre_push(remote_name: Option<&str>, _remote_url: Option<&str>) -> Result<()> {
-    if remote_name.is_some_and(|name| name != "origin") {
-        return Ok(());
-    }
+pub(crate) fn pre_push(remote_name: Option<&str>, remote_url: Option<&str>) -> Result<()> {
     let mut input = Vec::new();
     io::stdin()
         .take((MAX_STREAM + 1) as u64)
@@ -106,6 +105,10 @@ pub(crate) fn pre_push(remote_name: Option<&str>, _remote_url: Option<&str>) -> 
         .map_err(|e| e.to_string())?;
     if input.len() > MAX_STREAM {
         return Err("pre-push update stream exceeds byte limit".into());
+    }
+    run_repository_hook(remote_name, remote_url, &input)?;
+    if remote_name.is_some_and(|name| name != "origin") {
+        return Ok(());
     }
     let text = String::from_utf8(input).map_err(|_| "pre-push update stream is not UTF-8")?;
     let lines: Vec<_> = text.lines().collect();
@@ -138,6 +141,47 @@ pub(crate) fn pre_push(remote_name: Option<&str>, _remote_url: Option<&str>) -> 
         return Ok(());
     }
     native_claim_guard()
+}
+
+fn run_repository_hook(
+    remote_name: Option<&str>,
+    remote_url: Option<&str>,
+    input: &[u8],
+) -> Result<()> {
+    let hook = Path::new(".githooks/pre-push.repository");
+    let metadata = match fs::symlink_metadata(hook) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("inspect pre-push.repository: {error}")),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o7777 != 0o755
+    {
+        return Err(
+            "pre-push.repository must be a regular non-symlink file with exact mode 0755".into(),
+        );
+    }
+    let mut child = Command::new(hook)
+        .args(remote_name.into_iter().chain(remote_url))
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run pre-push.repository: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("open pre-push.repository stdin")?;
+    let write_result = stdin.write_all(input);
+    drop(stdin);
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait for pre-push.repository: {e}"))?;
+    if !status.success() {
+        return Err(format!("pre-push.repository rejected push with {status}"));
+    }
+    if let Err(error) = write_result
+        && error.kind() != io::ErrorKind::BrokenPipe
+    {
+        return Err(format!("write pre-push.repository stdin: {error}"));
+    }
+    Ok(())
 }
 
 fn native_claim_guard() -> Result<()> {

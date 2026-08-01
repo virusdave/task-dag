@@ -25,7 +25,11 @@ enum Commands {
         remote_url: Option<String>,
     },
     /// Install the canonical native-v2 pre-push hook in this worktree.
-    InstallHooks,
+    InstallHooks {
+        /// Preserve an existing custom pre-push hook as pre-push.repository.
+        #[arg(long)]
+        migrate_existing_pre_push: bool,
+    },
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommands,
@@ -374,7 +378,9 @@ pub(crate) fn run() -> Result<()> {
             remote_name,
             remote_url,
         } => commands::guards::pre_push(remote_name.as_deref(), remote_url.as_deref()),
-        Commands::InstallHooks => crate::repository::install_hooks(),
+        Commands::InstallHooks {
+            migrate_existing_pre_push,
+        } => crate::repository::install_hooks(migrate_existing_pre_push),
         Commands::Runtime {
             command: RuntimeCommands::Identity,
         } => crate::runtime_authority::identity(),

@@ -23,6 +23,8 @@ const CURRENT_ADVERTISEMENT_BYTES: usize = 512 * 1024;
 const MAX_INSPECTION_OBJECT_BYTES: usize = 256 * 1024;
 const MAX_INSPECTION_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const CANONICAL_PRE_PUSH_HOOK: &[u8] = include_bytes!("../.githooks/pre-push");
+// Remove after every cohort has migrated beyond the immediately preceding wrapper.
+const LEGACY_PRE_PUSH_HOOK_V1: &[u8] = include_bytes!("../assets/pre-push-v1-legacy");
 
 thread_local! {
     static INSPECTION: RefCell<(BTreeSet<String>, usize)> = const { RefCell::new((BTreeSet::new(), 0)) };
@@ -621,13 +623,32 @@ fn verify_hook_file(hooks_path: &std::path::Path, hooks: &File) -> Result<u32> {
     if before.dev() != opened.dev() || before.ino() != opened.ino() {
         return Err("canonical pre-push hook changed during inspection".into());
     }
-    let mut bytes = Vec::with_capacity(CANONICAL_PRE_PUSH_HOOK.len() + 1);
+    let comparison_length = CANONICAL_PRE_PUSH_HOOK
+        .len()
+        .max(LEGACY_PRE_PUSH_HOOK_V1.len())
+        + 1;
+    let mut bytes = Vec::with_capacity(comparison_length);
     Read::by_ref(&mut file)
-        .take((CANONICAL_PRE_PUSH_HOOK.len() + 1) as u64)
+        .take(comparison_length as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("read canonical pre-push hook: {e}"))?;
-    if bytes != CANONICAL_PRE_PUSH_HOOK {
+    let secondary = hooks_path.join("pre-push.repository");
+    let has_secondary = match fs::symlink_metadata(&secondary) {
+        Ok(metadata) => {
+            let mode = metadata.mode() & 0o7777;
+            if metadata.file_type().is_symlink() || !metadata.is_file() || mode != 0o755 {
+                return Err(".githooks/pre-push.repository must be a regular non-symlink file with exact mode 0755".into());
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("inspect pre-push.repository: {error}")),
+    };
+    if bytes != CANONICAL_PRE_PUSH_HOOK && (bytes != LEGACY_PRE_PUSH_HOOK_V1 || has_secondary) {
         return Err(".githooks/pre-push conflicts with the canonical hook".into());
+    }
+    if has_secondary && bytes != CANONICAL_PRE_PUSH_HOOK {
+        return Err("pre-push.repository requires the current canonical pre-push hook".into());
     }
     let after = fs::symlink_metadata(&path)
         .map_err(|e| format!("reinspect canonical pre-push hook: {e}"))?;
@@ -661,7 +682,132 @@ fn verify_hooks() -> Result<u32> {
     verify_hook_file(&hooks, &directory)
 }
 
-pub(crate) fn install_hooks() -> Result<()> {
+fn migrate_existing_hook(hooks_path: &std::path::Path, directory: &File) -> Result<bool> {
+    let primary = hooks_path.join("pre-push");
+    let secondary = hooks_path.join("pre-push.repository");
+    let descriptor = rustix::fs::openat(
+        directory,
+        "pre-push",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| format!("open existing pre-push hook: {e}"))?;
+    let mut old = File::from(descriptor);
+    let identity = old
+        .metadata()
+        .map_err(|e| format!("inspect existing pre-push hook: {e}"))?;
+    if !identity.is_file() || identity.mode() & 0o7777 != 0o755 {
+        return Err(
+            "migration requires a regular non-symlink pre-push hook with exact mode 0755".into(),
+        );
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut old)
+        .take(
+            (CANONICAL_PRE_PUSH_HOOK
+                .len()
+                .max(LEGACY_PRE_PUSH_HOOK_V1.len())
+                + 1) as u64,
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read existing pre-push hook: {e}"))?;
+    if bytes == CANONICAL_PRE_PUSH_HOOK {
+        return Ok(false);
+    }
+    if bytes == LEGACY_PRE_PUSH_HOOK_V1 {
+        return Err(
+            "the exact legacy task-dag hook is not a repository hook and cannot be migrated".into(),
+        );
+    }
+    old.sync_all()
+        .map_err(|e| format!("sync existing pre-push hook: {e}"))?;
+
+    let mut created_secondary = false;
+    match fs::symlink_metadata(&secondary) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::hard_link(&primary, &secondary)
+                .map_err(|e| format!("preserve pre-push as pre-push.repository: {e}"))?;
+            created_secondary = true;
+        }
+        Ok(_) => {}
+        Err(error) => return Err(format!("inspect pre-push.repository: {error}")),
+    }
+    let same_as_old = |path: &std::path::Path| {
+        fs::symlink_metadata(path).is_ok_and(|m| {
+            !m.file_type().is_symlink()
+                && m.is_file()
+                && m.dev() == identity.dev()
+                && m.ino() == identity.ino()
+        })
+    };
+    let result = (|| {
+        if !same_as_old(&primary) || !same_as_old(&secondary) {
+            return Err("pre-push hook identities changed during migration".into());
+        }
+        directory
+            .sync_all()
+            .map_err(|e| format!("sync .githooks after preserving hook: {e}"))?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("create migration nonce: {e}"))?
+            .as_nanos();
+        let temporary = hooks_path.join(format!(
+            ".pre-push.migrate.{}.{nonce}.tmp",
+            std::process::id()
+        ));
+        let mut replacement = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&temporary)
+            .map_err(|e| format!("create migration temporary hook: {e}"))?;
+        let temporary_identity = replacement
+            .metadata()
+            .map_err(|e| format!("inspect migration temporary hook: {e}"))?;
+        let cleanup_temporary = || {
+            if fs::symlink_metadata(&temporary).is_ok_and(|metadata| {
+                !metadata.file_type().is_symlink()
+                    && metadata.is_file()
+                    && metadata.dev() == temporary_identity.dev()
+                    && metadata.ino() == temporary_identity.ino()
+            }) {
+                let _ = fs::remove_file(&temporary);
+            }
+        };
+        let publish: Result<()> = (|| {
+            replacement
+                .write_all(CANONICAL_PRE_PUSH_HOOK)
+                .map_err(|e| format!("write migration temporary hook: {e}"))?;
+            replacement
+                .set_permissions(fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("set migration hook mode: {e}"))?;
+            replacement
+                .sync_all()
+                .map_err(|e| format!("sync migration hook: {e}"))?;
+            if !same_as_old(&primary) || !same_as_old(&secondary) {
+                return Err("pre-push hook identities changed before migration publish".into());
+            }
+            fs::rename(&temporary, &primary)
+                .map_err(|e| format!("publish migrated pre-push hook: {e}"))?;
+            Ok(())
+        })();
+        if publish.is_err() {
+            cleanup_temporary();
+        }
+        publish?;
+        directory
+            .sync_all()
+            .map_err(|e| format!("sync .githooks after migration: {e}"))?;
+        Ok(true)
+    })();
+    if result.is_err() && created_secondary && same_as_old(&secondary) && same_as_old(&primary) {
+        let _ = fs::remove_file(&secondary);
+        let _ = directory.sync_all();
+    }
+    result
+}
+
+pub(crate) fn install_hooks(migrate_existing_pre_push: bool) -> Result<()> {
     let (root, hooks) = worktree_hooks()?;
     let common = git_common_dir()?;
     let lock_path = common.join("task-dag/install-hooks.lock");
@@ -706,6 +852,9 @@ pub(crate) fn install_hooks() -> Result<()> {
     let directory = open_hooks_directory(&hooks)?;
     let hook = hooks.join("pre-push");
     let mut hook_changed = false;
+    if migrate_existing_pre_push && hook.exists() {
+        hook_changed = migrate_existing_hook(&hooks, &directory)?;
+    }
     match fs::symlink_metadata(&hook) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
