@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { MetricGrantKey, SessionEnvelope, SessionUser } from '../../shared/contracts/index.js'
 import { ALL_METRIC_GRANT_KEYS } from '../../shared/contracts/index.js'
 import { userHasAnyMetricGrant } from '../../shared/domain/metricGrants.js'
-import { getPermissionsForRole } from '../../shared/domain/permissions.js'
+import { getPermissionsForRole, isAdminUser } from '../../shared/domain/permissions.js'
 import { getServerEnv, isGoogleOAuthReady } from '../config/env.js'
 import { buildRuntimeDependencyStatuses } from '../runtime/dependencyStatus.js'
 import { getPool } from '../db/pool.js'
@@ -35,19 +35,12 @@ export async function buildSessionEnvelope(request: FastifyRequest): Promise<Ses
     }
   }
 
-  // Pending-migration detection runs against the live DB but is
-  // cached for ~30s inside getPendingMigrations, so the per-request
-  // cost is amortized. We intentionally surface this on every
-  // session response (including anonymous / login-screen calls) so
-  // the all-pages banner can render before a user successfully
-  // signs in and trips into the underlying SQL error.
-  const pendingMigrations = await safelyGetPendingMigrations()
   const userId = readSessionUserId(request)
   if (userId === null) {
     return {
       authMode: 'anonymous',
       localDevSignInAvailable,
-      pendingMigrations,
+      pendingMigrations: [],
       permissions: getPermissionsForRole(null),
       runtimeDependencies,
       user: null,
@@ -59,7 +52,7 @@ export async function buildSessionEnvelope(request: FastifyRequest): Promise<Ses
     return {
       authMode: 'anonymous',
       localDevSignInAvailable,
-      pendingMigrations,
+      pendingMigrations: [],
       permissions: getPermissionsForRole(null),
       runtimeDependencies,
       user: null,
@@ -75,6 +68,13 @@ export async function buildSessionEnvelope(request: FastifyRequest): Promise<Ses
     metricGrants:
       user.role === 'admin' ? Array.from(ALL_METRIC_GRANT_KEYS) : user.metricGrants,
   }
+
+  // Schema drift is an operator concern. Role identity, not an incidental
+  // capability such as canManageUsers, decides whether to perform the DB
+  // check and expose its result.
+  const pendingMigrations = isAdminUser(effectiveUser)
+    ? await safelyGetPendingMigrations()
+    : []
 
   return {
     authMode: 'session',

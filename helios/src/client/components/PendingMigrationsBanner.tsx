@@ -1,7 +1,6 @@
-// All-pages banner that fires when the helios server (this build's
-// code) expects schema the live DB doesn't have. Mounted at the
-// router root so it shows on every page — including /login — without
-// having to plumb session data through every route loader.
+// Admin-only banner that fires when the helios server (this build's code)
+// expects schema the live DB doesn't have. AppShell passes the already-loaded
+// session so non-admin users never mount the polling implementation.
 //
 // Data source: GET /api/session, which always carries a
 // `pendingMigrations` array (empty when the DB is up to date). The
@@ -29,7 +28,12 @@
 
 import { useEffect, useState } from 'react'
 
-import { SessionEnvelopeSchema, type PendingMigration } from '../../shared/contracts/index.js'
+import {
+  SessionEnvelopeSchema,
+  type PendingMigration,
+  type SessionEnvelope,
+} from '../../shared/contracts/index.js'
+import { isAdminUser } from '../../shared/domain/permissions.js'
 import { buildAppPath } from '../app/paths.js'
 import {
   buildPendingMigrationsSignature,
@@ -155,8 +159,23 @@ const PILL_STYLE: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-export function PendingMigrationsBanner(): JSX.Element | null {
-  const [pending, setPending] = useState<PendingMigration[]>([])
+export function PendingMigrationsBanner({
+  session,
+}: {
+  session: SessionEnvelope
+}): JSX.Element | null {
+  if (!isAdminUser(session.user)) {
+    return null
+  }
+  return <AdminPendingMigrationsBanner initialPending={session.pendingMigrations} />
+}
+
+function AdminPendingMigrationsBanner({
+  initialPending,
+}: {
+  initialPending: PendingMigration[]
+}): JSX.Element | null {
+  const [pending, setPending] = useState<PendingMigration[]>(initialPending)
   const [dismissedSignature, setDismissedSignature] = useState<string | null>(() =>
     readDismissedSignature(getSessionStorage()),
   )

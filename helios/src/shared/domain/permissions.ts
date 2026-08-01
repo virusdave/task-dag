@@ -1,4 +1,11 @@
-import type { PermissionSet, Role } from '../contracts/domain/auth.js'
+import type { PermissionSet, Role, SessionUser } from '../contracts/domain/auth.js'
+
+/** Role identity is authoritative; capabilities are not proxies for roles. */
+export function isAdminUser(
+  user: Pick<SessionUser, 'role'> | null | undefined,
+): boolean {
+  return user?.role === 'admin'
+}
 
 export function getPermissionsForRole(role: Role | null): PermissionSet {
   switch (role) {

@@ -18,6 +18,7 @@ import type {
   AgentWasteBacklogResponse,
   SessionEnvelope,
 } from '../../shared/contracts/index.js'
+import { isAdminUser } from '../../shared/domain/permissions.js'
 import { fetchAgentWasteBacklog } from '../routes/config/agentWasteReviewShared.js'
 import {
   computeBacklogPressure,
@@ -102,7 +103,7 @@ function readDismissState(): ReminderDismissState | null {
 export function AgentWasteReviewReminder() {
   const session = useRouteLoaderData('root') as SessionEnvelope | undefined
   const location = useLocation()
-  const isAdmin = Boolean(session?.user && session.permissions.canManageUsers)
+  const isAdmin = isAdminUser(session?.user)
 
   const [data, setData] = useState<AgentWasteBacklogResponse | null>(null)
   // Persisted dismiss/snooze state, mirrored into React state so a dismiss

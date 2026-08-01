@@ -9,6 +9,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { userHasAnyMetricGrant, userHasMetricGrant } from '../../shared/domain/metricGrants.js'
 import { GADS_METRIC_SCOPES } from '../../shared/domain/gadsSites.js'
+import { isAdminUser } from '../../shared/domain/permissions.js'
 import { buildAppPath } from '../app/paths.js'
 import { usePageTitle } from '../app/usePageTitle.js'
 import { buildCatalogSidebarSubtree } from '../routes/catalog/catalogSidebarSubtree.js'
@@ -20,6 +21,7 @@ import { SCREENS_SIDEBAR_SUBTREE } from '../routes/screens/screensSidebar.js'
 import { TASKS_SIDEBAR_SUBTREE } from '../routes/tasks/tasksSidebar.js'
 import { AgentWasteReviewReminder } from './AgentWasteReviewReminder.js'
 import { OperatorCapturePanel } from './OperatorCapturePanel.js'
+import { PendingMigrationsBanner } from './PendingMigrationsBanner.js'
 import { Pill } from './Pill.js'
 import { SidebarNavProvider, useSidebarNav } from './SidebarNavContext.js'
 import { TreeNav, type TreeNavNode } from './TreeNav.js'
@@ -39,6 +41,13 @@ export function shouldShowTopChip(sentinelBottom: number, isMobile: boolean): bo
 
 export function topScrollBehavior(reducedMotion: boolean): ScrollBehavior {
   return reducedMotion ? 'auto' : 'smooth'
+}
+
+export function getOperatorRuntimeWarnings(session: SessionEnvelope) {
+  if (!isAdminUser(session.user)) {
+    return []
+  }
+  return session.runtimeDependencies.filter((dependency) => dependency.status !== 'configured')
 }
 
 function isAnyModalOpen(): boolean {
@@ -372,7 +381,7 @@ export function buildPrimarySidebarNodes(
   // Nav-hiding is discoverability, not access control: the agent-waste
   // review page and its server API are independently admin-gated (#57).
   const adminConfigChildren: TreeNavNode[] = [...subtreeFor('config')]
-  if (session?.permissions.canManageUsers) {
+  if (isAdminUser(session?.user)) {
     adminConfigChildren.push({
       // Agents — operator surfaces for the AMP agent fleet. Today just the
       // agent-waste review queue (issue #57); grouped so future agent-config
@@ -487,7 +496,7 @@ function AppShellInner() {
     }
     return stored === 'true'
   })
-  const runtimeWarnings = session.runtimeDependencies.filter((dependency) => dependency.status !== 'configured')
+  const runtimeWarnings = getOperatorRuntimeWarnings(session)
   const topSentinelRef = useRef<HTMLSpanElement>(null)
   const topTargetRef = useRef<HTMLElement>(null)
 
@@ -579,6 +588,7 @@ function AppShellInner() {
 
   return (
     <div className="app-shell">
+      <PendingMigrationsBanner session={session} />
       <span className="top-sentinel" ref={topSentinelRef} aria-hidden="true" />
       <header className="topbar" ref={topTargetRef} tabIndex={-1}>
         <div>

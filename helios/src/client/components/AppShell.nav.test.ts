@@ -3,7 +3,12 @@ import { describe, expect, it } from 'vitest'
 import type { MetricGrantKey, Role } from '../../shared/contracts/domain/auth.js'
 import type { SessionEnvelope } from '../../shared/contracts/index.js'
 import { getPermissionsForRole } from '../../shared/domain/permissions.js'
-import { buildPrimarySidebarNodes, shouldShowTopChip, topScrollBehavior } from './AppShell.js'
+import {
+  buildPrimarySidebarNodes,
+  getOperatorRuntimeWarnings,
+  shouldShowTopChip,
+  topScrollBehavior,
+} from './AppShell.js'
 import type { TreeNavNode } from './TreeNav.js'
 
 // Admin-gated navbar entry for the agent-waste review queue (issue #57).
@@ -17,7 +22,16 @@ function sessionForRole(role: Role | null): SessionEnvelope {
     pendingMigrations: [],
     permissions: getPermissionsForRole(role),
     runtimeDependencies: [],
-    user: null,
+    user: role
+      ? {
+          active: true,
+          email: `${role}@example.com`,
+          id: 1,
+          metricGrants: [],
+          name: `${role} user`,
+          role,
+        }
+      : null,
   }
 }
 
@@ -98,6 +112,30 @@ describe('buildPrimarySidebarNodes — pending-migrations nav entry (#62)', () =
     const nodes = buildPrimarySidebarNodes({}, null)
     expect(findByNavKey(nodes, 'config.database.pending-migrations')).toBeUndefined()
   })
+})
+
+describe('operator runtime warnings', () => {
+  const warning = {
+    code: 'sweed' as const,
+    label: 'Sweed',
+    status: 'missing' as const,
+    summary: 'Sweed automation is unavailable.',
+  }
+
+  it('shows warnings to an admin', () => {
+    const session = sessionForRole('admin')
+    session.runtimeDependencies = [warning]
+    expect(getOperatorRuntimeWarnings(session)).toEqual([warning])
+  })
+
+  it.each(['viewer', 'editor', 'approver'] as const)(
+    'hides warnings from a %s',
+    (role) => {
+      const session = sessionForRole(role)
+      session.runtimeDependencies = [warning]
+      expect(getOperatorRuntimeWarnings(session)).toEqual([])
+    },
+  )
 })
 
 describe('buildPrimarySidebarNodes — low-inventory site navigation', () => {
