@@ -125,8 +125,8 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         let hooks = checkout.join(".githooks");
         fs::create_dir(&hooks).unwrap();
         fs::copy(source.join(".githooks/pre-push"), hooks.join("pre-push")).unwrap();
+        ok(checkout, &["config", "core.hooksPath", ".githooks"]);
     }
-    ok(&b, &["config", "core.hooksPath", "custom-hooks"]);
     ok(&a, &["fetch", source.to_str().unwrap(), runtime]);
     success(
         &a,
@@ -568,6 +568,7 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         target.join(".githooks/pre-push"),
     )
     .unwrap();
+    ok(&target, &["config", "core.hooksPath", ".githooks"]);
     ok(&target, &["fetch", source.to_str().unwrap(), runtime]);
     success(
         &target,
@@ -1286,8 +1287,8 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     );
     assert_eq!(
         ok(&b, &["config", "--get", "core.hooksPath"]),
-        "custom-hooks",
-        "an existing hooksPath must be preserved"
+        ".githooks",
+        "native claims must retain the canonical hooksPath"
     );
     let staging = a.join(".git/task-dag/native-claim-staging");
     assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);

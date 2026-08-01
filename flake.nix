@@ -32,6 +32,7 @@
                 ./Cargo.lock
                 ./src
                 ./build.rs
+                ./.githooks/pre-push
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;

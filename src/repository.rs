@@ -3,15 +3,15 @@ use crate::{
     model::{self, ACTIVATION, JOURNAL, Update},
     runtime,
 };
+use rustix::fs::{AtFlags, Mode, OFlags};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::Write,
-    io::{BufRead, BufReader},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::Command,
     process::Stdio,
@@ -21,6 +21,7 @@ const CURRENT_ADVERTISEMENT_LINES: usize = 502;
 const CURRENT_ADVERTISEMENT_BYTES: usize = 512 * 1024;
 const MAX_INSPECTION_OBJECT_BYTES: usize = 256 * 1024;
 const MAX_INSPECTION_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+const CANONICAL_PRE_PUSH_HOOK: &[u8] = include_bytes!("../.githooks/pre-push");
 
 thread_local! {
     static INSPECTION: RefCell<(BTreeSet<String>, usize)> = const { RefCell::new((BTreeSet::new(), 0)) };
@@ -354,6 +355,7 @@ pub(crate) fn native_claim_registry_lock(nonblocking: bool) -> Result<File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(path)
         .map_err(|e| format!("open native claim registry lock: {e}"))?;
@@ -368,57 +370,384 @@ pub(crate) fn native_claim_registry_lock(nonblocking: bool) -> Result<File> {
     Ok(file)
 }
 
-fn ensure_pre_push_hook() -> Result<()> {
-    let configured = Command::new("git")
-        .args(["config", "--get", "core.hooksPath"])
-        .output()
-        .map_err(|e| format!("read core.hooksPath: {e}"))?;
-    if configured.status.success() {
-        return Ok(());
+fn worktree_hooks() -> Result<(PathBuf, PathBuf)> {
+    let root = PathBuf::from(git::bounded_output(
+        &["rev-parse", "--show-toplevel"],
+        4096,
+    )?);
+    if root.as_os_str().is_empty() || !root.is_absolute() {
+        return Err("native hooks require a worktree root".into());
     }
-    if configured.status.code() != Some(1) {
-        return Err("could not determine effective core.hooksPath".into());
-    }
-    let root = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|e| format!("resolve worktree root: {e}"))?;
-    if !root.status.success() {
-        return Err("native claim requires a worktree root".into());
-    }
-    let root = PathBuf::from(
-        String::from_utf8(root.stdout)
-            .map_err(|e| e.to_string())?
-            .trim_end(),
-    );
     let hooks = root.join(".githooks");
-    let hook = hooks.join("pre-push");
-    let metadata = fs::metadata(&hook)
-        .map_err(|e| format!("native claim requires executable .githooks/pre-push: {e}"))?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-        return Err("native claim requires executable .githooks/pre-push".into());
+    Ok((root, hooks))
+}
+
+fn effective_hooks() -> Result<PathBuf> {
+    Ok(PathBuf::from(git::bounded_output(
+        &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+        4096,
+    )?))
+}
+
+fn config_value(local: bool) -> Result<Option<String>> {
+    let args: &[&str] = if local {
+        &["config", "--local", "--get", "core.hooksPath"]
+    } else {
+        &["config", "--get", "core.hooksPath"]
+    };
+    let output = git::bounded_output_status(args, 4096)?;
+    match output.code {
+        Some(0) => Ok(Some(output.stdout)),
+        Some(1) => Ok(None),
+        _ => Err(format!("could not read core.hooksPath: {}", output.stderr)),
     }
-    let set = Command::new("git")
-        .args(["config", "--local", "core.hooksPath"])
-        .arg(&hooks)
-        .output()
-        .map_err(|e| format!("set core.hooksPath: {e}"))?;
-    if !set.status.success() {
+}
+
+fn git_common_dir() -> Result<PathBuf> {
+    Ok(PathBuf::from(git::bounded_output(
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        4096,
+    )?))
+}
+
+fn install_local_hooks_config(common: &std::path::Path) -> Result<()> {
+    let config = common.join("config");
+    let lock = common.join("config.lock");
+    let mut transaction = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock)
+        .map_err(|e| format!("lock local Git config: {e}"))?;
+    let mut owned = match transaction.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = fs::remove_file(&lock);
+            return Err(format!("inspect local Git config lock: {error}"));
+        }
+    };
+    let mut committed = false;
+    let result = (|| {
+        let mut source = File::open(&config).map_err(|e| format!("open local Git config: {e}"))?;
+        let source_mode = source
+            .metadata()
+            .map_err(|e| format!("inspect local Git config: {e}"))?
+            .permissions()
+            .mode()
+            & 0o777;
+        transaction
+            .set_permissions(fs::Permissions::from_mode(source_mode))
+            .map_err(|e| format!("set staged local Git config mode: {e}"))?;
+        std::io::copy(&mut source, &mut transaction)
+            .and_then(|_| transaction.sync_all())
+            .map_err(|e| format!("stage local Git config: {e}"))?;
+        drop(transaction);
+        let lock_text = lock.to_str().ok_or("local Git config path is not UTF-8")?;
+        let existing = git::bounded_output_status(
+            &["config", "--file", lock_text, "--get-all", "core.hooksPath"],
+            4096,
+        )?;
+        match existing.code {
+            Some(1) => {}
+            Some(0) => {
+                return Err("core.hooksPath changed concurrently; refusing to overwrite it".into());
+            }
+            _ => {
+                return Err(format!(
+                    "inspect staged local Git config: {}",
+                    existing.stderr
+                ));
+            }
+        }
+        git::bounded_output(
+            &[
+                "config",
+                "--file",
+                lock_text,
+                "--add",
+                "core.hooksPath",
+                ".githooks",
+            ],
+            4096,
+        )?;
+        owned = fs::symlink_metadata(&lock)
+            .map_err(|e| format!("inspect updated local Git config lock: {e}"))?;
+        File::open(&lock)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| format!("sync staged local Git config: {e}"))?;
+        fs::rename(&lock, &config).map_err(|e| format!("commit local Git config: {e}"))?;
+        committed = true;
+        File::open(common)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| format!("sync Git common directory: {e}"))?;
+        Ok(())
+    })();
+    if result.is_err() && !committed {
+        if let Ok(current) = fs::symlink_metadata(&lock)
+            && !current.file_type().is_symlink()
+            && current.dev() == owned.dev()
+            && current.ino() == owned.ino()
+        {
+            let _ = fs::remove_file(&lock);
+        }
+    }
+    result
+}
+
+fn open_hooks_directory(path: &std::path::Path) -> Result<File> {
+    let before = fs::symlink_metadata(path)
+        .map_err(|e| format!("canonical .githooks is unavailable: {e}"))?;
+    if before.file_type().is_symlink() || !before.is_dir() {
+        return Err(".githooks must be a regular non-symlink directory".into());
+    }
+    let descriptor = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| format!("open .githooks directory: {e}"))?;
+    let directory = File::from(descriptor);
+    let opened = directory
+        .metadata()
+        .map_err(|e| format!("inspect .githooks: {e}"))?;
+    if before.dev() != opened.dev() || before.ino() != opened.ino() {
+        return Err(".githooks changed during inspection".into());
+    }
+    Ok(directory)
+}
+
+fn verify_directory_path(path: &std::path::Path, directory: &File) -> Result<()> {
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("reinspect .githooks directory: {e}"))?;
+    let opened = directory
+        .metadata()
+        .map_err(|e| format!("inspect open .githooks directory: {e}"))?;
+    if path_metadata.file_type().is_symlink()
+        || !path_metadata.is_dir()
+        || path_metadata.dev() != opened.dev()
+        || path_metadata.ino() != opened.ino()
+    {
+        return Err(".githooks changed during operation".into());
+    }
+    Ok(())
+}
+
+fn verify_hook_file(hooks_path: &std::path::Path, hooks: &File) -> Result<u32> {
+    verify_directory_path(hooks_path, hooks)?;
+    let path = hooks_path.join("pre-push");
+    let before = fs::symlink_metadata(&path)
+        .map_err(|e| format!("canonical .githooks/pre-push is unavailable: {e}"))?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err("canonical .githooks/pre-push must be a regular non-symlink file".into());
+    }
+    let descriptor = rustix::fs::openat(
+        hooks,
+        "pre-push",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| format!("open canonical pre-push hook: {e}"))?;
+    let mut file = File::from(descriptor);
+    let opened = file
+        .metadata()
+        .map_err(|e| format!("inspect canonical pre-push hook: {e}"))?;
+    if before.dev() != opened.dev() || before.ino() != opened.ino() {
+        return Err("canonical pre-push hook changed during inspection".into());
+    }
+    let mut bytes = Vec::with_capacity(CANONICAL_PRE_PUSH_HOOK.len() + 1);
+    Read::by_ref(&mut file)
+        .take((CANONICAL_PRE_PUSH_HOOK.len() + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read canonical pre-push hook: {e}"))?;
+    if bytes != CANONICAL_PRE_PUSH_HOOK {
+        return Err(".githooks/pre-push conflicts with the canonical hook".into());
+    }
+    let after = fs::symlink_metadata(&path)
+        .map_err(|e| format!("reinspect canonical pre-push hook: {e}"))?;
+    if after.file_type().is_symlink()
+        || !after.is_file()
+        || after.dev() != opened.dev()
+        || after.ino() != opened.ino()
+    {
+        return Err("canonical pre-push hook changed during inspection".into());
+    }
+    let mode = file
+        .metadata()
+        .map_err(|e| format!("final canonical pre-push metadata: {e}"))?
+        .mode()
+        & 0o7777;
+    if mode != 0o755 {
         return Err(format!(
-            "set core.hooksPath: {}",
-            String::from_utf8_lossy(&set.stderr).trim()
+            "canonical .githooks/pre-push mode is {mode:04o}, expected 0755"
         ));
     }
-    let verify = Command::new("git")
-        .args(["config", "--local", "--get", "core.hooksPath"])
-        .output()
-        .map_err(|e| format!("verify core.hooksPath: {e}"))?;
-    if !verify.status.success()
-        || PathBuf::from(String::from_utf8_lossy(&verify.stdout).trim_end()) != hooks
+    verify_directory_path(hooks_path, hooks)?;
+    Ok(mode)
+}
+
+fn verify_hooks() -> Result<u32> {
+    let (_, hooks) = worktree_hooks()?;
+    if effective_hooks()? != hooks {
+        return Err("effective core.hooksPath is not this worktree's .githooks".into());
+    }
+    let directory = open_hooks_directory(&hooks)?;
+    verify_hook_file(&hooks, &directory)
+}
+
+pub(crate) fn install_hooks() -> Result<()> {
+    let (root, hooks) = worktree_hooks()?;
+    let common = git_common_dir()?;
+    let lock_path = common.join("task-dag/install-hooks.lock");
+    let lock_parent = lock_path
+        .parent()
+        .ok_or("install-hooks lock has no parent")?;
+    fs::create_dir_all(lock_parent)
+        .map_err(|e| format!("create install-hooks lock directory: {e}"))?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)
+        .map_err(|e| format!("open install-hooks lock: {e}"))?;
+    lock.lock()
+        .map_err(|e| format!("lock install-hooks: {e}"))?;
+
+    let local = config_value(true)?;
+    let effective_config = config_value(false)?;
+    if (local.is_some() || effective_config.is_some()) && effective_hooks()? != hooks {
+        return Err("refusing to replace an existing custom core.hooksPath".into());
+    }
+
+    let mut directory_created = false;
+    match fs::symlink_metadata(&hooks) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(".githooks must be a regular non-symlink directory".into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::create_dir(&hooks) {
+                Ok(()) => directory_created = true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("create .githooks: {error}")),
+            }
+        }
+        Err(error) => return Err(format!("inspect .githooks: {error}")),
+    }
+
+    let directory = open_hooks_directory(&hooks)?;
+    let hook = hooks.join("pre-push");
+    let mut hook_changed = false;
+    match fs::symlink_metadata(&hook) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(".githooks/pre-push must be a regular non-symlink file".into());
+            }
+            match verify_hook_file(&hooks, &directory) {
+                Ok(_) => {}
+                Err(error) if error.contains("mode is") => {
+                    let descriptor = rustix::fs::openat(
+                        &directory,
+                        "pre-push",
+                        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|e| format!("open canonical pre-push hook: {e}"))?;
+                    let file = File::from(descriptor);
+                    let opened = file.metadata().map_err(|e| e.to_string())?;
+                    if metadata.dev() != opened.dev() || metadata.ino() != opened.ino() {
+                        return Err("canonical pre-push hook changed before chmod".into());
+                    }
+                    rustix::fs::fchmod(&file, Mode::from_raw_mode(0o755))
+                        .map_err(|e| format!("make canonical pre-push hook executable: {e}"))?;
+                    file.sync_all()
+                        .map_err(|e| format!("sync pre-push hook: {e}"))?;
+                    hook_changed = true;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos();
+            let temporary = format!(".pre-push.{}.{nonce}.tmp", std::process::id());
+            let result = (|| {
+                let descriptor = rustix::fs::openat(
+                    &directory,
+                    temporary.as_str(),
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(0o755),
+                )
+                .map_err(|e| format!("create temporary pre-push hook: {e}"))?;
+                let mut file = File::from(descriptor);
+                let owned = file.metadata().map_err(|e| e.to_string())?;
+                file.write_all(CANONICAL_PRE_PUSH_HOOK)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|e| format!("write canonical pre-push hook: {e}"))?;
+                rustix::fs::fchmod(&file, Mode::from_raw_mode(0o755))
+                    .map_err(|e| format!("set canonical pre-push hook mode: {e}"))?;
+                file.sync_all()
+                    .map_err(|e| format!("sync canonical pre-push hook: {e}"))?;
+                match rustix::fs::linkat(
+                    &directory,
+                    temporary.as_str(),
+                    &directory,
+                    "pre-push",
+                    AtFlags::empty(),
+                ) {
+                    Ok(()) => hook_changed = true,
+                    Err(error) if error == rustix::io::Errno::EXIST => {}
+                    Err(error) => return Err(format!("publish canonical pre-push hook: {error}")),
+                }
+                let current =
+                    rustix::fs::statat(&directory, temporary.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+                        .map_err(|e| format!("inspect temporary pre-push hook: {e}"))?;
+                if current.st_dev != owned.dev() || current.st_ino != owned.ino() {
+                    return Err("temporary pre-push hook changed before cleanup".into());
+                }
+                rustix::fs::unlinkat(&directory, temporary.as_str(), AtFlags::empty())
+                    .map_err(|e| format!("remove temporary pre-push hook: {e}"))?;
+                Ok(())
+            })();
+            result?;
+            directory
+                .sync_all()
+                .map_err(|e| format!("sync .githooks: {e}"))?;
+            if directory_created {
+                File::open(&root)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|e| format!("sync worktree root: {e}"))?;
+            }
+        }
+        Err(error) => return Err(format!("inspect pre-push hook: {error}")),
+    }
+    let _ = verify_hook_file(&hooks, &directory)?;
+
+    let config_changed = local.is_none();
+    if config_changed {
+        install_local_hooks_config(&common)?;
+    }
+    let final_local = config_value(true)?;
+    if (config_changed && final_local.as_deref() != Some(".githooks"))
+        || (!config_changed && final_local != local)
+        || effective_hooks()? != hooks
     {
         return Err("core.hooksPath verification failed".into());
     }
-    Ok(())
+    let mode = verify_hooks()?;
+    crate::commands::print_json(&serde_json::json!({
+        "configChanged": config_changed,
+        "hookChanged": hook_changed,
+        "hooksPath": ".githooks",
+        "mode": format!("{mode:04o}")
+    }))
 }
 
 fn stage_native_claims(updates: &[Update]) -> Result<()> {
@@ -435,7 +764,7 @@ fn stage_native_claims(updates: &[Update]) -> Result<()> {
     if active.is_empty() {
         return Ok(());
     }
-    ensure_pre_push_hook()?;
+    verify_hooks()?;
     let directory = git_path("task-dag/native-claims")?;
     let staging = git_path("task-dag/native-claim-staging")?;
     fs::create_dir_all(&directory).map_err(|e| format!("create native claim registry: {e}"))?;

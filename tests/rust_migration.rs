@@ -147,6 +147,7 @@ impl Fixture {
         fs::set_permissions(hooks.join("pre-push"), permissions).unwrap();
         ok(&work, &["config", "user.name", "migration test"]);
         ok(&work, &["config", "user.email", "migration@test.invalid"]);
+        ok(&work, &["config", "core.hooksPath", ".githooks"]);
         let runtime = env!("TASKDAG_BUILD_COMMIT");
         ok(&work, &["fetch", source.to_str().unwrap(), runtime]);
         Self::run_raw(

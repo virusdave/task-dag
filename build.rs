@@ -8,7 +8,13 @@ fn main() {
     if Path::new(".git").exists() {
         emit_git_reruns();
     }
-    for path in ["Cargo.toml", "Cargo.lock", "build.rs", "src"] {
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "build.rs",
+        "src",
+        ".githooks/pre-push",
+    ] {
         println!("cargo:rerun-if-changed={path}");
     }
     println!("cargo:rerun-if-env-changed=TASKDAG_TEST_COMPILED_COMMIT");
@@ -26,6 +32,7 @@ fn main() {
             "Cargo.lock",
             "build.rs",
             "src",
+            ".githooks/pre-push",
         ]);
         assert!(
             status.trim().is_empty(),

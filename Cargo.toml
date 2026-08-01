@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+rustix = { version = "1", features = ["fs"] }
 
 [features]
 test-seam = []

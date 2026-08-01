@@ -23,6 +23,12 @@ pub(crate) struct ObjectInfo {
     pub(crate) size: Option<usize>,
 }
 
+pub(crate) struct BoundedCommandOutput {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
 pub(crate) fn set_cache_only(value: bool) {
     CACHE_ONLY.with(|flag| *flag.borrow_mut() = value);
 }
@@ -31,6 +37,17 @@ pub(crate) fn set_cache_only(value: bool) {
 /// collected into an allocation. Reading concurrently also prevents a full
 /// stderr pipe from deadlocking a command with bounded stdout.
 pub(crate) fn bounded_output(args: &[&str], max_stdout: usize) -> Result<String> {
+    let output = bounded_output_status(args, max_stdout)?;
+    if output.code != Some(0) {
+        return Err(format!("git {}: {}", args.join(" "), output.stderr));
+    }
+    Ok(output.stdout)
+}
+
+pub(crate) fn bounded_output_status(
+    args: &[&str],
+    max_stdout: usize,
+) -> Result<BoundedCommandOutput> {
     const MAX_STDERR: usize = 16_384;
     enum ReadResult {
         Stdout(io::Result<(Vec<u8>, bool)>),
@@ -89,17 +106,16 @@ pub(crate) fn bounded_output(args: &[&str], max_stdout: usize) -> Result<String>
     stderr_reader
         .join()
         .map_err(|_| "git stderr reader panicked")?;
-    if !status.success() {
-        return Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&err.unwrap_or_default()).trim()
-        ));
-    }
-    Ok(String::from_utf8(out.unwrap_or_default())
-        .map_err(|_| "git output is not UTF-8")?
-        .trim_end()
-        .to_owned())
+    Ok(BoundedCommandOutput {
+        code: status.code(),
+        stdout: String::from_utf8(out.unwrap_or_default())
+            .map_err(|_| "git output is not UTF-8")?
+            .trim_end()
+            .to_owned(),
+        stderr: String::from_utf8_lossy(&err.unwrap_or_default())
+            .trim()
+            .to_owned(),
+    })
 }
 
 fn cache_only() -> bool {
