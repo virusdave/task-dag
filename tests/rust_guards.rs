@@ -340,6 +340,28 @@ fn pre_push_only_inspects_raw_origin_master_protocol() {
         .success()
     );
     assert!(
+        run(
+            &root,
+            &["guard-pre-push", "origin", "unused"],
+            &format!("{oid} {oid} refs/heads/tasks/system/transitions {zero}\n")
+        )
+        .status
+        .success()
+    );
+    for malformed in [
+        format!("(unknown) {zero} refs/heads/topic {oid}\n"),
+        format!("(unknown) {oid} refs/heads/topic {zero}\n"),
+        format!("{} {oid} refs/heads/topic {zero}\n", "b".repeat(40)),
+        format!("(other) {oid} refs/heads/topic {zero}\n"),
+        format!("(delete) {oid} refs/heads/topic {zero}\n"),
+    ] {
+        assert!(
+            !run(&root, &["guard-pre-push", "origin", "unused"], &malformed)
+                .status
+                .success()
+        );
+    }
+    assert!(
         !run(
             &root,
             &["guard-pre-push", "origin", "unused"],

@@ -15,6 +15,7 @@ fn git(cwd: &Path, args: &[&str]) -> Output {
     Command::new("git")
         .current_dir(cwd)
         .args(args)
+        .env("TASK_DAG_BIN", env!("CARGO_BIN_EXE_task-dag"))
         .output()
         .unwrap()
 }
@@ -371,6 +372,7 @@ impl Fixture {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_task-dag"));
         cmd.current_dir(work)
             .args(args)
+            .env("TASK_DAG_BIN", env!("CARGO_BIN_EXE_task-dag"))
             .env("TASKDAG_TEST_TIME", "1785196800")
             .env("TASKDAG_TEST_CURRENT_REPOSITORY", "owner/repo")
             .env("TASKDAG_SESSION_ID", "migration-integration")
