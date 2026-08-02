@@ -270,6 +270,17 @@ pub(crate) fn checked_snapshot(mut patterns: Vec<String>) -> Result<Snapshot> {
     Ok(snap)
 }
 
+pub(crate) fn activation_snapshot() -> Result<Snapshot> {
+    let snap = advertise(&[ACTIVATION.into()])?;
+    let activation = snap
+        .refs
+        .get(ACTIVATION)
+        .ok_or("v2 activation is absent; run init")?;
+    materialize(std::slice::from_ref(activation))?;
+    crate::validators::activation(activation)?;
+    Ok(snap)
+}
+
 pub(crate) fn validate_snapshot(snap: &Snapshot) -> Result<()> {
     let activation = snap
         .refs

@@ -192,7 +192,10 @@ pub(crate) fn activate_runtime(
     if let Some(outputs) = receipts::replay("activate-runtime", operation, &semantic)? {
         return print_json(&outputs);
     }
-    let snap = repository::checked_snapshot(Vec::new())?;
+    // Runtime activation is the bootstrap boundary: the immutable candidate
+    // may execute this one command before it appears in the leased activation.
+    // The exact activation lease and canonical runtime tag remain mandatory.
+    let snap = repository::activation_snapshot()?;
     let logical = if identity.is_null() {
         model::framed_digest("activate-runtime-logical", &[candidate, lease, operation])
     } else {
@@ -220,24 +223,20 @@ pub(crate) fn activate_runtime(
         .map_err(|_| "candidate must exist locally")?;
     runtime_authority::validate(candidate)?;
     let current = runtime()?;
-    if !prior["allowedRuntimeCommits"]
+    let prior_runtimes = prior["allowedRuntimeCommits"]
         .as_array()
-        .ok_or("activation runtimes malformed")?
-        .iter()
-        .any(|value| value.as_str() == Some(&current))
-    {
-        return Err("executing runtime is not authorized by leased activation".into());
-    }
+        .ok_or("activation runtimes malformed")?;
+    let baseline = rollover_baseline(prior_runtimes, &current, candidate)?;
     let epoch = prior["epoch"]
         .as_u64()
         .ok_or("activation epoch malformed")?
         .checked_add(1)
         .ok_or("activation epoch overflow")?;
     let activation_value = if identity.is_null() {
-        json!({"allowedRuntimeCommits":[current,candidate],"epoch":epoch,"formatVersion":2,"logicalId":logical,"operationId":operation,"state":"enabled","trustedFloor":prior["trustedFloor"]})
+        json!({"allowedRuntimeCommits":[baseline,candidate],"epoch":epoch,"formatVersion":2,"logicalId":logical,"operationId":operation,"state":"enabled","trustedFloor":prior["trustedFloor"]})
     } else {
-        let mut runtimes = vec![current.clone()];
-        if candidate != current {
+        let mut runtimes = vec![baseline];
+        if runtimes[0] != candidate {
             runtimes.push(candidate.into());
         }
         json!({"allowedRuntimeCommits":runtimes,"epoch":epoch,"fleetDigest":identity["fleetDigest"],"fleetRepositoryIds":identity["fleetRepositoryIds"],"formatVersion":3,"logicalId":logical,"operationId":operation,"repositoryId":identity["repositoryId"],"state":"enabled","trustedFloor":prior["trustedFloor"]})
@@ -265,6 +264,64 @@ pub(crate) fn activate_runtime(
     ]);
     repository::mutate(updates)?;
     print_json(&result)
+}
+
+fn rollover_baseline(prior_runtimes: &[Value], current: &str, candidate: &str) -> Result<String> {
+    if prior_runtimes
+        .iter()
+        .any(|value| value.as_str() == Some(current))
+    {
+        return Ok(current.into());
+    }
+    if current == candidate {
+        return prior_runtimes
+            .last()
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "activation runtimes malformed".into());
+    }
+    Err("executing runtime is neither authorized nor the immutable candidate".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rollover_baseline;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_rollover_accepts_authorized_or_exact_candidate_only() {
+        let prior = json!([
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ]);
+        let prior = prior.as_array().unwrap();
+        assert_eq!(
+            rollover_baseline(
+                prior,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "cccccccccccccccccccccccccccccccccccccccc"
+            )
+            .unwrap(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            rollover_baseline(
+                prior,
+                "cccccccccccccccccccccccccccccccccccccccc",
+                "cccccccccccccccccccccccccccccccccccccccc"
+            )
+            .unwrap(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert!(
+            rollover_baseline(
+                prior,
+                "dddddddddddddddddddddddddddddddddddddddd",
+                "cccccccccccccccccccccccccccccccccccccccc"
+            )
+            .is_err()
+        );
+    }
 }
 pub(crate) fn create(args: Create) -> Result<()> {
     model::bounded("operation-id", &args.operation_id, 256)?;
