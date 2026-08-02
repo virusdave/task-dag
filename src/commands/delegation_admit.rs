@@ -2,8 +2,8 @@ use super::print_json;
 use crate::{
     Result,
     cli::DelegateAdmit,
-    git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    git,
+    model::{self, ACTIVATION, Update},
     repository,
 };
 use serde_json::json;
@@ -68,7 +68,7 @@ pub(crate) fn admit(args: DelegateAdmit) -> Result<()> {
         return Err("delegation repository path contains a non-fleet repository".into());
     }
     let mut patterns = repository::lifecycle_patterns(target_task_id);
-    patterns.extend([admission_ref.clone(), ACTIVATION.into(), JOURNAL.into()]);
+    patterns.extend([admission_ref.clone(), ACTIVATION.into()]);
     let snap = repository::advertise(&patterns)?;
     if let Some(oid) = snap.refs.get(&admission_ref) {
         repository::materialize(std::slice::from_ref(oid))?;
@@ -121,18 +121,7 @@ pub(crate) fn admit(args: DelegateAdmit) -> Result<()> {
             new: Some(frontier.clone()),
         },
     ]);
-    let outputs = vec![
-        (admission_ref.clone(), admission.clone()),
-        (frontier_ref, frontier),
-    ];
-    let transition = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        local_activation_oid,
-        &args.operation_id,
-        &updates,
-        &outputs,
-    )?;
-    repository::mutate(&snap, updates, &transition)?;
+    repository::mutate(updates)?;
     print_json(
         &json!({"admissionOid":admission,"admissionRef":admission_ref,"taskId":target_task_id,"taskOid":task}),
     )

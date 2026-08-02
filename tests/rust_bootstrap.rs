@@ -82,7 +82,7 @@ fn uncertain(cwd: &Path, args: &[&str], token: &str, time: u64) {
 }
 
 #[test]
-fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
+fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     let root = std::env::temp_dir().join(format!("taskdag-rust-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -134,6 +134,15 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         "unused-token-000",
         100,
     );
+    ok(
+        &a,
+        &[
+            "push",
+            "origin",
+            &format!("{floor}:refs/heads/tasks/system/transitions"),
+        ],
+    );
+    let historical_journal = floor.clone();
 
     uncertain(
         &a,
@@ -157,9 +166,9 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
         "unused-token-000",
         100,
     );
-    assert_eq!(current["formatVersion"], 1);
+    assert_eq!(current["formatVersion"], 2);
     assert_eq!(current["activationOid"], activation_lease);
-    assert!(current["journalOid"].as_str().is_some());
+    assert!(current.get("journalOid").is_none());
     assert!(current.get("activation").is_none());
     assert!(current.get("journal").is_none());
     assert_eq!(current["rows"], serde_json::json!([]));
@@ -1262,11 +1271,9 @@ fn bare_origin_claims_breakdown_journal_and_ops_atomicity() {
     .next()
     .unwrap()
     .to_owned();
-    ok(&b, &["fetch", "origin", &journal]);
-    let parents = ok(&b, &["show", "-s", "--format=%P", &journal]);
-    assert!(
-        parents.split_whitespace().count() >= 2,
-        "journal predecessor must precede sorted semantic outputs"
+    assert_eq!(
+        journal, historical_journal,
+        "ordinary writes must not advance the historical journal ref"
     );
     let done = success(&a, &["show", child], "unused-token-000", 106);
     assert_eq!(done["state"], "done");

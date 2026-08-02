@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{Result, git, repository::Snapshot};
 
 pub(crate) const ACTIVATION: &str = "refs/heads/tasks/v2/activation";
-pub(crate) const JOURNAL: &str = "refs/heads/tasks/system/transitions";
 pub(crate) const FORCED_COMMENT_TARGET_WARNING: &str = "> **Forced comment target:** Tooling sent this comment under one-comment operator authorization. The source task may not be canonically associated with this issue; assess their relationship before acting on it.";
 const STATES: [&str; 5] = ["frontier", "active", "blocked", "waiting", "done"];
 

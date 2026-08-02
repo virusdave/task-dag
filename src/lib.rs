@@ -1,7 +1,6 @@
 mod cli;
 mod commands;
 mod git;
-mod journal;
 pub(crate) mod migration;
 mod model;
 mod receipts;

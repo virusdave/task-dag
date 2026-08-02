@@ -1,7 +1,7 @@
 use super::{checked_identity, claim_token, default_owner, print_json, timestamp};
 use crate::{
-    Result, git, journal,
-    model::{self, ACTIVATION, BreakdownSpec, JOURNAL, Update},
+    Result, git,
+    model::{self, BreakdownSpec, Update},
     receipts, repository,
 };
 use serde_json::json;
@@ -83,7 +83,6 @@ pub(crate) fn breakdown(id: &str, path: &str, claim_token_arg: &str) -> Result<(
     }
     let mut child_rows = Vec::new();
     let mut created = BTreeMap::new();
-    let mut outputs = Vec::new();
     let mut born_tokens = BTreeSet::new();
     let mut updates = vec![Update {
         semantic_ref: active_ref,
@@ -129,8 +128,6 @@ pub(crate) fn breakdown(id: &str, path: &str, claim_token_arg: &str) -> Result<(
             old: None,
             new: Some(state_oid.clone()),
         });
-        outputs.push((r.clone(), state_oid.clone()));
-        outputs.push((format!("object/task/{child_id}"), task.clone()));
         child_rows.push(json!({"claimToken":token,"owner":if child.claim {Some(owner)} else {None},"ref":r,"stateOid":state_oid,"taskId":child_id,"taskOid":task}));
     }
     let record = json!({"children":child_rows,"formatVersion":2,"operationId":spec.operation_id,"semanticId":semantic,"parentTaskId":id,"parentTaskOid":parent_task});
@@ -144,7 +141,6 @@ pub(crate) fn breakdown(id: &str, path: &str, claim_token_arg: &str) -> Result<(
         old: None,
         new: Some(manifest.clone()),
     });
-    outputs.push((waiting, manifest.clone()));
     let result = json!({"children":child_rows,"manifestOid":manifest,"parentTaskId":id});
     let (receipt_ref, receipt_oid) = receipts::create(
         "breakdown",
@@ -158,16 +154,7 @@ pub(crate) fn breakdown(id: &str, path: &str, claim_token_arg: &str) -> Result<(
         old: None,
         new: Some(receipt_oid.clone()),
     });
-    outputs.push((receipt_ref, receipt_oid));
     let updates = model::canonical_updates(updates);
-    outputs.sort();
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &spec.operation_id,
-        &updates,
-        &outputs,
-    )?;
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     print_json(&result)
 }

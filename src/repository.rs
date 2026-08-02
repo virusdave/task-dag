@@ -1,6 +1,6 @@
 use crate::{
     Result, git,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    model::{self, ACTIVATION, Update},
     runtime,
 };
 use rustix::fs::{AtFlags, Mode, OFlags};
@@ -54,8 +54,8 @@ pub(crate) fn advertise(patterns: &[String]) -> Result<Snapshot> {
     advertise_remote("origin", patterns)
 }
 
-/// Advertise only the five native-v2 lifecycle namespaces and the two system
-/// refs. This parser deliberately does not call `git check-ref-format`: the
+/// Advertise only the five native-v2 lifecycle namespaces and activation.
+/// This parser deliberately does not call `git check-ref-format`: the
 /// accepted grammar below is finite and stricter.
 pub(crate) fn advertise_current_state() -> Result<Snapshot> {
     let patterns = [
@@ -65,7 +65,6 @@ pub(crate) fn advertise_current_state() -> Result<Snapshot> {
         "refs/heads/tasks/waiting/v2-*",
         "refs/heads/tasks/done/v2-*",
         ACTIVATION,
-        JOURNAL,
     ];
     let mut child = Command::new("git")
         .args(["ls-remote", "--refs", "--", "origin"])
@@ -97,7 +96,6 @@ pub(crate) fn advertise_current_state() -> Result<Snapshot> {
             .ok_or_else(|| format!("malformed current-state advertisement line: {text}"))?;
         model::oid(oid)?;
         let valid = reference == ACTIVATION
-            || reference == JOURNAL
             || ["frontier", "active", "blocked", "waiting", "done"]
                 .iter()
                 .any(|state| {
@@ -264,7 +262,7 @@ fn advertise_remote_bounded(
     Ok(Snapshot { refs })
 }
 pub(crate) fn checked_snapshot(mut patterns: Vec<String>) -> Result<Snapshot> {
-    patterns.extend([ACTIVATION.into(), JOURNAL.into()]);
+    patterns.push(ACTIVATION.into());
     patterns.sort();
     patterns.dedup();
     let snap = advertise(&patterns)?;
@@ -277,13 +275,8 @@ pub(crate) fn validate_snapshot(snap: &Snapshot) -> Result<()> {
         .refs
         .get(ACTIVATION)
         .ok_or("v2 activation is absent; run init")?;
-    let journal = snap
-        .refs
-        .get(JOURNAL)
-        .ok_or("transition journal is absent; run init")?;
-    materialize(&[activation.clone(), journal.clone()])?;
+    materialize(std::slice::from_ref(activation))?;
     let a = crate::validators::activation(activation)?;
-    crate::validators::journal(journal, activation)?;
     let allowed = a["allowedRuntimeCommits"]
         .as_array()
         .ok_or("activation allowedRuntimeCommits malformed")?;
@@ -1047,18 +1040,14 @@ fn stage_native_claims(updates: &[Update]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn mutate(snap: &Snapshot, mut updates: Vec<Update>, journal: &str) -> Result<()> {
+pub(crate) fn mutate(updates: Vec<Update>) -> Result<()> {
     let _registry_lock = native_claim_registry_lock(false)?;
-    // Stage protection before adding the journal or performing any remote operation.
+    // Stage protection before performing any remote operation.
     // A rejected push may leave a harmless candidate that the hook reconciles.
     stage_native_claims(&updates)?;
-    updates.push(Update {
-        semantic_ref: JOURNAL.into(),
-        old: snap.refs.get(JOURNAL).cloned(),
-        new: Some(journal.into()),
-    });
     let mut cmd = Command::new("git");
-    cmd.args(["push", "--porcelain", "--atomic", "origin"]);
+    cmd.args(["push", "--porcelain", "--atomic", "origin"])
+        .env("TASKDAG_NATIVE_MUTATION", "1");
     for u in &updates {
         let old = u.old.as_deref().unwrap_or("");
         cmd.arg(format!("--force-with-lease={}:{}", u.semantic_ref, old));
@@ -1068,12 +1057,10 @@ pub(crate) fn mutate(snap: &Snapshot, mut updates: Vec<Update>, journal: &str) -
         });
     }
     let push = cmd.output().map_err(|e| format!("run git push: {e}"))?;
-    let mut touched: Vec<String> = updates.iter().map(|u| u.semantic_ref.clone()).collect();
-    touched.extend([ACTIVATION.into(), JOURNAL.into()]);
+    let touched: Vec<String> = updates.iter().map(|u| u.semantic_ref.clone()).collect();
     let readback = advertise(&touched)?;
     let all_new = updates
         .iter()
-        .filter(|u| u.semantic_ref != JOURNAL)
         .all(|u| readback.refs.get(&u.semantic_ref) == u.new.as_ref());
     if all_new {
         #[cfg(feature = "test-seam")]
@@ -1084,7 +1071,6 @@ pub(crate) fn mutate(snap: &Snapshot, mut updates: Vec<Update>, journal: &str) -
     }
     let all_old = updates
         .iter()
-        .filter(|u| u.semantic_ref != JOURNAL)
         .all(|u| readback.refs.get(&u.semantic_ref) == u.old.as_ref());
     if push.status.success() {
         Err("push reported success but authoritative readback differs".into())
@@ -1123,14 +1109,6 @@ pub(crate) fn ensure_new(s: &Snapshot, id: &str) -> Result<()> {
         ))
     }
 }
-pub(crate) fn absent(s: &Snapshot, r: &str) -> Result<()> {
-    if s.refs.contains_key(r) {
-        Err(format!("ref {r} must be absent"))
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{parse_advertisement, valid_exact_ref, valid_scope};

@@ -116,7 +116,6 @@ pub(crate) fn pre_push(remote_name: Option<&str>, remote_url: Option<&str>) -> R
         return Err("pre-push update stream exceeds line limit".into());
     }
     let mut raw_master = false;
-    let mut journal = false;
     for line in lines {
         let fields: Vec<_> = line.split(' ').collect();
         let local_is_zero = fields
@@ -134,10 +133,9 @@ pub(crate) fn pre_push(remote_name: Option<&str>, remote_url: Option<&str>) -> R
         {
             return Err("malformed pre-push update stream".into());
         }
-        journal |= fields[2] == model::JOURNAL && fields[1].bytes().any(|b| b != b'0');
         raw_master |= fields[2] == "refs/heads/master" && fields[1].bytes().any(|b| b != b'0');
     }
-    if !raw_master || journal {
+    if !raw_master || std::env::var_os("TASKDAG_NATIVE_MUTATION").is_some() {
         return Ok(());
     }
     native_claim_guard()

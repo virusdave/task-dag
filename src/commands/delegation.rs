@@ -2,8 +2,8 @@ use super::{print_json, timestamp};
 use crate::{
     Result,
     cli::DelegateCreate,
-    git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    git,
+    model::{self, ACTIVATION, Update},
     repository,
 };
 use serde_json::json;
@@ -50,7 +50,7 @@ pub(crate) fn create(args: DelegateCreate) -> Result<()> {
         return print_json(&replay_intent(oid, &args)?);
     }
     let mut patterns = repository::lifecycle_patterns(&args.task_id);
-    patterns.extend([reference.clone(), ACTIVATION.into(), JOURNAL.into()]);
+    patterns.extend([reference.clone(), ACTIVATION.into()]);
     let snap = repository::advertise(&patterns)?;
     if let Some(oid) = snap.refs.get(&reference) {
         return print_json(&replay_intent(oid, &args)?);
@@ -128,14 +128,6 @@ pub(crate) fn create(args: DelegateCreate) -> Result<()> {
             new: Some(waiting.clone()),
         },
     ]);
-    let outputs = vec![(reference.clone(), intent.clone()), (waiting_ref, waiting)];
-    let journal = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        activation_oid,
-        &args.operation_id,
-        &updates,
-        &outputs,
-    )?;
-    repository::mutate(&snap, updates, &journal)?;
+    repository::mutate(updates)?;
     print_json(&json!({"intentOid":intent,"intentRef":reference,"targetTaskId":target_task_id}))
 }

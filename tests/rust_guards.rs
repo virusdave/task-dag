@@ -129,16 +129,10 @@ impl Fixture {
         );
     }
 
-    fn guard(&self, journal: Option<bool>) -> std::process::Output {
+    fn guard(&self) -> std::process::Output {
         let oid = "d".repeat(40);
         let zero = "0".repeat(40);
-        let mut updates = format!("refs/heads/master {oid} refs/heads/master {zero}\n");
-        if let Some(create) = journal {
-            let journal = "refs/heads/tasks/system/transitions";
-            let local_ref = if create { journal } else { "(delete)" };
-            let local_oid = if create { &oid } else { &zero };
-            updates.push_str(&format!("{local_ref} {local_oid} {journal} {oid}\n"));
-        }
+        let updates = format!("refs/heads/master {oid} refs/heads/master {zero}\n");
         run(
             &self.work,
             &["guard-pre-push", "origin", "unused"],
@@ -233,9 +227,7 @@ fn matching_registry_and_remote_active_reject_raw_master() {
     let fixture = Fixture::new();
     fixture.registry(&fixture.token);
     fixture.active(&fixture.token, 0);
-    assert!(!fixture.guard(None).status.success());
-    assert!(fixture.guard(Some(true)).status.success());
-    assert!(!fixture.guard(Some(false)).status.success());
+    assert!(!fixture.guard().status.success());
 }
 
 #[test]
@@ -244,13 +236,13 @@ fn absent_or_stale_remote_active_removes_only_registry_entry() {
     let entry = fixture.registry(&fixture.token);
     let sentinel = fixture.work.join(".git/task-dag/sentinel");
     fs::write(&sentinel, "keep").unwrap();
-    assert!(fixture.guard(None).status.success());
+    assert!(fixture.guard().status.success());
     assert!(!entry.exists());
     assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep");
 
     let entry = fixture.registry(&fixture.token);
     fixture.active("different-token", 0);
-    assert!(fixture.guard(None).status.success());
+    assert!(fixture.guard().status.success());
     assert!(!entry.exists());
 }
 
@@ -259,12 +251,12 @@ fn malformed_registry_and_remote_objects_fail_closed() {
     let fixture = Fixture::new();
     let entry = fixture.registry(&fixture.token);
     fs::write(&entry, b"not json").unwrap();
-    assert!(!fixture.guard(None).status.success());
+    assert!(!fixture.guard().status.success());
 
     fs::remove_file(entry).unwrap();
     fixture.registry(&fixture.token);
     fixture.active(&fixture.token, 9_000);
-    assert!(!fixture.guard(None).status.success());
+    assert!(!fixture.guard().status.success());
 }
 
 #[test]
@@ -279,9 +271,8 @@ fn in_flight_registry_lock_fails_closed_without_removing_entry() {
         .open(lock_path)
         .unwrap();
     lock.lock().unwrap();
-    assert!(!fixture.guard(None).status.success());
+    assert!(!fixture.guard().status.success());
     assert!(entry.exists());
-    assert!(fixture.guard(Some(true)).status.success());
 }
 
 #[test]
@@ -302,7 +293,7 @@ fn oversized_message_file_and_registry_entry_fail_closed() {
     let entry = fixture.registry(&fixture.token);
     let file = File::options().write(true).open(&entry).unwrap();
     file.set_len(4097).unwrap();
-    assert!(!fixture.guard(None).status.success());
+    assert!(!fixture.guard().status.success());
     assert!(entry.exists());
 }
 
@@ -335,15 +326,6 @@ fn pre_push_only_inspects_raw_origin_master_protocol() {
             &root,
             &["guard-pre-push", "origin", "unused"],
             &format!("refs/heads/topic {oid} refs/heads/topic {zero}\n")
-        )
-        .status
-        .success()
-    );
-    assert!(
-        run(
-            &root,
-            &["guard-pre-push", "origin", "unused"],
-            &format!("{oid} {oid} refs/heads/tasks/system/transitions {zero}\n")
         )
         .status
         .success()

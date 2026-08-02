@@ -1,8 +1,8 @@
 use crate::{
     Result,
     cli::CompleteOps,
-    git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    git,
+    model::{self, Update},
     repository,
 };
 use serde_json::json;
@@ -154,14 +154,7 @@ pub(crate) fn complete(id: &str, publication: &str, claim_token: &str) -> Result
         updates.push(update);
     }
     let updates = model::canonical_updates(updates);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &logical,
-        &updates,
-        &[(done, evidence)],
-    )?;
-    repository::mutate(&snap, updates, &j)
+    repository::mutate(updates)
 }
 pub(crate) fn complete_ops(args: CompleteOps) -> Result<()> {
     model::valid_id(&args.task_id)?;
@@ -225,14 +218,7 @@ pub(crate) fn complete_ops(args: CompleteOps) -> Result<()> {
         updates.push(update);
     }
     let updates = model::canonical_updates(updates);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &logical,
-        &updates,
-        &[(done, done_oid)],
-    )?;
-    repository::mutate(&snap, updates, &j)
+    repository::mutate(updates)
 }
 
 pub(crate) fn converge(id: &str, operation: &str) -> Result<()> {
@@ -398,12 +384,5 @@ pub(crate) fn converge(id: &str, operation: &str) -> Result<()> {
         updates.push(update);
     }
     let updates = model::canonical_updates(updates);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &logical,
-        &updates,
-        &[(done, evidence)],
-    )?;
-    repository::mutate(&snap, updates, &j)
+    repository::mutate(updates)
 }

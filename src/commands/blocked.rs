@@ -1,6 +1,6 @@
 use crate::{
-    Result, git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    Result, git,
+    model::{self, Update},
     receipts, repository,
 };
 use serde_json::{Value, json};
@@ -90,7 +90,7 @@ pub(crate) fn unblock(id: &str, lease: &str, authorization: &str, operation: &st
 }
 
 fn transition(
-    snap: &repository::Snapshot,
+    _snap: &repository::Snapshot,
     domain: &str,
     operation: &str,
     semantic: &str,
@@ -124,13 +124,6 @@ fn transition(
             new: Some(receipt_oid.clone()),
         },
     ]);
-    let journal = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        operation,
-        &updates,
-        &[(new_ref, new), (receipt_ref, receipt_oid)],
-    )?;
-    repository::mutate(snap, updates, &journal)?;
+    repository::mutate(updates)?;
     super::print_json(&output)
 }

@@ -20,21 +20,21 @@ Use Git as the datastore, not as an event log that must be replayed.
    readiness prerequisites, decomposition, and completion evidence.
 3. A task's one current lifecycle ref says whether it is ready, claimed,
    waiting on children, blocked, or completed.
-4. Every mutation is one atomic Git push guarded by exact expected-old values,
-   or an idempotent replay whose already-achieved result is directly readable.
-5. A normal command reads only current refs and the commits they directly
-   name, plus the task's immediate parent, prerequisites, children, or
-   provider/cross-repository receipt when that relationship matters.
+4. Required ref updates use appropriate Git concurrency primitives and locking
+   in a semantically correct fashion. Multi-ref transitions use exact per-ref
+   leases and atomic push; sequential CAS transitions are valid when their
+   intermediate states are intentional, valid, and recoverable.
+5. A normal command reads bounded, semantically relevant authority and the
+   commits it names, including immediate parent, prerequisites, children, or
+   provider/cross-repository receipts when those relationships matter.
 6. Published history is assumed valid. Normal commands prove only: **if the
    observed old state is valid, this exact transition produces valid new
    state.** They never prove all history again.
-7. Full scans are exceptional audit/rebaseline operations. Rebaselining is
-   deliberately repeatable whenever a serious semantics or implementation bug
-   requires a new trusted floor; it is not treated as a one-time migration.
-8. One repository-wide append-only transition-journal ref participates in
-   every mutation. Its current tip is the activation writer fence; its history
-   permanently anchors transition facts for exceptional disaster replay, but
-   normal commands never replay it.
+7. Full scans are exceptional audit diagnostics, never part of normal command
+   correctness or recovery.
+8. There is no repository-wide transition journal or global writer fence.
+   Historical journal refs are inert Git data: native-v2 does not read,
+   validate, advance, or delete them.
 
 This preserves the original task-dag idea—relationships live in Git objects
 and refs—without the cumulative Epic Registry, a second graph authority, or a
@@ -311,54 +311,15 @@ repository already present in that path. The path is bounded by the finite set
 of repository identities in the current fleet activation record and prevents
 semantic cross-repository cycles without a distributed graph traversal.
 
-## The transition journal is also the activation writer fence
+## Concurrency authority
 
-Stock Git can lease only refs it updates. Merely reading the activation ref
-cannot stop an old writer from racing a later activation. Therefore every
-mutation exact-leases and advances one append-only
-`tasks/system/transitions` ref in the same atomic push.
-
-The journal entry contains:
-
-- the exact current activation object;
-- writer runtime commit and operation ID;
-- canonically sorted old/new values for every semantic ref changed by the
-  operation—including lifecycle, provider, reconciliation, `master`, and
-  activation refs—but excluding `tasks/system/transitions` itself;
-- canonical result digest over those semantic updates.
-
-The entry's first parent is the exact prior journal tip, which represents the
-expected old journal value without a circular self-reference. Additional
-parents are every immutable transition/output object created by the operation,
-ordered canonically by `(semantic-ref-name, object-id)`. The commit itself is
-the new journal value.
-
-Before every mutation, one advertisement must show that the journal tip records
-the same activation object as the activation ref and that activation permits
-the exact runtime. A mismatch fails closed and refetches. An activation
-transaction changes activation and journal atomically; its new journal entry
-records the **new** activation and directly reaches any newly created activation
-object.
-
-A concurrent unrelated writer may lose the journal lease; it refreshes and
-repeats the bounded mutable-input checks against one new remote advertisement,
-then rebuilds the journal entry without redoing completed provider effects.
-GitHub already serializes receive-pack updates, so this adds a bounded CAS
-retry rather than historical work.
-
-The initialization exception creates the first journal under an absent-ref
-lease with no predecessor. Initialization atomically creates activation and
-journal, and the activation object is a journal-reachable output. This is the
-one retained global coordination mechanism because stock Git has no
-compare-only ref guard.
-
-Normal commands read only current journal/activation tips. Exceptional offline
-replay can traverse the append-only journal and its transition parents to
-rebuild lifecycle refs. `rebuild-current` applies all recorded updates,
-including intentional pruning. A reserved future `rehydrate-pruned` mode may
-restore the latest done/lifecycle transition preceding a recorded compaction
-deletion. Total loss of all refs/object reachability is a repository-backup
-disaster, not something Git's object model can repair internally.
+Activation remains the validated runtime-compatibility authority. Each
+operation reads activation and the bounded refs relevant to its semantics,
+then exact-leases every ref it updates. Operations that require a multi-ref
+all-or-nothing transition use atomic push. Operation receipts support safe
+replay after uncertain outcomes, and authoritative touched-ref readback
+classifies success, rejection, or a conflicting result. No unrelated global
+ref participates in ordinary correctness.
 
 ## Transition invariants
 
@@ -366,8 +327,8 @@ Every writer proves only these local facts:
 
 1. **Runtime:** the exact current activation record explicitly permits this
    writer's exact task-dag implementation commit.
-2. **Activation fence/journal:** the exact journal old tip names that activation,
-   and the atomic push appends this operation's canonical transition entry.
+2. **Activation authority:** the validated activation permits the executing
+   runtime; activation updates themselves use an exact lease.
 3. **Authority:** each old ref equals the exact object ID observed before
    construction; every create asserts absence.
 4. **Identity:** every new record names the same Task-ID and Task object as the
@@ -402,13 +363,12 @@ constructed.
 
 Network fetch/push time is excluded from the tooling-overhead target. All
 fetches use the caller's existing full local checkout; normal commands never
-create an ephemeral clone. Every mutation also reads and advances the current
-transition journal under exact lease; that common O(1) step is omitted from
-each row.
+create an ephemeral clone. Each command reads only the bounded refs relevant to
+its semantics.
 
 | Command | Reads/fetches | Local work | Atomic write |
 |---|---|---|---|
-| create issue-backed Task | one advertisement containing activation/journal, one binding ref, and all fixed lifecycle namespaces for proposed Task-ID | create one Task/binding object | create binding + frontier refs, all absent-leased |
+| create issue-backed Task | activation, one binding ref, and all fixed lifecycle namespaces for proposed Task-ID | create one Task/binding object | create binding + frontier refs, all absent-leased |
 | frontier | current activation; frontier refs; immediate prerequisite done/admitted refs for candidates | parse current ref set and direct objects | none |
 | context/show | fixed lifecycle namespaces for one ID and directly named Task/record | parse one neighbourhood | none |
 | claim | activation; target frontier; immediate prerequisite done/admitted refs | create claim record | delete frontier at exact old; create active if absent |
@@ -416,7 +376,7 @@ each row.
 | release | activation; exact active claim | none or canonical frontier target | delete active at exact old; create frontier if absent |
 | block | activation; exact active claim | create block record | active→blocked at exact old |
 | unblock | activation; exact block record; immediate prerequisites | none | delete blocked at exact old; create frontier if absent |
-| breakdown | one advertisement with activation/fence, exact token-bound active claim, all fixed lifecycle namespaces for every proposed child ID, and immediate requirement satisfaction refs | create children + one manifest + zero or more independently readiness-proven born claims | active→waiting plus all active and frontier child refs in one atomic push |
+| breakdown | activation, exact token-bound active claim, all fixed lifecycle namespaces for every proposed child ID, and immediate requirement satisfaction refs | create children + one manifest + zero or more independently readiness-proven born claims | active→waiting plus all active and frontier child refs in one atomic push |
 | complete direct | activation; exact active claim; exact master; immediate prerequisites and direct reverse bindings | create publication commit with immediate first parent = master; create completion evidence | master→publication + active→done plus projection/reconcile work refs atomically |
 | complete operational | activation; exact active claim; canonical result description, authorization, and optional evidence links/digests | create immutable no-code completion evidence | active→done plus projection/reconcile work refs atomically; master untouched |
 | converge parent | one reconcile marker/waiting manifest; each direct child done ref; direct reverse bindings | create parent evidence | waiting→done; delete marker; ensure next-parent and provider-projection markers atomically |
@@ -436,17 +396,14 @@ unbounded “is descendant” proof with the direct check `publication^1 == old`
 ### Exact ambiguous-outcome protocol
 
 Each mutation attempt has a canonical result digest over every semantic field
-and exact old/new semantic ref value. Activation, journal tip, and all bounded
-mutable inputs are read from one remote advertisement before local
-construction, so the journal lease guards that observed snapshot. After an
-ambiguous push, one new remote advertisement classifies the operation-owned
-semantic refs; the current journal tip is deliberately excluded because a
-later unrelated valid mutation may already have replaced it:
+and exact old/new semantic ref value. Bounded mutable inputs are read before
+local construction. After an ambiguous push, one authoritative advertisement
+of only the refs changed by the operation classifies the result:
 
 - every affected ref has the exact requested new value: success;
 - every affected ref has the exact old value: a new Git attempt is allowed only
-  after validating the now-current activation/journal and repeating every bounded
-  mutable-input check; completed provider effects are reconciled, not repeated;
+  after validating current activation and repeating every bounded mutable-input
+  check; completed provider effects are reconciled, not repeated;
 - anything else: conflict/indeterminate, never blind retry.
 
 Attempt-specific timestamps and tokens are fixed when the attempt is built. A
@@ -479,7 +436,7 @@ successful completions or ref corruption.
 | cross-repo worker dies between steps | source/target is at a named intermediate state | any agent replays the next idempotent step |
 | GitHub unavailable | no authority mutation | wait/retry within bounded policy; never infer success |
 
-## Activation, audits, and repeatable trusted floors
+## Activation and audits
 
 Each repository has one current activation ref. Its tip is one canonical record
 containing:
@@ -487,7 +444,7 @@ containing:
 - activation epoch and state;
 - exact allowed task-dag writer implementation commit(s), normally one;
 - accepted object/ref format versions;
-- the current trusted audit/rebaseline floor for that repository;
+- the current trusted audit floor for that repository;
 - digest/link for documented historical exceptions, if any.
 
 Normal commands fetch and validate **that one record only**. They do not replay
@@ -495,27 +452,11 @@ activation history. They verify exact membership of the running task-dag
 implementation commit and that the requested writer is enabled. There is no
 normal-path merge-base/descendant walk.
 
-A whole-history audit is an explicit exceptional command run while ordinary
-writers are paused. It may validate every relevant historical object, record
-accepted legacy exceptions, and publish a new attestation. Fleet activation
-then advances each repository's current activation record to the newly audited
-floor using a reviewed plan and per-repository exact leases while writers remain
-paused. Cross-repository activation is coordinated, not falsely described as
-atomic.
-
-This rebaseline path is intentionally reusable. If a serious semantics or
-implementation defect is later found:
-
-1. pause writers;
-2. repair or explicitly classify affected historical state;
-3. rerun the exceptional full audit;
-4. publish a new trusted floor and exact allowed writer runtime;
-5. activate it across the fleet;
-6. resume normal transition-only validation.
-
-The current activation/journal attests that pre-transition published state is at
-the trusted floor. Normal commands do not independently prove tip ancestry or
-revisit that attestation.
+A whole-history audit is an explicit exceptional diagnostic run while ordinary
+writers are paused. Activation changes use appropriate Git concurrency
+primitives and locking, with authoritative readback. Cross-repository
+activation is coordinated, not falsely described as atomic. Normal commands do
+not independently prove tip ancestry or revisit historical state.
 
 ## Retention and compaction
 
@@ -528,11 +469,8 @@ cumulative state file. Done refs are retained indefinitely in this design.
 Safe compaction requires a separate reviewed closed-world protocol proving that
 no future or outstanding cross-repository dependant can need deleted evidence;
 this proposal deliberately does not invent that protocol. Any future
-compaction is an exceptional writer-paused operation fenced by activation. The
-append-only transition journal permanently retains the done object and the
-pruning transition, so pruning a done ref never destroys historical completion
-evidence and exceptional replay can distinguish current reconstruction from
-explicit rehydration of pruned evidence.
+compaction is an exceptional writer-paused operation coordinated through
+activation. Without such a protocol, done evidence is retained.
 
 ## Concern-by-concern design budget
 
@@ -548,14 +486,14 @@ earn machinery merely because it is imaginable.
 | worker abandonment | medium | permanently stuck task | yes, but dispatch stalls | **Address now:** renewable expiring claim + CAS reap |
 | cross-repository partial progress | medium | dependency never converges | yes from durable intent | **Address now:** intent/admission/evidence state machine |
 | provider API outage/unknown POST | medium | missing/duplicate projection | usually, via stable marker | **Address now:** Git intent first, provider reconciliation |
-| serious task-dag semantics bug | rare, high impact | trusted state may be wrong | only through explicit audit/repair | **Address now:** reusable exceptional rebaseline path; no normal scan |
-| activation changes during an old writer | rare, high impact | old semantics can publish after cutover | not safely detectable after the fact | **Address now:** transition-journal CAS also fences activation |
+| serious task-dag semantics bug | rare, high impact | trusted state may be wrong | explicit audit and reviewed repair | **Address now:** pause writers and audit; no normal scan or recovery subsystem |
+| activation changes during an old writer | rare, high impact | old semantics can publish after cutover | controlled by rollout coordination | **Address now:** appropriate Git concurrency primitives, locking, and authoritative readback |
 | malformed local command input | common | invalid proposed object | immediately | **Address now:** strict local schema/relationship checks |
 | very large direct child fanout | uncommon | one parent check becomes linear/slow | visible and decomposable | **Accept now:** O(immediate degree); encourage hierarchical decomposition |
 | millions of simultaneously open refs | very unlikely currently | listings become slow | measurable before corruption | **Defer:** add an index only when observed scale requires it |
 | completion-ref accumulation | certain but gradual | namespace/storage growth | measurable; safe deletion needs closed-world proof | **Retain indefinitely now;** separate future design only if needed |
 | host clock skew | low with fleet NTP | premature claim reap, wasted work | leases prevent stale completion | **Accept:** operational clock assumption; no consensus clock service |
-| force-push/history rewrite | exceptional/operator-controlled | floor/commit mismatch | explicit fleet pause and rebaseline | **Do not automate:** operator-approved repair path only |
+| force-push/history rewrite | exceptional/operator-controlled | floor/commit mismatch | explicit fleet pause and audit | **Do not automate:** operator-approved repair path only |
 | malicious repository writer | out of scope | can forge any participating state | not reliably inside same trust domain | **Do not address** |
 | SHA collision | negligible | identity ambiguity | extraordinary repo repair | **Do not address** beyond full IDs |
 | arbitrary non-GitHub backend | not a production need | transition atomicity may differ | choose/qualify later if needed | **Do not abstract:** require GitHub atomic push semantics |
@@ -572,9 +510,8 @@ earn machinery merely because it is imaginable.
 | separate lifecycle refs | directly readable current state | deriving state from history reintroduces replay and ambiguity |
 | immutable decomposition manifest | direct child lookup and fixed completion criterion | searching commits for children is unbounded; mutable child sets make completion race-prone |
 | exact expected-old lease | compare-and-swap | “push latest” can overwrite a concurrent valid transition |
-| atomic multi-ref push | state exclusivity and branch/task coupling | sequential updates expose partial states after crash |
+| atomic multi-ref push or sequential CAS | operation-specific state coupling | operations need either all-or-nothing publication or intentional valid recoverable intermediate states |
 | stable operation identity | idempotent unknown-outcome recovery | transport failure otherwise cannot distinguish absent from already done |
-| one append-only transition journal | activation race exclusion plus exceptional ref reconstruction | Git has no compare-only lease; unanchored transition objects cannot be replayed after lifecycle-ref loss |
 | current activation record | exact runtime/semantics compatibility | running an old writer against new formats can create locally valid but semantically wrong state |
 | renewable claim | crash recovery without manual force | permanent claims wedge; unleased claims permit stale completion |
 | cross-repo intent + admitted evidence | durable convergence without distributed transactions | direct remote observation can disappear or be reinterpreted and is not local readiness authority |
@@ -606,8 +543,8 @@ normal path.
 - `context`, `deps`, `dag`: read a bounded neighbourhood by following direct
   object/ref links. A user-requested wider DAG display may recurse explicitly,
   but normal mutations do not.
-- `audit` / `rebaseline`: exceptional, explicitly expensive whole-state tools;
-  never called implicitly by a normal command.
+- `audit`: exceptional, explicitly expensive whole-state diagnostics; never
+  called implicitly by a normal command.
 
 “Close epic” disappears as a data-model primitive. Closing an issue is a
 provider projection emitted when its bound root Task's done ref appears.
@@ -629,13 +566,11 @@ then removes their legacy scheduling refs; v2 never dual-writes them.
 2. Construct candidate Rust bootstrap implementation commit `C` locally with
    `C^1 == M`.
 3. Build and run the bootstrap binary corresponding exactly to `C`.
-4. Under absent-ref leases, atomically initialize v2 activation and the first
-   transition journal, authorizing exact runtime `C`. The activation object
-   directly parents `C` in the task-dag repository, making the permitted
-   runtime durable before `master` moves.
+4. Under an absent-ref lease, initialize v2 activation authorizing exact runtime
+   `C`. The activation object directly parents `C` in the task-dag repository,
+   making the permitted runtime durable before `master` moves.
 5. Create and claim the first new v2 Task for the bootstrap implementation.
-6. Complete it in one atomic transaction: `master: M→C`, `active→done`, and
-   journal `J→J'`.
+6. Complete it in one atomic transaction: `master: M→C` and `active→done`.
 7. With that published v2 runtime, create an **implement the remaining v2
    command set** Task and a dependent **roll out v2 and make it the only usable
    task-dag runtime** Task.
@@ -649,8 +584,8 @@ After self-bootstrap:
 1. Freeze the exact current origin refs and run a whole-state audit with the
    existing trusted tool. Record v1 state as a read-only bootstrap exception;
    do not convert it yet.
-2. Finish the Rust normal command set and exceptional audit/replay/activation
-   tools using v2 Tasks.
+2. Finish the Rust normal command set and exceptional audit/activation tools
+   using v2 Tasks.
 3. Verify the frozen/audited floor and publish the exact Rust runtime.
 4. With writers paused, activate its exact allowed writer commit and trusted
    floor in each participating repository using per-repository leased updates
@@ -661,8 +596,8 @@ After self-bootstrap:
    into unified Task objects, direct bindings, decomposition manifests,
    lifecycle transitions, and directly addressable completion evidence. Old
    datastore objects remain read-only historical evidence.
-7. Verify the migrated ref set against the frozen source snapshot, publish a
-   new rebaseline attestation, and remove migrated legacy scheduling refs.
+7. Verify the migrated ref set against the frozen source snapshot and remove
+   migrated legacy scheduling refs.
 8. Finish the performance epic using activated fast commands and measure real
    wall-clock/tooling overhead.
 9. Remove obsolete v0 support except explicit readers for retained legacy
@@ -670,9 +605,8 @@ After self-bootstrap:
    removal epic.
 
 Rollback before activation is “do not advance activation.” After activation,
-roll forward with a repaired runtime and repeatable rebaseline. Re-enabling old
-writers against newly emitted objects is not safe and is not the rollback
-strategy.
+roll forward with a repaired runtime. Re-enabling old writers against newly
+emitted objects is not safe and is not the rollback strategy.
 
 ## Performance contract
 
@@ -746,9 +680,10 @@ The design is ready to implement when review confirms:
 5. master publication and task completion cannot split;
 6. claim expiry cannot permit two successful owners;
 7. cross-repository partial states are valid and convergent;
-8. serious future semantic defects can establish a new audited floor without
-   restoring normal-path history replay;
+8. serious future semantic defects can be diagnosed by an explicit audit
+   without restoring normal-path history replay;
 9. each retained exception mechanism has a demonstrated normal-development
    failure mode whose significance justifies its complexity.
-10. activation cannot race a stale writer, and ambiguous outcomes classify from
-    one exact remote advertisement without blind replay.
+10. activation changes use appropriate Git concurrency primitives and locking,
+    and ambiguous outcomes classify from authoritative touched-ref readback
+    without blind replay.

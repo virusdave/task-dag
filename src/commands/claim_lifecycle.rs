@@ -1,6 +1,6 @@
 use crate::{
-    Result, git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    Result, git,
+    model::{self, Update},
     receipts, repository,
 };
 use serde_json::json;
@@ -57,14 +57,7 @@ pub(crate) fn renew(id: &str, token: &str, ttl: u64, operation: &str) -> Result<
             new: Some(receipt_oid.clone()),
         },
     ]);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &logical,
-        &updates,
-        &[(r, new), (receipt_ref, receipt_oid)],
-    )?;
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     super::print_json(&result)
 }
 
@@ -140,13 +133,6 @@ pub(crate) fn release(id: &str, token: Option<&str>, expired: bool, operation: &
             new: Some(receipt_oid.clone()),
         },
     ]);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &logical,
-        &updates,
-        &[(frontier, new), (receipt_ref, receipt_oid)],
-    )?;
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     super::print_json(&result)
 }

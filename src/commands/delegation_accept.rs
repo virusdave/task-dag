@@ -2,8 +2,8 @@ use super::print_json;
 use crate::{
     Result,
     cli::DelegateAccept,
-    git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    git,
+    model::{self, ACTIVATION, Update},
     repository,
 };
 use serde_json::json;
@@ -117,12 +117,7 @@ pub(crate) fn accept(args: DelegateAccept) -> Result<()> {
         .as_str()
         .ok_or("validated intent lacks source Task-ID")?;
     let mut patterns = repository::lifecycle_patterns(source_task_id);
-    patterns.extend([
-        intent_ref.clone(),
-        accepted_ref.clone(),
-        ACTIVATION.into(),
-        JOURNAL.into(),
-    ]);
+    patterns.extend([intent_ref.clone(), accepted_ref.clone(), ACTIVATION.into()]);
     let snap = repository::advertise(&patterns)?;
     if let Some(oid) = snap.refs.get(&accepted_ref) {
         return replay(oid, &accepted_ref, intent_oid, &intent, &args.operation_id);
@@ -185,15 +180,7 @@ pub(crate) fn accept(args: DelegateAccept) -> Result<()> {
             new: None,
         },
     ]);
-    let outputs = vec![(accepted_ref.clone(), accepted.clone()), (done_ref, done)];
-    let transition = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        local_activation_oid,
-        &args.operation_id,
-        &updates,
-        &outputs,
-    )?;
-    repository::mutate(&snap, updates, &transition)?;
+    repository::mutate(updates)?;
     print_json(
         &json!({"acceptedOid":accepted,"acceptedRef":accepted_ref,"resultDigest":exported["resultDigest"],"taskId":source_task_id}),
     )

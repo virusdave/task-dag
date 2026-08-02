@@ -2,8 +2,8 @@ use super::{checked_identity, claim_token, default_owner, print_json, timestamp}
 use crate::{
     Result,
     cli::Create,
-    git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    git,
+    model::{self, ACTIVATION, Update},
     receipts,
     repository::{self},
     runtime, runtime_authority,
@@ -84,37 +84,20 @@ pub(crate) fn init(
     if let Some(outputs) = receipts::replay("init", &operation, &semantic)? {
         return print_json(&outputs);
     }
-    let snap = repository::advertise(&[
-        ACTIVATION.into(),
-        JOURNAL.into(),
-        "refs/heads/master".into(),
-    ])?;
+    let snap = repository::advertise(&[ACTIVATION.into(), "refs/heads/master".into()])?;
     if let Some(a) = snap.refs.get(ACTIVATION) {
-        let j = snap
-            .refs
-            .get(JOURNAL)
-            .ok_or("init replay requires activation and journal together")?;
-        repository::materialize(&[a.clone(), j.clone()])?;
+        repository::materialize(std::slice::from_ref(a))?;
         let value = git::object_json(a)?;
-        let journal = git::object_json(j)?;
         let expected = identity.as_ref().map_or_else(
             || json!({"allowedRuntimeCommits":[runtime],"epoch":1,"formatVersion":2,"state":"enabled","trustedFloor":trusted_floor}),
             |identity| json!({"allowedRuntimeCommits":[runtime],"epoch":1,"fleetDigest":identity["fleetDigest"],"fleetRepositoryIds":identity["fleetRepositoryIds"],"formatVersion":3,"repositoryId":identity["repositoryId"],"state":"enabled","trustedFloor":trusted_floor}),
         );
-        return if value == expected
-            && crate::validators::activation(a).is_ok()
-            && crate::validators::journal(j, a).is_ok()
-            && journal["activation"] == *a
-        {
+        return if value == expected && crate::validators::activation(a).is_ok() {
             Ok(())
         } else {
             Err("v2 is already initialized differently".into())
         };
     }
-    if snap.refs.contains_key(JOURNAL) {
-        return Err("init found journal without activation".into());
-    }
-    repository::absent(&snap, JOURNAL)?;
     let master = snap
         .refs
         .get("refs/heads/master")
@@ -148,17 +131,7 @@ pub(crate) fn init(
             new: Some(receipt_oid.clone()),
         },
     ]);
-    let j = journal::commit(
-        None,
-        &activation,
-        "init",
-        &updates,
-        &[
-            (ACTIVATION.into(), activation.clone()),
-            (receipt_ref, receipt_oid),
-        ],
-    )?;
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     print_json(&result)
 }
 
@@ -290,17 +263,7 @@ pub(crate) fn activate_runtime(
             new: Some(receipt_oid.clone()),
         },
     ]);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        &activation,
-        &logical,
-        &updates,
-        &[
-            (ACTIVATION.into(), activation.clone()),
-            (receipt_ref, receipt_oid),
-        ],
-    )?;
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     print_json(&result)
 }
 pub(crate) fn create(args: Create) -> Result<()> {
@@ -392,19 +355,6 @@ pub(crate) fn create(args: Create) -> Result<()> {
             new: Some(receipt_oid.clone()),
         },
     ]);
-    let mut outputs = vec![
-        (r.clone(), state_oid.clone()),
-        (format!("object/task/{id}"), task.clone()),
-        (receipt_ref, receipt_oid),
-    ];
-    outputs.sort();
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &args.operation_id,
-        &updates,
-        &outputs,
-    )?;
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     print_json(&result)
 }

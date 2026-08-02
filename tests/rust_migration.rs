@@ -2012,9 +2012,6 @@ fn recursive_approximation_preserves_decomposed_requirements_and_rejects_ancesto
         Some("unused-token"),
     );
     assert!(complete_child.status.success());
-    let journal_before = decomposed_requirement
-        .remote("refs/heads/tasks/system/transitions")
-        .unwrap();
     let premature = Fixture::run_raw(
         &decomposed_requirement.work,
         &[
@@ -2028,12 +2025,6 @@ fn recursive_approximation_preserves_decomposed_requirements_and_rejects_ancesto
     );
     assert!(!premature.status.success());
     assert!(String::from_utf8_lossy(&premature.stderr).contains("requirement"));
-    assert_eq!(
-        decomposed_requirement
-            .remote("refs/heads/tasks/system/transitions")
-            .unwrap(),
-        journal_before
-    );
     let unblock = Fixture::run_raw(
         &decomposed_requirement.work,
         &[
@@ -2162,7 +2153,6 @@ fn recursive_approximation_preserves_decomposed_requirements_and_rejects_ancesto
 #[test]
 fn migrates_exact_closure_deterministically_and_preserves_unrelated_state() {
     let f = Fixture::new(false, false);
-    let journal_before = f.remote("refs/heads/tasks/system/transitions").unwrap();
     let out = f.migrate("migration-main", None);
     assert!(
         out.status.success(),
@@ -2273,13 +2263,6 @@ fn migrates_exact_closure_deterministically_and_preserves_unrelated_state() {
     let guard = ok(&f.work, &["show", "-s", "--format=%B", &replacement]);
     assert!(guard.contains("Task-Dag-Activation-Guard: v1\nActivation-Epoch: 7\n"));
     assert!(guard.contains(&format!("Expected-Authority-Tip: {}", f.activation)));
-    let journal_after = f.remote("refs/heads/tasks/system/transitions").unwrap();
-    assert_eq!(
-        ok(&f.work, &["show", "-s", "--format=%P", &journal_after])
-            .split_whitespace()
-            .next(),
-        Some(journal_before.as_str())
-    );
     assert_eq!(
         String::from_utf8(f.migrate("migration-main", None).stdout).unwrap(),
         raw

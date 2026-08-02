@@ -74,20 +74,15 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
         .get(model::ACTIVATION)
         .ok_or("v2 activation is absent")?
         .clone();
-    let journal = first
-        .refs
-        .get(model::JOURNAL)
-        .ok_or("transition journal is absent")?
-        .clone();
     let lifecycle_objects: Vec<_> = captured
         .iter()
         .map(|row| row.3.clone())
-        .chain([activation.clone(), journal.clone()])
+        .chain([activation.clone()])
         .collect();
     repository::materialize_local(&lifecycle_objects)?;
     crate::git::set_cache_only(true);
     let _guard = CacheOnlyGuard;
-    crate::validators::current_system(&activation, &journal)?;
+    crate::validators::activation(&activation)?;
     let mut relation_count = 0usize;
     let mut charge_relations = |count: usize| -> Result<()> {
         relation_count = charge_current_relations(relation_count, count)?;
@@ -193,7 +188,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
                 .into(),
         );
     }
-    let output = json!({"activationOid":activation,"fingerprint":current_fingerprint(&first.refs),"formatVersion":1,"journalOid":journal,"rows":rows});
+    let output = json!({"activationOid":activation,"fingerprint":current_fingerprint(&first.refs),"formatVersion":2,"rows":rows});
     let encoded = serde_json::to_vec(&output).map_err(|e| e.to_string())?;
     if encoded.len() > CURRENT_MAX_OUTPUT_BYTES {
         return Err("current-state JSON output exceeds hard limit".into());
@@ -278,14 +273,9 @@ pub(crate) fn activation() -> Result<()> {
         .refs
         .get(model::ACTIVATION)
         .ok_or("v2 activation is absent")?;
-    let journal_oid = snap
-        .refs
-        .get(model::JOURNAL)
-        .ok_or("transition journal is absent")?;
     let record = crate::validators::activation(activation_oid)?;
     print_json(&json!({
         "activationOid": activation_oid,
-        "journalOid": journal_oid,
         "record": record,
     }))
 }

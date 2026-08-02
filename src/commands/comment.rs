@@ -5,8 +5,8 @@ use crate::{
         CommentAssociate, CommentForceDecide, CommentForceRequest, CommentForceSend, CommentPost,
         CommentReconcile,
     },
-    git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    git,
+    model::{self, ACTIVATION, Update},
     repository,
 };
 use serde_json::{Value, json};
@@ -36,23 +36,12 @@ fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 }
 
 fn commit_mutation(
-    snap: &repository::Snapshot,
-    operation: &str,
+    _snap: &repository::Snapshot,
+    _operation: &str,
     updates: Vec<Update>,
-    outputs: Vec<(String, String)>,
+    _outputs: Vec<(String, String)>,
 ) -> Result<()> {
-    let activation = snap
-        .refs
-        .get(ACTIVATION)
-        .ok_or("snapshot lacks activation")?;
-    let transition = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        activation,
-        operation,
-        &updates,
-        &outputs,
-    )?;
-    repository::mutate(snap, updates, &transition)
+    repository::mutate(updates)
 }
 
 fn structural_chain(task_id: &str, task_oid: &str) -> Result<Vec<(String, String)>> {
@@ -97,7 +86,7 @@ fn find_binding(task_id: &str, intent_ref: &str) -> Result<BindingResolution> {
         .collect();
     let mut patterns = repository::lifecycle_patterns(task_id);
     patterns.extend(binding_refs.iter().map(|(reference, _)| reference.clone()));
-    patterns.extend([intent_ref.to_owned(), ACTIVATION.into(), JOURNAL.into()]);
+    patterns.extend([intent_ref.to_owned(), ACTIVATION.into()]);
     let snap = repository::advertise(&patterns)?;
     repository::validate_snapshot(&snap)?;
     let exact = model::lifecycle(&snap, task_id);
@@ -128,14 +117,12 @@ fn find_binding(task_id: &str, intent_ref: &str) -> Result<BindingResolution> {
                 target_ref.clone(),
                 intent_ref.to_owned(),
                 ACTIVATION.into(),
-                JOURNAL.into(),
             ]);
             let paired = repository::advertise(&paired_patterns)?;
             repository::validate_snapshot(&paired)?;
             if paired.refs.get(&reference) != Some(&oid)
                 || paired.refs.get(&target_ref) != Some(&oid)
                 || paired.refs.get(ACTIVATION) != snap.refs.get(ACTIVATION)
-                || paired.refs.get(JOURNAL) != snap.refs.get(JOURNAL)
                 || model::lifecycle(&paired, task_id) != exact
             {
                 return Err(
@@ -173,7 +160,6 @@ fn validate_intent_binding(intent: &Value) -> Result<()> {
             request_ref.clone(),
             decision_ref.clone(),
             ACTIVATION.into(),
-            JOURNAL.into(),
         ])?;
         if snap.refs.get(&request_ref).map(String::as_str) != Some(request_oid)
             || snap.refs.get(&decision_ref).map(String::as_str) != Some(decision_oid)
@@ -306,12 +292,7 @@ fn acquire_claim(intent_oid: &str, now: u64) -> Result<bool> {
     }
     let claim_ref = model::comment_delivery_claim_ref(intent_oid);
     let receipt_ref = model::comment_receipt_ref(intent_oid);
-    let patterns = vec![
-        claim_ref.clone(),
-        receipt_ref.clone(),
-        ACTIVATION.into(),
-        JOURNAL.into(),
-    ];
+    let patterns = vec![claim_ref.clone(), receipt_ref.clone(), ACTIVATION.into()];
     for attempt in 0..3 {
         let snap = repository::advertise(&patterns)?;
         repository::validate_snapshot(&snap)?;
@@ -469,7 +450,7 @@ fn provider_error(started: bool, stderr: String) -> ProviderOutput {
 fn source_task(task_id: &str) -> Result<(repository::Snapshot, String)> {
     model::valid_id(task_id)?;
     let mut patterns = repository::lifecycle_patterns(task_id);
-    patterns.extend([ACTIVATION.into(), JOURNAL.into()]);
+    patterns.push(ACTIVATION.into());
     let snap = repository::advertise(&patterns)?;
     repository::validate_snapshot(&snap)?;
     let lifecycle = model::lifecycle(&snap, task_id);
@@ -752,7 +733,7 @@ fn readback(intent: &Value, comment_id: &str, timeout: Duration) -> Result<Value
 
 fn record_receipt(intent_oid: &str, intent: &Value, observed: &Value) -> Result<Value> {
     let reference = model::comment_receipt_ref(intent_oid);
-    let patterns = vec![reference.clone(), ACTIVATION.into(), JOURNAL.into()];
+    let patterns = vec![reference.clone(), ACTIVATION.into()];
     let expected_id = decimal(&observed["id"], "comment ID")?;
     for attempt in 0..3 {
         let snap = repository::advertise(&patterns)?;
@@ -982,12 +963,7 @@ pub(crate) fn associate(args: CommentAssociate) -> Result<()> {
             field(&target, "issueId")?,
         );
         let mut patterns = repository::lifecycle_patterns(&args.task_id);
-        patterns.extend([
-            task_ref.clone(),
-            target_ref.clone(),
-            ACTIVATION.into(),
-            JOURNAL.into(),
-        ]);
+        patterns.extend([task_ref.clone(), target_ref.clone(), ACTIVATION.into()]);
         let snap = repository::advertise(&patterns)?;
         repository::validate_snapshot(&snap)?;
         if model::lifecycle(&snap, &args.task_id) != model::lifecycle(&base, &args.task_id) {
@@ -1194,8 +1170,7 @@ pub(crate) fn force_decide(args: CommentForceDecide) -> Result<()> {
             &args.operation_id,
         ],
     );
-    let snap =
-        repository::checked_snapshot(vec![reference.clone(), ACTIVATION.into(), JOURNAL.into()])?;
+    let snap = repository::checked_snapshot(vec![reference.clone(), ACTIVATION.into()])?;
     if let Some(oid) = snap.refs.get(&reference) {
         repository::materialize(std::slice::from_ref(oid))?;
         let value = crate::validators::comment::forced_decision(oid, &args.request_oid)?;
@@ -1233,7 +1208,6 @@ pub(crate) fn force_send(args: CommentForceSend) -> Result<()> {
         decision_ref.clone(),
         intent_ref.clone(),
         ACTIVATION.into(),
-        JOURNAL.into(),
     ])?;
     if snap.refs.get(&request_ref) != Some(&args.request_oid) {
         return Err("forced comment request is not the canonical published request".into());
@@ -1328,7 +1302,6 @@ pub(crate) fn reconcile(args: CommentReconcile) -> Result<()> {
         "refs/heads/tasks/comments/delivery-claims/*".into(),
         "refs/heads/tasks/comments/receipts/*".into(),
         ACTIVATION.into(),
-        JOURNAL.into(),
     ];
     let snap = repository::advertise_bounded(&patterns, RECONCILE_REF_LIMIT, RECONCILE_BYTE_LIMIT)?;
     repository::validate_snapshot(&snap)?;

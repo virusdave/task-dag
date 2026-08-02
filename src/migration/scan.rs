@@ -93,7 +93,6 @@ fn migration_patterns() -> Vec<String> {
         "refs/heads/tasks/delegated/*".into(),
         "refs/heads/tasks/delegated-close/v1/*".into(),
         "refs/heads/tasks/v2/activation".into(),
-        "refs/heads/tasks/system/transitions".into(),
     ]
 }
 

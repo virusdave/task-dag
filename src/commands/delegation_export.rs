@@ -2,8 +2,8 @@ use super::print_json;
 use crate::{
     Result,
     cli::DelegateExport,
-    git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    git,
+    model::{self, ACTIVATION, Update},
     repository,
 };
 use serde_json::json;
@@ -61,12 +61,7 @@ pub(crate) fn export(args: DelegateExport) -> Result<()> {
         .as_str()
         .ok_or("validated admission lacks target Task-ID")?;
     let mut patterns = repository::lifecycle_patterns(task_id);
-    patterns.extend([
-        admission_ref,
-        export_ref.clone(),
-        ACTIVATION.into(),
-        JOURNAL.into(),
-    ]);
+    patterns.extend([admission_ref, export_ref.clone(), ACTIVATION.into()]);
     let snap = repository::advertise(&patterns)?;
     if let Some(oid) = snap.refs.get(&export_ref) {
         return replay(oid, &export_ref, &args);
@@ -118,13 +113,6 @@ pub(crate) fn export(args: DelegateExport) -> Result<()> {
         old: None,
         new: Some(export.clone()),
     }];
-    let transition = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        local_activation_oid,
-        &args.operation_id,
-        &updates,
-        &[(export_ref.clone(), export.clone())],
-    )?;
-    repository::mutate(&snap, updates, &transition)?;
+    repository::mutate(updates)?;
     print_json(&json!({"exportOid":export,"exportRef":export_ref,"resultDigest":result_digest}))
 }

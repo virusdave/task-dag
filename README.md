@@ -46,6 +46,14 @@ The current surface is defined by `src/cli.rs`:
   `breakdown`, and `dag TASK-ID` is a bounded task view;
 - exceptional migration: `migrate-v1-census` and `migrate-v1`.
 
+Native-v2 commands read activation authority plus the bounded lifecycle,
+receipt, provider, and cross-repository refs that are semantically relevant to
+the operation. Required ref updates use appropriate Git concurrency primitives
+and locking in a semantically correct fashion. Multi-ref transitions use exact
+per-ref leases and atomic push; sequential CAS transitions are also valid when
+their intermediate states are intentional, valid, and recoverable. Historical
+`tasks/system/transitions` refs are inert data and are neither read nor updated.
+
 Use `task-dag <command> --help` for exact arguments. Immutable dependencies
 cannot be edited after task creation: `dep add` and `dep drop` are explicitly
 unsupported. `project` and `provider` are also unsupported.

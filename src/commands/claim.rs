@@ -1,7 +1,7 @@
 use super::{checked_identity, claim_token, print_json, timestamp};
 use crate::{
-    Result, git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    Result, git,
+    model::{self, Update},
     receipts, repository,
 };
 use serde_json::{Value, json};
@@ -90,13 +90,6 @@ pub(crate) fn claim(id: &str, owner: &str, ttl: u64, operation: &str) -> Result<
             new: Some(receipt_oid.clone()),
         },
     ]);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        &logical,
-        &updates,
-        &[(active_ref, new), (receipt_ref, receipt_oid)],
-    )?;
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     print_json(&result)
 }

@@ -1,8 +1,8 @@
 pub(crate) mod scan;
 
 use crate::{
-    Result, git, journal,
-    model::{self, ACTIVATION, JOURNAL, Update},
+    Result, git,
+    model::{self, Update},
     repository,
 };
 use serde_json::{Value, json};
@@ -736,13 +736,6 @@ pub(crate) fn run(
     ));
     outputs.push(("refs/heads/tasks/v1/graph".into(), graph_guard.clone()));
     updates = model::canonical_updates(updates);
-    let j = journal::commit(
-        snap.refs.get(JOURNAL).cloned(),
-        snap.refs.get(ACTIVATION).unwrap(),
-        operation,
-        &updates,
-        &outputs,
-    )?;
     #[cfg(feature = "test-seam")]
     if let Ok(raced) = std::env::var("TASKDAG_TEST_RACE_V1_ACTIVATION") {
         model::oid(&raced)?;
@@ -779,7 +772,7 @@ pub(crate) fn run(
             return Err("migration graph race seam could not advance graph".into());
         }
     }
-    repository::mutate(&snap, updates, &j)?;
+    repository::mutate(updates)?;
     let readback = repository::advertise(&[
         "refs/heads/master".into(),
         "refs/heads/tasks/v1/activation".into(),
