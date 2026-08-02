@@ -4,26 +4,32 @@
 Re-read agent canon each session; every rule applies unless explicitly scoped
 to dispatcher/worker machinery.**
 
-**First check `AGENT_WORKSPACE_MANIFEST`.** If it is set and validates (see
-`docs/agent-runtime/PREPARED_WORKSPACE_CONTRACT.md` in top-level), canon is
-already on local disk at `canon.canon_core_path` and task-dag at
-`task_dag.cli`; **do NOT bootstrap**. Follow an injected runtime capsule as
-the startup briefing; otherwise read the Core from `canon.canon_core_path`.
-Record `canon.canon_sha`.
+**First check `AGENT_WORKSPACE_MANIFEST`.** If it is set **and validates**
+(see `docs/agent-runtime/PREPARED_WORKSPACE_CONTRACT.md` in top-level), the
+workspace is prepared. **Do NOT bootstrap.** Record `canon.canon_sha`; follow
+an injected runtime capsule, or read Core from `canon.canon_core_path` when
+there is no capsule. Use the manifest's `task_dag.cli` and repo paths.
 
-**Otherwise** read canon from a fresh ephemeral checkout of
-`virusdave/top-level` at `origin/master`:
+**Otherwise** (no/invalid manifest) bootstrap a fresh canon read at
+`origin/master` — the cold path:
 
 ```sh
+unset AGENT_WORKSPACE_MANIFEST  # required when a present manifest failed validation
 ec=/home/amp-local/src/top-level/scripts/ephemeral_checkout
-cw=$("$ec" top-level --label "canon-read-$$-$RANDOM")
-cat "$cw/docs/canon/AGENTS_CANON.md"  # session end: "$ec" --remove "$cw"
+cw=$("$ec" top-level --label "canon-read-$$-$RANDOM")  # unique label; no shared paths
+cat "$cw/docs/canon/AGENTS_CANON.md" "$cw/docs/agent-kb/tools.md"
+# session end: "$ec" --remove "$cw"
 ```
 
-That file is authoritative; follow its dispatch table to relevant deep rules.
-The final work must include its Agent Gate Record. This file adds only
-task-dag-specific instructions and cannot weaken canon. Shared repository
-knowledge is indexed at `top-level:docs/agent-kb/repos/index.md`.
+Read **Canon Core**, then its compact tool router and every matched authority.
+Never bulk-load unrelated documentation or skip documentation specifically
+relevant to the task, tool, or context. Canon wins across all repos; final work
+requires its **Agent Gate Record**.
+
+<!-- agents-md:always-read:end -->
+
+Shared repository knowledge is indexed at
+`top-level:docs/agent-kb/repos/index.md`.
 
 ## Threat model for task-dag design and review
 
