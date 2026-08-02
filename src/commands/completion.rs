@@ -50,7 +50,7 @@ fn completion_snapshot(id: &str, include_master: bool) -> Result<repository::Sna
     Ok(authoritative)
 }
 
-fn reconciliation_update(
+pub(crate) fn reconciliation_update(
     snap: &repository::Snapshot,
     task: &str,
     id: &str,

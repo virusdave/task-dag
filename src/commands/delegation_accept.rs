@@ -34,9 +34,89 @@ fn replay(
     if !matches_intent(&value, intent_oid, intent, operation_id) {
         return Err("accepted delegation ref contains a different operation".into());
     }
+    let source_task_id = value["sourceTaskId"]
+        .as_str()
+        .ok_or("accepted delegation lacks source Task-ID")?;
+    reconcile_completed_source(source_task_id)?;
     print_json(
         &json!({"acceptedOid":oid,"acceptedRef":reference,"resultDigest":value["resultDigest"],"taskId":value["sourceTaskId"]}),
     )
+}
+
+fn reconcile_completed_source(source_task_id: &str) -> Result<()> {
+    let first = repository::task_snapshot(source_task_id, Vec::new())?;
+    repository::exclusive(&first, source_task_id, "done")?;
+    let done_oid = first
+        .refs
+        .get(&model::state_ref("done", source_task_id))
+        .ok_or("delegated completion disappeared")?
+        .clone();
+    repository::materialize(std::slice::from_ref(&done_oid))?;
+    let done = crate::validators::lifecycle("done", &done_oid, source_task_id)?;
+    let task_oid = done["taskOid"]
+        .as_str()
+        .ok_or("delegated completion lacks Task OID")?;
+    repository::materialize(std::slice::from_ref(&task_oid.to_owned()))?;
+    let task = crate::validators::task(task_oid, source_task_id)?;
+    let Some(parent_id) = task["structuralParent"]["taskId"].as_str() else {
+        return Ok(());
+    };
+    let mut patterns = repository::lifecycle_patterns(source_task_id);
+    patterns.extend(repository::lifecycle_patterns(parent_id));
+    patterns.extend([
+        format!("refs/heads/tasks/reconcile/{parent_id}"),
+        ACTIVATION.into(),
+    ]);
+    let snap = repository::advertise(&patterns)?;
+    repository::validate_snapshot(&snap)?;
+    let waiting_ref = model::state_ref("waiting", parent_id);
+    let marker = format!("refs/heads/tasks/reconcile/{parent_id}");
+    if snap.refs.contains_key(&waiting_ref) {
+        repository::exclusive(&snap, parent_id, "waiting")?;
+    } else {
+        repository::exclusive(&snap, parent_id, "done")?;
+        return cleanup_completed_parent_marker(&snap, parent_id, &marker);
+    }
+    if let Some(update) = super::completion::reconciliation_update(&snap, task_oid, source_task_id)?
+    {
+        repository::mutate(vec![update])?;
+        let after = repository::advertise(&patterns)?;
+        repository::validate_snapshot(&after)?;
+        if after
+            .refs
+            .contains_key(&model::state_ref("done", parent_id))
+        {
+            repository::exclusive(&after, parent_id, "done")?;
+            cleanup_completed_parent_marker(&after, parent_id, &marker)?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_completed_parent_marker(
+    snap: &repository::Snapshot,
+    parent_id: &str,
+    marker: &str,
+) -> Result<()> {
+    let Some(marker_oid) = snap.refs.get(marker) else {
+        return Ok(());
+    };
+    let done_oid = snap
+        .refs
+        .get(&model::state_ref("done", parent_id))
+        .ok_or("completed structural parent disappeared")?;
+    let done = crate::validators::lifecycle("done", done_oid, parent_id)?;
+    let manifest_oid = done["manifestOid"]
+        .as_str()
+        .ok_or("converged parent lacks manifest OID")?;
+    if marker_oid != manifest_oid {
+        return Err("completed parent retains a conflicting reconciliation marker".into());
+    }
+    repository::mutate(vec![Update {
+        semantic_ref: marker.into(),
+        old: Some(marker_oid.clone()),
+        new: None,
+    }])
 }
 
 #[cfg(test)]
@@ -118,6 +198,28 @@ pub(crate) fn accept(args: DelegateAccept) -> Result<()> {
         .ok_or("validated intent lacks source Task-ID")?;
     let mut patterns = repository::lifecycle_patterns(source_task_id);
     patterns.extend([intent_ref.clone(), accepted_ref.clone(), ACTIVATION.into()]);
+    let preliminary = repository::advertise(&patterns)?;
+    if let Some(oid) = preliminary.refs.get(&accepted_ref) {
+        return replay(oid, &accepted_ref, intent_oid, &intent, &args.operation_id);
+    }
+    repository::validate_snapshot(&preliminary)?;
+    repository::exclusive(&preliminary, source_task_id, "waiting")?;
+    let preliminary_waiting_oid = preliminary
+        .refs
+        .get(&model::state_ref("waiting", source_task_id))
+        .ok_or("delegated waiting lifecycle disappeared")?
+        .clone();
+    repository::materialize(std::slice::from_ref(&preliminary_waiting_oid))?;
+    let preliminary_waiting = crate::validators::waiting(&preliminary_waiting_oid, source_task_id)?;
+    let preliminary_task_oid = preliminary_waiting["parentTaskOid"]
+        .as_str()
+        .ok_or("validated waiting lifecycle lacks parent Task OID")?;
+    repository::materialize(std::slice::from_ref(&preliminary_task_oid.to_owned()))?;
+    let preliminary_task = crate::validators::task(preliminary_task_oid, source_task_id)?;
+    if let Some(parent_id) = preliminary_task["structuralParent"]["taskId"].as_str() {
+        patterns.extend(repository::lifecycle_patterns(parent_id));
+        patterns.push(format!("refs/heads/tasks/reconcile/{parent_id}"));
+    }
     let snap = repository::advertise(&patterns)?;
     if let Some(oid) = snap.refs.get(&accepted_ref) {
         return replay(oid, &accepted_ref, intent_oid, &intent, &args.operation_id);
@@ -163,7 +265,7 @@ pub(crate) fn accept(args: DelegateAccept) -> Result<()> {
     )?;
     crate::validators::lifecycle("done", &done, source_task_id)?;
     let done_ref = model::state_ref("done", source_task_id);
-    let updates = model::canonical_updates(vec![
+    let mut updates = vec![
         Update {
             semantic_ref: accepted_ref.clone(),
             old: None,
@@ -179,7 +281,13 @@ pub(crate) fn accept(args: DelegateAccept) -> Result<()> {
             old: Some(waiting_oid.clone()),
             new: None,
         },
-    ]);
+    ];
+    if let Some(update) =
+        super::completion::reconciliation_update(&snap, parent_task_oid, source_task_id)?
+    {
+        updates.push(update);
+    }
+    let updates = model::canonical_updates(updates);
     repository::mutate(updates)?;
     print_json(
         &json!({"acceptedOid":accepted,"acceptedRef":accepted_ref,"resultDigest":exported["resultDigest"],"taskId":source_task_id}),

@@ -526,21 +526,41 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         identity["record"]["allowedRuntimeCommits"],
         serde_json::json!([runtime])
     );
-    let delegated_source = success(
+    let delegated_parent = success(
         &a,
         &[
             "create",
             "--operation-id",
-            "delegated-source",
+            "delegated-parent",
             "--title",
-            "Delegated source",
+            "Delegated parent",
             "--description",
-            "source task",
+            "parent task",
             "--claim",
+        ],
+        "delegated-parent-token",
+        100,
+    );
+    let delegated_spec = root.join("delegated-spec.json");
+    fs::write(
+        &delegated_spec,
+        r#"{"operationId":"delegated-split","children":[{"key":"source","title":"Delegated source","description":"source task","requires":[],"claim":true}]}"#,
+    )
+    .unwrap();
+    let delegated_split = success(
+        &a,
+        &[
+            "breakdown",
+            delegated_parent["taskId"].as_str().unwrap(),
+            "--spec",
+            delegated_spec.to_str().unwrap(),
+            "--claim-token",
+            delegated_parent["claimToken"].as_str().unwrap(),
         ],
         "delegated-source-token",
         100,
     );
+    let delegated_source = delegated_split["children"][0].clone();
     let delegate_args = [
         "delegate",
         "create",
@@ -701,6 +721,78 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         )["state"],
         "done"
     );
+    let delegated_parent_id = delegated_parent["taskId"].as_str().unwrap();
+    let delegated_parent_waiting_ref = format!("refs/heads/tasks/waiting/{delegated_parent_id}");
+    let delegated_parent_marker = format!("refs/heads/tasks/reconcile/{delegated_parent_id}");
+    let delegated_parent_waiting_oid =
+        ok(&a, &["ls-remote", "origin", &delegated_parent_waiting_ref])
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned();
+    assert_eq!(
+        ok(&a, &["ls-remote", "origin", &delegated_parent_marker])
+            .split_whitespace()
+            .next(),
+        Some(delegated_parent_waiting_oid.as_str())
+    );
+    ok(
+        &a,
+        &["push", "origin", &format!(":{delegated_parent_marker}")],
+    );
+    let missing_marker = cli(
+        &a,
+        &[
+            "converge",
+            delegated_parent_id,
+            "--operation-id",
+            "delegated-split",
+        ],
+        "unused-token-000",
+        104,
+    );
+    assert!(!missing_marker.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_marker.stderr)
+            .contains("exact reconciliation marker is absent")
+    );
+    success(&a, &accept_args, "unused-token-000", 104);
+    assert_eq!(
+        ok(&a, &["ls-remote", "origin", &delegated_parent_marker])
+            .split_whitespace()
+            .next(),
+        Some(delegated_parent_waiting_oid.as_str())
+    );
+    success(
+        &a,
+        &[
+            "converge",
+            delegated_parent_id,
+            "--operation-id",
+            "delegated-split",
+        ],
+        "unused-token-000",
+        104,
+    );
+    assert_eq!(
+        success(
+            &a,
+            &["show", delegated_parent["taskId"].as_str().unwrap()],
+            "unused-token-000",
+            104,
+        )["state"],
+        "done"
+    );
+    ok(
+        &a,
+        &[
+            "push",
+            "origin",
+            &format!("{delegated_parent_waiting_oid}:{delegated_parent_marker}"),
+        ],
+    );
+    success(&a, &accept_args, "unused-token-000", 104);
+    assert!(ok(&a, &["ls-remote", "origin", &delegated_parent_marker]).is_empty());
     let source_task_id = delegated_source["taskId"].as_str().unwrap();
     let done_ref = format!("refs/heads/tasks/done/{source_task_id}");
     let original_done = ok(&a, &["ls-remote", "origin", &done_ref])
