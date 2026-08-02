@@ -74,12 +74,9 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
         .get(model::ACTIVATION)
         .ok_or("v2 activation is absent")?
         .clone();
-    let lifecycle_objects: Vec<_> = captured
-        .iter()
-        .map(|row| row.3.clone())
-        .chain([activation.clone()])
-        .collect();
+    let lifecycle_objects: Vec<_> = captured.iter().map(|row| row.3.clone()).collect();
     repository::materialize_local(&lifecycle_objects)?;
+    repository::materialize_local_activation(&activation)?;
     crate::git::set_cache_only(true);
     let _guard = CacheOnlyGuard;
     crate::validators::activation(&activation)?;

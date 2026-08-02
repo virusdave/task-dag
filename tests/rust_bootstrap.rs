@@ -1,9 +1,25 @@
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output},
 };
+
+fn framed_digest(domain: &str, parts: &[&str]) -> String {
+    fn frame(hash: &mut Sha256, value: &str) {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    let mut hash = Sha256::new();
+    frame(&mut hash, "task-dag-v2-framing-1");
+    frame(&mut hash, domain);
+    hash.update((parts.len() as u64).to_be_bytes());
+    for part in parts {
+        frame(&mut hash, part);
+    }
+    format!("{:x}", hash.finalize())
+}
 
 fn git(cwd: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -79,6 +95,69 @@ fn uncertain(cwd: &Path, args: &[&str], token: &str, time: u64) {
         "unexpected failure: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn current_state_caches_the_runtime_parent_for_one_parent_genesis_activation() {
+    let root = std::env::temp_dir().join(format!(
+        "taskdag-current-state-genesis-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let origin = root.join("origin.git");
+    let checkout = root.join("checkout");
+    ok(&root, &["init", "--bare", origin.to_str().unwrap()]);
+    ok(&root, &["init", "-b", "master", checkout.to_str().unwrap()]);
+    ok(&checkout, &["config", "user.name", "test"]);
+    ok(&checkout, &["config", "user.email", "test@localhost"]);
+    ok(
+        &checkout,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let floor = ok(&checkout, &["commit-tree", empty_tree, "-m", "floor"]);
+    let runtime = ok(
+        &checkout,
+        &["commit-tree", empty_tree, "-p", &floor, "-m", "runtime"],
+    );
+    let record = serde_json::json!({
+        "allowedRuntimeCommits": [&runtime],
+        "epoch": 1,
+        "formatVersion": 2,
+        "state": "enabled",
+        "trustedFloor": &floor,
+    });
+    let activation = ok(
+        &checkout,
+        &[
+            "commit-tree",
+            empty_tree,
+            "-p",
+            &runtime,
+            "-m",
+            &serde_json::to_string(&record).unwrap(),
+        ],
+    );
+    ok(
+        &checkout,
+        &[
+            "push",
+            "origin",
+            &format!("{floor}:refs/heads/master"),
+            &format!("{activation}:refs/heads/tasks/v2/activation"),
+        ],
+    );
+
+    let current = success(
+        &checkout,
+        &["current-state", "--max-tasks", "500"],
+        "unused-token-000",
+        100,
+    );
+    assert_eq!(current["activationOid"], activation);
+    assert_eq!(current["rows"], serde_json::json!([]));
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -202,6 +281,63 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
             100,
         ),
         "unchanged current-state output must be deterministic"
+    );
+    let activation_record = success(&a, &["activation"], "unused-token-000", 100)["record"].clone();
+    let operation = "current-state-rollover-regression";
+    let repository_id = activation_record["repositoryId"].as_str().unwrap();
+    let fleet_digest = activation_record["fleetDigest"].as_str().unwrap();
+    let logical_id = framed_digest(
+        "activate-runtime-logical-v3",
+        &[
+            runtime,
+            &activation_lease,
+            operation,
+            repository_id,
+            fleet_digest,
+        ],
+    );
+    let rollover_record = serde_json::json!({
+        "allowedRuntimeCommits": [runtime],
+        "epoch": 2,
+        "fleetDigest": fleet_digest,
+        "fleetRepositoryIds": activation_record["fleetRepositoryIds"],
+        "formatVersion": 3,
+        "logicalId": logical_id,
+        "operationId": operation,
+        "repositoryId": repository_id,
+        "state": "enabled",
+        "trustedFloor": floor,
+    });
+    let rollover = ok(
+        &a,
+        &[
+            "commit-tree",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "-p",
+            &activation_lease,
+            "-p",
+            runtime,
+            "-m",
+            &serde_json::to_string(&rollover_record).unwrap(),
+        ],
+    );
+    ok(
+        &a,
+        &[
+            "push",
+            "origin",
+            &format!("{rollover}:refs/heads/tasks/v2/activation"),
+        ],
+    );
+    assert_eq!(
+        success(
+            &a,
+            &["current-state", "--max-tasks", "500"],
+            "unused-token-000",
+            100,
+        )["activationOid"],
+        rollover,
+        "current-state must cache the immediate activation predecessor before cache-only validation"
     );
     for invalid in ["0", "501"] {
         let rejected = cli(

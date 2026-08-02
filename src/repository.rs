@@ -321,6 +321,30 @@ pub(crate) fn materialize_local(oids: &[String]) -> Result<()> {
     git::cache_commit_objects(&objects)
 }
 
+/// Cache the constant-bounded commit closure inspected by activation validation.
+pub(crate) fn materialize_local_activation(activation: &str) -> Result<()> {
+    materialize_local(&[activation.to_owned()])?;
+    let value = git::object_json(activation)?;
+    let parents = git::parents(activation)?;
+    if value.get("logicalId").is_none() {
+        if parents.len() == 1 {
+            materialize_local(&[parents[0].clone()])?;
+        }
+        return Ok(());
+    }
+    if parents.len() != 2 {
+        return Ok(());
+    }
+    let predecessor = &parents[0];
+    materialize_local(&[predecessor.clone()])?;
+    let predecessor_value = git::object_json(predecessor)?;
+    let predecessor_parents = git::parents(predecessor)?;
+    if predecessor_value.get("logicalId").is_none() && predecessor_parents.len() == 1 {
+        materialize_local(&[predecessor_parents[0].clone()])?;
+    }
+    Ok(())
+}
+
 pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
     model::bounded("remote", remote, 4096)?;
     let unique: BTreeSet<_> = oids.iter().cloned().collect();
