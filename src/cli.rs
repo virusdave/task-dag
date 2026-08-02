@@ -24,6 +24,21 @@ enum Commands {
         remote_name: Option<String>,
         remote_url: Option<String>,
     },
+    /// Authorize one ordinary origin/master publication attempt.
+    AuthorizeOrdinaryPush {
+        #[arg(long)]
+        commit: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        operator_approval: String,
+        #[arg(long, requires_all = ["claim_token", "task_instruction"])]
+        task_id: Option<String>,
+        #[arg(long, requires_all = ["task_id", "task_instruction"])]
+        claim_token: Option<String>,
+        #[arg(long, requires_all = ["task_id", "claim_token"])]
+        task_instruction: Option<String>,
+    },
     /// Install the canonical native-v2 pre-push hook in this worktree.
     InstallHooks {
         /// Preserve an existing custom pre-push hook as pre-push.repository.
@@ -366,6 +381,21 @@ pub(crate) fn run() -> Result<()> {
             remote_name,
             remote_url,
         } => commands::guards::pre_push(remote_name.as_deref(), remote_url.as_deref()),
+        Commands::AuthorizeOrdinaryPush {
+            commit,
+            operation_id,
+            operator_approval,
+            task_id,
+            claim_token,
+            task_instruction,
+        } => commands::guards::authorize_ordinary_push(
+            &commit,
+            &operation_id,
+            &operator_approval,
+            task_id.as_deref(),
+            claim_token.as_deref(),
+            task_instruction.as_deref(),
+        ),
         Commands::InstallHooks {
             migrate_existing_pre_push,
         } => crate::repository::install_hooks(migrate_existing_pre_push),

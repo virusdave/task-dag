@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -6,7 +6,7 @@ use std::{
     fs::{self, File},
     io::Write,
     io::{self, Read},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -14,6 +14,7 @@ use std::{
 use crate::{Result, git, model};
 
 const MAX_STREAM: usize = 262_144;
+const ORDINARY_AUTHORIZATION: &str = "task-dag/ordinary-publication-authorization";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -23,6 +24,18 @@ struct RegistryEntry {
     host: String,
     session_id: String,
     claim_token: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct OrdinaryAuthorization {
+    format_version: u64,
+    commit: String,
+    operation_id: String,
+    operator_approval: String,
+    task_id: Option<String>,
+    claim_token: Option<String>,
+    task_instruction: Option<String>,
 }
 
 struct SnapshotEntry {
@@ -115,7 +128,7 @@ pub(crate) fn pre_push(remote_name: Option<&str>, remote_url: Option<&str>) -> R
     if lines.len() > 256 {
         return Err("pre-push update stream exceeds line limit".into());
     }
-    let mut raw_master = false;
+    let mut master_oid = None;
     for line in lines {
         let fields: Vec<_> = line.split(' ').collect();
         let local_is_zero = fields
@@ -133,12 +146,83 @@ pub(crate) fn pre_push(remote_name: Option<&str>, remote_url: Option<&str>) -> R
         {
             return Err("malformed pre-push update stream".into());
         }
-        raw_master |= fields[2] == "refs/heads/master" && fields[1].bytes().any(|b| b != b'0');
+        if fields[2] == "refs/heads/master" && fields[1].bytes().any(|b| b != b'0') {
+            if master_oid.replace(fields[1]).is_some() {
+                return Err("pre-push update stream repeats origin/master".into());
+            }
+        }
     }
-    if !raw_master || std::env::var_os("TASKDAG_NATIVE_MUTATION").is_some() {
+    if master_oid.is_none() || std::env::var_os("TASKDAG_NATIVE_MUTATION").is_some() {
         return Ok(());
     }
-    native_claim_guard()
+    native_claim_guard(master_oid.unwrap())
+}
+
+pub(crate) fn authorize_ordinary_push(
+    commit: &str,
+    operation: &str,
+    operator_approval: &str,
+    task_id: Option<&str>,
+    claim_token: Option<&str>,
+    task_instruction: Option<&str>,
+) -> Result<()> {
+    model::oid(commit)?;
+    strict_bounded("operation ID", operation)?;
+    strict_bounded("operator approval", operator_approval)?;
+    let head = git::bounded_output(&["rev-parse", "HEAD"], 64)?;
+    if head != commit {
+        return Err("ordinary-publication authorization commit must equal HEAD".into());
+    }
+    match (task_id, claim_token, task_instruction) {
+        (None, None, None) => {}
+        (Some(id), Some(token), Some(instruction)) => {
+            model::valid_id(id)?;
+            strict_bounded("claim token", token)?;
+            strict_bounded("task instruction", instruction)?;
+            verify_local_claim_instruction(id, token, instruction)?;
+        }
+        _ => {
+            return Err(
+                "task authorization requires task-id, claim-token, and task-instruction together"
+                    .into(),
+            );
+        }
+    }
+    let authorization = OrdinaryAuthorization {
+        format_version: 1,
+        commit: commit.into(),
+        operation_id: operation.into(),
+        operator_approval: operator_approval.into(),
+        task_id: task_id.map(str::to_owned),
+        claim_token: claim_token.map(str::to_owned),
+        task_instruction: task_instruction.map(str::to_owned),
+    };
+    let bytes = serde_json::to_vec(&authorization).map_err(|e| e.to_string())?;
+    let _lock = crate::repository::native_claim_registry_lock(false)?;
+    let path = git_path(ORDINARY_AUTHORIZATION)?;
+    let parent = path
+        .parent()
+        .ok_or("ordinary authorization path has no parent")?;
+    fs::create_dir_all(parent).map_err(|e| format!("create task-dag local state: {e}"))?;
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|e| format!("stage ordinary-publication authorization: {e}"))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| format!("write ordinary-publication authorization: {e}"))?;
+        fs::rename(&temporary, &path)
+            .map_err(|e| format!("publish ordinary-publication authorization: {e}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn run_repository_hook(
@@ -182,7 +266,7 @@ fn run_repository_hook(
     Ok(())
 }
 
-fn native_claim_guard() -> Result<()> {
+fn native_claim_guard(master_oid: &str) -> Result<()> {
     let _registry_lock = crate::repository::native_claim_registry_lock(true)?;
     let registry = PathBuf::from(git::bounded_output(
         &["rev-parse", "--git-path", "task-dag/native-claims"],
@@ -291,11 +375,11 @@ fn native_claim_guard() -> Result<()> {
         args.extend(objects.iter().map(String::as_str));
         git::bounded_output(&args, 4096)?;
     }
-    let mut matched = false;
-    for entry in snapshots {
+    let mut matched = BTreeSet::new();
+    for entry in &snapshots {
         let reference = format!("refs/heads/tasks/active/{}", entry.value.task_id);
         let Some(object) = remote.get(&reference) else {
-            safe_remove(&entry);
+            safe_remove(entry);
             continue;
         };
         let info = git::bounded_output(&["cat-file", "-t", object], 64)?;
@@ -315,16 +399,115 @@ fn native_claim_guard() -> Result<()> {
             && active["host"] == entry.value.host
             && active["sessionId"] == entry.value.session_id
         {
-            matched = true;
+            matched.insert((entry.value.task_id.clone(), entry.value.claim_token.clone()));
         } else {
-            safe_remove(&entry);
+            safe_remove(entry);
         }
     }
-    if matched {
-        Err("refusing raw origin/master push while a matching native-v2 claim is active; use the canonical task-dag transition".into())
+    if !matched.is_empty() && consume_ordinary_authorization(master_oid, &matched)? {
+        Ok(())
+    } else if !matched.is_empty() {
+        Err("refusing raw origin/master push while a matching native-v2 claim is active; use task-dag complete for task-derived work or authorize-ordinary-push for explicitly approved unrelated publication".into())
     } else {
         Ok(())
     }
+}
+
+fn consume_ordinary_authorization(
+    master_oid: &str,
+    claims: &BTreeSet<(String, String)>,
+) -> Result<bool> {
+    let path = git_path(ORDINARY_AUTHORIZATION)?;
+    let before = match fs::symlink_metadata(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "inspect ordinary-publication authorization: {error}"
+            ));
+        }
+    };
+    if !before.file_type().is_file()
+        || before.permissions().mode() & 0o777 != 0o600
+        || before.len() > 16_384
+    {
+        return Err(
+            "ordinary-publication authorization is not a bounded mode-0600 regular file".into(),
+        );
+    }
+    let bytes =
+        fs::read(&path).map_err(|e| format!("read ordinary-publication authorization: {e}"))?;
+    let authorization: OrdinaryAuthorization = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("malformed ordinary-publication authorization: {e}"))?;
+    validate_authorization(&authorization)?;
+    if authorization.commit != master_oid {
+        return Err("ordinary-publication authorization does not match the pushed commit".into());
+    }
+    if let (Some(id), Some(token)) = (&authorization.task_id, &authorization.claim_token)
+        && !claims.contains(&(id.clone(), token.clone()))
+    {
+        return Err(
+            "ordinary-publication task authorization does not match a live local claim".into(),
+        );
+    }
+    let after = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+    if (before.dev(), before.ino(), before.len()) != (after.dev(), after.ino(), after.len()) {
+        return Err("ordinary-publication authorization changed while being consumed".into());
+    }
+    fs::remove_file(&path)
+        .map_err(|e| format!("consume ordinary-publication authorization: {e}"))?;
+    Ok(true)
+}
+
+fn validate_authorization(value: &OrdinaryAuthorization) -> Result<()> {
+    if value.format_version != 1 {
+        return Err("ordinary-publication authorization format is unsupported".into());
+    }
+    model::oid(&value.commit)?;
+    strict_bounded("operation ID", &value.operation_id)?;
+    strict_bounded("operator approval", &value.operator_approval)?;
+    match (&value.task_id, &value.claim_token, &value.task_instruction) {
+        (None, None, None) => Ok(()),
+        (Some(id), Some(token), Some(instruction)) => {
+            model::valid_id(id)?;
+            strict_bounded("claim token", token)?;
+            strict_bounded("task instruction", instruction)
+        }
+        _ => Err("ordinary-publication task authorization is incomplete".into()),
+    }
+}
+
+fn verify_local_claim_instruction(id: &str, token: &str, instruction: &str) -> Result<()> {
+    let snap = crate::repository::task_snapshot(id, Vec::new())?;
+    crate::repository::materialize_lifecycle(&snap, &[id.into()])?;
+    let active = model::lifecycle(&snap, id)
+        .into_iter()
+        .find(|(state, _, _)| state == "active")
+        .ok_or("ordinary-publication task is not currently active")?;
+    let value = crate::validators::lifecycle("active", &active.2, id)?;
+    if value["claimToken"] != token {
+        return Err("ordinary-publication claim token does not match the active task".into());
+    }
+    let task_oid = value["taskOid"]
+        .as_str()
+        .ok_or("active task lacks taskOid")?;
+    let task = crate::validators::task(task_oid, id)?;
+    let description = task["description"]
+        .as_str()
+        .ok_or("Task description is malformed")?;
+    if !description.contains(instruction) {
+        return Err(
+            "task-instruction is not an exact excerpt of the active task description".into(),
+        );
+    }
+    Ok(())
+}
+
+fn git_path(value: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(git::bounded_output(
+        &["rev-parse", "--git-path", value],
+        4096,
+    )?))
 }
 
 fn validate_registry(v: &RegistryEntry, id: &str) -> Result<()> {

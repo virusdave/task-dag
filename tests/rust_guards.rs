@@ -131,6 +131,10 @@ impl Fixture {
 
     fn guard(&self) -> std::process::Output {
         let oid = "d".repeat(40);
+        self.guard_oid(&oid)
+    }
+
+    fn guard_oid(&self, oid: &str) -> std::process::Output {
         let zero = "0".repeat(40);
         let updates = format!("refs/heads/master {oid} refs/heads/master {zero}\n");
         run(
@@ -219,6 +223,11 @@ fn commit_guard_enforces_canon_and_v2_boundaries() {
             .status
             .success()
     );
+    assert!(
+        run(&root, &["authorize-ordinary-push", "--help"], "")
+            .status
+            .success()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -228,6 +237,94 @@ fn matching_registry_and_remote_active_reject_raw_master() {
     fixture.registry(&fixture.token);
     fixture.active(&fixture.token, 0);
     assert!(!fixture.guard().status.success());
+}
+
+#[test]
+fn explicit_ordinary_publication_authorization_is_commit_bound_and_one_shot() {
+    let fixture = Fixture::new();
+    fixture.registry(&fixture.token);
+    fixture.active(&fixture.token, 0);
+    let tree = git(&fixture.work, &["mktree"], "");
+    let commit = git(
+        &fixture.work,
+        &["commit-tree", &tree],
+        "ordinary publication\n",
+    );
+    git(&fixture.work, &["update-ref", "HEAD", &commit], "");
+
+    let wrong = "e".repeat(40);
+    assert!(
+        !run(
+            &fixture.work,
+            &[
+                "authorize-ordinary-push",
+                "--commit",
+                &wrong,
+                "--operation-id",
+                "wrong-commit",
+                "--operator-approval",
+                "operator approved this ordinary publication"
+            ],
+            ""
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            &fixture.work,
+            &[
+                "authorize-ordinary-push",
+                "--commit",
+                &commit,
+                "--operation-id",
+                "approved-ordinary-publication",
+                "--operator-approval",
+                "operator approved this ordinary publication"
+            ],
+            ""
+        )
+        .status
+        .success()
+    );
+    let authorization = fixture
+        .work
+        .join(".git/task-dag/ordinary-publication-authorization");
+    assert!(authorization.exists());
+    assert!(fixture.guard_oid(&commit).status.success());
+    assert!(!authorization.exists());
+    assert!(!fixture.guard_oid(&commit).status.success());
+}
+
+#[test]
+fn incomplete_task_based_ordinary_authorization_is_rejected() {
+    let fixture = Fixture::new();
+    let tree = git(&fixture.work, &["mktree"], "");
+    let commit = git(
+        &fixture.work,
+        &["commit-tree", &tree],
+        "ordinary publication\n",
+    );
+    git(&fixture.work, &["update-ref", "HEAD", &commit], "");
+    assert!(
+        !run(
+            &fixture.work,
+            &[
+                "authorize-ordinary-push",
+                "--commit",
+                &commit,
+                "--operation-id",
+                "incomplete-task-authorization",
+                "--operator-approval",
+                "operator approved the task instruction",
+                "--task-id",
+                &fixture.id
+            ],
+            ""
+        )
+        .status
+        .success()
+    );
 }
 
 #[test]
