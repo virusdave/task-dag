@@ -146,13 +146,33 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
 
     uncertain(
         &a,
-        &["init", "--trusted-floor", &floor],
+        &[
+            "init",
+            "--trusted-floor",
+            &floor,
+            "--repository-id",
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--fleet-repository-id",
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--fleet-repository-id",
+            "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
         "unused-token-000",
         100,
     );
     success(
         &a,
-        &["init", "--trusted-floor", &floor],
+        &[
+            "init",
+            "--trusted-floor",
+            &floor,
+            "--repository-id",
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--fleet-repository-id",
+            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--fleet-repository-id",
+            "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
         "unused-token-000",
         100,
     );
@@ -353,114 +373,6 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         success(&a, &["show", legacy_id], "unused-token-000", 100)["state"],
         "frontier"
     );
-    let intervening_completion = ok(
-        &a,
-        &[
-            "commit-tree",
-            empty_tree,
-            "-p",
-            runtime,
-            "-p",
-            &floor,
-            "-m",
-            "intervening completion merge",
-        ],
-    );
-    let candidate_one = ok(
-        &a,
-        &[
-            "commit-tree",
-            empty_tree,
-            "-p",
-            &intervening_completion,
-            "-m",
-            "runtime one",
-        ],
-    );
-    success(
-        &a,
-        &["runtime", "publish", "--commit", &candidate_one],
-        "unused-token-000",
-        100,
-    );
-    let activation_one_args = [
-        "activate-runtime",
-        "--commit",
-        &candidate_one,
-        "--activation-lease",
-        &activation_lease,
-        "--operation-id",
-        "activation-one",
-    ];
-    uncertain(&a, &activation_one_args, "unused-token-000", 100);
-    let first_activation = success(&a, &activation_one_args, "unused-token-000", 100);
-    let successor_lease = ok(
-        &a,
-        &["ls-remote", "origin", "refs/heads/tasks/v2/activation"],
-    )
-    .split_whitespace()
-    .next()
-    .unwrap()
-    .to_owned();
-    let candidate_two = ok(
-        &a,
-        &[
-            "commit-tree",
-            empty_tree,
-            "-p",
-            runtime,
-            "-m",
-            "runtime two",
-        ],
-    );
-    success(
-        &a,
-        &["runtime", "publish", "--commit", &candidate_two],
-        "unused-token-000",
-        100,
-    );
-    success(
-        &a,
-        &[
-            "activate-runtime",
-            "--commit",
-            &candidate_two,
-            "--activation-lease",
-            &successor_lease,
-            "--operation-id",
-            "activation-two",
-        ],
-        "unused-token-000",
-        100,
-    );
-    let identity_lease = ok(
-        &a,
-        &["ls-remote", "origin", "refs/heads/tasks/v2/activation"],
-    )
-    .split_whitespace()
-    .next()
-    .unwrap()
-    .to_owned();
-    success(
-        &a,
-        &[
-            "activate-runtime",
-            "--commit",
-            runtime,
-            "--activation-lease",
-            &identity_lease,
-            "--operation-id",
-            "activation-identity",
-            "--repository-id",
-            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--fleet-repository-id",
-            "repo-v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--fleet-repository-id",
-            "repo-v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        ],
-        "unused-token-000",
-        100,
-    );
     let identity = success(&a, &["activation"], "unused-token-000", 100);
     assert_eq!(identity["record"]["formatVersion"], 3);
     assert_eq!(
@@ -477,27 +389,6 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     assert_eq!(
         identity["record"]["allowedRuntimeCommits"],
         serde_json::json!([runtime])
-    );
-    let inherit_lease = identity["activationOid"].as_str().unwrap();
-    let inherit_args = [
-        "activate-runtime",
-        "--commit",
-        runtime,
-        "--activation-lease",
-        inherit_lease,
-        "--operation-id",
-        "activation-inherit-identity",
-    ];
-    uncertain(&a, &inherit_args, "unused-token-000", 100);
-    success(&a, &inherit_args, "unused-token-000", 100);
-    let inherited = success(&a, &["activation"], "unused-token-000", 100);
-    assert_eq!(
-        inherited["record"]["repositoryId"],
-        identity["record"]["repositoryId"]
-    );
-    assert_eq!(
-        inherited["record"]["fleetDigest"],
-        identity["record"]["fleetDigest"]
     );
     let delegated_source = success(
         &a,
@@ -761,23 +652,6 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     );
     assert!(delegation_status["intent"].as_str().is_some());
     assert!(delegation_status["accepted"].as_str().is_some());
-    assert_eq!(
-        success(
-            &a,
-            &[
-                "activate-runtime",
-                "--commit",
-                &candidate_one,
-                "--activation-lease",
-                &activation_lease,
-                "--operation-id",
-                "activation-one"
-            ],
-            "unused-token-000",
-            999
-        ),
-        first_activation
-    );
     let late_create_args = [
         "create",
         "--operation-id",

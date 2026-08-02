@@ -62,25 +62,19 @@ link to this section alone is insufficient.
 - Run focused Rust filters while iterating. The Rust-only `cli-tests` workflow
   runs the complete wrapper; no retired Bash aggregate is a release gate.
 
-## Runtime deployment means complete fleet activation
+## Runtime deployment uses a quiesced system cutover
 
-Task-dag **deployment** definitionally means the system-installed coordinator
-has completed candidate staging and identity checks, fleet activation while the
-old stable runtime remains authorized, exact NixOS revision promotion, and
-authoritative final readback. Future runtime releases MUST use:
+Publish the immutable runtime, pin the reviewed NixOS revision to that exact
+commit, quiesce runtime consumers, and use the installed mirrored system
+controller:
 
 ```sh
-deploy-task-dag-runtime deploy <40-char-task-dag-commit>
+task-dag-v2 runtime publish --commit <40-char-task-dag-commit>
+self-deploy-helios-system --revision <40-char-nixos-sbc-commit>
 ```
 
-Publishing a runtime object, building a package, or distributing it to hosts
-without activation is only **staging**, never deployment. Do not substitute
-direct `runtime publish`, `activate-runtime`, package installation, or a
-hand-built fleet loop for the coordinator; those are internal primitives or
-exceptional recovery operations.
-
-The coordinator must not promote stable until every canonical repository
-authorizes the staged candidate and the candidate can read each repository.
-A system-installed stable runtime rejected by activation fencing or minimum
-runtime requirements is a **production-critical incident**: stop unrelated
-work, repair immediately, and page the operator.
+Deployment is complete only after both hosts report the exact runtime identity
+and consumers resume. Do not add per-repository runtime authorization,
+dual-runtime activation, deployment journals, or rolling compatibility
+machinery. Quiesce/resume is an operator-directed side-agent effect outside
+task-dag and autonomous dispatch.

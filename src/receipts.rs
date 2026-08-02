@@ -112,7 +112,7 @@ fn reconstruct_outputs(domain: &str, parents: &[String]) -> Result<Value> {
         return Ok(
             json!({"children":value["children"],"manifestOid":parents[0],"parentTaskId":id}),
         );
-    } else if matches!(domain, "init" | "activate-runtime") {
+    } else if domain == "init" {
         if parents.len() != 1 {
             return Err("activation receipt output parent ordering malformed".into());
         }
@@ -142,7 +142,7 @@ fn validate_outputs(domain: &str, outputs: &Value) -> Result<()> {
         },
         "block" => &["blockLease", "taskId"],
         "unblock" => &["taskId"],
-        "init" | "release" | "reap" | "activate-runtime" => &[],
+        "init" | "release" | "reap" => &[],
         _ => return Err("operation receipt domain is unsupported".into()),
     };
     if map.len() != required.len() || !required.iter().all(|key| map.contains_key(*key)) {

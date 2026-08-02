@@ -102,18 +102,6 @@ enum Commands {
         claim_token: String,
     },
     CompleteOps(CompleteOps),
-    ActivateRuntime {
-        #[arg(long)]
-        commit: String,
-        #[arg(long)]
-        activation_lease: String,
-        #[arg(long)]
-        operation_id: String,
-        #[arg(long, requires = "fleet_repository_id")]
-        repository_id: Option<String>,
-        #[arg(long, requires = "repository_id")]
-        fleet_repository_id: Vec<String>,
-    },
     Converge {
         task_id: String,
         #[arg(long)]
@@ -446,19 +434,6 @@ pub(crate) fn run() -> Result<()> {
             claim_token,
         } => commands::completion::complete(&task_id, &commit, &claim_token),
         Commands::CompleteOps(args) => commands::completion::complete_ops(args),
-        Commands::ActivateRuntime {
-            commit,
-            activation_lease,
-            operation_id,
-            repository_id,
-            fleet_repository_id,
-        } => commands::bootstrap::activate_runtime(
-            &commit,
-            &activation_lease,
-            &operation_id,
-            repository_id.as_deref(),
-            &fleet_repository_id,
-        ),
         Commands::Converge {
             task_id,
             operation_id,

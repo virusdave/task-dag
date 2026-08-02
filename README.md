@@ -28,8 +28,8 @@ nix flake check
 
 The current surface is defined by `src/cli.rs`:
 
-- runtime and bootstrap: `runtime identity`, `runtime publish`, `init`,
-  `activate-runtime`, `activation`;
+- runtime and bootstrap: `runtime identity`, `runtime publish`, `init`, and
+  `activation`;
 - lifecycle writers: `create`, `claim`, `renew`, `release`, `reap`, `block`,
   `unblock`, `breakdown`, `complete`, `complete-ops`, and `converge`;
 - bounded readers: `show`, `blocked`, `deps`, `context`, `frontier`, and
@@ -92,41 +92,31 @@ workspaces and older package layouts that still resolve that path. It executes
 the system-installed `task-dag-v2` binary and fails loudly when that binary is
 unavailable; it contains no task semantics.
 
-## Fleet activation and rollback
+## Runtime deployment and rollback
 
-Deploy an immutable runtime commit only through the fleet-installed
-coordinator:
-
-```sh
-deploy-task-dag-runtime deploy <40-char-task-dag-commit>
-```
-
-The coordinator stages and verifies the candidate, activates it fleet-wide
-while the old stable runtime remains authorized, promotes the exact NixOS
-revision, and performs authoritative final readback. It does not promote stable
-until every canonical repository authorizes the candidate and the candidate can
-read every repository.
-
-Building or distributing a package, or publishing its runtime object without
-activation, is **staging**, not deployment. `runtime publish`,
-`activate-runtime`, package installation, and hand-built activation loops are
-low-level primitives for the coordinator or exceptional recovery; they are not
-the normal release workflow. A system-installed stable runtime rejected by
-activation fencing or minimum-version requirements is a production-critical
-incident requiring immediate repair and an operator page.
-
-Rollback uses the same coordinator after staging an exact reviewed NixOS
-revision that pins the last known-good runtime:
+Publish the tested immutable runtime, pin the NixOS system to that exact commit,
+quiesce task-dag consumers, and deploy the reviewed system revision:
 
 ```sh
-deploy-task-dag-runtime deploy <last-known-good-40-char-commit>
+task-dag-v2 runtime publish --commit <40-char-task-dag-commit>
+self-deploy-helios-system --revision <40-char-nixos-sbc-commit>
 ```
 
-Do not manually install or repin the system runtime first, and do not hand-loop
-over `activate-runtime`. If the installed stable runtime is already fenced and
-the coordinator cannot proceed, stop and page the operator; low-level commands
-are incident-recovery primitives only. Rollback is never a semantic-ref rewrite
-or a history edit.
+After the system switch, verify both hosts report the exact runtime identity and
+resume consumers. Runtime deployment does not mutate participating repositories
+or maintain per-repository authorization. Worker quiesce/resume is an explicit
+operator-directed side-agent effect, outside task-dag and autonomous dispatch.
+Publishing the runtime tag without switching and verifying the system is
+staging, not deployment.
+
+Rollback uses the same system controller with an exact reviewed NixOS revision
+that pins the last known-good runtime:
+
+```sh
+self-deploy-helios-system --revision <last-known-good-nixos-sbc-commit>
+```
+
+Rollback is never a task semantic-ref rewrite or a history edit.
 
 ## Historical v1 evidence
 
