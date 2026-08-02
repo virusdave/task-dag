@@ -1,7 +1,6 @@
 use crate::{
     Result, git,
     model::{self, ACTIVATION, Update},
-    runtime,
 };
 use rustix::fs::{AtFlags, Mode, OFlags};
 use serde::Serialize;
@@ -287,14 +286,7 @@ pub(crate) fn validate_snapshot(snap: &Snapshot) -> Result<()> {
         .get(ACTIVATION)
         .ok_or("v2 activation is absent; run init")?;
     materialize(std::slice::from_ref(activation))?;
-    let a = crate::validators::activation(activation)?;
-    let allowed = a["allowedRuntimeCommits"]
-        .as_array()
-        .ok_or("activation allowedRuntimeCommits malformed")?;
-    let runtime = runtime()?;
-    if !allowed.iter().any(|v| v.as_str() == Some(&runtime)) {
-        return Err(format!("runtime {runtime} is not authorized by activation"));
-    }
+    crate::validators::activation(activation)?;
     Ok(())
 }
 pub(crate) fn materialize(oids: &[String]) -> Result<()> {
