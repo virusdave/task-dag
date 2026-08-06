@@ -466,6 +466,20 @@ fn source_task(task_id: &str) -> Result<(repository::Snapshot, String)> {
     Ok((snap, field(&value, "taskOid")?.to_owned()))
 }
 
+fn github_url_matches_repository(
+    value: &Value,
+    prefix: &str,
+    expected_repository: &str,
+    suffix: &str,
+) -> bool {
+    value
+        .as_str()
+        .and_then(|url| url.strip_prefix(prefix))
+        .and_then(|rest| rest.strip_suffix(suffix))
+        .and_then(|repository| model::github_repository(repository).ok())
+        .is_some_and(|repository| repository == expected_repository)
+}
+
 fn read_target(repository: &str, issue_number: &str) -> Result<Value> {
     let repository = model::github_repository(repository)?;
     model::positive_decimal_id("issue number", issue_number)?;
@@ -531,7 +545,12 @@ fn read_target(repository: &str, issue_number: &str) -> Result<Value> {
         return Err("GitHub issue title contains unsupported control characters".into());
     }
     if canonical_number != issue_number
-        || issue["repository_url"] != format!("https://api.github.com/repos/{repository}")
+        || !github_url_matches_repository(
+            &issue["repository_url"],
+            "https://api.github.com/repos/",
+            &repository,
+            "",
+        )
     {
         return Err("GitHub issue response does not match the canonical requested target".into());
     }
@@ -694,7 +713,12 @@ fn verify_provider_target(intent: &Value, timeout: Duration) -> TargetVerificati
     };
     if issue_id != intent["issueId"]
         || issue_number != intent["issueNumber"]
-        || issue["repository_url"] != format!("https://api.github.com/repos/{repo}")
+        || !github_url_matches_repository(
+            &issue["repository_url"],
+            "https://api.github.com/repos/",
+            repo,
+            "",
+        )
     {
         return TargetVerification::Permanent(
             "GitHub issue path no longer resolves to the intent's stable identity".into(),
@@ -718,16 +742,30 @@ fn readback(intent: &Value, comment_id: &str, timeout: Duration) -> Result<Value
     if !out.success {
         return Err(format!("GitHub comment readback failed: {}", out.stderr));
     }
-    let value: Value = serde_json::from_str(&out.stdout)
+    let mut value: Value = serde_json::from_str(&out.stdout)
         .map_err(|e| format!("parse GitHub comment readback: {e}"))?;
+    let issue_suffix = format!("/issues/{number}");
+    let comment_suffix = format!("{issue_suffix}#issuecomment-{comment_id}");
     if decimal(&value["id"], "comment ID")? != comment_id
         || value["body"] != intent["body"]
-        || value["html_url"]
-            != format!("https://github.com/{repo}/issues/{number}#issuecomment-{comment_id}")
-        || value["issue_url"] != format!("https://api.github.com/repos/{repo}/issues/{number}")
+        || !github_url_matches_repository(
+            &value["html_url"],
+            "https://github.com/",
+            repo,
+            &comment_suffix,
+        )
+        || !github_url_matches_repository(
+            &value["issue_url"],
+            "https://api.github.com/repos/",
+            repo,
+            &issue_suffix,
+        )
     {
         return Err("GitHub comment readback does not exactly match intent and target".into());
     }
+    value["html_url"] = Value::String(format!(
+        "https://github.com/{repo}/issues/{number}#issuecomment-{comment_id}"
+    ));
     Ok(value)
 }
 
@@ -1436,5 +1474,48 @@ mod tests {
             retry_after("retry after 999 seconds"),
             Some(Duration::from_secs(300))
         );
+    }
+
+    #[test]
+    fn github_urls_canonicalize_only_repository_casing() {
+        let repository = "freshlybakednyc/automation";
+        assert!(github_url_matches_repository(
+            &json!("https://api.github.com/repos/FreshlyBakedNYC/Automation"),
+            "https://api.github.com/repos/",
+            repository,
+            "",
+        ));
+        assert!(github_url_matches_repository(
+            &json!("https://github.com/FreshlyBakedNYC/Automation/issues/99#issuecomment-7"),
+            "https://github.com/",
+            repository,
+            "/issues/99#issuecomment-7",
+        ));
+        for invalid in [
+            "http://api.github.com/repos/FreshlyBakedNYC/Automation",
+            "https://API.github.com/repos/FreshlyBakedNYC/Automation",
+            "https://api.github.com/Repos/FreshlyBakedNYC/Automation",
+            "https://api.github.com/repos/FreshlyBakedNYC/Other",
+            "https://api.github.com/repos/FreshlyBakedNYC/Automation/extra",
+        ] {
+            assert!(!github_url_matches_repository(
+                &json!(invalid),
+                "https://api.github.com/repos/",
+                repository,
+                "",
+            ));
+        }
+        for invalid in [
+            "https://github.com/FreshlyBakedNYC/Automation/Issues/99#issuecomment-7",
+            "https://github.com/FreshlyBakedNYC/Automation/issues/98#issuecomment-7",
+            "https://github.com/FreshlyBakedNYC/Automation/issues/99#issuecomment-8",
+        ] {
+            assert!(!github_url_matches_repository(
+                &json!(invalid),
+                "https://github.com/",
+                repository,
+                "/issues/99#issuecomment-7",
+            ));
+        }
     }
 }

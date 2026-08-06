@@ -231,6 +231,10 @@ impl Fixture {
     }
 
     fn associate(&self, task_id: &str, operation: &str) -> Output {
+        self.associate_with_mode(task_id, operation, "normal")
+    }
+
+    fn associate_with_mode(&self, task_id: &str, operation: &str, mode: &str) -> Output {
         self.command(
             &[
                 "comment",
@@ -243,7 +247,7 @@ impl Fixture {
                 "--operation-id",
                 operation,
             ],
-            "normal",
+            mode,
         )
     }
 
@@ -394,14 +398,17 @@ endpoint=${2:?}
 if [[ "$endpoint" == repos/owner/repository ]]; then
   echo TARGET_REPO >>"$state/calls"
   if [[ "$mode" == target-mismatch ]]; then id=999; else id=123; fi
-  jq -n --arg id "$id" '{id:$id,full_name:"owner/repository"}'
+  if [[ "$mode" == mixed-case ]]; then full_name=Owner/Repository; else full_name=owner/repository; fi
+  jq -n --arg id "$id" --arg full_name "$full_name" '{id:$id,full_name:$full_name}'
 elif [[ "$endpoint" == repos/owner/repository/issues/7 ]]; then
   echo TARGET_ISSUE >>"$state/calls"
-  jq -n '{id:"456",number:"7",title:"Comment projection issue",repository_url:"https://api.github.com/repos/owner/repository"}'
+  if [[ "$mode" == mixed-case ]]; then repository_url=https://api.github.com/repos/Owner/Repository; else repository_url=https://api.github.com/repos/owner/repository; fi
+  jq -n --arg repository_url "$repository_url" '{id:"456",number:"7",title:"Comment projection issue",repository_url:$repository_url}'
 elif [[ "$endpoint" == */issues/comments/* ]]; then
   echo GET >>"$state/calls"
   id=$(cat "$state/id")
-  jq -n --rawfile body "$state/body" --arg id "$id" '{id:$id,body:$body,html_url:("https://github.com/owner/repository/issues/7#issuecomment-"+$id),issue_url:"https://api.github.com/repos/owner/repository/issues/7"}'
+  if [[ "$mode" == mixed-case ]]; then repository=Owner/Repository; else repository=owner/repository; fi
+  jq -n --rawfile body "$state/body" --arg id "$id" --arg repository "$repository" '{id:$id,body:$body,html_url:("https://github.com/"+$repository+"/issues/7#issuecomment-"+$id),issue_url:("https://api.github.com/repos/"+$repository+"/issues/7")}'
 elif [[ " $* " == *" --method POST "* ]]; then
   echo POST >>"$state/calls"
   body=; for arg in "$@"; do [[ "$arg" == body=* ]] && body=${arg#body=}; done
@@ -473,6 +480,43 @@ fn associate_creates_paired_aliases_and_conflicting_target_fails_closed() {
             ))
             .is_empty()
     );
+}
+
+#[test]
+fn mixed_case_provider_repository_identity_is_canonicalized_end_to_end() {
+    let fixture = Fixture::new("mixed-case", false);
+    let associated =
+        fixture.associate_with_mode(&fixture.task_id, "associate-mixed-case", "mixed-case");
+    assert!(
+        associated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&associated.stderr)
+    );
+
+    let posted = fixture.post("post-mixed-case", "canonical repository", "mixed-case");
+    assert!(
+        posted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&posted.stderr)
+    );
+    let result: Value = serde_json::from_slice(&posted.stdout).unwrap();
+    assert_eq!(
+        result["commentUrl"],
+        "https://github.com/owner/repository/issues/7#issuecomment-9007199254740993"
+    );
+    assert_eq!(fixture.calls("POST"), 1);
+    assert_eq!(
+        fixture.refs("refs/heads/tasks/comments/receipts/*").len(),
+        1
+    );
+
+    let replay = fixture.post("post-mixed-case", "canonical repository", "mixed-case");
+    assert!(replay.status.success());
+    assert_eq!(
+        result,
+        serde_json::from_slice::<Value>(&replay.stdout).unwrap()
+    );
+    assert_eq!(fixture.calls("POST"), 1);
 }
 
 #[test]
