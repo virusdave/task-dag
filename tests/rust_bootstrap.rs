@@ -588,6 +588,32 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         )["state"],
         "waiting"
     );
+    for command in ["context", "dag"] {
+        let neighborhood = success(
+            &a,
+            &[command, delegated_source["taskId"].as_str().unwrap()],
+            "unused-token-000",
+            100,
+        );
+        assert_eq!(neighborhood["state"], "waiting");
+        assert_eq!(neighborhood["directChildren"], serde_json::json!([]));
+    }
+    let delegated_current = success(
+        &a,
+        &["current-state", "--max-tasks", "500"],
+        "unused-token-000",
+        100,
+    );
+    let delegated_row = delegated_current["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["taskId"] == delegated_source["taskId"])
+        .unwrap();
+    assert_eq!(
+        delegated_row["context"]["directChildren"],
+        serde_json::json!([])
+    );
     let target_origin = root.join("target-origin.git");
     ok(&root, &["init", "--bare", target_origin.to_str().unwrap()]);
     let target_floor = ok(
@@ -1209,54 +1235,204 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         .unwrap()
         .to_owned();
     let child = children[0]["taskId"].as_str().unwrap();
-    let complete_ops_args = [
+    let multiline_prefix =
+        "Agent Gate Record\n\n- exact production-compatible multiline evidence\n- tab:\tvalue";
+    let multiline_evidence = format!(
+        "{multiline_prefix}{}",
+        "x".repeat(16_384 - multiline_prefix.len()),
+    );
+    assert_eq!(multiline_evidence.len(), 16_384);
+    let mut near_limit_evidence = vec![multiline_evidence.clone()];
+    near_limit_evidence.extend((1..15).map(|_| "x".repeat(16_384)));
+    let mut complete_ops_args = vec![
         "complete-ops",
         child,
         "--description",
         "verified",
         "--authorization",
         "fixture",
-        "--evidence",
-        "evidence-1",
-        "--claim-token",
-        child_token,
     ];
+    for value in &near_limit_evidence {
+        complete_ops_args.extend(["--evidence", value]);
+    }
+    complete_ops_args.extend(["--claim-token", child_token]);
     uncertain(&b, &complete_ops_args, "unused-token-000", 103);
     success(&b, &complete_ops_args, "unused-token-000", 103);
+    let completed = success(&a, &["show", child], "unused-token-000", 103);
+    assert_eq!(
+        completed["record"]["evidence"][0]["value"],
+        multiline_evidence
+    );
+    assert_eq!(
+        completed["record"]["evidence"].as_array().unwrap().len(),
+        15
+    );
+    let current = success(
+        &a,
+        &["current-state", "--max-tasks", "500"],
+        "unused-token-000",
+        103,
+    );
+    let completed_row = current["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["taskId"] == child)
+        .unwrap();
+    assert_eq!(
+        completed_row["record"]["evidence"][0]["value"],
+        multiline_evidence
+    );
+    assert_eq!(
+        completed_row["record"]["evidence"]
+            .as_array()
+            .unwrap()
+            .len(),
+        15
+    );
+
+    let oversized = success(
+        &a,
+        &[
+            "create",
+            "--operation-id",
+            "oversized-operations-evidence",
+            "--title",
+            "Oversized operations evidence",
+            "--description",
+            "Writer must preserve the current-state object bound",
+            "--claim",
+        ],
+        "oversized-operations-token",
+        103,
+    );
+    let oversized_id = oversized["taskId"].as_str().unwrap();
+    let oversized_token = oversized["claimToken"].as_str().unwrap();
+    let oversized_evidence = vec!["y".repeat(16_384); 17];
+    let mut oversized_args = vec![
+        "complete-ops",
+        oversized_id,
+        "--description",
+        "must remain active",
+        "--authorization",
+        "fixture",
+    ];
+    for value in &oversized_evidence {
+        oversized_args.extend(["--evidence", value]);
+    }
+    oversized_args.extend(["--claim-token", oversized_token]);
+    let oversized_rejected = cli(&a, &oversized_args, "unused-token-000", 103);
+    assert!(!oversized_rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&oversized_rejected.stderr)
+            .contains("exceeds per-object byte limit")
+    );
+    assert_eq!(
+        success(&a, &["show", oversized_id], "unused-token-000", 103)["state"],
+        "active"
+    );
     let second = children[1]["taskId"].as_str().unwrap();
     let second_token = children[1]["claimToken"].as_str().unwrap();
-    success(
-        &a,
+    let second_active_ref = format!("refs/heads/tasks/active/{second}");
+    let second_active = ok(&a, &["ls-remote", "origin", &second_active_ref])
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    ok(&a, &["fetch", "origin", &second_active]);
+    let second_active_value: serde_json::Value =
+        serde_json::from_str(&ok(&a, &["show", "-s", "--format=%B", &second_active])).unwrap();
+    let second_task = second_active_value["taskOid"].as_str().unwrap();
+    ok(&a, &["fetch", "origin", second_task]);
+    let legacy_value = "legacy evidence";
+    let legacy_values = vec![legacy_value.to_owned(); 65];
+    let legacy_evidence: Vec<_> = legacy_values
+        .iter()
+        .map(|value| serde_json::json!({"digest":framed_digest("digest", &[value]),"value":value}))
+        .collect();
+    let legacy_description = "historical writer accepted 65 evidence entries";
+    let legacy_authorization = "fixture";
+    let legacy_logical = framed_digest(
+        "complete-ops-logical",
         &[
             "complete-ops",
             second,
-            "--description",
-            "second",
-            "--authorization",
-            "fixture",
-            "--claim-token",
+            legacy_description,
+            legacy_authorization,
+            &serde_json::to_string(&legacy_values).unwrap(),
             second_token,
         ],
+    );
+    let legacy_done_body = root.join("legacy-ops-done.json");
+    fs::write(
+        &legacy_done_body,
+        serde_json::to_vec(&serde_json::json!({
+            "attemptId": legacy_logical,
+            "authorization": legacy_authorization,
+            "description": legacy_description,
+            "evidence": legacy_evidence,
+            "formatVersion": 2,
+            "logicalId": legacy_logical,
+            "taskId": second,
+            "taskOid": second_task,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let legacy_done = ok(
+        &a,
+        &[
+            "commit-tree",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "-p",
+            &second_active,
+            "-p",
+            second_task,
+            "-F",
+            legacy_done_body.to_str().unwrap(),
+        ],
+    );
+    let second_done_ref = format!("refs/heads/tasks/done/{second}");
+    ok(
+        &a,
+        &[
+            "push",
+            "--atomic",
+            "origin",
+            &format!(":{second_active_ref}"),
+            &format!("{legacy_done}:{second_done_ref}"),
+        ],
+    );
+    let mut legacy_replay_args = vec![
+        "complete-ops",
+        second,
+        "--description",
+        legacy_description,
+        "--authorization",
+        legacy_authorization,
+    ];
+    for value in &legacy_values {
+        legacy_replay_args.extend(["--evidence", value]);
+    }
+    legacy_replay_args.extend(["--claim-token", second_token]);
+    success(&a, &legacy_replay_args, "unused-token-000", 104);
+    let legacy_current = success(
+        &a,
+        &["current-state", "--max-tasks", "500"],
         "unused-token-000",
         104,
     );
-    success(
-        &b,
-        &[
-            "complete-ops",
-            child,
-            "--description",
-            "verified",
-            "--authorization",
-            "fixture",
-            "--evidence",
-            "evidence-1",
-            "--claim-token",
-            child_token,
-        ],
-        "unused-token-000",
-        105,
+    let legacy_row = legacy_current["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["taskId"] == second)
+        .unwrap();
+    assert_eq!(
+        legacy_row["record"]["evidence"].as_array().unwrap().len(),
+        65
     );
+    success(&b, &complete_ops_args, "unused-token-000", 105);
     let master_after = ok(&b, &["ls-remote", "origin", "refs/heads/master"])
         .split_whitespace()
         .next()

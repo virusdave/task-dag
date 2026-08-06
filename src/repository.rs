@@ -292,15 +292,7 @@ pub(crate) fn materialize_local(oids: &[String]) -> Result<()> {
     let mut charge = Vec::new();
     for oid in &objects {
         let item = info.get(oid).ok_or("git batch-check omitted object")?;
-        if item.kind.as_deref() != Some("commit") {
-            return Err(format!(
-                "validator closure object {oid} is missing or is not a commit"
-            ));
-        }
-        let size = item.size.ok_or("git batch-check object size absent")?;
-        if size > MAX_INSPECTION_OBJECT_BYTES {
-            return Err(format!("object {oid} exceeds per-object byte limit"));
-        }
+        let size = inspection_commit_size(oid, item)?;
         charge.push((oid.clone(), size));
     }
     INSPECTION.with(|inspection| -> Result<()> {
@@ -319,6 +311,26 @@ pub(crate) fn materialize_local(oids: &[String]) -> Result<()> {
         Ok(())
     })?;
     git::cache_commit_objects(&objects)
+}
+
+fn inspection_commit_size(oid: &str, item: &git::ObjectInfo) -> Result<usize> {
+    if item.kind.as_deref() != Some("commit") {
+        return Err(format!(
+            "validator closure object {oid} is missing or is not a commit"
+        ));
+    }
+    let size = item.size.ok_or("git batch-check object size absent")?;
+    if size > MAX_INSPECTION_OBJECT_BYTES {
+        return Err(format!("object {oid} exceeds per-object byte limit"));
+    }
+    Ok(size)
+}
+
+pub(crate) fn validate_inspection_commit(oid: &str) -> Result<()> {
+    model::oid(oid)?;
+    let info = git::batch_object_info(&[oid.to_owned()])?;
+    inspection_commit_size(oid, info.get(oid).ok_or("git batch-check omitted object")?)?;
+    Ok(())
 }
 
 /// Cache the constant-bounded commit closure inspected by activation validation.

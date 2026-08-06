@@ -158,8 +158,6 @@ pub(crate) fn complete(id: &str, publication: &str, claim_token: &str) -> Result
 }
 pub(crate) fn complete_ops(args: CompleteOps) -> Result<()> {
     model::valid_id(&args.task_id)?;
-    model::nonempty("description", &args.description)?;
-    model::nonempty("authorization", &args.authorization)?;
     let snap = completion_snapshot(&args.task_id, false)?;
     let evidence_values = serde_json::to_string(&args.evidence).map_err(|e| e.to_string())?;
     let logical = model::framed_digest(
@@ -182,6 +180,17 @@ pub(crate) fn complete_ops(args: CompleteOps) -> Result<()> {
             Err("task is done with a semantically different result".into())
         };
     }
+    let evidence: Vec<_> = args
+        .evidence
+        .iter()
+        .map(|value| json!({"digest":model::digest(value),"value":value}))
+        .collect();
+    let payload = json!({
+        "authorization": args.authorization,
+        "description": args.description,
+        "evidence": evidence,
+    });
+    crate::validators::new_operations_done_payload(&payload)?;
     repository::exclusive(&snap, &args.task_id, "active")?;
     let active_ref = model::state_ref("active", &args.task_id);
     let active = snap.refs[&active_ref].clone();
@@ -193,15 +202,11 @@ pub(crate) fn complete_ops(args: CompleteOps) -> Result<()> {
         super::timestamp()?,
     )?;
     let task = claim.task_oid;
-    let evidence: Vec<_> = args
-        .evidence
-        .iter()
-        .map(|v| json!({"digest":model::digest(v),"value":v}))
-        .collect();
     let done_oid = git::commit(
-        &json!({"attemptId":logical,"authorization":args.authorization,"description":args.description,"evidence":evidence,"formatVersion":2,"logicalId":logical,"taskId":args.task_id,"taskOid":task}),
+        &json!({"attemptId":logical,"authorization":payload["authorization"],"description":payload["description"],"evidence":payload["evidence"],"formatVersion":2,"logicalId":logical,"taskId":args.task_id,"taskOid":task}),
         &[active.clone(), task.clone()],
     )?;
+    repository::validate_inspection_commit(&done_oid)?;
     let mut updates = vec![
         Update {
             semantic_ref: active_ref,

@@ -166,6 +166,67 @@ fn delegated_task_matches(waiting: &Value, task_oid: &str) -> bool {
     waiting["parentTaskOid"].as_str() == Some(task_oid)
 }
 
+enum OperationsPayloadPolicy {
+    LegacyRead,
+    NewWrite,
+}
+
+fn new_operations_evidence_value(value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err("operations evidence value must not be empty".into());
+    }
+    if value.len() > 16_384 {
+        return Err("operations evidence value exceeds 16384 bytes".into());
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err("operations evidence value contains an unsupported control character".into());
+    }
+    Ok(())
+}
+
+fn operations_done_payload(value: &Value, policy: OperationsPayloadPolicy) -> Result<()> {
+    let authorization = value["authorization"]
+        .as_str()
+        .ok_or("done authorization malformed")?;
+    let description = value["description"]
+        .as_str()
+        .ok_or("done description malformed")?;
+    model::nonempty("done authorization", authorization)?;
+    model::nonempty("done description", description)?;
+    let evidence = value["evidence"]
+        .as_array()
+        .ok_or("operations done evidence list malformed")?;
+    if matches!(policy, OperationsPayloadPolicy::NewWrite) {
+        model::bounded("done authorization", authorization, 4_096)?;
+        model::bounded("done description", description, 16_384)?;
+        if evidence.len() > 64 {
+            return Err("operations done evidence has too many entries".into());
+        }
+    }
+    for item in evidence {
+        if item.as_object().map(|map| map.len()) != Some(2) {
+            return Err("operations evidence fields malformed".into());
+        }
+        let captured = item["value"]
+            .as_str()
+            .ok_or("operations evidence value malformed")?;
+        if matches!(policy, OperationsPayloadPolicy::NewWrite) {
+            new_operations_evidence_value(captured)?;
+        }
+        if item["digest"] != model::digest(captured) {
+            return Err("operations evidence digest mismatch".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn new_operations_done_payload(value: &Value) -> Result<()> {
+    operations_done_payload(value, OperationsPayloadPolicy::NewWrite)
+}
+
 /// Validate only the current lifecycle record and its immediate parent
 /// header. Historical lifecycle parents and child state objects are opaque.
 pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
@@ -368,38 +429,7 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
                 )?;
             }
             if value.get("evidence").is_some() {
-                model::bounded(
-                    "done authorization",
-                    value["authorization"]
-                        .as_str()
-                        .ok_or("done authorization malformed")?,
-                    4_096,
-                )?;
-                model::bounded(
-                    "done description",
-                    value["description"]
-                        .as_str()
-                        .ok_or("done description malformed")?,
-                    16_384,
-                )?;
-                let evidence = value["evidence"]
-                    .as_array()
-                    .ok_or("operations done evidence list malformed")?;
-                if evidence.len() > 64 {
-                    return Err("operations done evidence has too many entries".into());
-                }
-                for item in evidence {
-                    if item.as_object().map(|map| map.len()) != Some(2) {
-                        return Err("operations evidence fields malformed".into());
-                    }
-                    let captured = item["value"]
-                        .as_str()
-                        .ok_or("operations evidence value malformed")?;
-                    model::bounded("operations evidence value", captured, 16_384)?;
-                    if item["digest"] != model::digest(captured) {
-                        return Err("operations evidence digest mismatch".into());
-                    }
-                }
+                operations_done_payload(&value, OperationsPayloadPolicy::LegacyRead)?;
             }
             if value.get("manifestOid").is_some() {
                 let mut child_ids = BTreeSet::new();
@@ -445,10 +475,7 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
             let valid_parents = if let Some(publication) = value["publicationCommit"].as_str() {
                 parents.len() == 3 && parents[2] == publication
             } else if value.get("evidence").is_some() {
-                value["evidence"]
-                    .as_array()
-                    .is_some_and(|items| items.len() <= 64)
-                    && parents.len() == 2
+                parents.len() == 2
             } else if let Some(manifest) = value["manifestOid"].as_str() {
                 let children = value["children"]
                     .as_array()
@@ -946,20 +973,7 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
             if parents.len() != 2 {
                 return Err("operations done evidence parent ordering is malformed".into());
             }
-            for item in value["evidence"]
-                .as_array()
-                .ok_or("operations done evidence list malformed")?
-            {
-                if item.as_object().map(|m| m.len()) != Some(2) {
-                    return Err("operations evidence fields malformed".into());
-                }
-                let captured = item["value"]
-                    .as_str()
-                    .ok_or("operations evidence value malformed")?;
-                if item["digest"] != model::digest(captured) {
-                    return Err("operations evidence digest mismatch".into());
-                }
-            }
+            operations_done_payload(&value, OperationsPayloadPolicy::LegacyRead)?;
         }
         "done" if value.get("acceptedOid").is_some() => {
             let accepted_oid = value["acceptedOid"]
@@ -1142,10 +1156,90 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LEGACY_REQUIREMENT_CONVERGENCE, current_convergence_evidence, delegated_task_matches,
-        legacy_requirement_convergence,
+        LEGACY_REQUIREMENT_CONVERGENCE, OperationsPayloadPolicy, current_convergence_evidence,
+        delegated_task_matches, legacy_requirement_convergence, operations_done_payload,
     };
     use crate::model;
+    use proptest::prelude::*;
+
+    fn operations_payload(values: &[String]) -> serde_json::Value {
+        let evidence: Vec<_> = values
+            .iter()
+            .map(|value| serde_json::json!({"digest":model::digest(value),"value":value}))
+            .collect();
+        serde_json::json!({"authorization":"operator approved","description":"done","evidence":evidence})
+    }
+
+    #[test]
+    fn new_operations_evidence_policy_is_bounded_and_multiline() {
+        for accepted in [
+            "line one\nline two".to_owned(),
+            "column\tvalue".to_owned(),
+            "x".repeat(16_384),
+        ] {
+            assert!(
+                operations_done_payload(
+                    &operations_payload(&[accepted]),
+                    OperationsPayloadPolicy::NewWrite,
+                )
+                .is_ok()
+            );
+        }
+        for rejected in [
+            " \n\t ".to_owned(),
+            "carriage\rreturn".to_owned(),
+            "control\u{0001}".to_owned(),
+            "x".repeat(16_385),
+        ] {
+            assert!(
+                operations_done_payload(
+                    &operations_payload(&[rejected]),
+                    OperationsPayloadPolicy::NewWrite,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            operations_done_payload(
+                &operations_payload(&vec!["evidence".to_owned(); 64]),
+                OperationsPayloadPolicy::NewWrite,
+            )
+            .is_ok()
+        );
+        assert!(
+            operations_done_payload(
+                &operations_payload(&vec!["evidence".to_owned(); 65]),
+                OperationsPayloadPolicy::NewWrite,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_operations_evidence_preserves_the_historical_writer_language() {
+        let legacy = operations_payload(&vec!["carriage\rreturn".to_owned(); 65]);
+        assert!(operations_done_payload(&legacy, OperationsPayloadPolicy::LegacyRead).is_ok());
+        let mut bad_digest = legacy;
+        bad_digest["evidence"][0]["digest"] = serde_json::json!("0".repeat(64));
+        assert!(operations_done_payload(&bad_digest, OperationsPayloadPolicy::LegacyRead).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn every_tightened_writer_evidence_payload_is_accepted_by_legacy_readers(
+            values in proptest::collection::vec("[ -~\\n\\t]{1,128}", 0..65),
+        ) {
+            let payload = operations_payload(&values);
+            prop_assume!(operations_done_payload(
+                &payload,
+                OperationsPayloadPolicy::NewWrite,
+            ).is_ok());
+            prop_assert!(operations_done_payload(
+                &payload,
+                OperationsPayloadPolicy::LegacyRead,
+            ).is_ok());
+        }
+    }
 
     #[test]
     fn delegated_done_rejects_a_different_task_object_with_the_same_id() {

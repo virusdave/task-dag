@@ -7,7 +7,10 @@ mod task;
 
 pub(crate) use delegation::{admission, intent};
 pub(crate) use delegation_completion::{accepted, export};
-pub(crate) use lifecycle::{current_convergence_evidence, current_lifecycle, lifecycle, waiting};
+pub(crate) use lifecycle::{
+    current_convergence_evidence, current_lifecycle, lifecycle, new_operations_done_payload,
+    waiting,
+};
 pub(crate) use system::{activation, activation_identity};
 pub(crate) use task::task;
 

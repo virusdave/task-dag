@@ -410,7 +410,7 @@ fn neighborhood(id: &str) -> Result<serde_json::Value> {
     let record = lifecycle_record(&found[0].0, &found[0].2, id)?;
     let task_oid = record_task(&record, &found[0].0)?;
     let task = crate::validators::task(&task_oid, id)?;
-    let direct_children = if found[0].0 == "waiting" {
+    let direct_children = if found[0].0 == "waiting" && record.get("intentOid").is_none() {
         record["children"]
             .as_array()
             .ok_or("waiting children malformed")?
