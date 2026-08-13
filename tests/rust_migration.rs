@@ -783,6 +783,25 @@ fn unpaired_declaration_imports_waiting_and_exact_close_imports_done() {
             ))
             .is_some()
     );
+    let current = Fixture::run_raw(
+        &completed.work,
+        &["current-state", "--max-tasks", "500"],
+        None,
+        None,
+    );
+    assert!(
+        current.status.success(),
+        "{}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+    let current: Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert!(
+        current["provenDone"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|proof| proof["taskId"] == imported["syntheticTaskId"])
+    );
     let root_waiting = completed
         .remote(&format!(
             "refs/heads/tasks/waiting/{}",

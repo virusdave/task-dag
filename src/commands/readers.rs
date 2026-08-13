@@ -8,6 +8,8 @@ const FRONTIER_V2_SCOPE: &str = "refs/heads/tasks/frontier/v2-*";
 const CURRENT_MAX_TASKS: usize = 500;
 const CURRENT_MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 const CURRENT_MAX_RELATIONS: usize = 50_000;
+const CURRENT_MAX_EXACT_DONE_REFS: usize = 4_096;
+const CURRENT_MAX_EXACT_DONE_REF_BYTES: usize = 512 * 1024;
 
 struct CacheOnlyGuard;
 
@@ -21,7 +23,7 @@ fn current_rows(snapshot: &repository::Snapshot) -> Result<Vec<(String, String, 
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
     for (reference, oid) in &snapshot.refs {
-        for state in ["frontier", "active", "blocked", "waiting", "done"] {
+        for state in ["frontier", "active", "blocked", "waiting"] {
             if let Some(id) = model::parse_state_ref(reference, state) {
                 model::valid_id(id)?;
                 if !seen.insert(id.to_owned()) {
@@ -36,7 +38,7 @@ fn current_rows(snapshot: &repository::Snapshot) -> Result<Vec<(String, String, 
 
 fn current_fingerprint(refs: &BTreeMap<String, String>) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"task-dag-current-state-v1\0");
+    hash.update(b"task-dag-open-state-v3\0");
     for (reference, oid) in refs {
         hash.update((reference.len() as u64).to_be_bytes());
         hash.update(reference.as_bytes());
@@ -65,7 +67,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
     let captured = current_rows(&first)?;
     if captured.len() > max_tasks {
         return Err(format!(
-            "current-state has {} tasks, exceeding --max-tasks {max_tasks}",
+            "current-state has {} open tasks, exceeding --max-tasks {max_tasks}",
             captured.len()
         ));
     }
@@ -111,22 +113,29 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
         .iter()
         .map(|(_, _, id, _, _, oid)| ((*id).clone(), oid.clone()))
         .collect();
-    let resolve = |edge: &Value, kind: &str| -> Result<()> {
+    let mut required_done = BTreeMap::<String, String>::new();
+    let mut remember_related = |edge: &Value, kind: &str| -> Result<()> {
         let id = edge["taskId"]
             .as_str()
             .ok_or_else(|| format!("{kind} Task-ID malformed"))?;
         let oid = edge["taskOid"]
             .as_str()
             .ok_or_else(|| format!("{kind} Task OID malformed"))?;
-        if identity.get(id).map(String::as_str) != Some(oid) {
-            return Err(format!(
-                "{kind} {id} is absent from current-state closure or names a different Task OID"
-            ));
+        if let Some(open_oid) = identity.get(id) {
+            if open_oid != oid {
+                return Err(format!("Immutable identity mismatch for {kind} {id}"));
+            }
+            return Ok(());
+        }
+        if required_done
+            .insert(id.into(), oid.into())
+            .is_some_and(|prior| prior != oid)
+        {
+            return Err(format!("Immutable identity mismatch for {kind} {id}"));
         }
         Ok(())
     };
-    let mut rows = Vec::with_capacity(records.len());
-    for (_, _, id, _, _, task_oid) in &records {
+    for (_, _, id, _, record, task_oid) in &records {
         let raw = crate::git::object_json(task_oid)?;
         if raw["taskId"].as_str() != Some(id) {
             return Err("Task object's own taskId is wrong".into());
@@ -135,12 +144,148 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
             .as_array()
             .ok_or("Task requirements malformed")?;
         charge_relations(requirements.len() + usize::from(!raw["structuralParent"].is_null()))?;
+        if !raw["structuralParent"].is_null() {
+            let parent_id = raw["structuralParent"]["taskId"]
+                .as_str()
+                .ok_or("structural parent Task-ID malformed")?;
+            let Some((_, parent_state, _, _, parent_record, parent_oid)) = records
+                .iter()
+                .find(|(_, _, candidate, _, _, _)| *candidate == parent_id)
+            else {
+                return Err(format!(
+                    "Open task {id} has no open structural parent {parent_id}"
+                ));
+            };
+            if *parent_state != "waiting" || raw["structuralParent"]["taskOid"] != *parent_oid {
+                return Err(format!(
+                    "Open task {id} has invalid structural parent {parent_id}"
+                ));
+            }
+            let reciprocal = parent_record["children"]
+                .as_array()
+                .is_some_and(|children| {
+                    children.iter().any(|child| {
+                        child["taskId"].as_str() == Some(id)
+                            && child["taskOid"].as_str() == Some(task_oid)
+                    })
+                });
+            if !reciprocal {
+                return Err(format!(
+                    "Open structural parent {parent_id} does not name child {id}"
+                ));
+            }
+        }
+        for requirement in requirements {
+            remember_related(requirement, "requirement")?;
+        }
+        if record.get("intentOid").is_none() {
+            if let Some(children) = record.get("children") {
+                let children = children.as_array().ok_or("waiting children malformed")?;
+                charge_relations(children.len())?;
+                for child in children {
+                    remember_related(child, "waiting child")?;
+                }
+            }
+        }
     }
+
+    let mut done_ids: BTreeSet<String> = identity.keys().cloned().collect();
+    done_ids.extend(required_done.keys().cloned());
+    if done_ids.len() > CURRENT_MAX_EXACT_DONE_REFS {
+        return Err("current-state exact done proof exceeds hard ref limit".into());
+    }
+    let done_refs: Vec<String> = done_ids
+        .iter()
+        .map(|id| model::state_ref("done", id))
+        .collect();
+    let done_ref_bytes = done_refs.iter().try_fold(0usize, |total, reference| {
+        total
+            .checked_add(reference.len())
+            .ok_or("exact done ref byte overflow")
+    })?;
+    if done_ref_bytes > CURRENT_MAX_EXACT_DONE_REF_BYTES {
+        return Err("current-state exact done proof exceeds hard byte limit".into());
+    }
+    let done_snapshot = if done_refs.is_empty() {
+        repository::Snapshot {
+            refs: BTreeMap::new(),
+        }
+    } else {
+        repository::advertise_bounded(
+            &done_refs,
+            CURRENT_MAX_EXACT_DONE_REFS,
+            CURRENT_MAX_EXACT_DONE_REF_BYTES,
+        )?
+    };
+    for id in identity.keys() {
+        if done_snapshot
+            .refs
+            .contains_key(&model::state_ref("done", id))
+        {
+            return Err(format!("Task-ID {id} appears in multiple lifecycle states"));
+        }
+    }
+    let done_oids: Vec<String> = required_done
+        .keys()
+        .map(|id| {
+            done_snapshot
+                .refs
+                .get(&model::state_ref("done", id))
+                .cloned()
+                .ok_or_else(|| format!("Related task {id} is neither open nor done"))
+        })
+        .collect::<Result<_>>()?;
+    repository::materialize_local(&done_oids)?;
+    let mut proven_done = Vec::with_capacity(required_done.len());
+    for (id, expected_task_oid) in &required_done {
+        let state_oid = done_snapshot
+            .refs
+            .get(&model::state_ref("done", id))
+            .ok_or_else(|| format!("Related task {id} lost its done proof"))?
+            .clone();
+        let raw_record = crate::git::object_json(&state_oid)?;
+        if raw_record.get("acceptedOid").is_some() || raw_record.get("closeOid").is_some() {
+            // These two legacy-compatible shapes deliberately retain full
+            // validation of a fixed evidence set independent of retained
+            // lifecycle and Task requirement history.
+            repository::materialize_local_legacy_done_evidence(
+                &state_oid,
+                raw_record.get("acceptedOid").is_some(),
+            )?;
+        }
+        let record = crate::validators::current_lifecycle("done", &state_oid, id)?;
+        let task_oid = record_task(&record, "done")?;
+        if &task_oid != expected_task_oid {
+            return Err(format!("Immutable identity mismatch for done task {id}"));
+        }
+        repository::materialize_local(std::slice::from_ref(&task_oid))?;
+        let task = crate::validators::task(&task_oid, id)?;
+        crate::validators::current_convergence_evidence(&state_oid, id, &record, &task)?;
+        proven_done.push(json!({"stateOid":state_oid,"taskId":id,"taskOid":task_oid}));
+    }
+
+    let resolve = |edge: &Value, kind: &str| -> Result<()> {
+        let id = edge["taskId"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task-ID malformed"))?;
+        let oid = edge["taskOid"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task OID malformed"))?;
+        if identity
+            .get(id)
+            .or_else(|| required_done.get(id))
+            .map(String::as_str)
+            != Some(oid)
+        {
+            return Err(format!(
+                "{kind} {id} is absent from current-state closure or names a different Task OID"
+            ));
+        }
+        Ok(())
+    };
+    let mut rows = Vec::with_capacity(records.len());
     for (reference, state, id, state_oid, record, task_oid) in records {
         let task = crate::validators::task(&task_oid, id)?;
-        if state == "done" {
-            crate::validators::current_convergence_evidence(&state_oid, id, &record, &task)?;
-        }
         if !task["structuralParent"].is_null() {
             resolve(&task["structuralParent"], "structural parent")?;
         }
@@ -185,7 +330,22 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
                 .into(),
         );
     }
-    let output = json!({"activationOid":activation,"fingerprint":current_fingerprint(&first.refs),"formatVersion":2,"rows":rows});
+    if !done_refs.is_empty()
+        && repository::advertise_bounded(
+            &done_refs,
+            CURRENT_MAX_EXACT_DONE_REFS,
+            CURRENT_MAX_EXACT_DONE_REF_BYTES,
+        )?
+        .refs
+            != done_snapshot.refs
+    {
+        return Err(
+            "retryable current-state drift: exact done refs changed between advertisements".into(),
+        );
+    }
+    let mut fingerprint_refs = first.refs.clone();
+    fingerprint_refs.extend(done_snapshot.refs);
+    let output = json!({"activationOid":activation,"fingerprint":current_fingerprint(&fingerprint_refs),"formatVersion":3,"provenDone":proven_done,"rows":rows,"scope":"open"});
     let encoded = serde_json::to_vec(&output).map_err(|e| e.to_string())?;
     if encoded.len() > CURRENT_MAX_OUTPUT_BYTES {
         return Err("current-state JSON output exceeds hard limit".into());
@@ -256,11 +416,7 @@ pub(crate) fn show(id: &str) -> Result<()> {
     }
     let (state, r, oid) = &found[0];
     repository::materialize(std::slice::from_ref(oid))?;
-    let record = if state == "waiting" {
-        crate::validators::waiting(oid, id)?
-    } else {
-        crate::validators::lifecycle(state, oid, id)?
-    };
+    let record = lifecycle_record(state, oid, id)?;
     print_json(&json!({"record":record,"ref":r,"state":state,"stateOid":oid,"taskId":id}))
 }
 
@@ -426,11 +582,13 @@ fn neighborhood(id: &str) -> Result<serde_json::Value> {
 }
 
 fn lifecycle_record(state: &str, oid: &str, id: &str) -> Result<Value> {
-    Ok(if state == "waiting" {
-        crate::validators::waiting(oid, id)?
-    } else {
-        crate::validators::lifecycle(state, oid, id)?
-    })
+    let record = crate::validators::current_lifecycle(state, oid, id)?;
+    let task_oid = record_task(&record, state)?;
+    let task = crate::validators::task(&task_oid, id)?;
+    if state == "done" {
+        crate::validators::current_convergence_evidence(oid, id, &record, &task)?;
+    }
+    Ok(record)
 }
 
 fn record_task(record: &Value, state: &str) -> Result<String> {

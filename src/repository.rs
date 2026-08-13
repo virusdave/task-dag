@@ -53,7 +53,10 @@ pub(crate) fn advertise(patterns: &[String]) -> Result<Snapshot> {
     advertise_remote("origin", patterns)
 }
 
-/// Advertise only the five native-v2 lifecycle namespaces and activation.
+/// Advertise only open native-v2 lifecycle namespaces and activation.
+///
+/// Done refs are retained indefinitely, so a normal reader must address only
+/// the exact done refs required by the open tasks it is inspecting.
 /// This parser deliberately does not call `git check-ref-format`: the
 /// accepted grammar below is finite and stricter.
 pub(crate) fn advertise_current_state() -> Result<Snapshot> {
@@ -62,7 +65,6 @@ pub(crate) fn advertise_current_state() -> Result<Snapshot> {
         "refs/heads/tasks/active/v2-*",
         "refs/heads/tasks/blocked/v2-*",
         "refs/heads/tasks/waiting/v2-*",
-        "refs/heads/tasks/done/v2-*",
         ACTIVATION,
     ];
     let mut child = Command::new("git")
@@ -95,7 +97,7 @@ pub(crate) fn advertise_current_state() -> Result<Snapshot> {
             .ok_or_else(|| format!("malformed current-state advertisement line: {text}"))?;
         model::oid(oid)?;
         let valid = reference == ACTIVATION
-            || ["frontier", "active", "blocked", "waiting", "done"]
+            || ["frontier", "active", "blocked", "waiting"]
                 .iter()
                 .any(|state| {
                     model::parse_state_ref(reference, state)
@@ -353,6 +355,38 @@ pub(crate) fn materialize_local_activation(activation: &str) -> Result<()> {
     let predecessor_parents = git::parents(predecessor)?;
     if predecessor_value.get("logicalId").is_none() && predecessor_parents.len() == 1 {
         materialize_local(&[predecessor_parents[0].clone()])?;
+    }
+    Ok(())
+}
+
+/// Cache exactly the immutable evidence commits dereferenced by the two
+/// legacy-compatible done validators. Task parents are identities only and
+/// must not expand this fixed closure through their requirement ancestry.
+pub(crate) fn materialize_local_legacy_done_evidence(oid: &str, delegated: bool) -> Result<()> {
+    let done_parents = git::parents(oid)?;
+    if done_parents.len() != 3 {
+        return Ok(());
+    }
+    materialize_local(&done_parents)?;
+    if delegated {
+        let waiting_parents = git::parents(&done_parents[0])?;
+        let accepted_parents = git::parents(&done_parents[2])?;
+        if waiting_parents.len() == 3 && accepted_parents.len() == 2 {
+            let evidence = waiting_parents
+                .into_iter()
+                .chain(accepted_parents)
+                .collect::<Vec<_>>();
+            materialize_local(&evidence)?;
+        }
+    } else {
+        let close_parents = git::parents(&done_parents[2])?;
+        if close_parents.len() == 1 {
+            materialize_local(&close_parents)?;
+            let declaration_parents = git::parents(&close_parents[0])?;
+            if declaration_parents.len() == 1 {
+                materialize_local(&declaration_parents)?;
+            }
+        }
     }
     Ok(())
 }

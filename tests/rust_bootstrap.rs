@@ -156,7 +156,37 @@ fn current_state_caches_the_runtime_parent_for_one_parent_genesis_activation() {
         100,
     );
     assert_eq!(current["activationOid"], activation);
+    assert_eq!(current["formatVersion"], 3);
+    assert_eq!(current["scope"], "open");
+    assert_eq!(current["provenDone"], serde_json::json!([]));
     assert_eq!(current["rows"], serde_json::json!([]));
+
+    let irrelevant_done = ok(
+        &checkout,
+        &[
+            "commit-tree",
+            empty_tree,
+            "-m",
+            "irrelevant historical done",
+        ],
+    );
+    let mut push_args = vec!["push", "origin"];
+    let refspecs: Vec<String> = (0..501)
+        .map(|index| {
+            let id = format!("v2-{index:064x}");
+            format!("{irrelevant_done}:refs/heads/tasks/done/{id}")
+        })
+        .collect();
+    push_args.extend(refspecs.iter().map(String::as_str));
+    ok(&checkout, &push_args);
+    let after_history_growth = success(
+        &checkout,
+        &["current-state", "--max-tasks", "500"],
+        "unused-token-000",
+        100,
+    );
+    assert_eq!(after_history_growth["rows"], serde_json::json!([]));
+    assert_eq!(after_history_growth["provenDone"], serde_json::json!([]));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -265,7 +295,8 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         "unused-token-000",
         100,
     );
-    assert_eq!(current["formatVersion"], 2);
+    assert_eq!(current["formatVersion"], 3);
+    assert_eq!(current["scope"], "open");
     assert_eq!(current["activationOid"], activation_lease);
     assert!(current.get("journalOid").is_none());
     assert!(current.get("activation").is_none());
@@ -746,6 +777,19 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
             104,
         )["state"],
         "done"
+    );
+    let delegated_current = success(
+        &a,
+        &["current-state", "--max-tasks", "500"],
+        "unused-token-000",
+        104,
+    );
+    assert!(
+        delegated_current["provenDone"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|proof| proof["taskId"] == delegated_source["taskId"])
     );
     let delegated_parent_id = delegated_parent["taskId"].as_str().unwrap();
     let delegated_parent_waiting_ref = format!("refs/heads/tasks/waiting/{delegated_parent_id}");
@@ -1273,12 +1317,24 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         "unused-token-000",
         103,
     );
-    let completed_row = current["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["taskId"] == child)
-        .unwrap();
+    assert!(
+        current["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["taskId"] != child),
+        "done tasks must not be returned as open rows"
+    );
+    assert!(
+        current["provenDone"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|proof| proof["taskId"] == child
+                && proof["taskOid"] == completed["record"]["taskOid"]),
+        "an open parent's completed child must have exact done proof"
+    );
+    let completed_row = success(&a, &["show", child], "unused-token-000", 103);
     assert_eq!(
         completed_row["record"]["evidence"][0]["value"],
         multiline_evidence
@@ -1416,18 +1472,7 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     }
     legacy_replay_args.extend(["--claim-token", second_token]);
     success(&a, &legacy_replay_args, "unused-token-000", 104);
-    let legacy_current = success(
-        &a,
-        &["current-state", "--max-tasks", "500"],
-        "unused-token-000",
-        104,
-    );
-    let legacy_row = legacy_current["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["taskId"] == second)
-        .unwrap();
+    let legacy_row = success(&a, &["show", second], "unused-token-000", 104);
     assert_eq!(
         legacy_row["record"]["evidence"].as_array().unwrap().len(),
         65

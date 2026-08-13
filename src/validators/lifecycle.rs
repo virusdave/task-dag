@@ -228,7 +228,8 @@ pub(crate) fn new_operations_done_payload(value: &Value) -> Result<()> {
 }
 
 /// Validate only the current lifecycle record and its immediate parent
-/// header. Historical lifecycle parents and child state objects are opaque.
+/// header. Historical child state objects are opaque; delegated and migrated
+/// completion evidence has a fixed-size chain and retains its exact checks.
 pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
     if state == "waiting" {
         return current_waiting(oid, id);
@@ -534,6 +535,9 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
             };
             if !valid_parents {
                 return Err("done record immediate parent ordering is malformed".into());
+            }
+            if value.get("acceptedOid").is_some() || value.get("closeOid").is_some() {
+                return lifecycle("done", oid, id);
             }
             for key in ["closeRef", "declarationRef"] {
                 if let Some(reference) = value.get(key) {
