@@ -315,6 +315,11 @@ pub(crate) fn materialize_local(oids: &[String]) -> Result<()> {
     git::cache_commit_objects(&objects)
 }
 
+pub(crate) fn materialize_inspection(oids: &[String]) -> Result<()> {
+    materialize_remote_inner("origin", oids, true)?;
+    materialize_local(oids)
+}
+
 fn inspection_commit_size(oid: &str, item: &git::ObjectInfo) -> Result<usize> {
     if item.kind.as_deref() != Some("commit") {
         return Err(format!(
@@ -336,13 +341,13 @@ pub(crate) fn validate_inspection_commit(oid: &str) -> Result<()> {
 }
 
 /// Cache the constant-bounded commit closure inspected by activation validation.
-pub(crate) fn materialize_local_activation(activation: &str) -> Result<()> {
-    materialize_local(&[activation.to_owned()])?;
+pub(crate) fn materialize_activation(activation: &str) -> Result<()> {
+    materialize_inspection(&[activation.to_owned()])?;
     let value = git::object_json(activation)?;
     let parents = git::parents(activation)?;
     if value.get("logicalId").is_none() {
         if parents.len() == 1 {
-            materialize_local(&[parents[0].clone()])?;
+            materialize_inspection(&[parents[0].clone()])?;
         }
         return Ok(());
     }
@@ -350,11 +355,11 @@ pub(crate) fn materialize_local_activation(activation: &str) -> Result<()> {
         return Ok(());
     }
     let predecessor = &parents[0];
-    materialize_local(&[predecessor.clone()])?;
+    materialize_inspection(&[predecessor.clone()])?;
     let predecessor_value = git::object_json(predecessor)?;
     let predecessor_parents = git::parents(predecessor)?;
     if predecessor_value.get("logicalId").is_none() && predecessor_parents.len() == 1 {
-        materialize_local(&[predecessor_parents[0].clone()])?;
+        materialize_inspection(&[predecessor_parents[0].clone()])?;
     }
     Ok(())
 }
@@ -362,12 +367,12 @@ pub(crate) fn materialize_local_activation(activation: &str) -> Result<()> {
 /// Cache exactly the immutable evidence commits dereferenced by the two
 /// legacy-compatible done validators. Task parents are identities only and
 /// must not expand this fixed closure through their requirement ancestry.
-pub(crate) fn materialize_local_legacy_done_evidence(oid: &str, delegated: bool) -> Result<()> {
+pub(crate) fn materialize_legacy_done_evidence(oid: &str, delegated: bool) -> Result<()> {
     let done_parents = git::parents(oid)?;
     if done_parents.len() != 3 {
         return Ok(());
     }
-    materialize_local(&done_parents)?;
+    materialize_inspection(&done_parents)?;
     if delegated {
         let waiting_parents = git::parents(&done_parents[0])?;
         let accepted_parents = git::parents(&done_parents[2])?;
@@ -376,15 +381,15 @@ pub(crate) fn materialize_local_legacy_done_evidence(oid: &str, delegated: bool)
                 .into_iter()
                 .chain(accepted_parents)
                 .collect::<Vec<_>>();
-            materialize_local(&evidence)?;
+            materialize_inspection(&evidence)?;
         }
     } else {
         let close_parents = git::parents(&done_parents[2])?;
         if close_parents.len() == 1 {
-            materialize_local(&close_parents)?;
+            materialize_inspection(&close_parents)?;
             let declaration_parents = git::parents(&close_parents[0])?;
             if declaration_parents.len() == 1 {
-                materialize_local(&declaration_parents)?;
+                materialize_inspection(&declaration_parents)?;
             }
         }
     }
@@ -392,6 +397,10 @@ pub(crate) fn materialize_local_legacy_done_evidence(oid: &str, delegated: bool)
 }
 
 pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
+    materialize_remote_inner(remote, oids, false)
+}
+
+fn materialize_remote_inner(remote: &str, oids: &[String], inspection: bool) -> Result<()> {
     model::bounded("remote", remote, 4096)?;
     let unique: BTreeSet<_> = oids.iter().cloned().collect();
     if unique.is_empty() {
@@ -410,25 +419,63 @@ pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
         .filter_map(|(oid, kind)| kind.is_none().then_some(oid))
         .collect();
     if !missing.is_empty() {
-        let mut fetch = Command::new("git");
-        fetch.args([
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            "--no-write-fetch-head",
-            "--",
-            remote,
-        ]);
+        let mut fetch = if inspection {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                // POSIX shells express RLIMIT_FSIZE in 512-byte blocks.
+                "ulimit -f 131072 || exit 125; exec git \"$@\"",
+                "task-dag-bounded-fetch",
+                "-c",
+                "fetch.unpackLimit=1",
+                "-c",
+                "fetch.bundleURI=",
+                "-c",
+                "fetch.uriprotocols=",
+                "-c",
+                "fetch.recurseSubmodules=false",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.file.allow=always",
+                "-c",
+                "protocol.https.allow=always",
+                "-c",
+                "protocol.ssh.allow=always",
+                "fetch",
+                "--depth=1",
+                "--filter=tree:0",
+                "--no-recurse-submodules",
+                "--no-tags",
+                "--quiet",
+                "--no-write-fetch-head",
+                "--",
+                remote,
+            ]);
+            command
+        } else {
+            let mut command = Command::new("git");
+            command.args([
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                "--no-write-fetch-head",
+                "--",
+                remote,
+            ]);
+            command
+        };
         fetch.args(&missing);
         fetch.env("GIT_NO_LAZY_FETCH", "1");
         let out = fetch
             .output()
             .map_err(|e| format!("run bounded fetch: {e}"))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if inspection && stderr.contains("filtering not recognized by server") {
+            return Err("bounded object fetch requires server-side object filtering".into());
+        }
         if !out.status.success() {
-            return Err(format!(
-                "bounded object fetch failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
+            return Err(format!("bounded object fetch failed: {}", stderr.trim()));
         }
         if git::batch_object_types(&missing)?
             .values()
@@ -437,7 +484,9 @@ pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
             return Err("fetched object did not equal captured advertisement OID".into());
         }
     }
-    git::cache_commit_objects(&objects)?;
+    if !inspection {
+        git::cache_commit_objects(&objects)?;
+    }
     Ok(())
 }
 pub(crate) fn materialize_lifecycle(snap: &Snapshot, ids: &[String]) -> Result<()> {

@@ -77,8 +77,8 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
         .ok_or("v2 activation is absent")?
         .clone();
     let lifecycle_objects: Vec<_> = captured.iter().map(|row| row.3.clone()).collect();
-    repository::materialize_local(&lifecycle_objects)?;
-    repository::materialize_local_activation(&activation)?;
+    repository::materialize_inspection(&lifecycle_objects)?;
+    repository::materialize_activation(&activation)?;
     crate::git::set_cache_only(true);
     let _guard = CacheOnlyGuard;
     crate::validators::activation(&activation)?;
@@ -108,7 +108,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
         tasks.insert(task_oid.clone());
         records.push((reference, state, id, state_oid, record, task_oid));
     }
-    repository::materialize_local(&tasks.into_iter().collect::<Vec<_>>())?;
+    repository::materialize_inspection(&tasks.into_iter().collect::<Vec<_>>())?;
     let identity: BTreeMap<_, _> = records
         .iter()
         .map(|(_, _, id, _, _, oid)| ((*id).clone(), oid.clone()))
@@ -235,7 +235,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
                 .ok_or_else(|| format!("Related task {id} is neither open nor done"))
         })
         .collect::<Result<_>>()?;
-    repository::materialize_local(&done_oids)?;
+    repository::materialize_inspection(&done_oids)?;
     let mut proven_done = Vec::with_capacity(required_done.len());
     for (id, expected_task_oid) in &required_done {
         let state_oid = done_snapshot
@@ -248,7 +248,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
             // These two legacy-compatible shapes deliberately retain full
             // validation of a fixed evidence set independent of retained
             // lifecycle and Task requirement history.
-            repository::materialize_local_legacy_done_evidence(
+            repository::materialize_legacy_done_evidence(
                 &state_oid,
                 raw_record.get("acceptedOid").is_some(),
             )?;
@@ -258,7 +258,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
         if &task_oid != expected_task_oid {
             return Err(format!("Immutable identity mismatch for done task {id}"));
         }
-        repository::materialize_local(std::slice::from_ref(&task_oid))?;
+        repository::materialize_inspection(std::slice::from_ref(&task_oid))?;
         let task = crate::validators::task(&task_oid, id)?;
         crate::validators::current_convergence_evidence(&state_oid, id, &record, &task)?;
         proven_done.push(json!({"stateOid":state_oid,"taskId":id,"taskOid":task_oid}));
