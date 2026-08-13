@@ -788,6 +788,7 @@ pub(crate) fn run(
 }
 
 fn rfc3339(timestamp: u64) -> Result<String> {
+    let _span = tracing::info_span!("migration.format-time").entered();
     // `git show` cannot format an arbitrary epoch. Use the ubiquitous POSIX
     // date boundary and validate its fixed UTC output before publishing it.
     let out = std::process::Command::new("date")

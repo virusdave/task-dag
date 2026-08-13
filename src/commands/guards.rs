@@ -230,6 +230,7 @@ fn run_repository_hook(
     remote_url: Option<&str>,
     input: &[u8],
 ) -> Result<()> {
+    let _span = tracing::info_span!("hook.repository-pre-push").entered();
     let hook = Path::new(".githooks/pre-push.repository");
     let metadata = match fs::symlink_metadata(hook) {
         Ok(metadata) => metadata,

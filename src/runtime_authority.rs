@@ -24,6 +24,7 @@ pub(crate) fn runtime_ref(commit: &str) -> Result<String> {
 }
 
 pub(crate) fn identity() -> Result<()> {
+    let _span = tracing::info_span!("runtime.identity").entered();
     crate::commands::print_json(&serde_json::json!({
         "canonicalIdentity": CANONICAL_IDENTITY,
         "compiledCommit": crate::runtime()?,
@@ -31,6 +32,7 @@ pub(crate) fn identity() -> Result<()> {
 }
 
 fn advertise(reference: &str) -> Result<BTreeMap<String, String>> {
+    let _span = tracing::info_span!("runtime.advertise").entered();
     let out = Command::new("git")
         .args(["ls-remote", "--refs", remote(), reference])
         .output()
@@ -67,6 +69,7 @@ pub(crate) fn validate(commit: &str) -> Result<()> {
 }
 
 pub(crate) fn publish(commit: &str) -> Result<()> {
+    let _span = tracing::info_span!("runtime.publish").entered();
     model::oid(commit)?;
     crate::git::output(["cat-file", "-e", &format!("{commit}^{{commit}}")])
         .map_err(|_| "runtime publication commit must exist locally as a commit")?;
@@ -79,14 +82,21 @@ pub(crate) fn publish(commit: &str) -> Result<()> {
             Err("immutable canonical runtime ref has conflicting content".into())
         };
     }
-    let push = Command::new("git")
-        .args(["push", "--porcelain"])
-        .arg(format!("--force-with-lease={reference}:"))
-        .arg(remote())
-        .arg(format!("{commit}:{reference}"))
-        .output()
-        .map_err(|e| format!("publish canonical runtime: {e}"))?;
-    match validate(commit) {
+    let push = {
+        let _push_span = tracing::info_span!("runtime.push").entered();
+        Command::new("git")
+            .args(["push", "--porcelain"])
+            .arg(format!("--force-with-lease={reference}:"))
+            .arg(remote())
+            .arg(format!("{commit}:{reference}"))
+            .output()
+            .map_err(|e| format!("publish canonical runtime: {e}"))?
+    };
+    let readback = {
+        let _readback_span = tracing::info_span!("runtime.readback").entered();
+        validate(commit)
+    };
+    match readback {
         Ok(()) => Ok(()),
         Err(readback) if push.status.success() => Err(format!(
             "runtime publication reported success but readback failed: {readback}"

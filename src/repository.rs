@@ -60,6 +60,7 @@ pub(crate) fn advertise(patterns: &[String]) -> Result<Snapshot> {
 /// This parser deliberately does not call `git check-ref-format`: the
 /// accepted grammar below is finite and stricter.
 pub(crate) fn advertise_current_state() -> Result<Snapshot> {
+    let _span = tracing::info_span!("remote.advertise-current-state").entered();
     let patterns = [
         "refs/heads/tasks/frontier/v2-*",
         "refs/heads/tasks/active/v2-*",
@@ -221,6 +222,7 @@ fn advertise_remote_bounded(
     line_limit: usize,
     byte_limit: usize,
 ) -> Result<Snapshot> {
+    let _span = tracing::info_span!("remote.advertise").entered();
     model::bounded("remote", remote, 4096)?;
     if patterns.is_empty() || patterns.iter().any(|pattern| !valid_scope(pattern)) {
         return Err("scoped advertisement requires non-global exact refs or prefixes".into());
@@ -285,6 +287,7 @@ pub(crate) fn materialize(oids: &[String]) -> Result<()> {
 }
 
 pub(crate) fn materialize_local(oids: &[String]) -> Result<()> {
+    let _span = tracing::info_span!("object.validate-direct").entered();
     let unique: BTreeSet<_> = oids.iter().cloned().collect();
     let objects: Vec<_> = unique.into_iter().collect();
     if objects.is_empty() {
@@ -334,6 +337,7 @@ fn inspection_commit_size(oid: &str, item: &git::ObjectInfo) -> Result<usize> {
 }
 
 pub(crate) fn validate_inspection_commit(oid: &str) -> Result<()> {
+    let _span = tracing::info_span!("object.validate-direct").entered();
     model::oid(oid)?;
     let info = git::batch_object_info(&[oid.to_owned()])?;
     inspection_commit_size(oid, info.get(oid).ok_or("git batch-check omitted object")?)?;
@@ -401,6 +405,7 @@ pub(crate) fn materialize_remote(remote: &str, oids: &[String]) -> Result<()> {
 }
 
 fn materialize_remote_inner(remote: &str, oids: &[String], inspection: bool) -> Result<()> {
+    let _span = tracing::info_span!("object.materialize").entered();
     model::bounded("remote", remote, 4096)?;
     let unique: BTreeSet<_> = oids.iter().cloned().collect();
     if unique.is_empty() {
@@ -419,6 +424,7 @@ fn materialize_remote_inner(remote: &str, oids: &[String], inspection: bool) -> 
         .filter_map(|(oid, kind)| kind.is_none().then_some(oid))
         .collect();
     if !missing.is_empty() {
+        let _fetch_span = tracing::info_span!("remote.fetch").entered();
         let mut fetch = if inspection {
             let mut command = Command::new("sh");
             command.args([
@@ -1152,6 +1158,7 @@ fn stage_native_claims(updates: &[Update]) -> Result<()> {
 }
 
 pub(crate) fn mutate(updates: Vec<Update>) -> Result<()> {
+    let _span = tracing::info_span!("remote.mutate").entered();
     let _registry_lock = native_claim_registry_lock(false)?;
     // Stage protection before performing any remote operation.
     // A rejected push may leave a harmless candidate that the hook reconciles.
@@ -1167,9 +1174,15 @@ pub(crate) fn mutate(updates: Vec<Update>) -> Result<()> {
             None => format!(":{}", u.semantic_ref),
         });
     }
-    let push = cmd.output().map_err(|e| format!("run git push: {e}"))?;
+    let push = {
+        let _push_span = tracing::info_span!("remote.push").entered();
+        cmd.output().map_err(|e| format!("run git push: {e}"))?
+    };
     let touched: Vec<String> = updates.iter().map(|u| u.semantic_ref.clone()).collect();
-    let readback = advertise(&touched)?;
+    let readback = {
+        let _readback_span = tracing::info_span!("remote.readback").entered();
+        advertise(&touched)?
+    };
     let all_new = updates
         .iter()
         .all(|u| readback.refs.get(&u.semantic_ref) == u.new.as_ref());

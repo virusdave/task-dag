@@ -1339,15 +1339,18 @@ fn validate_expired_root_claim(
     if !ttl.is_finite() || ttl <= 0.0 {
         return Err("legacy root claim TTL is malformed".into());
     }
-    let host = std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|host| host.trim().to_owned())
-        .filter(|host| !host.is_empty())
-        .unwrap_or_else(|| "unknown".into());
+    let host = {
+        let _span = tracing::info_span!("migration.read-hostname").entered();
+        std::process::Command::new("hostname")
+            .arg("-s")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|host| host.trim().to_owned())
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| "unknown".into())
+    };
     let configured_host = std::env::var("TASK_DAG_CLAIMER_HOST").unwrap_or_else(|_| host.clone());
     let claimer_host = field("Claimer-Host")?;
     if claimer_host == host || claimer_host == configured_host {
@@ -1448,6 +1451,7 @@ fn parse_blocked_metadata(body: &str, task: &str) -> Result<(Option<String>, u64
 }
 
 fn parse_rfc3339(value: &str) -> Result<u64> {
+    let _span = tracing::info_span!("migration.parse-time").entered();
     if value.len() != 20 || !value.ends_with('Z') {
         return Err("legacy Blocked-At is not canonical RFC3339 UTC".into());
     }

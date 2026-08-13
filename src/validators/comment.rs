@@ -47,6 +47,7 @@ fn github_target(value: &Value, kind: &str) -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(skip_all, name = "validate.comment-binding")]
 pub(crate) fn issue_binding(oid: &str, expected_task_id: &str) -> Result<Value> {
     let value = object(
         oid,
@@ -85,6 +86,7 @@ pub(crate) fn issue_binding(oid: &str, expected_task_id: &str) -> Result<Value> 
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.comment-intent")]
 pub(crate) fn intent(oid: &str) -> Result<Value> {
     let value = object(
         oid,
@@ -221,6 +223,7 @@ pub(crate) fn intent(oid: &str) -> Result<Value> {
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.comment-delivery-claim")]
 pub(crate) fn delivery_claim(oid: &str, expected_intent_oid: &str) -> Result<Value> {
     let value = object(
         oid,
@@ -256,6 +259,7 @@ pub(crate) fn delivery_claim(oid: &str, expected_intent_oid: &str) -> Result<Val
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.comment-receipt")]
 pub(crate) fn receipt(oid: &str, expected_intent_oid: &str) -> Result<Value> {
     let value = object(
         oid,
@@ -312,6 +316,7 @@ pub(crate) fn receipt(oid: &str, expected_intent_oid: &str) -> Result<Value> {
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.comment-forced-request")]
 pub(crate) fn forced_request(oid: &str) -> Result<Value> {
     let value = object(
         oid,
@@ -405,6 +410,7 @@ pub(crate) fn forced_request(oid: &str) -> Result<Value> {
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.comment-forced-decision")]
 pub(crate) fn forced_decision(oid: &str, expected_request_oid: &str) -> Result<Value> {
     let value = object(
         oid,

@@ -58,6 +58,21 @@ Use `task-dag <command> --help` for exact arguments. Immutable dependencies
 cannot be edited after task creation: `dep add` and `dep drop` are explicitly
 unsupported. `project` and `provider` are also unsupported.
 
+Pass the global `--timings` option to emit live, additive operation timings to
+stderr without changing a command's normal stdout. Timings use the standard
+folded-stack format accepted by flamegraph tooling:
+
+```text
+all-threads; invocation; command.context; remote.fetch 1843200
+```
+
+The final number is nanoseconds spent in exactly that active stack since the
+previous span transition. Summing records by stack prefix partitions parent
+wall time without double-counting nested operations. The option is global, so
+`task-dag --timings context ...` and `task-dag context --timings ...` are
+equivalent. Without `--timings`, tracing callsites are disabled and do not read
+the clock, allocate span state, or write output.
+
 `comment post` resolves the nearest structural-ancestor GitHub issue binding,
 records an immutable intent before calling authenticated `gh api`, and records
 a receipt only after exact authenticated readback. Delivery is bounded to six

@@ -67,6 +67,7 @@ fn legacy_requirement_convergence(oid: &str, id: &str, task_oid: &str, manifest:
     LEGACY_REQUIREMENT_CONVERGENCE.contains(&(oid, id, task_oid, manifest))
 }
 
+#[tracing::instrument(skip_all, name = "validate.convergence-evidence")]
 pub(crate) fn current_convergence_evidence(
     oid: &str,
     id: &str,
@@ -223,6 +224,7 @@ fn operations_done_payload(value: &Value, policy: OperationsPayloadPolicy) -> Re
     Ok(())
 }
 
+#[tracing::instrument(skip_all, name = "validate.operations-done-payload")]
 pub(crate) fn new_operations_done_payload(value: &Value) -> Result<()> {
     operations_done_payload(value, OperationsPayloadPolicy::NewWrite)
 }
@@ -230,6 +232,7 @@ pub(crate) fn new_operations_done_payload(value: &Value) -> Result<()> {
 /// Validate only the current lifecycle record and its immediate parent
 /// header. Historical child state objects are opaque; delegated and migrated
 /// completion evidence has a fixed-size chain and retains its exact checks.
+#[tracing::instrument(skip_all, name = "validate.current-lifecycle")]
 pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
     if state == "waiting" {
         return current_waiting(oid, id);
@@ -695,6 +698,7 @@ fn current_waiting(oid: &str, id: &str) -> Result<Value> {
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.lifecycle")]
 pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
     let value = match state {
         "frontier" => object(
@@ -1379,6 +1383,7 @@ fn validate_done_active_parent(parents: &[String], task_oid: &str, id: &str) -> 
     Ok(())
 }
 
+#[tracing::instrument(skip_all, name = "validate.waiting")]
 pub(crate) fn waiting(oid: &str, id: &str) -> Result<Value> {
     if git::object_json(oid)?.get("intentOid").is_some() {
         return delegated_waiting(oid, id);

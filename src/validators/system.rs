@@ -121,6 +121,7 @@ fn activation_record(oid: &str, inspect_floor_parent: bool) -> Result<(Value, Ve
     Ok((value, parents))
 }
 
+#[tracing::instrument(skip_all, name = "validate.activation")]
 pub(crate) fn activation(oid: &str) -> Result<Value> {
     let (value, parents) = activation_record(oid, true)?;
     if value.get("logicalId").is_some() {
@@ -173,6 +174,7 @@ pub(crate) fn activation(oid: &str) -> Result<Value> {
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.activation-identity")]
 pub(crate) fn activation_identity(value: &Value) -> Result<(String, String, Vec<String>)> {
     if value["formatVersion"] != 3 {
         return Err("cross-repository operations require activation identity v3".into());

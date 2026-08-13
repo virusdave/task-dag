@@ -2,6 +2,7 @@ use super::{digest, object};
 use crate::{Result, git, model};
 use serde_json::Value;
 
+#[tracing::instrument(skip_all, name = "validate.delegation-export")]
 pub(crate) fn export(oid: &str) -> Result<Value> {
     let value = object(
         oid,
@@ -71,6 +72,7 @@ pub(crate) fn export(oid: &str) -> Result<Value> {
     Ok(value)
 }
 
+#[tracing::instrument(skip_all, name = "validate.delegation-accepted")]
 pub(crate) fn accepted(oid: &str) -> Result<Value> {
     let value = object(
         oid,

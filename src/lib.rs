@@ -6,6 +6,7 @@ mod model;
 mod receipts;
 mod repository;
 mod runtime_authority;
+mod timing;
 mod validators;
 
 pub type Result<T> = std::result::Result<T, String>;

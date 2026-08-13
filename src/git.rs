@@ -48,6 +48,7 @@ pub(crate) fn bounded_output_status(
     args: &[&str],
     max_stdout: usize,
 ) -> Result<BoundedCommandOutput> {
+    let _span = tracing::info_span!("git.bounded-output").entered();
     const MAX_STDERR: usize = 16_384;
     enum ReadResult {
         Stdout(io::Result<(Vec<u8>, bool)>),
@@ -123,6 +124,7 @@ fn cache_only() -> bool {
 }
 
 fn batch(args: &[&str], objects: &[String]) -> Result<Vec<u8>> {
+    let _span = tracing::info_span!("git.batch-objects").entered();
     let mut child = Command::new("git")
         .args(args)
         .env("GIT_NO_LAZY_FETCH", "1")
@@ -283,6 +285,7 @@ fn commit_tree(
     parents: &[String],
     fixed_date: Option<&str>,
 ) -> Result<String> {
+    let _span = tracing::info_span!("git.construct-object").entered();
     oid(tree)?;
     let mut cmd = Command::new("git");
     cmd.args(["commit-tree", tree]);
@@ -374,6 +377,7 @@ pub(crate) fn lifecycle_task(state: &str) -> Result<String> {
         .ok_or_else(|| format!("lifecycle object {state} has no taskOid"))
 }
 pub(crate) fn output<const N: usize>(args: [&str; N]) -> Result<String> {
+    let _span = tracing::info_span!("git.command").entered();
     let out = Command::new("git")
         .args(args)
         .output()
@@ -391,6 +395,7 @@ pub(crate) struct TrailerValues {
 }
 
 pub(crate) fn trailer_values(object: &str, key: &str) -> Result<TrailerValues> {
+    let _span = tracing::info_span!("git.parse-trailers").entered();
     oid(object)?;
     model::bounded("trailer key", key, 256)?;
     let extract = |mode: &str| -> Result<Vec<u8>> {

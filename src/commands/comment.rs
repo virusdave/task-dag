@@ -355,6 +355,7 @@ struct ProviderOutput {
 }
 
 fn provider(args: &[String], timeout: Duration) -> ProviderOutput {
+    let _span = tracing::info_span!("provider.github").entered();
     let executable = if cfg!(feature = "test-seam") {
         std::env::var("TASKDAG_TEST_GH").unwrap_or_else(|_| "gh".into())
     } else {
@@ -728,6 +729,7 @@ fn verify_provider_target(intent: &Value, timeout: Duration) -> TargetVerificati
 }
 
 fn readback(intent: &Value, comment_id: &str, timeout: Duration) -> Result<Value> {
+    let _span = tracing::info_span!("provider.github-readback").entered();
     let repo = field(intent, "repository")?;
     let number = field(intent, "issueNumber")?;
     let out = provider(

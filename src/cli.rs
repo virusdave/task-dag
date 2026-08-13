@@ -6,6 +6,9 @@ use crate::{Result, commands};
 #[derive(Parser)]
 #[command(name = "task-dag", about = "Minimal self-hosting task-dag v2 writer")]
 struct Cli {
+    /// Emit additive folded-stack operation timings to stderr.
+    #[arg(long, global = true)]
+    timings: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -372,7 +375,14 @@ struct Unsupported {
 }
 
 pub(crate) fn run() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    if cli.timings {
+        crate::timing::init()?;
+    }
+    let _invocation = tracing::info_span!("invocation").entered();
+    let command_span = cli.command.timing_span();
+    let _command = command_span.entered();
+    match cli.command {
         Commands::GuardCommitMessage {
             stdin,
             message_file,
@@ -543,5 +553,89 @@ pub(crate) fn run() -> Result<()> {
             &resolution_evidence,
             recursive_approximation,
         ),
+    }
+}
+
+impl Commands {
+    fn timing_span(&self) -> tracing::Span {
+        match self {
+            Self::GuardCommitMessage { .. } => tracing::info_span!("command.guard-commit-message"),
+            Self::GuardPrePush { .. } => tracing::info_span!("command.guard-pre-push"),
+            Self::AuthorizeOrdinaryPush { .. } => {
+                tracing::info_span!("command.authorize-ordinary-push")
+            }
+            Self::InstallHooks { .. } => tracing::info_span!("command.install-hooks"),
+            Self::Runtime {
+                command: RuntimeCommands::Identity,
+            } => tracing::info_span!("command.runtime-identity"),
+            Self::Runtime {
+                command: RuntimeCommands::Publish { .. },
+            } => tracing::info_span!("command.runtime-publish"),
+            Self::Init { .. } => tracing::info_span!("command.init"),
+            Self::Create(_) => tracing::info_span!("command.create"),
+            Self::Claim { .. } => tracing::info_span!("command.claim"),
+            Self::Renew { .. } => tracing::info_span!("command.renew"),
+            Self::Release { .. } => tracing::info_span!("command.release"),
+            Self::Reap { .. } => tracing::info_span!("command.reap"),
+            Self::Block { .. } => tracing::info_span!("command.block"),
+            Self::Unblock { .. } => tracing::info_span!("command.unblock"),
+            Self::Breakdown(_) => tracing::info_span!("command.breakdown"),
+            Self::Complete { .. } => tracing::info_span!("command.complete"),
+            Self::CompleteOps(_) => tracing::info_span!("command.complete-ops"),
+            Self::Converge { .. } => tracing::info_span!("command.converge"),
+            Self::Show { .. } => tracing::info_span!("command.show"),
+            Self::Activation => tracing::info_span!("command.activation"),
+            Self::Blocked => tracing::info_span!("command.blocked"),
+            Self::Deps { .. } => tracing::info_span!("command.deps"),
+            Self::Context { .. } => tracing::info_span!("command.context"),
+            Self::Frontier => tracing::info_span!("command.frontier"),
+            Self::CurrentState { .. } => tracing::info_span!("command.current-state"),
+            Self::Comment {
+                command: CommentCommands::Associate(_),
+            } => tracing::info_span!("command.comment-associate"),
+            Self::Comment {
+                command: CommentCommands::ForceRequest(_),
+            } => tracing::info_span!("command.comment-force-request"),
+            Self::Comment {
+                command: CommentCommands::ForceDecide(_),
+            } => tracing::info_span!("command.comment-force-decide"),
+            Self::Comment {
+                command: CommentCommands::ForceSend(_),
+            } => tracing::info_span!("command.comment-force-send"),
+            Self::Comment {
+                command: CommentCommands::Post(_),
+            } => tracing::info_span!("command.comment-post"),
+            Self::Comment {
+                command: CommentCommands::Reconcile(_),
+            } => tracing::info_span!("command.comment-reconcile"),
+            Self::Delegate {
+                command: DelegateCommands::Create(_),
+            } => tracing::info_span!("command.delegate-create"),
+            Self::Delegate {
+                command: DelegateCommands::Admit(_),
+            } => tracing::info_span!("command.delegate-admit"),
+            Self::Delegate {
+                command: DelegateCommands::Export(_),
+            } => tracing::info_span!("command.delegate-export"),
+            Self::Delegate {
+                command: DelegateCommands::Accept(_),
+            } => tracing::info_span!("command.delegate-accept"),
+            Self::Delegate {
+                command: DelegateCommands::Status(_),
+            } => tracing::info_span!("command.delegate-status"),
+            Self::Dep {
+                command: DepCommands::Add(_),
+            } => tracing::info_span!("command.dep-add"),
+            Self::Dep {
+                command: DepCommands::Drop(_),
+            } => tracing::info_span!("command.dep-drop"),
+            Self::Dag { .. } => tracing::info_span!("command.dag"),
+            Self::EpicCreate(_) => tracing::info_span!("command.epic-create"),
+            Self::EpicCompose(_) => tracing::info_span!("command.epic-compose"),
+            Self::Project(_) => tracing::info_span!("command.project"),
+            Self::Provider(_) => tracing::info_span!("command.provider"),
+            Self::MigrateV1Census { .. } => tracing::info_span!("command.migrate-v1-census"),
+            Self::MigrateV1 { .. } => tracing::info_span!("command.migrate-v1"),
+        }
     }
 }

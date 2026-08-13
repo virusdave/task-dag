@@ -3,6 +3,7 @@ use crate::{Result, git, model};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[tracing::instrument(skip_all, name = "validate.task")]
 pub(crate) fn task(object_oid: &str, expected_id: &str) -> Result<Value> {
     let value = object(
         object_oid,
