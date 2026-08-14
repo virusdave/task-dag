@@ -19,6 +19,8 @@ use std::{
 
 const CURRENT_ADVERTISEMENT_LINES: usize = 502;
 const CURRENT_ADVERTISEMENT_BYTES: usize = 512 * 1024;
+const CURRENT_PAGE_TASKS: usize = 16;
+const CURRENT_PAGE_EXACT_CHUNK: usize = 2_048;
 const MAX_INSPECTION_OBJECT_BYTES: usize = 256 * 1024;
 const MAX_INSPECTION_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const CANONICAL_PRE_PUSH_HOOK: &[u8] = include_bytes!("../.githooks/pre-push");
@@ -36,6 +38,11 @@ pub(crate) fn start_local_inspection() {
 #[derive(Debug, Clone)]
 pub(crate) struct Snapshot {
     pub(crate) refs: BTreeMap<String, String>,
+}
+
+pub(crate) enum CurrentStatePageAdvertisement {
+    Split { activation: String },
+    Leaf(Snapshot),
 }
 
 pub(crate) fn lifecycle_patterns(id: &str) -> Vec<String> {
@@ -120,6 +127,165 @@ pub(crate) fn advertise_current_state() -> Result<Snapshot> {
         .map_err(|e| format!("wait for advertisement: {e}"))?;
     if !status.success() {
         return Err(format!("current-state advertisement exited with {status}"));
+    }
+    Ok(Snapshot { refs })
+}
+
+fn local_ref_lines(
+    patterns: &[String],
+    count: usize,
+    byte_limit: usize,
+) -> Result<Vec<(String, String)>> {
+    let count_arg = format!("--count={count}");
+    let mut args = vec![
+        "for-each-ref",
+        count_arg.as_str(),
+        "--format=%(refname)%09%(objectname)",
+    ];
+    args.extend(patterns.iter().map(String::as_str));
+    let output = git::bounded_output(&args, byte_limit)?;
+    if output.is_empty() {
+        return Ok(Vec::new());
+    }
+    output
+        .lines()
+        .map(|line| {
+            let (reference, oid) = line
+                .split_once('\t')
+                .ok_or_else(|| format!("malformed local ref line: {line}"))?;
+            if !valid_exact_ref(reference) {
+                return Err(format!(
+                    "local task mirror contains malformed ref {reference}"
+                ));
+            }
+            model::oid(oid)?;
+            Ok((reference.into(), oid.into()))
+        })
+        .collect()
+}
+
+fn local_exact_ref_lines(patterns: &[String]) -> Result<Vec<(String, String)>> {
+    if patterns.is_empty() {
+        return Ok(Vec::new());
+    }
+    if patterns.iter().collect::<BTreeSet<_>>().len() != patterns.len() {
+        return Err("local exact snapshot contains duplicate patterns".into());
+    }
+    let mut refs = Vec::new();
+    for chunk in patterns.chunks(CURRENT_PAGE_EXACT_CHUNK) {
+        let expected = chunk.iter().cloned().collect::<BTreeSet<_>>();
+        let mut input = chunk.join("\n");
+        input.push('\n');
+        let output = git::bounded_input_output(
+            &[
+                "for-each-ref",
+                "--stdin",
+                "--format=%(refname)%09%(objectname)",
+            ],
+            input,
+            CURRENT_ADVERTISEMENT_BYTES,
+        )?;
+        for line in output.lines() {
+            let (reference, oid) = line
+                .split_once('\t')
+                .ok_or_else(|| format!("malformed local exact ref line: {line}"))?;
+            if !expected.contains(reference) {
+                return Err(format!(
+                    "local exact snapshot returned out-of-scope ref {reference}"
+                ));
+            }
+            model::oid(oid)?;
+            refs.push((reference.into(), oid.into()));
+        }
+    }
+    Ok(refs)
+}
+
+fn local_pattern_exists(pattern: String) -> Result<bool> {
+    Ok(!local_ref_lines(&[pattern], 1, 4096)?.is_empty())
+}
+
+fn validate_split_partition(prefix: &str) -> Result<()> {
+    for state in ["frontier", "active", "blocked", "waiting"] {
+        let base = format!("refs/heads/tasks/{state}/v2-{prefix}");
+        if local_pattern_exists(base.clone())? {
+            return Err(format!(
+                "local task mirror contains prematurely short Task-ID ref {base}"
+            ));
+        }
+        let invalid = if prefix.len() == 64 {
+            format!("{base}?*")
+        } else {
+            format!("{base}[!0-9a-f]*")
+        };
+        if local_pattern_exists(invalid)? {
+            return Err(format!(
+                "local task mirror contains malformed Task-ID below v2-{prefix}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn advertise_local_current_state_page(
+    prefix: &str,
+) -> Result<CurrentStatePageAdvertisement> {
+    if prefix.len() > 64
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(
+            "current-state-page prefix must contain at most 64 lowercase hexadecimal characters"
+                .into(),
+        );
+    }
+    if git::bounded_output(&["rev-parse", "--is-bare-repository"], 16)? != "true" {
+        return Err("current-state-page requires a bare local task mirror".into());
+    }
+    let loose_tasks = git::bounded_output(&["rev-parse", "--git-path", "refs/heads/tasks"], 4096)?;
+    match fs::metadata(&loose_tasks) {
+        Ok(_) => {
+            return Err(
+                "current-state-page requires a packed mirror with no loose task refs; refresh then run git pack-refs --all --prune"
+                    .into(),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect local task-ref storage: {error}")),
+    }
+    let activation = git::bounded_output(&["rev-parse", "--verify", ACTIVATION], 128)?;
+    model::oid(&activation)?;
+    let mut refs = BTreeMap::from([(ACTIVATION.into(), activation.clone())]);
+    let mut remaining = CURRENT_PAGE_TASKS + 1;
+    for state in ["frontier", "active", "blocked", "waiting"] {
+        let pattern = format!("refs/heads/tasks/{state}/v2-{prefix}*");
+        for (reference, oid) in local_ref_lines(&[pattern], remaining, CURRENT_ADVERTISEMENT_BYTES)?
+        {
+            let id = model::parse_state_ref(&reference, state)
+                .ok_or_else(|| format!("local page returned out-of-scope ref {reference}"))?;
+            model::valid_id(id)?;
+            if refs.insert(reference.clone(), oid).is_some() {
+                return Err(format!("local page returned duplicate ref {reference}"));
+            }
+            remaining = remaining.saturating_sub(1);
+            if remaining == 0 {
+                validate_split_partition(prefix)?;
+                return Ok(CurrentStatePageAdvertisement::Split { activation });
+            }
+        }
+    }
+    Ok(CurrentStatePageAdvertisement::Leaf(Snapshot { refs }))
+}
+
+pub(crate) fn local_exact_snapshot(patterns: &[String]) -> Result<Snapshot> {
+    let mut refs = BTreeMap::new();
+    for (reference, oid) in local_exact_ref_lines(patterns)? {
+        if refs.insert(reference.clone(), oid).is_some() {
+            return Err(format!(
+                "local exact snapshot returned duplicate ref {reference}"
+            ));
+        }
     }
     Ok(Snapshot { refs })
 }
@@ -368,6 +534,31 @@ pub(crate) fn materialize_activation(activation: &str) -> Result<()> {
     Ok(())
 }
 
+/// Cache the bounded activation closure from an already-complete local mirror.
+/// Unlike `materialize_activation`, this never attempts an object fetch.
+pub(crate) fn materialize_local_activation(activation: &str) -> Result<()> {
+    materialize_local(&[activation.to_owned()])?;
+    let value = git::object_json(activation)?;
+    let parents = git::parents(activation)?;
+    if value.get("logicalId").is_none() {
+        if parents.len() == 1 {
+            materialize_local(&[parents[0].clone()])?;
+        }
+        return Ok(());
+    }
+    if parents.len() != 2 {
+        return Ok(());
+    }
+    let predecessor = &parents[0];
+    materialize_local(std::slice::from_ref(predecessor))?;
+    let predecessor_value = git::object_json(predecessor)?;
+    let predecessor_parents = git::parents(predecessor)?;
+    if predecessor_value.get("logicalId").is_none() && predecessor_parents.len() == 1 {
+        materialize_local(&[predecessor_parents[0].clone()])?;
+    }
+    Ok(())
+}
+
 /// Cache exactly the immutable evidence commits dereferenced by the two
 /// legacy-compatible done validators. Task parents are identities only and
 /// must not expand this fixed closure through their requirement ancestry.
@@ -394,6 +585,37 @@ pub(crate) fn materialize_legacy_done_evidence(oid: &str, delegated: bool) -> Re
             let declaration_parents = git::parents(&close_parents[0])?;
             if declaration_parents.len() == 1 {
                 materialize_inspection(&declaration_parents)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Cache legacy-compatible done evidence from an already-complete local mirror.
+pub(crate) fn materialize_local_legacy_done_evidence(oid: &str, delegated: bool) -> Result<()> {
+    let done_parents = git::parents(oid)?;
+    if done_parents.len() != 3 {
+        return Ok(());
+    }
+    materialize_local(&done_parents)?;
+    if delegated {
+        let waiting_parents = git::parents(&done_parents[0])?;
+        let accepted_parents = git::parents(&done_parents[2])?;
+        if waiting_parents.len() == 3 && accepted_parents.len() == 2 {
+            materialize_local(
+                &waiting_parents
+                    .into_iter()
+                    .chain(accepted_parents)
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+    } else {
+        let close_parents = git::parents(&done_parents[2])?;
+        if close_parents.len() == 1 {
+            materialize_local(&close_parents)?;
+            let declaration_parents = git::parents(&close_parents[0])?;
+            if declaration_parents.len() == 1 {
+                materialize_local(&declaration_parents)?;
             }
         }
     }

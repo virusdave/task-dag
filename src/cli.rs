@@ -141,6 +141,10 @@ enum Commands {
         #[arg(long)]
         max_tasks: usize,
     },
+    CurrentStatePage {
+        #[arg(long, default_value = "")]
+        prefix: String,
+    },
     Comment {
         #[command(subcommand)]
         command: CommentCommands,
@@ -485,6 +489,7 @@ pub(crate) fn run() -> Result<()> {
         Commands::Context { task_id } => commands::readers::context(&task_id),
         Commands::Frontier => commands::readers::frontier(),
         Commands::CurrentState { max_tasks } => commands::readers::current_state(max_tasks),
+        Commands::CurrentStatePage { prefix } => commands::readers::current_state_page(&prefix),
         Commands::Comment {
             command: CommentCommands::Associate(args),
         } => commands::comment::associate(args),
@@ -590,6 +595,7 @@ impl Commands {
             Self::Context { .. } => tracing::info_span!("command.context"),
             Self::Frontier => tracing::info_span!("command.frontier"),
             Self::CurrentState { .. } => tracing::info_span!("command.current-state"),
+            Self::CurrentStatePage { .. } => tracing::info_span!("command.current-state-page"),
             Self::Comment {
                 command: CommentCommands::Associate(_),
             } => tracing::info_span!("command.comment-associate"),

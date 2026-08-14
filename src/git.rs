@@ -37,7 +37,19 @@ pub(crate) fn set_cache_only(value: bool) {
 /// collected into an allocation. Reading concurrently also prevents a full
 /// stderr pipe from deadlocking a command with bounded stdout.
 pub(crate) fn bounded_output(args: &[&str], max_stdout: usize) -> Result<String> {
-    let output = bounded_output_status(args, max_stdout)?;
+    let output = bounded_output_status_inner(args, None, max_stdout)?;
+    if output.code != Some(0) {
+        return Err(format!("git {}: {}", args.join(" "), output.stderr));
+    }
+    Ok(output.stdout)
+}
+
+pub(crate) fn bounded_input_output(
+    args: &[&str],
+    input: String,
+    max_stdout: usize,
+) -> Result<String> {
+    let output = bounded_output_status_inner(args, Some(input), max_stdout)?;
     if output.code != Some(0) {
         return Err(format!("git {}: {}", args.join(" "), output.stderr));
     }
@@ -46,6 +58,14 @@ pub(crate) fn bounded_output(args: &[&str], max_stdout: usize) -> Result<String>
 
 pub(crate) fn bounded_output_status(
     args: &[&str],
+    max_stdout: usize,
+) -> Result<BoundedCommandOutput> {
+    bounded_output_status_inner(args, None, max_stdout)
+}
+
+fn bounded_output_status_inner(
+    args: &[&str],
+    input: Option<String>,
     max_stdout: usize,
 ) -> Result<BoundedCommandOutput> {
     let _span = tracing::info_span!("git.bounded-output").entered();
@@ -65,12 +85,23 @@ pub(crate) fn bounded_output_status(
     let mut child = Command::new("git")
         .args(args)
         .env("GIT_NO_LAZY_FETCH", "1")
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("run git {}: {e}", args.join(" ")))?;
     let stdout = child.stdout.take().ok_or("open git stdout")?;
     let stderr = child.stderr.take().ok_or("open git stderr")?;
+    let stdin_writer = if let Some(input) = input {
+        let mut stdin = child.stdin.take().ok_or("open git stdin")?;
+        Some(thread::spawn(move || stdin.write_all(input.as_bytes())))
+    } else {
+        None
+    };
     let (send, receive) = mpsc::channel();
     let stdout_send = send.clone();
     let stdout_reader = thread::spawn(move || {
@@ -107,6 +138,12 @@ pub(crate) fn bounded_output_status(
     stderr_reader
         .join()
         .map_err(|_| "git stderr reader panicked")?;
+    if let Some(writer) = stdin_writer {
+        writer
+            .join()
+            .map_err(|_| "git stdin writer panicked")?
+            .map_err(|error| format!("write git {} input: {error}", args.join(" ")))?;
+    }
     Ok(BoundedCommandOutput {
         code: status.code(),
         stdout: String::from_utf8(out.unwrap_or_default())

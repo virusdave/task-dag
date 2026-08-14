@@ -32,8 +32,8 @@ The current surface is defined by `src/cli.rs`:
   `activation`;
 - lifecycle writers: `create`, `claim`, `renew`, `release`, `reap`, `block`,
   `unblock`, `breakdown`, `complete`, `complete-ops`, and `converge`;
-- bounded readers: `show`, `blocked`, `deps`, `context`, `frontier`, and
-  `current-state`;
+- bounded readers: `show`, `blocked`, `deps`, `context`, `frontier`,
+  compatibility `current-state`, and local-mirror `current-state-page`;
 - provider-free delegation: `delegate create`, `delegate admit`,
   `delegate export`, `delegate accept`, and `delegate status`;
 - GitHub comment projection: `comment post TASK-ID --kind status|operator-decision
@@ -53,6 +53,17 @@ and locking in a semantically correct fashion. Multi-ref transitions use exact
 per-ref leases and atomic push; sequential CAS transitions are also valid when
 their intermediate states are intentional, valid, and recoverable. Historical
 `tasks/system/transitions` refs are inert data and are neither read nor updated.
+
+`current-state-page` traverses open task state as a hexadecimal prefix tree in
+a bare local mirror. Start with an empty prefix. A `split` result directs the
+caller to the sixteen one-nibble child prefixes; a `leaf` contains at most 16
+selected tasks plus exact directly related lifecycle proofs. Every invocation
+reads and validates only its prefix and direct relation closure, never prior
+pages. Callers must hold the mirror stable across a complete traversal and run
+`git pack-refs --all --prune` once after refresh; the reader rejects loose task
+refs because Git cannot guarantee prefix-bounded iteration over them. The
+legacy aggregate `current-state --max-tasks` remains only for cutover
+compatibility and must not be used for an unbounded repository index.
 
 Use `task-dag <command> --help` for exact arguments. Immutable dependencies
 cannot be edited after task creation: `dep add` and `dep drop` are explicitly

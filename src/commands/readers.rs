@@ -354,6 +354,314 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn current_state_page(prefix: &str) -> Result<()> {
+    use repository::CurrentStatePageAdvertisement::{Leaf, Split};
+
+    repository::start_local_inspection();
+    let first = repository::advertise_local_current_state_page(prefix)?;
+    let first = match first {
+        Split { activation } => {
+            let children = "0123456789abcdef"
+                .chars()
+                .map(|nibble| format!("{prefix}{nibble}"))
+                .collect::<Vec<_>>();
+            return print_json(&json!({
+                "activationOid": activation,
+                "children": children,
+                "formatVersion": 1,
+                "kind": "split",
+                "prefix": prefix,
+                "scope": "open-prefix",
+            }));
+        }
+        Leaf(snapshot) => snapshot,
+    };
+    let captured = current_rows(&first)?;
+    let activation = first
+        .refs
+        .get(model::ACTIVATION)
+        .ok_or("v2 activation is absent")?
+        .clone();
+    let lifecycle_oids = captured.iter().map(|row| row.3.clone()).collect::<Vec<_>>();
+    repository::materialize_local(&lifecycle_oids)?;
+    repository::materialize_local_activation(&activation)?;
+    crate::git::set_cache_only(true);
+    let _guard = CacheOnlyGuard;
+    crate::validators::activation(&activation)?;
+
+    let mut relation_count = 0usize;
+    let mut selected = Vec::with_capacity(captured.len());
+    let mut selected_identity = BTreeMap::<String, String>::new();
+    let mut selected_tasks = BTreeMap::<String, Value>::new();
+    let mut task_oids = BTreeSet::new();
+    for (reference, state, id, state_oid) in &captured {
+        let record = crate::validators::current_lifecycle(state, state_oid, id)?;
+        let task_oid = record_task(&record, state)?;
+        if selected_identity
+            .insert(id.clone(), task_oid.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "Task-ID {id} appears more than once in current-state page"
+            ));
+        }
+        task_oids.insert(task_oid.clone());
+        selected.push((reference, state, id, state_oid, record, task_oid));
+    }
+    crate::git::set_cache_only(false);
+    repository::materialize_local(&task_oids.into_iter().collect::<Vec<_>>())?;
+    crate::git::set_cache_only(true);
+
+    let mut related = BTreeMap::<String, String>::new();
+    let mut remember = |edge: &Value, kind: &str| -> Result<()> {
+        let id = edge["taskId"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task-ID malformed"))?;
+        let oid = edge["taskOid"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task OID malformed"))?;
+        relation_count = charge_current_relations(relation_count, 1)?;
+        if let Some(selected_oid) = selected_identity.get(id) {
+            if selected_oid != oid {
+                return Err(format!("Immutable identity mismatch for {kind} {id}"));
+            }
+            return Ok(());
+        }
+        if related
+            .insert(id.into(), oid.into())
+            .is_some_and(|prior| prior != oid)
+        {
+            return Err(format!("Immutable identity mismatch for {kind} {id}"));
+        }
+        Ok(())
+    };
+    for (_, state, id, _, record, task_oid) in &selected {
+        let task = crate::validators::task(task_oid, id)?;
+        if task["taskId"].as_str() != Some(id) {
+            return Err("Task object's own taskId is wrong".into());
+        }
+        if !task["structuralParent"].is_null() {
+            remember(&task["structuralParent"], "structural parent")?;
+        }
+        for requirement in task["requirements"]
+            .as_array()
+            .ok_or("Task requirements malformed")?
+        {
+            remember(requirement, "requirement")?;
+        }
+        if *state == "waiting" && record.get("intentOid").is_none() {
+            for child in record["children"]
+                .as_array()
+                .ok_or("waiting children malformed")?
+            {
+                remember(child, "waiting child")?;
+            }
+        }
+        selected_tasks.insert(id.to_string(), task);
+    }
+
+    let related_patterns = related
+        .keys()
+        .flat_map(|id| repository::lifecycle_patterns(id))
+        .chain(
+            selected_identity
+                .keys()
+                .map(|id| model::state_ref("done", id)),
+        )
+        .collect::<Vec<_>>();
+    crate::git::set_cache_only(false);
+    let related_snapshot = repository::local_exact_snapshot(&related_patterns)?;
+    let related_lifecycle_oids = related_snapshot.refs.values().cloned().collect::<Vec<_>>();
+    repository::materialize_local(&related_lifecycle_oids)?;
+    for id in selected_identity.keys() {
+        if related_snapshot
+            .refs
+            .contains_key(&model::state_ref("done", id))
+        {
+            return Err(format!("Task-ID {id} appears in multiple lifecycle states"));
+        }
+    }
+
+    let mut closure = BTreeMap::<String, (String, String, Value, String)>::new();
+    for (_, state, id, state_oid, record, task_oid) in &selected {
+        closure.insert(
+            (*id).clone(),
+            (
+                (*state).clone(),
+                (*state_oid).clone(),
+                record.clone(),
+                task_oid.clone(),
+            ),
+        );
+    }
+    let mut related_task_oids = BTreeSet::new();
+    for (id, expected_oid) in &related {
+        let lifecycle = model::lifecycle(&related_snapshot, id);
+        if lifecycle.len() != 1 {
+            return Err(format!(
+                "Related task {id} must have exactly one lifecycle ref"
+            ));
+        }
+        let (state, reference, state_oid) = &lifecycle[0];
+        if related_snapshot.refs.get(reference) != Some(state_oid) {
+            return Err(format!(
+                "Related task {id} lifecycle snapshot is inconsistent"
+            ));
+        }
+        let raw_record = crate::git::object_json(state_oid)?;
+        if *state == "done"
+            && (raw_record.get("acceptedOid").is_some() || raw_record.get("closeOid").is_some())
+        {
+            repository::materialize_local_legacy_done_evidence(
+                state_oid,
+                raw_record.get("acceptedOid").is_some(),
+            )?;
+        }
+        let record = crate::validators::current_lifecycle(state, state_oid, id)?;
+        let task_oid = record_task(&record, state)?;
+        if &task_oid != expected_oid {
+            return Err(format!("Immutable identity mismatch for related task {id}"));
+        }
+        related_task_oids.insert(task_oid.clone());
+        closure.insert(
+            id.clone(),
+            (state.clone(), state_oid.clone(), record, task_oid),
+        );
+    }
+    repository::materialize_local(&related_task_oids.into_iter().collect::<Vec<_>>())?;
+    crate::git::set_cache_only(true);
+
+    let mut closure_tasks = selected_tasks;
+    let mut proven_done = Vec::new();
+    for (id, (state, state_oid, record, task_oid)) in &closure {
+        if closure_tasks.contains_key(id) {
+            continue;
+        }
+        let task = crate::validators::task(task_oid, id)?;
+        if state == "done" {
+            crate::validators::current_convergence_evidence(state_oid, id, record, &task)?;
+            proven_done.push(json!({"stateOid":state_oid,"taskId":id,"taskOid":task_oid}));
+        }
+        closure_tasks.insert(id.clone(), task);
+    }
+
+    let resolve = |edge: &Value, kind: &str| -> Result<&(String, String, Value, String)> {
+        let id = edge["taskId"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task-ID malformed"))?;
+        let oid = edge["taskOid"]
+            .as_str()
+            .ok_or_else(|| format!("{kind} Task OID malformed"))?;
+        let resolved = closure
+            .get(id)
+            .ok_or_else(|| format!("{kind} {id} is absent from current-state page closure"))?;
+        if resolved.3 != oid {
+            return Err(format!("Immutable identity mismatch for {kind} {id}"));
+        }
+        Ok(resolved)
+    };
+    let mut rows = Vec::with_capacity(selected.len());
+    for (reference, state, id, state_oid, record, task_oid) in selected {
+        let task = closure_tasks
+            .get(id)
+            .ok_or_else(|| format!("Selected task {id} is absent from page closure"))?;
+        if !task["structuralParent"].is_null() {
+            let parent = resolve(&task["structuralParent"], "structural parent")?;
+            if parent.0 != "waiting" {
+                return Err(format!(
+                    "Open task {id} has a non-waiting structural parent"
+                ));
+            }
+            let reciprocal = parent.2["children"].as_array().is_some_and(|children| {
+                children.iter().any(|child| {
+                    child["taskId"].as_str() == Some(id)
+                        && child["taskOid"].as_str() == Some(task_oid.as_str())
+                })
+            });
+            if !reciprocal {
+                return Err(format!("Open structural parent does not name child {id}"));
+            }
+        }
+        for requirement in task["requirements"]
+            .as_array()
+            .ok_or("Task requirements malformed")?
+        {
+            resolve(requirement, "requirement")?;
+        }
+        let direct_children = if state == "waiting" && record.get("intentOid").is_none() {
+            let children = record["children"]
+                .as_array()
+                .ok_or("waiting children malformed")?;
+            for child in children {
+                resolve(child, "waiting child")?;
+                let child_id = child["taskId"]
+                    .as_str()
+                    .ok_or("waiting child Task-ID malformed")?;
+                let child_task = closure_tasks
+                    .get(child_id)
+                    .ok_or_else(|| format!("Waiting child {child_id} task is absent"))?;
+                if child_task["structuralParent"]["taskId"].as_str() != Some(id)
+                    || child_task["structuralParent"]["taskOid"].as_str() != Some(task_oid.as_str())
+                {
+                    return Err(format!(
+                        "Waiting child {child_id} names a different structural parent"
+                    ));
+                }
+            }
+            Value::Array(
+                children
+                    .iter()
+                    .map(|child| json!({"taskId":child["taskId"],"taskOid":child["taskOid"]}))
+                    .collect(),
+            )
+        } else {
+            json!([])
+        };
+        let context = json!({
+            "directChildren":direct_children,
+            "directRequirements":task["requirements"],
+            "state":state,
+            "stateOid":state_oid,
+            "structuralParent":task["structuralParent"],
+            "task":task,
+            "taskId":id,
+            "taskOid":task_oid,
+        });
+        rows.push(json!({"context":context,"record":record,"ref":reference,"state":state,"stateOid":state_oid,"taskId":id,"taskOid":task_oid}));
+    }
+
+    match repository::advertise_local_current_state_page(prefix)? {
+        Leaf(second) if second.refs == first.refs => {}
+        _ => return Err("retryable current-state-page drift: selected refs changed".into()),
+    }
+    if repository::local_exact_snapshot(&related_patterns)?.refs != related_snapshot.refs {
+        return Err("retryable current-state-page drift: related refs changed".into());
+    }
+    let mut fingerprint_refs = first.refs.clone();
+    fingerprint_refs.extend(related_snapshot.refs);
+    let output = json!({
+        "activationOid":activation,
+        "fingerprint":current_fingerprint(&fingerprint_refs),
+        "formatVersion":1,
+        "kind":"leaf",
+        "prefix":prefix,
+        "provenDone":proven_done,
+        "rows":rows,
+        "scope":"open-prefix",
+    });
+    let encoded = serde_json::to_vec(&output).map_err(|error| error.to_string())?;
+    if encoded.len() > CURRENT_MAX_OUTPUT_BYTES {
+        return Err(
+            "current-state-page JSON output exceeds hard limit for one bounded leaf".into(),
+        );
+    }
+    println!(
+        "{}",
+        String::from_utf8(encoded).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod current_state_tests {
     use super::{CURRENT_MAX_RELATIONS, charge_current_relations};
