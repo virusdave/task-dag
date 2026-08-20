@@ -603,7 +603,7 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         "--title",
         "Delegated target",
         "--description",
-        "target task",
+        "Delegated target\n\nUnicode: naïve 🛰️\nQuotes: \"quoted\"\nTab:\tvalue",
         "--claim-token",
         delegated_source["claimToken"].as_str().unwrap(),
     ];
@@ -710,15 +710,17 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     uncertain(&target, &admit_args, "unused-token-000", 100);
     let admitted = success(&target, &admit_args, "unused-token-000", 100);
     assert_eq!(admitted["taskId"], delegated["targetTaskId"]);
-    assert_eq!(
-        success(
-            &target,
-            &["show", admitted["taskId"].as_str().unwrap()],
-            "unused-token-000",
-            100,
-        )["state"],
-        "frontier"
+    let admitted_task = success(
+        &target,
+        &["context", admitted["taskId"].as_str().unwrap()],
+        "unused-token-000",
+        100,
     );
+    assert_eq!(
+        admitted_task["task"]["description"],
+        "Delegated target\n\nUnicode: naïve 🛰️\nQuotes: \"quoted\"\nTab:\tvalue"
+    );
+    assert_eq!(admitted_task["state"], "frontier");
     let target_claim = success(
         &target,
         &[
@@ -1163,7 +1165,7 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         "--title",
         "Root",
         "--description",
-        "Root task",
+        "Root task\n\nUnicode: café 🚀\nQuotes: “hello”\nTab:\tvalue\nMarkdown: **bold**",
         "--claim",
     ];
     let created_raw = cli(&a, &create_alias_args, "parent-token-000", 100);
@@ -1176,7 +1178,7 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         "--title",
         "Root",
         "--description",
-        "Root task",
+        "Root task\n\nUnicode: café 🚀\nQuotes: “hello”\nTab:\tvalue\nMarkdown: **bold**",
         "--claim",
     ];
     assert_eq!(
@@ -1185,6 +1187,10 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     );
     let id = created["taskId"].as_str().unwrap();
     assert_eq!(created["claimToken"], "parent-token-000");
+    assert_eq!(
+        success(&a, &["context", id], "unused-token-000", 100)["task"]["description"],
+        "Root task\n\nUnicode: café 🚀\nQuotes: “hello”\nTab:\tvalue\nMarkdown: **bold**"
+    );
     let wrong = cli(
         &b,
         &[
@@ -1219,7 +1225,7 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     assert!(!stale.status.success());
 
     let spec = root.join("breakdown.json");
-    fs::write(&spec, r#"{"operationId":"split","children":[{"key":"a","title":"A","description":"A","requires":[],"claim":true},{"key":"b","title":"B","description":"B","requires":[],"claim":true},{"key":"c","title":"C","description":"C","requires":["a"],"claim":false}]}"#).unwrap();
+    fs::write(&spec, r#"{"operationId":"split","children":[{"key":"a","title":"A","description":"Child A\n\n- Unicode: 你好\n- Tab:\tvalue\n- Markdown: `code`","requires":[],"claim":true},{"key":"b","title":"B","description":"B","requires":[],"claim":true},{"key":"c","title":"C","description":"C","requires":["a"],"claim":false}]}"#).unwrap();
     let breakdown_args = [
         "epic-compose",
         id,
@@ -1272,6 +1278,15 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
     );
     assert_ne!(children[0]["claimToken"], children[1]["claimToken"]);
     let child_token = children[0]["claimToken"].as_str().unwrap();
+    assert_eq!(
+        success(
+            &a,
+            &["context", children[0]["taskId"].as_str().unwrap()],
+            "unused-token-000",
+            102,
+        )["task"]["description"],
+        "Child A\n\n- Unicode: 你好\n- Tab:\tvalue\n- Markdown: `code`"
+    );
 
     let master_before = ok(&a, &["ls-remote", "origin", "refs/heads/master"])
         .split_whitespace()

@@ -344,7 +344,7 @@ pub(crate) fn validate_children(parent: &str, s: &BreakdownSpec) -> Result<()> {
         nonempty("child key", &c.key)?;
         bounded("child key", &c.key, 128)?;
         bounded("title", &c.title, 512)?;
-        bounded("description", &c.description, 16_384)?;
+        description("description", &c.description)?;
         if !keys.insert(&c.key) {
             return Err(format!("duplicate child key {}", c.key));
         }
@@ -427,6 +427,15 @@ pub(crate) fn bounded(name: &str, value: &str, max: usize) -> Result<()> {
     } else {
         Ok(())
     }
+}
+pub(crate) fn description(name: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} must not be empty"));
+    }
+    if value.len() > 16_384 {
+        return Err(format!("{name} exceeds 16384 bytes"));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_claim(value: Value, token: &str, id: &str, now: u64) -> Result<ClaimRecord> {
@@ -532,6 +541,23 @@ mod tests {
                 .starts_with("refs/heads/tasks/comments/bindings/by-task/v2-")
         );
     }
+
+    #[test]
+    fn descriptions_accept_rich_text_and_enforce_utf8_byte_limits() {
+        let rich = "First line\n\n- Unicode: café 🚀\n- Quotes: “double” and 'single'\n- Tab:\tvalue\n- Markdown: **bold** [link](https://example.com)\0";
+        assert!(description("description", rich).is_ok());
+        assert!(description("description", "an existing plain description").is_ok());
+        assert_eq!(
+            description("description", " \n\t ").unwrap_err(),
+            "description must not be empty"
+        );
+        assert!(description("description", &"x".repeat(16_384)).is_ok());
+        assert_eq!(
+            description("description", &format!("{}é", "x".repeat(16_383))).unwrap_err(),
+            "description exceeds 16384 bytes"
+        );
+    }
+
     use proptest::prelude::*;
     proptest! {
         #[test] fn ids_are_deterministic_grammatical_and_domain_separated(a in "[a-zA-Z0-9_-]{1,40}", b in "[a-zA-Z0-9_-]{1,40}") { let root=task_id("root",&[&a]); let again=task_id("root",&[&a]); let child=task_id("child",&[&a,&b]); prop_assert_eq!(&root,&again); prop_assert!(valid_id(&root).is_ok()); prop_assert!(valid_id(&child).is_ok()); prop_assert_ne!(root,child); }

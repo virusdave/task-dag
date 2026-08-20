@@ -1137,7 +1137,7 @@ fn description(oid: &str) -> Result<String> {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    model::bounded("legacy description", &body, 16_384)
+    model::description("legacy description", &body)
         .map_err(|error| format!("{error} for {oid}"))?;
     Ok(body)
 }

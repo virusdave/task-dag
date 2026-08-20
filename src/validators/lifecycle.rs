@@ -196,13 +196,15 @@ fn operations_done_payload(value: &Value, policy: OperationsPayloadPolicy) -> Re
         .as_str()
         .ok_or("done description malformed")?;
     model::nonempty("done authorization", authorization)?;
-    model::nonempty("done description", description)?;
+    if description.trim().is_empty() {
+        return Err("done description must not be empty".into());
+    }
     let evidence = value["evidence"]
         .as_array()
         .ok_or("operations done evidence list malformed")?;
     if matches!(policy, OperationsPayloadPolicy::NewWrite) {
         model::bounded("done authorization", authorization, 4_096)?;
-        model::bounded("done description", description, 16_384)?;
+        model::description("done description", description)?;
         if evidence.len() > 64 {
             return Err("operations done evidence has too many entries".into());
         }

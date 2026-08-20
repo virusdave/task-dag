@@ -138,7 +138,7 @@ pub(crate) fn init(
 pub(crate) fn create(args: Create) -> Result<()> {
     model::bounded("operation-id", &args.operation_id, 256)?;
     model::bounded("title", &args.title, 512)?;
-    model::bounded("description", &args.description, 16_384)?;
+    model::description("description", &args.description)?;
     let id = model::task_id("root", &[&args.operation_id]);
     let mut canonical_requires = args.requires.clone();
     canonical_requires.sort();

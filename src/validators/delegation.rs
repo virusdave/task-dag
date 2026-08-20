@@ -60,12 +60,11 @@ pub(crate) fn intent(oid: &str) -> Result<Value> {
             .ok_or("delegation title malformed")?,
         512,
     )?;
-    model::bounded(
+    model::description(
         "delegation description",
         value["description"]
             .as_str()
             .ok_or("delegation description malformed")?,
-        16_384,
     )?;
     digest("delegation fleetDigest", &value["fleetDigest"])?;
     digest("delegation semanticId", &value["semanticId"])?;

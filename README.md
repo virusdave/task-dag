@@ -69,6 +69,12 @@ Use `task-dag <command> --help` for exact arguments. Immutable dependencies
 cannot be edited after task creation: `dep add` and `dep drop` are explicitly
 unsupported. `project` and `provider` are also unsupported.
 
+Task descriptions are UTF-8 text up to 16,384 bytes. Multiline content,
+Unicode, tabs, punctuation, quotes, Markdown, and other control characters are
+stored and returned losslessly as canonical JSON strings. A direct CLI argument
+cannot contain NUL because operating-system argument vectors cannot represent
+it; JSON breakdown specifications can.
+
 Pass the global `--timings` option to emit live, additive operation timings to
 stderr without changing a command's normal stdout. Timings use the standard
 folded-stack format accepted by flamegraph tooling:

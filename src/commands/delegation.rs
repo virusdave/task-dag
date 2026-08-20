@@ -43,7 +43,7 @@ pub(crate) fn create(args: DelegateCreate) -> Result<()> {
     model::repository_id(&args.target_repository_id)?;
     model::bounded("operation-id", &args.operation_id, 256)?;
     model::bounded("title", &args.title, 512)?;
-    model::bounded("description", &args.description, 16_384)?;
+    model::description("description", &args.description)?;
     let reference = model::delegation_intent_ref(&args.operation_id);
     let replay = repository::advertise(std::slice::from_ref(&reference))?;
     if let Some(oid) = replay.refs.get(&reference) {

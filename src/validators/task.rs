@@ -36,12 +36,11 @@ pub(crate) fn task(object_oid: &str, expected_id: &str) -> Result<Value> {
         value["title"].as_str().ok_or("Task title malformed")?,
         512,
     )?;
-    model::bounded(
+    model::description(
         "Task description",
         value["description"]
             .as_str()
             .ok_or("Task description malformed")?,
-        16_384,
     )?;
     if let Some(v) = value.get("createSemanticId") {
         digest("Task createSemanticId", v)?;
