@@ -8,7 +8,8 @@ to dispatcher/worker machinery.**
 (see `docs/agent-runtime/PREPARED_WORKSPACE_CONTRACT.md` in top-level), the
 workspace is prepared. **Do NOT bootstrap.** Record `canon.canon_sha`; follow
 an injected runtime capsule, or read Core from `canon.canon_core_path` when
-there is no capsule. Use the manifest's `task_dag.cli` and repo paths.
+there is no capsule. Use the manifest's claim and repo data, but invoke
+task-dag through `/run/current-system/sw/bin/task-dag`.
 
 **Otherwise** (no/invalid manifest) bootstrap a fresh canon read at
 `origin/master` — the cold path:
