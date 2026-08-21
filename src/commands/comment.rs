@@ -193,95 +193,6 @@ fn validate_intent_binding(intent: &Value) -> Result<()> {
     Ok(())
 }
 
-fn intended_semantics(
-    args: &CommentPost,
-    source_oid: &str,
-    binding_oid: &str,
-    binding: &Value,
-    input: &str,
-) -> String {
-    model::framed_digest(
-        "github-comment-intent-semantics",
-        &[
-            &args.task_id,
-            source_oid,
-            binding_oid,
-            &args.kind,
-            input,
-            &args.operation_id,
-            binding["repository"].as_str().unwrap_or(""),
-            binding["issueId"].as_str().unwrap_or(""),
-        ],
-    )
-}
-
-fn replay_intent(oid: &str, semantic: &str) -> Result<Value> {
-    repository::materialize(std::slice::from_ref(&oid.to_owned()))?;
-    let value = crate::validators::comment::intent(oid)?;
-    if value["semanticId"] != semantic {
-        return Err("comment operation was already used with different semantics".into());
-    }
-    Ok(value)
-}
-
-fn create_intent(args: &CommentPost, input: &str) -> Result<(String, Value)> {
-    let reference = model::comment_intent_ref(&args.operation_id);
-    for _ in 0..3 {
-        let (snap, source_oid, binding_oid, binding) = resolve(&args.task_id, &reference)?;
-        let semantic = intended_semantics(args, &source_oid, &binding_oid, &binding, input);
-        if let Some(oid) = snap.refs.get(&reference) {
-            return Ok((oid.clone(), replay_intent(oid, &semantic)?));
-        }
-        let intent_id = model::framed_digest("github-comment-intent-id", &[&semantic]);
-        let body = model::render_comment(&args.kind, input, &intent_id, false)?;
-        let value = json!({
-            "bindingOid":binding_oid,"bindingTaskId":binding["taskId"],"body":body,
-            "bodyDigest":model::digest(&body),"createdAt":timestamp()?,"formatVersion":2,
-            "inputBody":input,"inputBodyDigest":model::digest(input),"intentId":intent_id,
-            "issueId":binding["issueId"],"issueNumber":binding["issueNumber"],"kind":args.kind,
-            "marker":format!("<!-- task-dag:projection:{intent_id} -->"),"operationId":args.operation_id,
-            "provider":"github","repository":binding["repository"],"repositoryId":binding["repositoryId"],
-            "semanticId":semantic,"sourceTaskId":args.task_id,"sourceTaskOid":source_oid
-        });
-        let oid = git::commit(&value, &[])?;
-        crate::validators::comment::intent(&oid)?;
-        let updates = vec![Update {
-            semantic_ref: reference.clone(),
-            old: None,
-            new: Some(oid.clone()),
-        }];
-        match commit_mutation(
-            &snap,
-            &args.operation_id,
-            updates,
-            vec![(reference.clone(), oid.clone())],
-        ) {
-            Ok(()) => return Ok((oid, value)),
-            Err(error) => {
-                let raced = repository::advertise(std::slice::from_ref(&reference))?;
-                if let Some(raced_oid) = raced.refs.get(&reference) {
-                    return Ok((raced_oid.clone(), replay_intent(raced_oid, &semantic)?));
-                }
-                if error
-                    .to_string()
-                    .contains("atomic push rejected; semantic refs remain")
-                {
-                    continue;
-                }
-                return Err(error);
-            }
-        }
-    }
-    let snap = repository::advertise(std::slice::from_ref(&reference))?;
-    let oid = snap
-        .refs
-        .get(&reference)
-        .ok_or("comment intent creation lost a bounded CAS race")?;
-    let (_, source_oid, binding_oid, binding) = resolve(&args.task_id, &reference)?;
-    let semantic = intended_semantics(args, &source_oid, &binding_oid, &binding, input);
-    Ok((oid.clone(), replay_intent(oid, &semantic)?))
-}
-
 fn acquire_claim(intent_oid: &str, now: u64) -> Result<bool> {
     #[cfg(feature = "test-seam")]
     if let Ok(delay) = std::env::var("TASKDAG_TEST_COMMENT_CLAIM_DELAY_MS") {
@@ -769,6 +680,278 @@ fn readback(intent: &Value, comment_id: &str, timeout: Duration) -> Result<Value
         "https://github.com/{repo}/issues/{number}#issuecomment-{comment_id}"
     ));
     Ok(value)
+}
+
+fn simple_retry_delay() -> Duration {
+    if cfg!(feature = "test-seam") {
+        Duration::from_millis(
+            std::env::var("TASKDAG_TEST_COMMENT_RETRY_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10),
+        )
+    } else {
+        Duration::from_secs(3)
+    }
+}
+
+fn simple_recovery_budget() -> Duration {
+    if cfg!(feature = "test-seam") {
+        Duration::from_millis(
+            std::env::var("TASKDAG_TEST_COMMENT_RECOVERY_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(100),
+        )
+    } else {
+        Duration::from_secs(8)
+    }
+}
+
+fn comments_with_marker(intent: &Value, timeout: Duration) -> Result<Vec<Value>> {
+    let repo = field(intent, "repository")?;
+    let number = field(intent, "issueNumber")?;
+    let marker = field(intent, "marker")?;
+    let listed = provider(
+        &[
+            "api".into(),
+            format!("repos/{repo}/issues/{number}/comments"),
+            "--paginate".into(),
+            "--slurp".into(),
+            "--hostname".into(),
+            "github.com".into(),
+        ],
+        timeout,
+    );
+    if !listed.success {
+        return Err(format!("GitHub comment listing failed: {}", listed.stderr));
+    }
+    let value: Value = serde_json::from_str(&listed.stdout)
+        .map_err(|error| format!("parse GitHub comment listing: {error}"))?;
+    Ok(comments(value)?
+        .into_iter()
+        .filter(|comment| {
+            comment["body"]
+                .as_str()
+                .is_some_and(|body| body.contains(marker))
+        })
+        .collect())
+}
+
+fn find_simple_comment(intent: &Value, timeout: Duration) -> Result<Option<Value>> {
+    let found = comments_with_marker(intent, timeout)?;
+    if found.len() > 1 {
+        return Err("multiple GitHub comments contain the operation marker".into());
+    }
+    Ok(found.into_iter().next())
+}
+
+fn verified_simple_comment(intent: &Value, timeout: Duration) -> Result<Option<Value>> {
+    let began = Instant::now();
+    let Some(comment) = find_simple_comment(intent, timeout)? else {
+        return Ok(None);
+    };
+    if comment["body"] != intent["body"] {
+        return Ok(None);
+    }
+    let id = decimal(&comment["id"], "comment ID")?;
+    let remaining = timeout.saturating_sub(began.elapsed());
+    if remaining.is_zero() {
+        return Err("comment recovery deadline elapsed before exact readback".into());
+    }
+    readback(intent, &id, remaining).map(Some)
+}
+
+fn write_simple_comment(
+    intent: &Value,
+    existing: Option<&Value>,
+    timeout: Duration,
+) -> ProviderOutput {
+    let repo = match field(intent, "repository") {
+        Ok(value) => value,
+        Err(error) => return provider_error(false, error),
+    };
+    let body = match field(intent, "body") {
+        Ok(value) => value,
+        Err(error) => return provider_error(false, error),
+    };
+    let target = if let Some(comment) = existing {
+        match decimal(&comment["id"], "comment ID") {
+            Ok(id) => format!("repos/{repo}/issues/comments/{id}"),
+            Err(error) => return provider_error(false, error),
+        }
+    } else {
+        let number = match field(intent, "issueNumber") {
+            Ok(value) => value,
+            Err(error) => return provider_error(false, error),
+        };
+        format!("repos/{repo}/issues/{number}/comments")
+    };
+    provider(
+        &[
+            "api".into(),
+            target,
+            "--method".into(),
+            if existing.is_some() { "PATCH" } else { "POST" }.into(),
+            "-f".into(),
+            format!("body={body}"),
+            "--hostname".into(),
+            "github.com".into(),
+        ],
+        timeout,
+    )
+}
+
+fn reconcile_simple_comment(
+    intent: &Value,
+    delay: Duration,
+    deadline: Instant,
+) -> Result<Option<Value>> {
+    let mut last = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match verified_simple_comment(intent, remaining) {
+            Ok(Some(comment)) => return Ok(Some(comment)),
+            Ok(None) => {}
+            Err(error) => last = Some(error),
+        }
+    }
+    if let Some(error) = last {
+        tracing::warn!(error = %error, "bounded GitHub comment readback remained unavailable");
+    }
+    Ok(None)
+}
+
+fn page_ambiguous_comment(intent: &Value, operation_id: &str, reason: &str) -> String {
+    let repo = intent["repository"].as_str().unwrap_or("unknown/unknown");
+    let number = intent["issueNumber"].as_str().unwrap_or("unknown");
+    let issue_url = format!("https://github.com/{repo}/issues/{number}");
+    let message = format!(
+        "task-dag could not determine whether GitHub comment operation {operation_id} landed. Inspect the issue and tell the worker whether to retry: {issue_url}. Last result: {reason}"
+    );
+    let executable = if cfg!(feature = "test-seam") {
+        std::env::var("TASKDAG_TEST_PAGE_DAVE").unwrap_or_else(|_| "page-dave".into())
+    } else {
+        "page-dave".into()
+    };
+    let page = Command::new(executable)
+        .args([
+            "-p",
+            "4",
+            "--title",
+            "GitHub comment result needs inspection",
+            "--tags",
+            "warning",
+            "--click",
+            &issue_url,
+            &message,
+        ])
+        .output();
+    match page {
+        Ok(output) if output.status.success() => format!(
+            "comment result remains ambiguous; operator paged to inspect {issue_url}: {reason}"
+        ),
+        Ok(output) => format!(
+            "comment result remains ambiguous and operator page failed: {}; inspect {issue_url}: {reason}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => format!(
+            "comment result remains ambiguous and operator page could not start ({error}); inspect {issue_url}: {reason}"
+        ),
+    }
+}
+
+fn deliver_simple_comment(intent: &Value, operation_id: &str) -> Result<Value> {
+    let delay = simple_retry_delay();
+    for attempt in 0..2 {
+        match verify_provider_target(intent, Duration::from_secs(30)) {
+            TargetVerification::Verified => break,
+            TargetVerification::Permanent(error) => return Err(error),
+            TargetVerification::Retryable(_error) if attempt == 0 => {
+                thread::sleep(delay);
+                continue;
+            }
+            TargetVerification::Retryable(error) => return Err(error),
+        }
+    }
+
+    let existing = match find_simple_comment(intent, Duration::from_secs(30)) {
+        Ok(value) => value,
+        Err(first) if !permanent(&first) => {
+            thread::sleep(delay);
+            find_simple_comment(intent, Duration::from_secs(30))?
+        }
+        Err(error) => return Err(error),
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|comment| comment["body"] == intent["body"])
+    {
+        return verified_simple_comment(intent, Duration::from_secs(30))?
+            .ok_or_else(|| "matching GitHub comment disappeared during readback".into());
+    }
+
+    let mut last = String::new();
+    let mut recovery_deadline = None;
+    for write_attempt in 0..2 {
+        if write_attempt > 0 && recovery_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            break;
+        }
+        let current = if write_attempt == 0 {
+            existing.clone()
+        } else {
+            let remaining = recovery_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::from_secs(30));
+            if remaining.is_zero() {
+                break;
+            }
+            match find_simple_comment(intent, remaining) {
+                Ok(value) => value,
+                Err(error) => {
+                    last = error;
+                    break;
+                }
+            }
+        };
+        let remaining = recovery_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(30));
+        if remaining.is_zero() {
+            break;
+        }
+        let written = write_simple_comment(intent, current.as_ref(), remaining);
+        if written.success {
+            match serde_json::from_str::<Value>(&written.stdout)
+                .map_err(|error| format!("parse GitHub comment write: {error}"))
+                .and_then(|value| decimal(&value["id"], "comment ID"))
+            {
+                Ok(_) => last = "GitHub comment write could not be uniquely verified".into(),
+                Err(error) => last = error,
+            }
+        } else {
+            last = format!("GitHub comment write failed: {}", written.stderr);
+            if permanent(&written.stderr) && recovery_deadline.is_none() {
+                return Err(last);
+            }
+        }
+        let deadline =
+            *recovery_deadline.get_or_insert_with(|| Instant::now() + simple_recovery_budget());
+        if let Some(comment) = reconcile_simple_comment(intent, delay, deadline)? {
+            return Ok(comment);
+        }
+        if write_attempt == 0 {
+            thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+    Err(page_ambiguous_comment(intent, operation_id, &last))
 }
 
 fn record_receipt(intent_oid: &str, intent: &Value, observed: &Value) -> Result<Value> {
@@ -1303,11 +1486,36 @@ pub(crate) fn post(args: CommentPost) -> Result<()> {
     let input = model::normalize_comment_input(
         std::str::from_utf8(&bytes).map_err(|_| "comment body file is not UTF-8")?,
     )?;
-    let (oid, intent) = create_intent(&args, &input)?;
-    let receipt = deliver(&oid, &intent)?;
-    print_json(
-        &json!({"commentId":receipt["commentId"],"commentUrl":receipt["commentUrl"],"intentOid":oid,"intentRef":model::comment_intent_ref(&args.operation_id)}),
-    )
+    let (_, source_oid, binding_oid, binding) = resolve(
+        &args.task_id,
+        &model::comment_intent_ref(&args.operation_id),
+    )?;
+    let marker_id = model::framed_digest(
+        "github-comment-operation-marker",
+        &[&args.task_id, &source_oid, &args.kind, &args.operation_id],
+    );
+    let body = model::render_comment(&args.kind, &input, &marker_id, false)?;
+    let intent = json!({
+        "bindingOid":binding_oid,
+        "body":body,
+        "issueId":binding["issueId"],
+        "issueNumber":binding["issueNumber"],
+        "kind":args.kind,
+        "marker":format!("<!-- task-dag:projection:{marker_id} -->"),
+        "operationId":args.operation_id,
+        "provider":"github",
+        "repository":binding["repository"],
+        "repositoryId":binding["repositoryId"],
+        "sourceTaskId":args.task_id,
+        "sourceTaskOid":source_oid
+    });
+    let comment = deliver_simple_comment(&intent, field(&intent, "operationId")?)?;
+    print_json(&json!({
+        "action":if comment["body"] == body { "posted-or-updated" } else { "verified" },
+        "commentId":decimal(&comment["id"], "comment ID")?,
+        "commentUrl":comment["html_url"],
+        "issueUrl":format!("https://github.com/{}/issues/{}", field(&intent,"repository")?, field(&intent,"issueNumber")?)
+    }))
 }
 
 fn duration(value: &str) -> Result<u64> {

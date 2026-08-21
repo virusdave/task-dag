@@ -5,6 +5,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::{Duration, Instant},
 };
 
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -54,6 +55,7 @@ struct Fixture {
     root: PathBuf,
     work: PathBuf,
     fake: PathBuf,
+    pager: PathBuf,
     state: PathBuf,
     task_id: String,
 }
@@ -107,6 +109,7 @@ impl Fixture {
             root,
             work,
             fake: PathBuf::new(),
+            pager: PathBuf::new(),
             state: PathBuf::new(),
             task_id: String::new(),
         };
@@ -133,6 +136,13 @@ impl Fixture {
         fixture.fake = fixture.root.join("fake-gh");
         fs::write(&fixture.fake, FAKE_GH).unwrap();
         fs::set_permissions(&fixture.fake, fs::Permissions::from_mode(0o770)).unwrap();
+        fixture.pager = fixture.root.join("fake-page-dave");
+        fs::write(
+            &fixture.pager,
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\"${FAKE_GH_STATE:?}/pages\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fixture.pager, fs::Permissions::from_mode(0o770)).unwrap();
         fixture
     }
 
@@ -178,7 +188,16 @@ impl Fixture {
                 self.root.join("runtime-origin.git"),
             )
             .env("TASKDAG_TEST_GH", &self.fake)
+            .env("TASKDAG_TEST_PAGE_DAVE", &self.pager)
             .env("TASKDAG_TEST_COMMENT_RETRY_MS", "0")
+            .env(
+                "TASKDAG_TEST_COMMENT_RECOVERY_MS",
+                if matches!(mode, "slow-recovery" | "slow-replay-lookup") {
+                    "100"
+                } else {
+                    "3000"
+                },
+            )
             .env("TASKDAG_TEST_COMMENT_DEADLINE_MS", deadline_ms)
             .env("FAKE_GH_STATE", &self.state)
             .env(
@@ -404,6 +423,13 @@ elif [[ "$endpoint" == repos/owner/repository/issues/7 ]]; then
   echo TARGET_ISSUE >>"$state/calls"
   if [[ "$mode" == mixed-case ]]; then repository_url=https://api.github.com/repos/Owner/Repository; else repository_url=https://api.github.com/repos/owner/repository; fi
   jq -n --arg repository_url "$repository_url" '{id:"456",number:"7",title:"Comment projection issue",repository_url:$repository_url}'
+elif [[ "$endpoint" == */issues/comments/* && " $* " == *" --method PATCH "* ]]; then
+  echo PATCH >>"$state/calls"
+  body=; for arg in "$@"; do [[ "$arg" == body=* ]] && body=${arg#body=}; done
+  printf %s "$body" >"$state/body"
+  id=$(cat "$state/id")
+  if [[ "$mode" == permanent-patch ]]; then echo 'HTTP 422 validation failed' >&2; exit 1; fi
+  jq -n --arg id "$id" '{id:$id}'
 elif [[ "$endpoint" == */issues/comments/* ]]; then
   echo GET >>"$state/calls"
   id=$(cat "$state/id")
@@ -412,22 +438,30 @@ elif [[ "$endpoint" == */issues/comments/* ]]; then
 elif [[ " $* " == *" --method POST "* ]]; then
   echo POST >>"$state/calls"
   body=; for arg in "$@"; do [[ "$arg" == body=* ]] && body=${arg#body=}; done
-  git ls-remote --refs origin 'refs/heads/tasks/comments/intents/*' | grep -q . && echo yes >"$state/intent-before-post"
-  printf %s "$body" >"$state/body"; echo 9007199254740993 >"$state/id"
+  post_count=$(cat "$state/post-count" 2>/dev/null || echo 0); post_count=$((post_count+1)); echo "$post_count" >"$state/post-count"
+  if [[ "$mode" == ambiguous-no-land || "$mode" == slow-replay-lookup ]]; then echo 'HTTP 503 provider unavailable' >&2; exit 1; fi
+  if [[ "$mode" == ambiguous-then-permanent ]]; then
+    if [[ "$post_count" == 1 ]]; then echo 'HTTP 503 provider unavailable' >&2; else echo 'HTTP 422 validation failed' >&2; fi
+    exit 1
+  fi
   if [[ "$mode" == permanent-post ]]; then echo 'HTTP 422 validation failed' >&2; exit 1; fi
+  printf %s "$body" >"$state/body"; echo 9007199254740993 >"$state/id"
   if [[ "$mode" == uncertain && ! -e "$state/uncertain-done" ]]; then touch "$state/uncertain-done"; printf '{'; exit 0; fi
   jq -n '{id:"9007199254740993"}'
 else
   echo LIST >>"$state/calls"
+  list_count=$(cat "$state/list-count" 2>/dev/null || echo 0); list_count=$((list_count+1)); echo "$list_count" >"$state/list-count"
+  if [[ "$mode" == transient-list && ! -e "$state/transient-list-done" ]]; then
+    touch "$state/transient-list-done"; echo 'HTTP 503 provider unavailable' >&2; exit 1
+  fi
+  if [[ "$mode" == slow-recovery && -e "$state/body" ]]; then sleep 5; fi
+  if [[ "$mode" == slow-replay-lookup && "$list_count" -ge 5 ]]; then sleep 5; fi
   if [[ "$mode" == slow-list ]]; then sleep 5; fi
   if [[ "$mode" == permanent-list ]]; then echo 'HTTP 403 forbidden' >&2; exit 1; fi
   if [[ -e "$state/body" ]]; then
     id=$(cat "$state/id")
-    if [[ "$mode" == duplicate ]]; then jq -n --rawfile body "$state/body" --arg id "$id" '[[{id:$id,body:$body}],[{id:"2",body:$body}]]'
+    if [[ "$mode" == duplicate || "$mode" == duplicate-after-post ]]; then jq -n --rawfile body "$state/body" --arg id "$id" '[[{id:$id,body:$body}],[{id:"2",body:$body}]]'
     else jq -n --rawfile body "$state/body" --arg id "$id" '[[],[{id:$id,body:$body}]]'; fi
-  elif [[ "$mode" == duplicate ]]; then
-    marker=$(git show -s --format=%B "$(git ls-remote --refs origin 'refs/heads/tasks/comments/intents/*' | awk 'NR==1 {print $1}')" | jq -r .body)
-    jq -n --arg body "$marker" '[[{id:"1",body:$body},{id:"2",body:$body}]]'
   else printf '[[],[]]\n'; fi
 fi
 "##;
@@ -505,9 +539,10 @@ fn mixed_case_provider_repository_identity_is_canonicalized_end_to_end() {
         "https://github.com/owner/repository/issues/7#issuecomment-9007199254740993"
     );
     assert_eq!(fixture.calls("POST"), 1);
-    assert_eq!(
-        fixture.refs("refs/heads/tasks/comments/receipts/*").len(),
-        1
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/receipts/*")
+            .is_empty()
     );
 
     let replay = fixture.post("post-mixed-case", "canonical repository", "mixed-case");
@@ -705,7 +740,7 @@ fn reconciliation_rejects_forced_intent_without_canonical_authorization() {
 }
 
 #[test]
-fn paginated_search_posts_exact_bytes_and_records_receipt() {
+fn paginated_search_posts_exact_bytes_without_durable_delivery_refs() {
     let fixture = Fixture::new("success", true);
     let output = fixture.post("post-success", "exact body\nsecond line\n", "normal");
     assert!(
@@ -715,30 +750,20 @@ fn paginated_search_posts_exact_bytes_and_records_receipt() {
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     let posted = fs::read_to_string(fixture.state.join("body")).unwrap();
-    let intent_oid = result["intentOid"].as_str().unwrap();
-    let intent: Value = serde_json::from_str(&ok(
-        &fixture.work,
-        &["show", "-s", "--format=%B", intent_oid],
-    ))
-    .unwrap();
-    assert_eq!(
-        posted,
-        intent["body"].as_str().unwrap(),
-        "POST body must exactly equal canonical intent bytes"
-    );
+    assert_eq!(result["commentId"], "9007199254740993");
     assert!(posted.starts_with("<!-- task-dag:status -->\n<!-- task-dag:projection:"));
     assert!(posted.ends_with("\n\nexact body\nsecond line\n"));
-    assert_eq!(
-        fs::read_to_string(fixture.state.join("intent-before-post"))
-            .unwrap()
-            .trim(),
-        "yes"
-    );
     assert_eq!(fixture.calls("POST"), 1);
     assert_eq!(fixture.calls("GET"), 1);
-    assert_eq!(
-        fixture.refs("refs/heads/tasks/comments/receipts/*").len(),
-        1
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/intents/*")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/receipts/*")
+            .is_empty()
     );
 }
 
@@ -753,14 +778,142 @@ fn uncertain_post_is_reconciled_by_marker_with_one_post() {
     );
     assert_eq!(fixture.calls("POST"), 1);
     assert!(fixture.calls("LIST") >= 2);
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/intents/*")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/receipts/*")
+            .is_empty()
+    );
+}
+
+#[test]
+fn one_transient_listing_failure_is_retried_before_posting() {
+    let fixture = Fixture::new("transient-list", true);
+    let output = fixture.post("transient-list-operation", "retry once", "transient-list");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.calls("LIST"), 3);
+    assert_eq!(fixture.calls("POST"), 1);
+}
+
+#[test]
+fn unresolved_write_ambiguity_pages_once_with_the_issue_url() {
+    let fixture = Fixture::new("ambiguous-no-land", true);
+    let output = fixture.post(
+        "ambiguous-no-land-operation",
+        "cannot determine",
+        "ambiguous-no-land",
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("operator paged"), "{error}");
+    assert!(error.contains("https://github.com/owner/repository/issues/7"));
+    assert_eq!(fixture.calls("POST"), 2);
+    let pages = fs::read_to_string(fixture.state.join("pages")).unwrap();
+    assert_eq!(pages.lines().count(), 1);
+    assert!(pages.contains("-p 4"));
+    assert!(pages.contains("--click https://github.com/owner/repository/issues/7"));
+}
+
+#[test]
+fn duplicate_marker_created_during_post_is_detected_and_paged() {
+    let fixture = Fixture::new("duplicate-after-post", true);
+    let output = fixture.post(
+        "duplicate-after-post-operation",
+        "concurrent post",
+        "duplicate-after-post",
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("operator paged"), "{error}");
+    assert_eq!(fixture.calls("POST"), 1);
     assert_eq!(
-        fixture.refs("refs/heads/tasks/comments/receipts/*").len(),
+        fs::read_to_string(fixture.state.join("pages"))
+            .unwrap()
+            .lines()
+            .count(),
         1
     );
 }
 
 #[test]
-fn exact_operation_replays_and_changed_body_fails_before_provider() {
+fn permanent_replay_failure_after_ambiguity_still_pages() {
+    let fixture = Fixture::new("ambiguous-then-permanent", true);
+    let output = fixture.post(
+        "ambiguous-then-permanent-operation",
+        "inspect first write",
+        "ambiguous-then-permanent",
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("operator paged"), "{error}");
+    assert_eq!(fixture.calls("POST"), 2);
+    assert_eq!(
+        fs::read_to_string(fixture.state.join("pages"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn ambiguity_readback_obeys_one_short_overall_budget() {
+    let fixture = Fixture::new("slow-recovery", true);
+    let started = Instant::now();
+    let output = fixture.post(
+        "slow-recovery-operation",
+        "bounded recovery",
+        "slow-recovery",
+    );
+    assert!(!output.status.success());
+    assert!(
+        started.elapsed().as_secs() < 2,
+        "recovery exceeded short budget"
+    );
+    assert_eq!(fixture.calls("POST"), 1);
+    assert_eq!(
+        fs::read_to_string(fixture.state.join("pages"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn pre_replay_lookup_uses_the_remaining_recovery_budget() {
+    let fixture = Fixture::new("slow-replay-lookup", true);
+    let started = Instant::now();
+    let output = fixture.post(
+        "slow-replay-lookup-operation",
+        "bounded replay lookup",
+        "slow-replay-lookup",
+    );
+    assert!(!output.status.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "replay lookup exceeded shared budget"
+    );
+    assert_eq!(fixture.calls("POST"), 1);
+    assert_eq!(
+        fs::read_to_string(fixture.state.join("pages"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn exact_operation_replays_and_changed_body_updates_the_same_comment() {
     let fixture = Fixture::new("replay", true);
     let first = fixture.post("same-operation", "stable", "normal");
     assert!(first.status.success());
@@ -772,27 +925,30 @@ fn exact_operation_replays_and_changed_body_fails_before_provider() {
         serde_json::from_slice::<Value>(&second.stdout).unwrap()
     );
     assert_eq!(fixture.calls("POST"), 1);
-    let calls = fs::read_to_string(fixture.state.join("calls")).unwrap();
     let changed = fixture.post("same-operation", "changed", "normal");
-    assert!(!changed.status.success());
-    assert!(String::from_utf8_lossy(&changed.stderr).contains("different semantics"));
-    assert_eq!(
-        fs::read_to_string(fixture.state.join("calls")).unwrap(),
-        calls
+    assert!(changed.status.success());
+    assert_eq!(fixture.calls("POST"), 1);
+    assert_eq!(fixture.calls("PATCH"), 1);
+    assert!(
+        fs::read_to_string(fixture.state.join("body"))
+            .unwrap()
+            .ends_with("\n\nchanged\n")
     );
 }
 
 #[test]
-fn duplicate_marker_fails_closed_with_pending_intent() {
+fn duplicate_marker_fails_without_another_write() {
     let fixture = Fixture::new("duplicate", true);
+    let first = fixture.post("duplicate-operation", "duplicate", "normal");
+    assert!(first.status.success());
     let output = fixture.post("duplicate-operation", "duplicate", "duplicate");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("multiple GitHub comments"));
-    assert_eq!(fixture.calls("POST"), 0);
-    assert_eq!(fixture.refs("refs/heads/tasks/comments/intents/*").len(), 1);
+    assert_eq!(fixture.calls("POST"), 1);
+    assert_eq!(fixture.calls("PATCH"), 0);
     assert!(
         fixture
-            .refs("refs/heads/tasks/comments/receipts/*")
+            .refs("refs/heads/tasks/comments/intents/*")
             .is_empty()
     );
 }
@@ -804,7 +960,11 @@ fn permanent_provider_failure_stops_in_first_round() {
     assert!(!output.status.success());
     assert_eq!(fixture.calls("LIST"), 1);
     assert_eq!(fixture.calls("POST"), 0);
-    assert_eq!(fixture.refs("refs/heads/tasks/comments/intents/*").len(), 1);
+    assert!(
+        fixture
+            .refs("refs/heads/tasks/comments/intents/*")
+            .is_empty()
+    );
     assert!(
         fixture
             .refs("refs/heads/tasks/comments/receipts/*")
@@ -959,182 +1119,4 @@ fn reconciliation_rejects_a_prefixed_intent_with_a_stale_binding_task() {
         fixture.calls("LIST") + fixture.calls("POST") + fixture.calls("GET"),
         0
     );
-}
-
-#[test]
-fn reconciliation_rejects_an_intent_under_the_wrong_operation_ref() {
-    let fixture = Fixture::new("wrong-intent-ref", true);
-    let failed = fixture.post("wrong-ref-operation", "pending", "permanent-list");
-    assert!(!failed.status.success());
-    let line = fixture
-        .refs("refs/heads/tasks/comments/intents/*")
-        .pop()
-        .unwrap();
-    let (oid, correct_ref) = line.split_once('\t').unwrap();
-    let wrong_ref = format!("refs/heads/tasks/comments/intents/{}", "f".repeat(64));
-    fixture.remote_update_ref(&wrong_ref, Some(oid));
-    fixture.remote_update_ref(correct_ref, None);
-    let prior_calls = fs::read_to_string(fixture.state.join("calls")).unwrap();
-    let output = fixture.command_with(
-        &["comment", "reconcile", "--max", "1", "--older-than", "1s"],
-        "normal",
-        "101",
-        "30000",
-    );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("operation identity"));
-    assert_eq!(
-        fs::read_to_string(fixture.state.join("calls")).unwrap(),
-        prior_calls
-    );
-}
-
-#[test]
-fn reconciliation_rejects_a_live_claim_under_the_wrong_intent_ref() {
-    let fixture = Fixture::new("wrong-claim-ref", true);
-    let failed = fixture.post("wrong-claim-operation", "pending", "permanent-list");
-    assert!(!failed.status.success());
-    let line = fixture
-        .refs("refs/heads/tasks/comments/delivery-claims/*")
-        .pop()
-        .unwrap();
-    let (oid, correct_ref) = line.split_once('\t').unwrap();
-    let wrong_ref = format!(
-        "refs/heads/tasks/comments/delivery-claims/{}",
-        "e".repeat(64)
-    );
-    fixture.remote_update_ref(&wrong_ref, Some(oid));
-    fixture.remote_update_ref(correct_ref, None);
-    let prior_calls = fs::read_to_string(fixture.state.join("calls")).unwrap();
-    let output = fixture.command_with(
-        &["comment", "reconcile", "--max", "1", "--older-than", "1s"],
-        "normal",
-        "101",
-        "30000",
-    );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("claim ref"));
-    assert_eq!(
-        fs::read_to_string(fixture.state.join("calls")).unwrap(),
-        prior_calls
-    );
-}
-
-#[test]
-fn delivery_deadline_prevents_post_after_a_slow_listing() {
-    let fixture = Fixture::new("deadline", true);
-    let body = fixture.root.join("deadline.txt");
-    fs::write(&body, "deadline").unwrap();
-    let output = fixture.command_with(
-        &[
-            "comment",
-            "post",
-            &fixture.task_id,
-            "--kind",
-            "status",
-            "--body-file",
-            body.to_str().unwrap(),
-            "--operation-id",
-            "deadline-operation",
-        ],
-        "slow-list",
-        "100",
-        "3000",
-    );
-    assert!(!output.status.success());
-    assert_eq!(fixture.calls("LIST"), 1);
-    assert_eq!(fixture.calls("POST"), 0);
-    assert!(
-        fixture
-            .refs("refs/heads/tasks/comments/receipts/*")
-            .is_empty()
-    );
-}
-
-#[test]
-fn claim_acquisition_consumes_the_delivery_deadline() {
-    let fixture = Fixture::new("claim-deadline", true);
-    let body = fixture.root.join("claim-deadline.txt");
-    fs::write(&body, "claim deadline").unwrap();
-    let output = fixture.command_with(
-        &[
-            "comment",
-            "post",
-            &fixture.task_id,
-            "--kind",
-            "status",
-            "--body-file",
-            body.to_str().unwrap(),
-            "--operation-id",
-            "claim-deadline-operation",
-        ],
-        "claim-delay",
-        "100",
-        "100",
-    );
-    assert!(!output.status.success());
-    assert_eq!(
-        fixture.calls("LIST") + fixture.calls("POST") + fixture.calls("GET"),
-        0
-    );
-}
-
-#[test]
-fn reconciliation_is_oldest_first_bounded_and_excludes_receipts_and_young_intents() {
-    let fixture = Fixture::new("reconcile-order", true);
-    for (operation, created) in [("oldest", "90"), ("middle", "95"), ("young", "495")] {
-        let output = fixture.post_at(operation, operation, "permanent-list", created);
-        assert!(!output.status.success());
-    }
-    let intents: Vec<(String, String)> = fixture
-        .refs("refs/heads/tasks/comments/intents/*")
-        .into_iter()
-        .map(|line| {
-            let (oid, _) = line.split_once('\t').unwrap();
-            let value: Value =
-                serde_json::from_str(&ok(&fixture.work, &["show", "-s", "--format=%B", oid]))
-                    .unwrap();
-            (
-                value["operationId"].as_str().unwrap().to_owned(),
-                oid.to_owned(),
-            )
-        })
-        .collect();
-    let oid = |operation: &str| {
-        intents
-            .iter()
-            .find(|(candidate, _)| candidate == operation)
-            .unwrap()
-            .1
-            .clone()
-    };
-    let receipt_ref = |intent_oid: &str| {
-        format!(
-            "refs/heads/tasks/comments/receipts/{}",
-            framed("github-comment-intent-key", &[intent_oid])
-        )
-    };
-
-    for expected in ["oldest", "middle"] {
-        let output = fixture.command_with(
-            &["comment", "reconcile", "--max", "1", "--older-than", "10s"],
-            "normal",
-            "500",
-            "30000",
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(result["selected"], 1);
-        assert_eq!(result["delivered"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            fixture.refs(&receipt_ref(&oid(expected))).len(),
-            1,
-            "reconciliation did not select {expected}"
-        );
-    }
-    assert!(fixture.refs(&receipt_ref(&oid("young"))).is_empty());
 }

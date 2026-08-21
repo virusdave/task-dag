@@ -37,11 +37,11 @@ The current surface is defined by `src/cli.rs`:
 - provider-free delegation: `delegate create`, `delegate admit`,
   `delegate export`, `delegate accept`, and `delegate status`;
 - GitHub comment projection: `comment post TASK-ID --kind status|operator-decision
-  --body-file PATH --operation-id ID`, plus explicit bounded recovery with
-  `comment reconcile --max N --older-than DURATION`; canonical issue bindings
-  use `comment associate`, while exceptional unbound targets use the explicit
-  `comment force-request`, `comment force-decide`, and `comment force-send`
-  authorization sequence;
+  --body-file PATH --operation-id ID`; canonical issue bindings use `comment
+  associate`, while exceptional unbound targets use the explicit `comment
+  force-request`, `comment force-decide`, and `comment force-send`
+  authorization sequence. `comment reconcile` remains only for pending legacy
+  forced-target intents;
 - compatibility aliases: `epic-create` is `create`, `epic-compose` is
   `breakdown`, and `dag TASK-ID` is a bounded task view;
 - exceptional migration: `migrate-v1-census` and `migrate-v1`.
@@ -91,15 +91,13 @@ equivalent. Without `--timings`, tracing callsites are disabled and do not read
 the clock, allocate span state, or write output.
 
 `comment post` resolves the nearest structural-ancestor GitHub issue binding,
-records an immutable intent before calling authenticated `gh api`, and records
-a receipt only after exact authenticated readback. Delivery is bounded to six
-rounds over five minutes, with at least ten seconds between production rounds;
-every possible POST is preceded by a complete paginated marker search.
-Operation IDs replay only when their exact semantics agree. Failed or uncertain
-delivery leaves the intent pending. Reconciliation is never implicit: the
-operator selects at most 100 pending intents older than a duration such as
-`10m`, `2h`, or `1d`; selection is oldest-first and bounded by hard ref and byte
-limits.
+derives a stable hidden marker from the task, kind, and operation ID, then uses
+authenticated `gh api` to update the matching comment or post it when absent.
+One clear transient failure gets one short retry. An uncertain write gets a few
+seconds of marker readback and at most one replay with the same marker. If the
+result is still unclear, the command exits nonzero with the issue URL and pages
+the operator at priority 4 for manual inspection. Normal posting creates no
+intent, delivery-claim, or receipt refs and has no background reconciler.
 
 `comment associate` authenticates and verifies the canonical GitHub repository
 and issue paths and records both stable-ID binding aliases atomically. Forced

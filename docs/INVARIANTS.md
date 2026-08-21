@@ -949,19 +949,25 @@ CLI) should get an `ingest-comment` acknowledgement reply or opt-in markers —
 still changes operator workflow semantics and remains an **operator
 decision**, not an agent's to make unilaterally.
 
-### Native-v2 outbound GitHub comment records
+### Native-v2 outbound GitHub comments
 
-Native v2 treats GitHub comments as projections of task-dag state. The
-canonical command records an immutable intent before any provider write and an
-immutable receipt only after authenticated readback. GitHub is never task
-state, and no Helios process is required for delivery or recovery.
+Native v2 treats GitHub comments as best-effort projections of task-dag state.
+Normal `comment post` resolves the canonical binding, finds a stable
+operation-marker comment, and either updates or creates it. It performs one
+short retry plus bounded readback for uncertain writes; unresolved ambiguity is
+returned with the issue URL and pages the operator. Normal posting creates no
+task-dag intent, claim, or receipt records. GitHub is never task state, and no
+Helios process is required for delivery or recovery.
 
 - `tasks/comments/bindings/by-task/<Task-ID>` and the paired
   `tasks/comments/bindings/by-target/<digest>` point to the same parentless,
   absent-to-present binding. The task-keyed ref makes nearest-structural-parent
   resolution bounded; the provider-keyed ref prevents two tasks from directly
   claiming the same stable GitHub issue identity.
-- `tasks/comments/intents/<digest>` identifies one operation. It snapshots the
+- Exceptional forced-target delivery retains the historical durable records
+  below until that separately authorized workflow is retired. Normal
+  `comment post` never creates them.
+- `tasks/comments/intents/<digest>` identifies one forced-target operation. It snapshots the
   source task, exact binding or forced-target authorization, stable provider
   identities, normalized input bytes, exact rendered bytes and digest, comment
   kind, and two tooling-owned leading markers. Exact operation replay is
