@@ -561,6 +561,17 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
     Ok(value)
 }
 
+pub(crate) fn lifecycle_task_oid(record: &Value, state: &str) -> Result<String> {
+    record[if state == "waiting" {
+        "parentTaskOid"
+    } else {
+        "taskOid"
+    }]
+    .as_str()
+    .map(str::to_owned)
+    .ok_or_else(|| format!("{state} record has no Task OID"))
+}
+
 fn current_waiting(oid: &str, id: &str) -> Result<Value> {
     let delegated = git::object_json(oid)?.get("intentOid").is_some();
     let value = if delegated {
@@ -1385,6 +1396,25 @@ fn validate_done_active_parent(parents: &[String], task_oid: &str, id: &str) -> 
     Ok(())
 }
 
+fn validate_waiting_parent_anchor(parents: &[String], task_oid: &str, id: &str) -> Result<()> {
+    let anchor = parents
+        .first()
+        .ok_or("waiting record lacks its lifecycle or migration parent")?;
+    if let Ok(active) = lifecycle("active", anchor, id) {
+        if active["taskOid"] != task_oid {
+            return Err("waiting active parent names wrong Task".into());
+        }
+        return Ok(());
+    }
+    let expected_id = model::task_id("legacy-v1-sha", &[anchor]);
+    let task_value = task(task_oid, id)?;
+    let expected_operation = model::framed_digest("migrate-v1-task-operation", &[anchor]);
+    if id != expected_id || task_value["operationId"] != expected_operation {
+        return Err("waiting record lacks an active or canonical migration parent".into());
+    }
+    Ok(())
+}
+
 #[tracing::instrument(skip_all, name = "validate.waiting")]
 pub(crate) fn waiting(oid: &str, id: &str) -> Result<Value> {
     if git::object_json(oid)?.get("intentOid").is_some() {
@@ -1422,6 +1452,7 @@ pub(crate) fn waiting(oid: &str, id: &str) -> Result<Value> {
     if parents.len() != children.len() + 2 || parents[1] != parent_task {
         return Err("waiting manifest immediate parent ordering is malformed".into());
     }
+    validate_waiting_parent_anchor(&parents, &parent_task, id)?;
     let state_oids: Result<Vec<String>> = children
         .iter()
         .map(|child| {

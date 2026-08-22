@@ -79,7 +79,7 @@ fn find_binding(task_id: &str, intent_ref: &str) -> Result<BindingResolution> {
     } else {
         crate::validators::lifecycle(&lifecycle[0].0, &lifecycle[0].2, task_id)?
     };
-    let source_oid = field(&lifecycle_value, "taskOid")?.to_owned();
+    let source_oid = crate::validators::lifecycle_task_oid(&lifecycle_value, &lifecycle[0].0)?;
     let binding_refs: Vec<_> = structural_chain(task_id, &source_oid)?
         .into_iter()
         .map(|(id, oid)| (model::github_binding_task_ref(&id), oid))
@@ -375,7 +375,10 @@ fn source_task(task_id: &str) -> Result<(repository::Snapshot, String)> {
     } else {
         crate::validators::lifecycle(&lifecycle[0].0, &lifecycle[0].2, task_id)?
     };
-    Ok((snap, field(&value, "taskOid")?.to_owned()))
+    Ok((
+        snap,
+        crate::validators::lifecycle_task_oid(&value, &lifecycle[0].0)?,
+    ))
 }
 
 fn github_url_matches_repository(

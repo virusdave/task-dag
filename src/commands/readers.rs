@@ -104,7 +104,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
     let mut tasks = BTreeSet::new();
     for (reference, state, id, state_oid) in &captured {
         let record = crate::validators::current_lifecycle(state, state_oid, id)?;
-        let task_oid = record_task(&record, &state)?;
+        let task_oid = crate::validators::lifecycle_task_oid(&record, &state)?;
         tasks.insert(task_oid.clone());
         records.push((reference, state, id, state_oid, record, task_oid));
     }
@@ -254,7 +254,7 @@ pub(crate) fn current_state(max_tasks: usize) -> Result<()> {
             )?;
         }
         let record = crate::validators::current_lifecycle("done", &state_oid, id)?;
-        let task_oid = record_task(&record, "done")?;
+        let task_oid = crate::validators::lifecycle_task_oid(&record, "done")?;
         if &task_oid != expected_task_oid {
             return Err(format!("Immutable identity mismatch for done task {id}"));
         }
@@ -396,7 +396,7 @@ pub(crate) fn current_state_page(prefix: &str) -> Result<()> {
     let mut task_oids = BTreeSet::new();
     for (reference, state, id, state_oid) in &captured {
         let record = crate::validators::current_lifecycle(state, state_oid, id)?;
-        let task_oid = record_task(&record, state)?;
+        let task_oid = crate::validators::lifecycle_task_oid(&record, state)?;
         if selected_identity
             .insert(id.clone(), task_oid.clone())
             .is_some()
@@ -518,7 +518,7 @@ pub(crate) fn current_state_page(prefix: &str) -> Result<()> {
             )?;
         }
         let record = crate::validators::current_lifecycle(state, state_oid, id)?;
-        let task_oid = record_task(&record, state)?;
+        let task_oid = crate::validators::lifecycle_task_oid(&record, state)?;
         if &task_oid != expected_oid {
             return Err(format!("Immutable identity mismatch for related task {id}"));
         }
@@ -827,7 +827,7 @@ pub(crate) fn deps(id: &str) -> Result<()> {
     }
     repository::materialize(std::slice::from_ref(&found[0].2))?;
     let record = lifecycle_record(&found[0].0, &found[0].2, id)?;
-    let task_oid = record_task(&record, &found[0].0)?;
+    let task_oid = crate::validators::lifecycle_task_oid(&record, &found[0].0)?;
     let task = crate::validators::task(&task_oid, id)?;
     let reqs = task["requirements"]
         .as_array()
@@ -872,7 +872,7 @@ fn neighborhood(id: &str) -> Result<serde_json::Value> {
     }
     repository::materialize(std::slice::from_ref(&found[0].2))?;
     let record = lifecycle_record(&found[0].0, &found[0].2, id)?;
-    let task_oid = record_task(&record, &found[0].0)?;
+    let task_oid = crate::validators::lifecycle_task_oid(&record, &found[0].0)?;
     let task = crate::validators::task(&task_oid, id)?;
     let direct_children = if found[0].0 == "waiting" && record.get("intentOid").is_none() {
         record["children"]
@@ -891,21 +891,10 @@ fn neighborhood(id: &str) -> Result<serde_json::Value> {
 
 fn lifecycle_record(state: &str, oid: &str, id: &str) -> Result<Value> {
     let record = crate::validators::current_lifecycle(state, oid, id)?;
-    let task_oid = record_task(&record, state)?;
+    let task_oid = crate::validators::lifecycle_task_oid(&record, state)?;
     let task = crate::validators::task(&task_oid, id)?;
     if state == "done" {
         crate::validators::current_convergence_evidence(oid, id, &record, &task)?;
     }
     Ok(record)
-}
-
-fn record_task(record: &Value, state: &str) -> Result<String> {
-    record[if state == "waiting" {
-        "parentTaskOid"
-    } else {
-        "taskOid"
-    }]
-    .as_str()
-    .map(str::to_owned)
-    .ok_or_else(|| format!("{state} record has no Task OID"))
 }

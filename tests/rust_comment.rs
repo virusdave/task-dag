@@ -147,7 +147,11 @@ impl Fixture {
     }
 
     fn install_binding(&self, task_oid: &str) {
-        let value = json!({"formatVersion":2,"issueId":"456","issueNumber":"7","operationId":"bind-fixture","provider":"github","repository":"owner/repository","repositoryId":"123","semanticId":"0".repeat(64),"taskId":self.task_id,"taskOid":task_oid});
+        self.install_binding_for(&self.task_id, task_oid);
+    }
+
+    fn install_binding_for(&self, task_id: &str, task_oid: &str) {
+        let value = json!({"formatVersion":2,"issueId":"456","issueNumber":"7","operationId":"bind-fixture","provider":"github","repository":"owner/repository","repositoryId":"123","semanticId":"0".repeat(64),"taskId":task_id,"taskOid":task_oid});
         let file = self.root.join("binding.json");
         fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
         let oid = ok(
@@ -162,11 +166,117 @@ impl Fixture {
                 "origin",
                 &format!(
                     "{oid}:refs/heads/tasks/comments/bindings/by-task/{}",
-                    self.task_id
+                    task_id
                 ),
                 &format!("{oid}:refs/heads/tasks/comments/bindings/by-target/{target}"),
             ],
         );
+    }
+
+    fn decompose(&self, operation: &str) -> Value {
+        self.decompose_task(&self.task_id, operation)
+    }
+
+    fn decompose_task(&self, task_id: &str, operation: &str) -> Value {
+        let claimed = self.run_ok(
+            &[
+                "claim",
+                task_id,
+                "--owner",
+                "comment-test",
+                "--operation-id",
+                &format!("claim-{operation}"),
+            ],
+            "normal",
+        );
+        let spec = self.root.join(format!("{operation}-breakdown.json"));
+        fs::write(
+            &spec,
+            serde_json::to_vec(&json!({
+                "operationId": operation,
+                "children": [{
+                    "key": "child",
+                    "title": "Comment child",
+                    "description": "Waiting comment fixture child",
+                    "requires": [],
+                    "claim": false
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        self.run_ok(
+            &[
+                "breakdown",
+                task_id,
+                "--spec",
+                spec.to_str().unwrap(),
+                "--claim-token",
+                claimed["claimToken"].as_str().unwrap(),
+            ],
+            "normal",
+        )
+    }
+
+    fn corrupt_waiting_parent(&self, mode: &str) {
+        let waiting_ref = format!("refs/heads/tasks/waiting/{}", self.task_id);
+        let waiting_oid = self.refs(&waiting_ref)[0]
+            .split_once('\t')
+            .unwrap()
+            .0
+            .to_owned();
+        let mut value: Value = serde_json::from_str(&ok(
+            &self.work,
+            &["show", "-s", "--format=%B", &waiting_oid],
+        ))
+        .unwrap();
+        let mut parents: Vec<String> = ok(&self.work, &["show", "-s", "--format=%P", &waiting_oid])
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        match mode {
+            "missing" => {
+                value.as_object_mut().unwrap().remove("parentTaskOid");
+            }
+            "malformed" => value["parentTaskOid"] = json!("not-an-oid"),
+            "wrong" => {
+                let mut alternate: Value = serde_json::from_str(&ok(
+                    &self.work,
+                    &["show", "-s", "--format=%B", &parents[1]],
+                ))
+                .unwrap();
+                alternate["description"] = json!("Alternate valid task object");
+                let alternate_file = self.root.join("alternate-waiting-task.json");
+                fs::write(&alternate_file, serde_json::to_vec(&alternate).unwrap()).unwrap();
+                let alternate_oid = ok(
+                    &self.work,
+                    &[
+                        "commit-tree",
+                        EMPTY_TREE,
+                        "-F",
+                        alternate_file.to_str().unwrap(),
+                    ],
+                );
+                value["parentTaskOid"] = json!(alternate_oid);
+                parents[1] = value["parentTaskOid"].as_str().unwrap().to_owned();
+            }
+            _ => panic!("unknown corruption mode"),
+        }
+        let value_file = self.root.join(format!("{mode}-waiting.json"));
+        fs::write(&value_file, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut arguments = vec!["commit-tree", EMPTY_TREE];
+        for parent in &parents {
+            arguments.extend(["-p", parent]);
+        }
+        arguments.extend(["-F", value_file.to_str().unwrap()]);
+        let corrupt_oid = ok(&self.work, &arguments);
+        let staging_ref = format!("refs/heads/test-fixtures/{mode}-waiting");
+        ok(
+            &self.work,
+            &["push", "origin", &format!("{corrupt_oid}:{staging_ref}")],
+        );
+        self.remote_update_ref(&waiting_ref, Some(&corrupt_oid));
+        self.remote_update_ref(&staging_ref, None);
     }
 
     fn command(&self, args: &[&str], mode: &str) -> Output {
@@ -226,6 +336,25 @@ impl Fixture {
 
     fn post(&self, operation: &str, body: &str, mode: &str) -> Output {
         self.post_at(operation, body, mode, "100")
+    }
+
+    fn post_for(&self, task_id: &str, operation: &str, body: &str, mode: &str) -> Output {
+        let file = self.root.join(format!("{operation}.txt"));
+        fs::write(&file, body).unwrap();
+        self.command(
+            &[
+                "comment",
+                "post",
+                task_id,
+                "--kind",
+                "status",
+                "--body-file",
+                file.to_str().unwrap(),
+                "--operation-id",
+                operation,
+            ],
+            mode,
+        )
     }
 
     fn post_at(&self, operation: &str, body: &str, mode: &str, now: &str) -> Output {
@@ -514,6 +643,180 @@ fn associate_creates_paired_aliases_and_conflicting_target_fails_closed() {
             ))
             .is_empty()
     );
+}
+
+#[test]
+fn waiting_source_association_creates_the_normal_paired_aliases() {
+    let fixture = Fixture::new("waiting-associate", false);
+    fixture.decompose("waiting-associate-split");
+
+    let associated = fixture.associate(&fixture.task_id, "waiting-associate");
+    assert!(
+        associated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&associated.stderr)
+    );
+    let result: Value = serde_json::from_slice(&associated.stdout).unwrap();
+    let task_alias = fixture.refs(result["taskRef"].as_str().unwrap());
+    let target_alias = fixture.refs(result["targetRef"].as_str().unwrap());
+    assert_eq!(task_alias.len(), 1);
+    assert_eq!(target_alias.len(), 1);
+    assert_eq!(
+        task_alias[0].split_once('\t').unwrap().0,
+        target_alias[0].split_once('\t').unwrap().0
+    );
+}
+
+#[test]
+fn waiting_source_posts_through_own_or_structural_ancestor_binding_once() {
+    let own = Fixture::new("waiting-own-binding", true);
+    own.decompose("waiting-own-split");
+    let posted = own.post("waiting-own-post", "waiting own binding", "normal");
+    assert!(
+        posted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&posted.stderr)
+    );
+    let replay = own.post("waiting-own-post", "waiting own binding", "normal");
+    assert!(replay.status.success());
+    assert_eq!(posted.stdout, replay.stdout);
+    assert_eq!(own.calls("POST"), 1);
+
+    let ancestor = Fixture::new("waiting-ancestor-binding", true);
+    let first_split = ancestor.decompose("waiting-ancestor-root-split");
+    let child_id = first_split["children"][0]["taskId"].as_str().unwrap();
+    ancestor.decompose_task(child_id, "waiting-ancestor-child-split");
+    let posted = ancestor.post_for(
+        child_id,
+        "waiting-ancestor-post",
+        "waiting ancestor binding",
+        "normal",
+    );
+    assert!(
+        posted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&posted.stderr)
+    );
+    assert_eq!(ancestor.calls("POST"), 1);
+}
+
+#[test]
+fn malformed_waiting_parent_identity_fails_before_comment_provider_or_intent() {
+    for mode in ["missing", "malformed", "wrong"] {
+        let fixture = Fixture::new(&format!("waiting-{mode}-parent"), true);
+        fixture.decompose(&format!("waiting-{mode}-split"));
+        fixture.corrupt_waiting_parent(mode);
+
+        let output = fixture.post(&format!("waiting-{mode}-post"), "must not post", "normal");
+        assert!(!output.status.success(), "{mode} unexpectedly succeeded");
+        assert_eq!(
+            fixture.calls("LIST") + fixture.calls("POST") + fixture.calls("GET"),
+            0,
+            "{mode} reached the comment provider"
+        );
+        assert!(
+            fixture
+                .refs("refs/heads/tasks/comments/intents/*")
+                .is_empty(),
+            "{mode} created a comment intent"
+        );
+    }
+}
+
+#[test]
+fn malformed_waiting_parent_identity_prevents_association_after_target_read() {
+    for mode in ["missing", "malformed", "wrong"] {
+        let fixture = Fixture::new(&format!("waiting-{mode}-associate"), false);
+        fixture.decompose(&format!("waiting-{mode}-associate-split"));
+        fixture.corrupt_waiting_parent(mode);
+
+        let output = fixture.associate(
+            &fixture.task_id,
+            &format!("waiting-{mode}-associate-operation"),
+        );
+        assert!(!output.status.success(), "{mode} unexpectedly succeeded");
+        assert_eq!(fixture.calls("TARGET_REPO"), 1);
+        assert_eq!(fixture.calls("TARGET_ISSUE"), 1);
+        assert_eq!(
+            fixture.calls("LIST")
+                + fixture.calls("POST")
+                + fixture.calls("PATCH")
+                + fixture.calls("GET"),
+            0,
+            "{mode} attempted a comment write"
+        );
+        assert!(
+            fixture
+                .refs(&format!(
+                    "refs/heads/tasks/comments/bindings/by-task/{}",
+                    fixture.task_id
+                ))
+                .is_empty(),
+            "{mode} created a task binding alias"
+        );
+        assert!(
+            fixture.refs(&fixture.target_binding_ref()).is_empty(),
+            "{mode} created a target binding alias"
+        );
+    }
+}
+
+#[test]
+fn ordinary_source_lifecycle_association_behavior_is_unchanged() {
+    for state in ["frontier", "active", "blocked", "done"] {
+        let fixture = Fixture::new(&format!("associate-{state}"), false);
+        if state != "frontier" {
+            let claim = fixture.run_ok(
+                &[
+                    "claim",
+                    &fixture.task_id,
+                    "--owner",
+                    "comment-test",
+                    "--operation-id",
+                    &format!("associate-{state}-claim"),
+                ],
+                "normal",
+            );
+            if state == "blocked" {
+                fixture.run_ok(
+                    &[
+                        "block",
+                        &fixture.task_id,
+                        "--claim-token",
+                        claim["claimToken"].as_str().unwrap(),
+                        "--reason",
+                        "Comment lifecycle fixture",
+                        "--authorization",
+                        "Integration test",
+                        "--operation-id",
+                        "associate-blocked-block",
+                    ],
+                    "normal",
+                );
+            } else if state == "done" {
+                fixture.run_ok(
+                    &[
+                        "complete-ops",
+                        &fixture.task_id,
+                        "--description",
+                        "Comment lifecycle fixture complete",
+                        "--authorization",
+                        "Integration test",
+                        "--claim-token",
+                        claim["claimToken"].as_str().unwrap(),
+                    ],
+                    "normal",
+                );
+            }
+        }
+        let associated =
+            fixture.associate(&fixture.task_id, &format!("associate-{state}-operation"));
+        assert!(
+            associated.status.success(),
+            "{state}: {}",
+            String::from_utf8_lossy(&associated.stderr)
+        );
+    }
 }
 
 #[test]
