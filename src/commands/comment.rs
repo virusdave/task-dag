@@ -845,6 +845,8 @@ fn page_ambiguous_comment(intent: &Value, operation_id: &str, reason: &str) -> S
     };
     let page = Command::new(executable)
         .args([
+            "--identity",
+            "task-dag",
             "-p",
             "4",
             "--title",
