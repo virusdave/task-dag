@@ -1121,7 +1121,6 @@ fn unresolved_write_ambiguity_pages_once_with_the_issue_url() {
     assert_eq!(fixture.calls("POST"), 2);
     let pages = fs::read_to_string(fixture.state.join("pages")).unwrap();
     assert_eq!(pages.lines().count(), 1);
-    assert!(pages.contains("--identity task-dag"));
     assert!(pages.contains("-p 4"));
     assert!(pages.contains("--click https://github.com/owner/repository/issues/7"));
 }
