@@ -248,6 +248,7 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
                 &[],
                 &["semanticId"],
                 &["logicalId", "releasedClaim"],
+                &["logicalId", "releaseKind", "releasedClaim"],
                 &["logicalId", "releasedBlock"],
             ],
         )?,
@@ -338,6 +339,12 @@ pub(crate) fn current_lifecycle(state: &str, oid: &str, id: &str) -> Result<Valu
     }
     if let Some(v) = value.get("logicalId") {
         digest("logicalId", v)?;
+    }
+    if state == "frontier"
+        && value.get("releaseKind").is_some()
+        && !matches!(value["releaseKind"].as_str(), Some("release" | "reap"))
+    {
+        return Err("frontier releaseKind is malformed".into());
     }
     match state {
         "frontier" if parents.len() != if task_position == 0 { 1 } else { 2 } => {
@@ -722,6 +729,7 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
                 &[],
                 &["semanticId"],
                 &["logicalId", "releasedClaim"],
+                &["logicalId", "releaseKind", "releasedClaim"],
                 &["logicalId", "releasedBlock"],
             ],
         )?,
@@ -813,6 +821,12 @@ pub(crate) fn lifecycle(state: &str, oid: &str, id: &str) -> Result<Value> {
     }
     if let Some(v) = value.get("logicalId") {
         digest("logicalId", v)?;
+    }
+    if state == "frontier"
+        && value.get("releaseKind").is_some()
+        && !matches!(value["releaseKind"].as_str(), Some("release" | "reap"))
+    {
+        return Err("frontier releaseKind is malformed".into());
     }
     match state {
         "active" => {

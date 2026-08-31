@@ -106,7 +106,7 @@ pub(crate) fn release(id: &str, token: Option<&str>, expired: bool, operation: &
         )?;
     }
     let frontier = model::state_ref("frontier", id);
-    let record = json!({"formatVersion":2,"logicalId":logical,"operationId":logical,"releasedClaim":active,"taskId":id,"taskOid":claim.task_oid});
+    let record = json!({"formatVersion":2,"logicalId":logical,"operationId":logical,"releaseKind":domain,"releasedClaim":active,"taskId":id,"taskOid":claim.task_oid});
     let new = git::commit(&record, &[active.clone(), claim.task_oid])?;
     let result = json!({});
     let (receipt_ref, receipt_oid) = receipts::create(

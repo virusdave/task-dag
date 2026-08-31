@@ -79,6 +79,20 @@ enum Commands {
         #[arg(long)]
         operation_id: String,
     },
+    /// Atomically transfer an exact dead generation's claim to a recovery generation.
+    RecoverClaim {
+        task_id: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long, default_value_t = 12)]
+        ttl_hours: u64,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        authorization_fd: i32,
+        #[arg(long)]
+        receipt_fd: i32,
+    },
     Release {
         task_id: String,
         #[arg(long)]
@@ -441,6 +455,21 @@ pub(crate) fn run() -> Result<()> {
             ttl_hours,
             operation_id,
         } => commands::claim_lifecycle::renew(&task_id, &claim_token, ttl_hours, &operation_id),
+        Commands::RecoverClaim {
+            task_id,
+            owner,
+            ttl_hours,
+            operation_id,
+            authorization_fd,
+            receipt_fd,
+        } => commands::claim_recovery::recover(
+            &task_id,
+            &owner,
+            ttl_hours,
+            &operation_id,
+            authorization_fd,
+            receipt_fd,
+        ),
         Commands::Release {
             task_id,
             claim_token,
@@ -580,6 +609,7 @@ impl Commands {
             Self::Create(_) => tracing::info_span!("command.create"),
             Self::Claim { .. } => tracing::info_span!("command.claim"),
             Self::Renew { .. } => tracing::info_span!("command.renew"),
+            Self::RecoverClaim { .. } => tracing::info_span!("command.recover-claim"),
             Self::Release { .. } => tracing::info_span!("command.release"),
             Self::Reap { .. } => tracing::info_span!("command.reap"),
             Self::Block { .. } => tracing::info_span!("command.block"),

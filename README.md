@@ -30,8 +30,9 @@ The current surface is defined by `src/cli.rs`:
 
 - runtime and bootstrap: `runtime identity`, `runtime publish`, `init`, and
   `activation`;
-- lifecycle writers: `create`, `claim`, `renew`, `release`, `reap`, `block`,
-  `unblock`, `breakdown`, `complete`, `complete-ops`, and `converge`;
+- lifecycle writers: `create`, `claim`, `renew`, `recover-claim`, `release`,
+  `reap`, `block`, `unblock`, `breakdown`, `complete`, `complete-ops`, and
+  `converge`;
 - bounded readers: `show`, `blocked`, `deps`, `context`, `frontier`,
   compatibility `current-state`, and local-mirror `current-state-page`;
 - provider-free delegation: `delegate create`, `delegate admit`,
@@ -48,7 +49,13 @@ The current surface is defined by `src/cli.rs`:
 
 Native-v2 commands read activation authority plus the bounded lifecycle,
 receipt, provider, and cross-repository refs that are semantically relevant to
-the operation. Required ref updates use appropriate Git concurrency primitives
+the operation. `recover-claim` is the narrow dead-worker handoff transition:
+it atomically rotates and privately returns authority while transferring an
+exact active claim, or a frontier proven to have reaped that exact claim, to a
+new owner. Its authorization and receipt JSON use caller-opened owner-private
+file descriptors; tokens never belong in argv or stdout. Voluntarily released,
+competing, blocked, done, waiting, malformed, and no-longer-ready tasks fail
+closed. Required ref updates use appropriate Git concurrency primitives
 and locking in a semantically correct fashion. Multi-ref transitions use exact
 per-ref leases and atomic push; sequential CAS transitions are also valid when
 their intermediate states are intentional, valid, and recoverable. Historical

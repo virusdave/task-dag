@@ -97,6 +97,59 @@ fn uncertain(cwd: &Path, args: &[&str], token: &str, time: u64) {
     );
 }
 
+fn recover_success(
+    cwd: &Path,
+    task: &str,
+    owner: &str,
+    operation: &str,
+    authorization: &serde_json::Value,
+    token: &str,
+    time: u64,
+) -> (serde_json::Value, serde_json::Value) {
+    let authorization_path = cwd.join(format!("recover-{operation}-authorization.json"));
+    let receipt_path = cwd.join(format!("recover-{operation}-receipt.json"));
+    fs::write(
+        &authorization_path,
+        serde_json::to_vec(authorization).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&authorization_path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&receipt_path, b"").unwrap();
+    fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let script = format!(
+        "exec 3<{} 4>{}; exec \"$TASK_DAG_BIN\" recover-claim \"$TASK\" --owner \"$OWNER\" --ttl-hours 1 --operation-id \"$OPERATION\" --authorization-fd 3 --receipt-fd 4",
+        authorization_path.display(),
+        receipt_path.display()
+    );
+    let out = Command::new("bash")
+        .current_dir(cwd)
+        .args(["-c", &script])
+        .env("TASK_DAG_BIN", env!("CARGO_BIN_EXE_task-dag"))
+        .env("TASK", task)
+        .env("OWNER", owner)
+        .env("OPERATION", operation)
+        .env("TASKDAG_TEST_TOKEN", token)
+        .env("TASKDAG_TEST_TIME", time.to_string())
+        .env("TASKDAG_TEST_LEGACY_ACTIVATION", "1")
+        .env("TASKDAG_SESSION_ID", "recovery-session")
+        .env(
+            "TASKDAG_TEST_RUNTIME_REMOTE",
+            cwd.parent().unwrap().join("runtime-origin.git"),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "recover-claim failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains(token));
+    (
+        serde_json::from_slice(&out.stdout).unwrap(),
+        serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap(),
+    )
+}
+
 #[test]
 fn current_state_caches_the_runtime_parent_for_one_parent_genesis_activation() {
     let root = std::env::temp_dir().join(format!(
@@ -1031,7 +1084,7 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         ),
         renewed
     );
-    success(
+    let reap_claim = success(
         &a,
         &[
             "claim",
@@ -1046,9 +1099,66 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         "reap-token-00000",
         1_000,
     );
+    let active_authorization = serde_json::json!({
+        "claimToken": "reap-token-00000",
+        "priorStateOid": reap_claim["stateOid"],
+        "priorOwner": "fixture",
+        "priorOperationId": "reap-claim",
+        "taskOid": late_original["taskOid"],
+    });
+    let (active_public, active_receipt) = recover_success(
+        &a,
+        late_id,
+        "fixture-recovery",
+        "active-recovery",
+        &active_authorization,
+        "active-recovery-token",
+        1_001,
+    );
+    assert_eq!(active_public["recovered"], true);
+    assert_eq!(active_receipt["claimToken"], "active-recovery-token");
     let reap_args = ["reap", late_id, "--operation-id", "late-reap"];
-    uncertain(&a, &reap_args, "unused-token-000", 4_600);
-    let reaped = success(&a, &reap_args, "unused-token-000", 4_600);
+    uncertain(&a, &reap_args, "unused-token-000", 4_602);
+    let reaped = success(&a, &reap_args, "unused-token-000", 4_602);
+    let reaped_authorization = serde_json::json!({
+        "claimToken": active_receipt["claimToken"],
+        "priorStateOid": active_receipt["stateOid"],
+        "priorOwner": "fixture-recovery",
+        "priorOperationId": "active-recovery",
+        "taskOid": late_original["taskOid"],
+    });
+    let (_, reaped_receipt) = recover_success(
+        &a,
+        late_id,
+        "fixture-recovery-2",
+        "reaped-recovery",
+        &reaped_authorization,
+        "reaped-recovery-token",
+        4_603,
+    );
+    let (_, replayed_receipt) = recover_success(
+        &a,
+        late_id,
+        "fixture-recovery-2",
+        "reaped-recovery",
+        &reaped_authorization,
+        "different-replay-token",
+        9_999,
+    );
+    assert_eq!(replayed_receipt, reaped_receipt);
+    success(
+        &a,
+        &[
+            "release",
+            late_id,
+            "--claim-token",
+            "reaped-recovery-token",
+            "--operation-id",
+            "release-recovery",
+        ],
+        "unused-token-000",
+        4_604,
+    );
     success(
         &a,
         &[

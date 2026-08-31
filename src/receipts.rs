@@ -75,7 +75,7 @@ fn reconstruct_outputs(domain: &str, parents: &[String]) -> Result<Value> {
                 json!({"claimToken":value.get("claimToken"),"owner":value.get("owner"),"ref":model::state_ref(state,id),"stateOid":parents[0],"taskId":id,"taskOid":parents[1]}),
             );
         }
-        "claim" | "renew" => Some("active"),
+        "claim" | "renew" | "recover-claim" => Some("active"),
         "release" | "reap" | "unblock" => Some("frontier"),
         "block" => Some("blocked"),
         _ => None,
@@ -90,7 +90,7 @@ fn reconstruct_outputs(domain: &str, parents: &[String]) -> Result<Value> {
             .to_owned();
         let value = crate::validators::lifecycle(state, &parents[0], &id)?;
         return Ok(match domain {
-            "claim" => {
+            "claim" | "recover-claim" => {
                 json!({"claimToken":value["claimToken"],"expiresAt":value["expiresAt"],"owner":value["owner"],"stateOid":parents[0],"taskId":id})
             }
             "renew" => {
@@ -127,7 +127,7 @@ fn validate_outputs(domain: &str, outputs: &Value) -> Result<()> {
         .as_object()
         .ok_or("operation receipt outputs are not an object")?;
     let required: &[&str] = match domain {
-        "create" | "breakdown" | "claim" | "renew" => match domain {
+        "create" | "breakdown" | "claim" | "renew" | "recover-claim" => match domain {
             "create" => &[
                 "claimToken",
                 "owner",
@@ -137,7 +137,9 @@ fn validate_outputs(domain: &str, outputs: &Value) -> Result<()> {
                 "taskOid",
             ],
             "breakdown" => &["children", "manifestOid", "parentTaskId"],
-            "claim" => &["claimToken", "expiresAt", "owner", "stateOid", "taskId"],
+            "claim" | "recover-claim" => {
+                &["claimToken", "expiresAt", "owner", "stateOid", "taskId"]
+            }
             _ => &["claimToken", "expiresAt", "taskId"],
         },
         "block" => &["blockLease", "taskId"],
