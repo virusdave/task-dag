@@ -95,8 +95,18 @@ enum Commands {
     },
     Release {
         task_id: String,
-        #[arg(long)]
-        claim_token: String,
+        #[arg(
+            long,
+            conflicts_with = "claim_token_file",
+            required_unless_present = "claim_token_file"
+        )]
+        claim_token: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "claim_token",
+            required_unless_present = "claim_token"
+        )]
+        claim_token_file: Option<PathBuf>,
         #[arg(long)]
         operation_id: String,
     },
@@ -473,8 +483,12 @@ pub(crate) fn run() -> Result<()> {
         Commands::Release {
             task_id,
             claim_token,
+            claim_token_file,
             operation_id,
-        } => commands::claim_lifecycle::release(&task_id, Some(&claim_token), false, &operation_id),
+        } => {
+            let token = commands::release_claim_token(claim_token, claim_token_file.as_deref())?;
+            commands::claim_lifecycle::release(&task_id, Some(&token), false, &operation_id)
+        }
         Commands::Reap {
             task_id,
             operation_id,

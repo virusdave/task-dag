@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{PermissionsExt, symlink},
     path::Path,
     process::{Command, Output},
 };
@@ -1056,16 +1056,115 @@ fn bare_origin_claims_breakdown_and_ops_atomicity_ignore_historical_journal() {
         ),
         late_claim
     );
-    let release_args = [
+    let state_before_rejected_files =
+        success(&a, &["show", late_id], "unused-token-000", 201)["stateOid"].clone();
+    let token_file = root.join("release-token");
+    fs::write(&token_file, "late-claim-token").unwrap();
+    fs::set_permissions(&token_file, fs::Permissions::from_mode(0o644)).unwrap();
+    let token_path = token_file.to_str().unwrap();
+    let private_release_args = [
         "release",
         late_id,
-        "--claim-token",
-        "late-claim-token",
+        "--claim-token-file",
+        token_path,
         "--operation-id",
         "late-release",
     ];
-    uncertain(&a, &release_args, "unused-token-000", 201);
-    success(&a, &release_args, "unused-token-000", 201);
+    assert!(
+        !cli(&a, &private_release_args, "unused-token-000", 201)
+            .status
+            .success()
+    );
+    fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+    let token_link = root.join("release-token-link");
+    symlink(&token_file, &token_link).unwrap();
+    assert!(
+        !cli(
+            &a,
+            &[
+                "release",
+                late_id,
+                "--claim-token-file",
+                token_link.to_str().unwrap(),
+                "--operation-id",
+                "late-release",
+            ],
+            "unused-token-000",
+            201,
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !cli(
+            &a,
+            &[
+                "release",
+                late_id,
+                "--claim-token-file",
+                root.to_str().unwrap(),
+                "--operation-id",
+                "late-release",
+            ],
+            "unused-token-000",
+            201,
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !cli(
+            &a,
+            &[
+                "release",
+                late_id,
+                "--claim-token",
+                "late-claim-token",
+                "--claim-token-file",
+                token_path,
+                "--operation-id",
+                "late-release",
+            ],
+            "unused-token-000",
+            201,
+        )
+        .status
+        .success()
+    );
+    assert!(
+        cli(&a, &["release", "--help"], "unused-token-000", 201,)
+            .status
+            .success()
+    );
+    assert!(
+        !cli(
+            &a,
+            &["release", late_id, "--operation-id", "late-release"],
+            "unused-token-000",
+            201,
+        )
+        .status
+        .success()
+    );
+    fs::write(&token_file, vec![b'x'; 257]).unwrap();
+    assert!(
+        !cli(&a, &private_release_args, "unused-token-000", 201)
+            .status
+            .success()
+    );
+    fs::write(&token_file, b"late-claim-token\n").unwrap();
+    assert!(
+        !cli(&a, &private_release_args, "unused-token-000", 201)
+            .status
+            .success()
+    );
+    assert_eq!(
+        success(&a, &["show", late_id], "unused-token-000", 201)["stateOid"],
+        state_before_rejected_files
+    );
+    fs::write(&token_file, "late-claim-token").unwrap();
+    uncertain(&a, &private_release_args, "unused-token-000", 201);
+    success(&a, &private_release_args, "unused-token-000", 201);
     assert_eq!(
         success(
             &a,

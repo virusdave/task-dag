@@ -18,11 +18,15 @@ pub(crate) mod unsupported;
 use crate::Result;
 use serde_json::Value;
 use std::{
-    fs::File,
+    fs::{self, File},
     io::Read,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::Path,
     process,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use rustix::fs::{Mode, OFlags};
 
 #[cfg(feature = "test-seam")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,6 +63,56 @@ pub(crate) fn claim_token() -> Result<String> {
         .and_then(|mut f| f.read_exact(&mut bytes))
         .map_err(|e| format!("secure claim token generation from /dev/urandom failed: {e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub(crate) fn release_claim_token(argument: Option<String>, path: Option<&Path>) -> Result<String> {
+    let token = match (argument, path) {
+        (Some(value), None) => value,
+        (None, Some(path)) => {
+            let before = fs::symlink_metadata(path)
+                .map_err(|e| format!("cannot inspect claim-token file: {e}"))?;
+            let effective_uid = rustix::process::geteuid().as_raw();
+            if !before.file_type().is_file()
+                || before.permissions().mode() & 0o7777 != 0o600
+                || before.uid() != effective_uid
+                || before.len() > 256
+            {
+                return Err(
+                    "claim-token file must be an owner-private mode-0600 regular file of at most 256 bytes"
+                        .into(),
+                );
+            }
+            let descriptor = rustix::fs::open(
+                path,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|e| format!("cannot open claim-token file: {e}"))?;
+            let mut file = File::from(descriptor);
+            let opened = file
+                .metadata()
+                .map_err(|e| format!("cannot inspect opened claim-token file: {e}"))?;
+            if !opened.is_file()
+                || opened.permissions().mode() & 0o7777 != 0o600
+                || opened.uid() != effective_uid
+                || (before.dev(), before.ino()) != (opened.dev(), opened.ino())
+            {
+                return Err("claim-token file changed before it was opened".into());
+            }
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(257)
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("cannot read claim-token file: {e}"))?;
+            if bytes.len() > 256 {
+                return Err("claim-token file exceeds 256 bytes".into());
+            }
+            String::from_utf8(bytes).map_err(|_| "claim-token file is not UTF-8")?
+        }
+        _ => return Err("exactly one claim-token input is required".into()),
+    };
+    crate::model::bounded("claim token", &token, 256)?;
+    Ok(token)
 }
 #[cfg(feature = "test-seam")]
 fn model_token(value: &str) -> Result<String> {
